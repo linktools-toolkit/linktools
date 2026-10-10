@@ -10,7 +10,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
-    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
+    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy, EvaluationSpec,
     GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
 )
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -20,9 +20,13 @@ from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CO
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unsafe_kind", ("effect", "model"))
+@pytest.mark.parametrize("unsafe_kind,external_effects", (
+    ("non_replay_safe", "deny"), ("model", "deny"),
+    ("replay_safe", "deny"), ("replay_safe", "read_only"),
+    ("non_replay_safe", "live"), ("model", "live"),
+))
 async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
-    tmp_path: Path, unsafe_kind: str,
+    tmp_path: Path, unsafe_kind: str, external_effects: str,
 ) -> None:
     calls: list[str] = []
 
@@ -41,7 +45,7 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
     scorer = Task("expansion.score", exact, effect_policy="none")
     async with Runtime.open("unsafe-expansion", models=models, context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
-        unsafe = (Task("expansion.effect", effect, effect_policy="non_replay_safe") if unsafe_kind == "effect"
+        unsafe = (Task("expansion.effect", effect, effect_policy=unsafe_kind) if unsafe_kind != "model"
                   else runtime.tasks.from_agent("expansion.model", runtime.agents.get()))
         expander = TaskExpander("expansion.expand", lambda context: (TaskNode("child", task=unsafe),))
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("expansion", 1), cases=(
@@ -51,7 +55,8 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
         with pytest.raises(AIError) as rejected:
             await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("expanded", graph_template=GraphTargetSpec(template=template, selector="terminal_sinks")),),
-                (rule_scorer(scorer),)), PRINCIPAL, "run"), engine=runtime.tasks.bind(initial, unsafe, scorer, expander))
+                (rule_scorer(scorer),), policy=EvaluationPolicy(external_effects=external_effects)),
+                PRINCIPAL, "run"), engine=runtime.tasks.bind(initial, unsafe, scorer, expander))
         assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
         assert calls == [] and models.prompts == []
 

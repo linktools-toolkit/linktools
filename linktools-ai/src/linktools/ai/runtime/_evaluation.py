@@ -114,7 +114,6 @@ class RuntimeEvaluations:
         execution: ExecutionService, graph: TaskGraphService,
         captures: "RuntimeInputCaptures", history: "RuntimeHistory", *,
         cursor_signer: CursorSigner, asset_readers: tuple[AssetStoreReader, ...] = (),
-        shared_environment: bool = False,
     ) -> None:
         self._namespace = namespace
         self._storage = storage
@@ -129,7 +128,6 @@ class RuntimeEvaluations:
         self._object_keys = RuntimeObjectKeyFactory(namespace)
         self._cursor_signer = cursor_signer
         self._asset_readers = asset_readers
-        self._shared_environment = shared_environment
         self._retention = EvaluationRetention(storage, authorization, self._cancel_submission, captures,
                                              release_scopes=self._close_trial_scopes)
         self._watchers: dict[str, asyncio.Task[None]] = {}
@@ -286,10 +284,6 @@ class RuntimeEvaluations:
                     retention is RuntimeRetentionMode.VOLATILE and not policy.allow_volatile):
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "evaluation evidence requires retained storage")
 
-    def _validate_environment(self, policy: EvaluationPolicy) -> None:
-        if policy.external_effects == "live" and self._shared_environment:
-            raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "live effects require an isolated environment")
-
     async def start(
         self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
         trial_scope: EvaluationTrialScopeCallback[ScopeAppT] | None = None,
@@ -327,8 +321,6 @@ class RuntimeEvaluations:
             existing = await self._record(previous.resource_id, principal)
             require_evaluation_content(existing, now=_now())
         self._validate_storage(spec.policy)
-        if not cancelled and not scope_required:
-            self._validate_environment(spec.policy)
         if spec.policy.price_table is not None:
             PriceTable.from_mapping(await self._value(spec.policy.price_table), currency=spec.policy.currency)
         dataset = await self.get_dataset(spec.dataset, principal=principal)
@@ -455,7 +447,6 @@ class RuntimeEvaluations:
     ) -> AsyncIterator["TaskEngine"]:
         self._require_trial_scope(record, trial_scope)
         if trial_scope is None:
-            self._validate_environment(record.manifest.policy)
             yield engine if intent.scorer_slot_id is None else engine.with_definitions(self._recorder)
             return
         self._ensure_open()
@@ -483,7 +474,6 @@ class RuntimeEvaluations:
                     if (other._storage.plan.route(domain).retention is not RuntimeRetentionMode.DURABLE
                             or other._storage.object_store(domain).store_id != self._storage.object_store(domain).store_id):
                         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires shared retained evidence stores")
-                other._validate_environment(record.manifest.policy)
                 await self._validate_definitions(record.manifest, selected)
                 yield selected if intent.scorer_slot_id is None else selected.with_definitions(self._recorder)
         except BaseException:
@@ -1421,8 +1411,6 @@ class RuntimeEvaluations:
         await self._require_content(source, principal)
         bound = self._engine(engine)
         self._validate_storage(source.manifest.policy)
-        if trial_scope is None:
-            self._validate_environment(source.manifest.policy)
         trials, _ = await self._trials(source, principal)
         selected = tuple(item for item in trials if request.trial_ids is None or item.trial.trial_id in request.trial_ids)
         if request.trial_ids is not None and {item.trial.trial_id for item in selected} != set(request.trial_ids):
@@ -1517,14 +1505,12 @@ class RuntimeEvaluations:
                 decision.actor, node.execution_id, decision.score.to_mapping(),
                 f"evaluation-human:{decision.decision_id}")
             if not record.manifest.trial_scope_required:
-                self._validate_environment(record.manifest.policy)
                 await self._graph.resume(state.graph_id, "score", request)
                 return
             scope = self._trial_scopes.get((record.experiment_id, intent.slot_id))
             if scope is not None:
                 with scope.borrow_engine() as engine:
                     if engine is not None:
-                        engine.runtime.evaluations._validate_environment(record.manifest.policy)
                         run = await engine.with_definitions(self._recorder).get(
                             state.graph_id, principal=decision.actor)
                         await run.resume("score", request)

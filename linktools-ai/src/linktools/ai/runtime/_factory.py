@@ -766,7 +766,6 @@ async def _build_local_components(
             input_captures, history,
             cursor_signer=HmacCursorSigner("evaluation", runtime_token_seed),
             asset_readers=tuple(asset_sources.values()),
-            shared_environment=app is not None or workspace is not None,
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         tree_streamer = ExecutionTreeStreamer(

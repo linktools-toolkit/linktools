@@ -921,17 +921,20 @@ async def test_cancel_before_admission_never_opens_a_trial_scope(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("child_environment", ("app", "workspace", "bare"))
-async def test_live_effects_are_admitted_by_the_trial_runtime_environment(
+@pytest.mark.parametrize("child_environment", ("bare", "app", "workspace", "both"))
+async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
     tmp_path: Path, child_environment: str,
 ) -> None:
     calls: list[Path | None] = []
     opened: list[EvaluationTrialScope] = []
     closed: list[EvaluationTrialScope] = []
     child_stores: list[RuntimeStorage] = []
+    output = tmp_path / "target-output.txt"
 
     async def target(context: TaskNodeContext[Path]) -> JsonValue:
+        assert context.principal == PRINCIPAL
         calls.append(context.app)
+        output.write_text(context.input["answer"], encoding="utf-8")
         return dict(context.input)
 
     async def score(context: TaskNodeContext[Path]) -> JsonValue:
@@ -939,7 +942,7 @@ async def test_live_effects_are_admitted_by_the_trial_runtime_environment(
         assert sample.target_output == sample.expected == {"answer": "private case input"}
         return ScoreBundle(dimensions={"quality": 1.0}).to_mapping()
 
-    tasks = (Task("scopes.target", target, effect_policy="none"),
+    tasks = (Task("scopes.target", target, effect_policy="replay_safe"),
              Task("scopes.score", score, effect_policy="none"))
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     workspace = CapabilityGroup("workspace", workspace=Workspace.load(tmp_path))
@@ -950,9 +953,9 @@ async def test_live_effects_are_admitted_by_the_trial_runtime_environment(
         child_stores.append(child_storage)
         try:
             async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=child_storage,
-                context=RuntimeContext(tmp_path if child_environment == "app" else None,
+                context=RuntimeContext(tmp_path if child_environment in {"app", "both"} else None,
                                        tenant_id=PRINCIPAL.tenant_id),
-                capabilities=(workspace,) if child_environment == "workspace" else (),
+                capabilities=(workspace,) if child_environment in {"workspace", "both"} else (),
                 auto_recover=False) as child:
                 opened.append(descriptor)
                 yield child.tasks.bind(*tasks)
@@ -969,33 +972,33 @@ async def test_live_effects_are_admitted_by_the_trial_runtime_environment(
         await _until(lambda: bool(opened) and closed == opened)
         assert all(not child_storage.ready for child_storage in child_stores)
         assert storage.ready
-        if child_environment == "bare":
-            assert view.completion == "complete", view.needs_attention
-            assert calls == [None]
-            assert [descriptor.scorer_slot_id for descriptor in opened] == [None, "quality"]
-            assert (await run.scores()).items[0].score.dimensions == {"quality": 1.0}
-        else:
-            assert view.completion == "needs_attention", view.needs_attention
-            assert calls == []
-            assert all(descriptor.scorer_slot_id is None for descriptor in opened)
-            record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
-            assert any(item.disposition.reason_code == str(ErrorCode.EVALUATION_INCOMPATIBLE)
-                       for item in record.dispositions)
-            assert await storage.task.admissions.submission_status(opened[0].submission.ref) in {None, "cancelled"}
+        assert view.completion == "complete", view.needs_attention
+        assert calls == [tmp_path if child_environment in {"app", "both"} else None]
+        assert output.read_text(encoding="utf-8") == "private case input"
+        assert [descriptor.scorer_slot_id for descriptor in opened] == [None, "quality"]
+        assert (await run.scores()).items[0].score.dimensions == {"quality": 1.0}
 
 
 @pytest.mark.asyncio
-async def test_reconcile_refuses_unscoped_live_execution_in_a_shared_environment(
+async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
 
     async def target(context: TaskNodeContext[Path]) -> JsonValue:
+        assert context.principal == PRINCIPAL
+        assert context.app == tmp_path
         calls.append("target")
         return dict(context.input)
 
+    async def score(context: TaskNodeContext[Path]) -> JsonValue:
+        assert context.principal == PRINCIPAL
+        sample = ScoringInput.from_mapping(context.input)
+        assert sample.target_output == sample.expected == {"answer": "private case input"}
+        return ScoreBundle(dimensions={"quality": 1.0}).to_mapping()
+
     tasks = (Task("scopes.target", target, effect_policy="none"),
-             Task("scopes.score", _score, effect_policy="none"))
+             Task("scopes.score", score, effect_policy="none"))
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(*tasks)
@@ -1015,18 +1018,34 @@ async def test_reconcile_refuses_unscoped_live_execution_in_a_shared_environment
                          "evaluation_trial": trial.trial_id, "evaluation_slot": slot})
         await storage.evaluation.records.register_launch_intent(run.experiment_id,
             EvaluationLaunchIntent(slot, trial, None, submission, None), capacity=1)
+        assert not record.manifest.trial_scope_required
+        assert calls == []
+        assert await storage.task.admissions.submission_status(submission.ref) is None
 
     reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened,
         context=RuntimeContext(tmp_path, tenant_id=PRINCIPAL.tenant_id),
         capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),),
         auto_recover=False) as runtime:
-        with pytest.raises(AIError, match="live effects require an isolated environment") as rejected:
-            await runtime.evaluations.reconcile(run.experiment_id, engine=runtime.tasks.bind(*tasks),
-                principal=PRINCIPAL, idempotency_key="resume-live")
-        assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
-        assert calls == []
-        assert await reopened.task.admissions.submission_status(submission.ref) is None
+        engine = runtime.tasks.bind(*tasks)
+        resumed = await runtime.evaluations.reconcile(run.experiment_id, engine=engine,
+            principal=PRINCIPAL, idempotency_key="resume-live")
+        view = (await resumed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
+        assert view.completion == "complete", view.needs_attention
+        current = await reopened.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        intent = next(item for item in current.intents if item.slot_id == slot)
+        assert current.manifest == record.manifest
+        assert intent.confirmed and intent.submission == submission
+        assert intent.submission.admission.principal == PRINCIPAL
+        completed_trial = (await resumed.trials()).items[0]
+        assert completed_trial.graph_ref.graph_id == submission.graph.graph_id
+        assert (await resumed.scores()).items[0].score.dimensions == {"quality": 1.0}
+        graph = await reopened.task.tasks.graph_state(submission.graph.graph_id, tenant_id=PRINCIPAL.tenant_id)
+        assert graph.node_states[0].execution_id == completed_trial.subject.execution_id
+        await runtime.evaluations.reconcile(run.experiment_id, engine=engine,
+            principal=PRINCIPAL, idempotency_key="resume-live")
+        assert (await resumed.trials()).items[0].graph_ref == completed_trial.graph_ref
+        assert calls == ["target"]
 
 
 @pytest.mark.asyncio

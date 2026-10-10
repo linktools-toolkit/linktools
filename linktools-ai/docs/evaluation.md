@@ -184,15 +184,16 @@ stopped before requesting takeover.
 The callback is trusted application setup, not a sandbox or an effect-policy
 override. Existing fixture, tool, and external-effect admission rules remain in
 force. The coordinating Runtime validates storage, authorization, and frozen
-definitions; scoped execution checks the yielded Runtime's actual environment
-before starting or recovering work. The existing `live` restriction still
-rejects a child with application state or a Workspace, even when the controller
-has neither. A controller with those resources may plan a scoped run, but its
-presence does not grant the child permission to execute effects. Separate
-Runtime ownership does not prove distinct Workspace paths or external tool
-targets: stable resource mapping and isolation remain the trusted host's
-responsibility. Cancellation and retention do not open contexts or require
-permission to start new effects.
+definitions; the yielded engine must preserve those contracts. Explicit
+`external_effects="live"` permits declared effects in Runtimes with or without
+application state and a Workspace. Neither their absence nor separate Runtime
+ownership proves isolation. The trusted host must provide appropriate resource
+boundaries, credentials, and external tool destinations. For independent
+trials, consistently map each slot to its own private Workspace and captured
+inputs/resources, including on recovery. Keep production publication and
+approval outside the evaluated graph; exercise test substitutes only in a
+controlled environment. Cancellation and retention do not
+open contexts or require permission to start new effects.
 
 The callback must clean up partial entry if opening fails or is cancelled, and
 release the resources it owns on exit. It must not run the evaluated business
@@ -329,9 +330,21 @@ Register that binding with the ModelRegistry used to open the Runtime. For
 intended real provider calls, explicitly choose
 `EvaluationPolicy(model_mode="live_model")` and supply an appropriate route.
 This permits live model calls and their costs; it does not enable external tool
-effects. `read_only` permits only declared read-only tool behavior; `live`
-requires an isolated environment. These policies validate declared contracts,
-not arbitrary Python side effects inside a falsely declared Task.
+effects. `read_only` permits only declared read-only tool behavior and does not
+admit MCP. `live` explicitly permits declared external effects for targets and
+scorers; it does not certify isolation or grant model-provider permission.
+The trusted host owns the execution environment and external destinations.
+These policies validate declared contracts, not arbitrary Python side effects
+inside a falsely declared Task. Non-replay-safe Tasks still require
+reconciliation, and unresolved native Task/tool effects still require recovery
+rather than being automatically repeated.
+
+App/Workspace presence no longer restricts `live` admission. This also applies
+to existing unfinished `live` evaluations reopened for reconciliation or
+rescoring: work previously blocked by that environment restriction can now
+execute. Review the host's resource mapping and destinations before resuming
+such work; authorization, frozen bindings, scope mode, and native effect
+recovery checks remain in force. The default remains `external_effects="deny"`.
 
 An Agent judge receives `ScoringInput` as data, with a fixed instruction to treat
 the answer as untrusted, and returns structured `ScoreBundle` output. Do not
