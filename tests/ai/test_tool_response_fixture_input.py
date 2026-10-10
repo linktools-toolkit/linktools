@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload
+from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage, ToolResponseFixture
 from linktools.ai.runtime._execution import _request_digest
@@ -95,15 +95,15 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assets, first, second = await _fixtures()
+    principal = service_principal("default", "fixture-owner")
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage,
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
-        execution = await runtime.agents.get().start("first", idempotency_key="first")
+        execution = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record.tool_response_ref == first
         assert record.context_imported is False
-        principal = runtime.default_principal
         for policy in ("clean", "captured"):
             reference = await runtime.executions.capture_input(execution.execution_id,
                 CaptureInputRequest(principal, "capture-" + policy, policy))
@@ -122,7 +122,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
 
         with monkeypatch.context() as patch:
             patch.setattr(assets, "read_versions", no_asset_read)
-            replay = await runtime.agents.get().start("first", idempotency_key="first")
+            replay = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
             assert replay.execution_id == execution.execution_id
             assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
     assert await assets.read_versions((first,))
@@ -130,17 +130,17 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage,
                             tool_responses=ToolResponseFixture(second, assets)) as runtime:
-        original = await runtime.executions.get(execution.execution_id)
+        original = await runtime.executions.get(execution.execution_id, principal=principal)
         for derived in (await original.retry("retry"), await original.fork("fork")):
             assert (await derived.wait()).result.status is ExecutionStatus.SUCCEEDED
             accepted = await storage.execution.executions.get(derived.execution_id, tenant_id=runtime.tenant_id)
             assert accepted.tool_response_ref == first
-        request = ExecutionRequest("child", runtime.default_principal, "child", None, "run", False, False,
+        request = ExecutionRequest("child", principal, "child", None, "run", False, False,
                                    tool_response_ref=second)
         handle = await runtime._execution_service.start_subagent(record.binding_digest, request,
             parent_execution_id=record.execution_id, root_execution_id=record.root_execution_id,
             parent_invocation_id="child-call", binding_contract=record.binding)
-        child = await runtime.executions.get(handle.execution_id)
+        child = await runtime.executions.get(handle.execution_id, principal=principal)
         assert (await child.wait()).result.status is ExecutionStatus.SUCCEEDED
         accepted = await storage.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
         assert accepted.tool_response_ref == first
@@ -150,7 +150,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
         legacy = await runtime._execution_service._request_for_execution(request, replace(record, tool_response_ref=None))
         assert legacy.tool_response_ref is None
         with pytest.raises(AIError) as conflict:
-            await runtime.agents.get().start("first", idempotency_key="first")
+            await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     await assets.close()
 
