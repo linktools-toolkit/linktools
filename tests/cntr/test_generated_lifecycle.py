@@ -89,7 +89,7 @@ def test_apply_failure_restores_and_confirms_old_generation(tmp_path):
     AppliedServiceModels(owner.manager, {"services": owner.services}).record(("test",))
     context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
         native_running_images={"test": "sha256:test"}, containers=(owner,), initial_healthy_services=set(),
-        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={}, started_services=set(),
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     with pytest.raises(RuntimeError, match="new failed"):
         ComposeOperations(owner.manager)._publish_candidate(owner, second, context, ("test",))
@@ -110,7 +110,7 @@ def test_rollback_failure_reports_both_failures(tmp_path):
     AppliedServiceModels(owner.manager, {"services": owner.services}).record(("test",))
     context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
         native_running_images={"test": "sha256:test"}, containers=(owner,), initial_healthy_services=set(),
-        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={}, started_services=set(),
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     with pytest.raises(ContainerError, match="new failed.*rollback failed: old failed"):
         ComposeOperations(owner.manager)._publish_candidate(owner, second, context, ("test",))
@@ -143,7 +143,7 @@ def test_first_upgrade_failure_restores_running_service_without_previous_generat
         saved_compose={str(old_compose): old_compose.read_text()},
         compose_files={str(old_compose): "services:\n  test:\n    image: new:test\n"},
         compose_owners={str(old_compose): "test"}, applied_compose={},
-        applied_generation_services={}, service_models=AppliedServiceModels(
+        applied_generation_services={}, started_services=set(), service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
     )
     with pytest.raises(RuntimeError, match="new failed"):
@@ -173,7 +173,7 @@ def test_first_deployment_failure_does_not_start_unrelated_services(tmp_path):
     context = SimpleNamespace(
         generated_candidates={}, initial_running_services=set(),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
-        applied_generation_services={}, service_models=AppliedServiceModels(
+        applied_generation_services={}, started_services=set(), service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
     )
     with pytest.raises(RuntimeError, match="first failed"):
@@ -207,7 +207,7 @@ def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
         generated_candidates={}, initial_running_services=set(),
         saved_compose={}, compose_files={str(compose_path): compose_path.read_text()},
         compose_owners={str(compose_path): "test"}, applied_compose={},
-        applied_generation_services={}, service_models=AppliedServiceModels(
+        applied_generation_services={}, started_services=set(), service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
     )
     operations = ComposeOperations(owner.manager)
@@ -234,7 +234,7 @@ def test_first_upgrade_reports_unrecoverable_missing_compose_snapshot(tmp_path):
         generated_candidates={}, initial_running_services={"test"},
         native_running_images={"test": "sha256:test"}, containers=(owner,),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
-        applied_generation_services={}, service_models=AppliedServiceModels(
+        applied_generation_services={}, started_services=set(), service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
     )
     with pytest.raises(ContainerError, match="Cannot replace running service test without a previous Compose model"):
@@ -381,7 +381,7 @@ def test_compose_only_apply_failure_restores_previous_service_model(tmp_path):
                              apply_saved_services=lambda context, services, files: applied.append(files))
     context = SimpleNamespace(saved_compose={str(config): "old"}, compose_files={str(config): "new"},
                               compose_owners={str(config): "app"}, initial_running_services={"app"}, applied_compose={},
-                              initial_healthy_services=set(),
+                              initial_healthy_services=set(), started_services=set(),
                               service_models=AppliedServiceModels(SimpleNamespace(data_path=tmp_path,
                                   artifact_index=SimpleNamespace(record=lambda entries, remove=(): None)),
                                                                  {"services": {"app": {}}}))
@@ -534,7 +534,7 @@ def test_unchanged_candidate_replaces_bootstrap_before_application(tmp_path):
     owner.apply_config = apply
     owner.manager.generated_configs = {"test": owner}
     context = SimpleNamespace(generated_candidates={}, initial_running_services=set(),
-        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={}, started_services=set(),
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     ComposeOperations(owner.manager)._publish_candidate(owner, unchanged, context, ("test",))
     assert applied == [full.generation_id]
@@ -565,7 +565,7 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     path = str(tmp_path / "test.yml")
     context = SimpleNamespace(generated_candidates={}, initial_running_services=set(owner.services),
         native_running_images={name: "sha256:" + name for name in owner.services}, containers=(owner,),
-        applied_generation_services={}, applied_compose={},
+        applied_generation_services={}, started_services=set(), applied_compose={},
         saved_compose={path: yaml.safe_dump(old_model)}, compose_files={path: yaml.safe_dump(new_model)},
         compose_owners={path: "test"}, service_models=AppliedServiceModels(owner.manager, new_model))
     operations = ComposeOperations(owner.manager)
@@ -685,7 +685,7 @@ def test_publication_failure_restores_original_generation_before_runtime_apply(t
         generated_candidates={}, initial_running_services={"test"},
         native_running_images={"test": "sha256:test"}, containers=(owner,),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
-        applied_generation_services={}, service_models=models)
+        applied_generation_services={}, started_services=set(), service_models=models)
 
     original_publish = candidate.publish
 

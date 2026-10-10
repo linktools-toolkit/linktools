@@ -216,6 +216,7 @@ class ComposeOperations:
         context.applied_compose = {}
         context.applied_generation_services = {}
         context.locally_restored_services = set()
+        context.started_services = set()
         context.bootstrapped_services = set()
         context.compose_files = {}
         context.compose_owners = {}
@@ -417,6 +418,7 @@ class ComposeOperations:
                     state_context = self._make_context(context.commands, ComposeSelection(
                         selection.project_containers, (container,), (service,), False))
                     manager.running_state.mark_started(state_context)
+                    context.started_services.add(service)
                     pending_restart.discard(service)
                     context.applying_service = None
                 for container in sync:
@@ -583,7 +585,9 @@ class ComposeOperations:
                     runner.stop(context, started)
                     saved_models.restore(started)
                     self._restore_applied_compose(container, context, previous)
-                    if not any(name in context.initial_running_services for name in container.services):
+                    remaining = (set(context.initial_running_services) |
+                                 context.started_services) - set(started)
+                    if not any(name in remaining for name in container.services):
                         stopped_context = copy(context)
                         stopped_context.target_containers = [container]
                         stopped_context.is_full_containers = False
@@ -716,7 +720,9 @@ class ComposeOperations:
                 if hasattr(context, "locally_restored_services"):
                     context.locally_restored_services.update(restore_services)
             elif stop_services and not any(
-                    service in context.initial_running_services for service in container.services):
+                    name in (set(context.initial_running_services) |
+                             context.started_services) - set(stop_services)
+                    for name in container.services):
                 stopped_context = copy(context)
                 stopped_context.target_containers = [container]
                 stopped_context.is_full_containers = False

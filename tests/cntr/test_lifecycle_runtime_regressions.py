@@ -579,6 +579,23 @@ def test_plain_first_start_cleanup_failure_reports_both_errors(tmp_path):
         operations.up(["app"])
 
 
+def test_plain_cold_multi_service_failure_keeps_successful_sibling_running(tmp_path):
+    app = Container("app", {"first": {"image": "app:first"},
+                            "second": {"image": "app:second"}}, tmp_path / "app")
+    operations, manager, runner, calls, _ = manager_at(tmp_path, (app,))
+
+    def started(context, service):
+        if service == "second":
+            raise ContainerError("second service unhealthy")
+
+    app.on_service_started = started
+    with pytest.raises(ContainerError, match="second service unhealthy"):
+        operations.up(["app"])
+    assert ("stop", "second") in calls
+    assert ("stop", "first") not in calls
+    assert manager.running_state.get_persisted() == ["app"]
+
+
 def test_plain_partial_start_failure_preserves_running_sibling(tmp_path):
     app = Container("app", {"existing": {"image": "app:old"},
                              "new": {"image": "app:new"}}, tmp_path / "app")
