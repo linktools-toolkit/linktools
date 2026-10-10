@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TypeAlias
 
 from ..agent import AgentBindingContract, AgentInputCaptureRef
+from ..asset import AssetVersionRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
     Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput, canonical_json_bytes,
@@ -77,6 +78,13 @@ class AgentInputCapture:
     task_input: TaskInvocationInputContract | None = None
     source_principal: Mapping[str, JsonValue] | None = None
     input_context: ExecutionInputContext | None = None
+    tool_response_ref: AssetVersionRef | None = None
+
+    def require_importable(self) -> None:
+        """Reject imports that cannot retain all accepted invocation inputs."""
+        if self.tool_response_ref is not None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE,
+                          safe_details={"reason": "tool_response_fixture_import_unsupported"})
 
 
 class RuntimeInputCaptures:
@@ -422,6 +430,7 @@ class RuntimeInputCaptures:
                        "source_execution_id": execution_id, "source_invocation_id": record.parent_invocation_id,
                        "repository_instructions": instructions,
                        "input_context": None if context is None else context.to_payload(),
+                       **({"tool_response_ref": record.tool_response_ref.to_payload()} if record.tool_response_ref is not None else {}),
                        "source_principal": {"principal_id": record.principal_id, "tenant_id": principal.tenant_id, "kind": record.principal_kind},
                        "task_input": None if task_input is None else encode_domain(task_input)}
             identity, digest = await self._publish("agent", principal, request.idempotency_key, payload)
@@ -450,7 +459,8 @@ class RuntimeInputCaptures:
                                  payload["source_invocation_id"], payload["repository_instructions"],
                                  None if payload["task_input"] is None else decode_domain(payload["task_input"], TaskInvocationInputContract),
                                  None if payload["source_principal"] is None else ImmutableJsonMapping(payload["source_principal"]),
-                                 None if payload.get("input_context") is None else ExecutionInputContext.from_payload(payload["input_context"]))
+                                 None if payload.get("input_context") is None else ExecutionInputContext.from_payload(payload["input_context"]),
+                                 None if payload.get("tool_response_ref") is None else decode_domain(payload["tool_response_ref"], AssetVersionRef))
 
     async def read_task(self, reference: TaskInvocationInputRef, *, principal: Principal) -> TaskInvocationInputContract:
         payload = await self._read(reference, "task", principal)
@@ -532,6 +542,7 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if isinstance(reference, AgentInputCaptureRef):
             agent = await self.read_agent(reference, principal=principal)
+            agent.require_importable()
             if agent.task_input is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             contract = agent.task_input
@@ -674,6 +685,7 @@ class RuntimeInputCaptures:
                     reference = await self.capture_input(source, CaptureInputRequest(
                         principal, request.idempotency_key + ":input:" + node.node_id, request.context_policy))
                     agent = await self.read_agent(reference, principal=principal)
+                    agent.require_importable()
                     original_input = self._captured_original_input(
                         agent.task_input.original_input if agent.task_input is not None
                         else node.original_input if node.original_input is not None else node.input,

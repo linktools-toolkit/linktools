@@ -89,6 +89,7 @@ from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
+from ._tool_response_fixture import ToolResponseFixture
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
 from ._metrics import (
@@ -394,6 +395,7 @@ class Runtime(Generic[AppT]):
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
+        tool_responses: ToolResponseFixture | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -410,6 +412,7 @@ class Runtime(Generic[AppT]):
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
+        tool_responses: ToolResponseFixture | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -425,12 +428,15 @@ class Runtime(Generic[AppT]):
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
+        tool_responses: ToolResponseFixture | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         """Open a Runtime, optionally skipping namespace-wide startup recovery.
 
         Explicit graph and execution recovery remain available when disabled.
         Closing still drains work owned by this Runtime.
         """
+        if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
+            raise TypeError("tool_responses must be ToolResponseFixture")
         if not isinstance(auto_recover, bool):
             raise TypeError("auto_recover must be bool")
         resolved_namespace = validate_persistence_namespace(namespace)
@@ -448,6 +454,7 @@ class Runtime(Generic[AppT]):
             limits=selected_limits,
             authorization=authorization,
             auto_recover=auto_recover,
+            tool_responses=tool_responses,
         )
 
     @property
@@ -1458,6 +1465,7 @@ async def _open_runtime(
     limits: PromptLimits,
     authorization: "AuthorizationPolicy | None",
     auto_recover: bool = True,
+    tool_responses: ToolResponseFixture | None = None,
 ):
     from ._factory import compose_runtime_components
 
@@ -1472,6 +1480,7 @@ async def _open_runtime(
         limits=limits,
         authorization=authorization,
         auto_recover=auto_recover,
+        tool_responses=tool_responses,
     )
     try:
         if components.metric_control is not None:

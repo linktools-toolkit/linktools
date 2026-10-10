@@ -68,7 +68,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 
 from ..agent import AgentBinding, CompiledAgent, AssistantTextOutput, output_validation_error
-from ..asset import AssetMaterializer, AssetStoreReader
+from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..capability import (
     AgentContext,
     CapabilityContribution,
@@ -126,6 +126,7 @@ from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
+from ._tool_response_fixture import ToolResponseFixture, _ToolResponseManifest
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
@@ -218,6 +219,8 @@ class _AgentRunScope:
     event_sink: EventSink | None = None
     usage_sink: UsageSink | None = None
     tool_operations: ToolOperationBridge | None = None
+    tool_response_ref: AssetVersionRef | None = None
+    response_fixture: _ToolResponseManifest | None = None
     budget: RunBudgetContext | None = None
     replace_history_system_prompt: bool = False
     context_target_tokens: int | None = None
@@ -248,6 +251,7 @@ class AgentExecutor:
         asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
         sandbox: Sandbox | None = None,
+        tool_responses: ToolResponseFixture | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
@@ -255,6 +259,44 @@ class AgentExecutor:
         self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
         self._sandbox = sandbox
+        self._tool_responses = tool_responses
+
+    async def validate_recovery_inputs(
+        self,
+        binding: AgentBinding,
+        tool_response_ref: AssetVersionRef | None,
+    ) -> None:
+        """Validate pinned tool responses before admitting another attempt."""
+        await self._load_tool_responses(binding, tool_response_ref)
+
+    async def _load_tool_responses(
+        self,
+        binding: AgentBinding,
+        reference: AssetVersionRef | None,
+    ) -> _ToolResponseManifest | None:
+        if reference is not None:
+            try:
+                if self._tool_responses is None:
+                    raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+                fixture = await self._tool_responses.load(reference)
+                fixture.validate_servers(
+                    binding.compiled_agent.mcp_servers,
+                    binding.compiled_agent.mcp_policy,
+                )
+            except AIError as error:
+                if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
+                    raise
+                raise AIError(
+                    ErrorCode.AGENT_BINDING_UNAVAILABLE,
+                    safe_details={"reason": "tool_response_fixture_unavailable", "cause_code": error.code.value},
+                ) from error
+            return fixture
+        if self._tool_responses is not None:
+            raise AIError(
+                ErrorCode.BINDING_CONFLICT,
+                "a tool response fixture cannot replace an admitted live execution",
+            )
+        return None
 
     async def execute(self, scope: _AgentRunScope) -> AgentExecutionOutcome:
         binding = scope.binding
@@ -411,9 +453,16 @@ class AgentExecutor:
         workspace = scope.workspace
         backend = self._sandbox
         mcp_bindings = _mcp_bindings(scope.binding)
+        response_fixture = await self._load_tool_responses(
+            scope.binding, scope.tool_response_ref,
+        )
+        live_mcp_servers = (
+            scope.binding.compiled_agent.mcp_servers
+            if response_fixture is None else ()
+        )
         has_stdio_mcp = any(
             server.transport == "stdio"
-            for server in scope.binding.compiled_agent.mcp_servers
+            for server in live_mcp_servers
         )
         materializer = AssetMaterializer()
         session: SandboxSession | None = None
@@ -431,7 +480,7 @@ class AgentExecutor:
                     self._asset_sources,
                 )
             mcp_projections = await prepare_mcp_projections(
-                scope.binding.compiled_agent.mcp_servers,
+                live_mcp_servers,
                 mcp_bindings,
                 asset_readers=self._asset_sources,
                 sandboxed=backend is not None,
@@ -457,6 +506,7 @@ class AgentExecutor:
                         },
                         mcp_bindings=mcp_bindings,
                         mcp_projections=mcp_projections,
+                        response_fixture=response_fixture,
                     ),
                     run_usage=run_usage,
                     usage_limits=usage_limits,
@@ -495,6 +545,7 @@ class AgentExecutor:
                     skill_resource_paths=resource_paths,
                     mcp_bindings=mcp_bindings,
                     mcp_projections=mcp_projections,
+                    response_fixture=response_fixture,
                 ),
                 run_usage=run_usage,
                 usage_limits=usage_limits,
@@ -1007,6 +1058,7 @@ async def _materialize_agent(
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 budget=scope.budget,
+                response_fixture=scope.response_fixture,
             )
         )
     if business_tools:

@@ -72,6 +72,7 @@ from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from ._transient_history import TransientExecutionHistoryStore
+from ._tool_response_fixture import ToolResponseFixture
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
 from .state._contracts import BudgetRepository, TaskAdmissionRepository
@@ -117,11 +118,14 @@ async def compose_runtime_components(
     limits: "PromptLimits | None" = None,
     authorization: "AuthorizationPolicy | None" = None,
     auto_recover: bool = True,
+    tool_responses: ToolResponseFixture | None = None,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
     if not isinstance(storage, RuntimeStorage):
         raise TypeError("storage must be RuntimeStorage")
+    if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
+        raise TypeError("tool_responses must be ToolResponseFixture")
     if metrics is not None and not isinstance(metrics, Metrics):
         raise TypeError("metrics must be Metrics")
     selected_limits = PromptLimits() if limits is None else limits
@@ -297,6 +301,7 @@ async def compose_runtime_components(
             input_materializer=input_materializer,
             session_execution_ready=True,
             auto_recover=auto_recover,
+            tool_responses=tool_responses,
             metrics=metrics,
         )
         try:
@@ -492,6 +497,7 @@ async def _build_local_components(
     session_execution_ready: bool,
     auto_recover: bool,
     metrics: "Metrics | None",
+    tool_responses: ToolResponseFixture | None,
 ) -> _RuntimeComponents:
     metric_buffer: _MetricBuffer | None = None
     metric_source_namespace: str | None = None
@@ -550,6 +556,7 @@ async def _build_local_components(
             payload_policy=payload_policy,
             input_materializer=input_materializer,
             session_execution_ready=session_execution_ready,
+            tool_responses=tool_responses,
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -563,6 +570,7 @@ async def _build_local_components(
             asset_sources=asset_sources,
             metrics=metric_buffer,
             sandbox=sandbox,
+            tool_responses=tool_responses,
         )
     except BaseException:
         actions: list[tuple[str, Callable[[], Awaitable[None]]]] = [
