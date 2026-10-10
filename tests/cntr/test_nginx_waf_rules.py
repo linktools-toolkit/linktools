@@ -56,7 +56,7 @@ def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
 
 def test_nginx_literal_preserves_data_not_template_expression(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    value = nginx._nginx_literal('Bearer "path\\$host"')
+    value = nginx.quote('Bearer "path\\$host"')
     assert value.startswith('"') and value.endswith('"')
     assert r'\"' in value
     assert r'\\' in value
@@ -68,7 +68,7 @@ def test_nginx_literal_preserves_data_not_template_expression(fresh_manager):
 def test_nginx_header_rejects_control_characters_without_leaking(fresh_manager, value):
     nginx = fresh_manager.containers["nginx"]
     with pytest.raises(ContainerError, match="control character") as exc:
-        nginx._nginx_literal(value)
+        nginx.quote(value)
     assert "secret" not in str(exc.value)
 
 

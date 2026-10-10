@@ -3,10 +3,9 @@ services:
     image: 'authelia/authelia:{{ AUTHELIA_TAG }}'
     command:
       - 'authelia'
-      - '--config=/generated/configuration.yml'
-      - '--config=/generated/configuration.acl.yml'
-      - '--config=/generated/configuration.2fa.yml'
-      - '--config=/generated/configuration.oidc.yml'
+#     {% for name in container.config_files %}
+      - '--config=/generated/{{ name }}'
+#     {% endfor %}
     environment:
       - AUTHELIA_LOG_LEVEL=debug
       - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
@@ -21,10 +20,9 @@ services:
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
-      - '{{ APP_PATH/"generated/current/configuration.yml" }}:/generated/configuration.yml:ro'
-      - '{{ APP_PATH/"generated/current/configuration.acl.yml" }}:/generated/configuration.acl.yml:ro'
-      - '{{ APP_PATH/"generated/current/configuration.2fa.yml" }}:/generated/configuration.2fa.yml:ro'
-      - '{{ APP_PATH/"generated/current/configuration.oidc.yml" }}:/generated/configuration.oidc.yml:ro'
+#     {% for name in container.config_files %}
+      - '{{ APP_PATH/"generated/current"/name }}:/generated/{{ name }}:ro'
+#     {% endfor %}
       - '{{ APP_PATH/"generated/current/authentication_backend_ldap_password" }}:/generated/authentication_backend_ldap_password:ro'
     networks:
       authelia:

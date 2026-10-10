@@ -141,6 +141,16 @@ def test_authelia_prepares_new_password_without_overwriting_legacy(tmp_path, mon
     container.on_starting(context)
     assert values["authentication_backend_ldap_password"] == "new password"
     assert legacy.read_text() == "old password"
+    commands = []
+    container.manager.compose_runner = SimpleNamespace(
+        validate_service=lambda context, service, command, **kwargs:
+        commands.append(command) or SimpleNamespace(succeeded=True))
+    container.on_check(context)
+    assert commands == [["authelia", "config", "validate"] + [
+        "--config=/generated/" + name for name in (
+            "configuration.yml", "configuration.acl.yml", "configuration.2fa.yml", "configuration.oidc.yml")]]
+    assert set(values) == {argument.removeprefix("--config=/generated/") for argument in commands[0][3:]} | {
+        "authentication_backend_ldap_password"}
 
 
 def test_lldap_prepares_without_modifying_persistent_inputs(tmp_path, monkeypatch):

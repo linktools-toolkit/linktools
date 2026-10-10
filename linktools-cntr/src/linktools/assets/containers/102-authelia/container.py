@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 class Container(BaseContainer):
     _config_services = ("authelia", "authelia-admin")
+    config_files = ("configuration.yml", "configuration.acl.yml",
+                     "configuration.2fa.yml", "configuration.oidc.yml")
 
     @property
     def dependencies(self) -> "Iterable[str]":
@@ -157,8 +159,7 @@ class Container(BaseContainer):
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
         command = ["authelia", "config", "validate"]
-        command.extend("--config=/generated/" + name for name in (
-            "configuration.yml", "configuration.acl.yml", "configuration.2fa.yml", "configuration.oidc.yml"))
+        command.extend("--config=/generated/" + name for name in self.config_files)
         result = self.manager.compose_runner.validate_service(context, "authelia", command, check=False)
         if not result.succeeded:
             match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
@@ -218,7 +219,6 @@ class Container(BaseContainer):
         for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
             self._create_secret_file(secret_path / name)
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
-        files = {name: self.render_template(self.get_source_path("templates", name)) for name in (
-            "configuration.yml", "configuration.acl.yml", "configuration.2fa.yml", "configuration.oidc.yml")}
+        files = {name: self.render_template(self.get_source_path("templates", name)) for name in self.config_files}
         files["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
         context.write_files(self, files)

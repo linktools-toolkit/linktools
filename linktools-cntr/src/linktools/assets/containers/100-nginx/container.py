@@ -31,8 +31,7 @@ if TYPE_CHECKING:
 
 class Container(BaseContainer):
 
-    @staticmethod
-    def _nginx_literal(value: "Any") -> str:
+    def quote(self, value: object) -> str:
         data = str(value)
         if any(ch in data for ch in ("\r", "\n", "\x00")):
             raise ContainerError("Nginx header value contains a control character")
@@ -227,9 +226,6 @@ class Container(BaseContainer):
             location = " at {}:{}".format(*match.groups()) if match else ""
             raise ContainerError("Native validation failed for nginx{} (exit {})".format(
                 location, result.returncode))
-    def quote(self, value: "Any") -> str:
-        return self._nginx_literal(value)
-
     @cached_property
     def sites(self) -> "Mapping[tuple[str, str], ResolvedSite]":
         return self.manager.nginx_sites

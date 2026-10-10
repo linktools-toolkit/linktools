@@ -12,7 +12,6 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from typing import Any
     from linktools.cntr import OperationContext, Integrations
     from linktools.types import PathType
@@ -26,14 +25,14 @@ class Container(BaseContainer):
         def get_base_dn(cfg: "ConfigResolver") -> str:
             domain = cfg.get("NGINX_ROOT_DOMAIN")
             parts = domain.split(".")
-            return ",".join([f"dc={part}" for part in parts])
+            return ",".join(f"dc={part}" for part in parts)
 
         return dict(
             LLDAP_TAG="stable",
             LLDAP_DOMAIN=Nginx.domain(self, "ldap"),
             LLDAP_PORT=ConfigField(cast=int, default=0),
             LLDAP_WEB_PORT=ConfigField(cast=int, default=0),
-            LLDAP_BASE_DN=ConfigField(provider=LazyProvider(lambda r: get_base_dn(r))),
+            LLDAP_BASE_DN=ConfigField(provider=LazyProvider(get_base_dn)),
             LLDAP_ADMIN_PASSWORD=ConfigField(provider=PromptProvider(
                 default=utils.random_string(20), cached=True,
             )),
