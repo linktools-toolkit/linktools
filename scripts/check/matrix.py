@@ -38,7 +38,7 @@ def package_checks(packages: "typing.Iterable[str]") -> "typing.List[typing.Dict
                     " + ".join(bundle), " (%s)" % group if group != "all" else "",
                 ),
                 "pytest-args": "-n 4 --dist=loadfile --capture=fd -rs --test-group=%s%s" % (
-                    group, " --durations=50" if group != "all" else "",
+                    group, " --durations=0 --durations-min=0 -vv" if group != "all" else "",
                 ),
             })
     return checks
