@@ -14,7 +14,6 @@ from ..agent import (
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpecCodec
 from ..workspace import Sandbox
-from ._mcp import _mcp_execution_policy
 
 
 class _AgentBindingResolver:
@@ -100,6 +99,8 @@ class _AgentBindingResolver:
                 pin.contract,
                 declaration=server,
             )
+            from ._mcp import _mcp_execution_policy
+
             current_policy = dict(_mcp_execution_policy(server, self._sandbox))
             bound_policy = pin.contract.get("execution_policy")
             if bound_policy is not None and dict(bound_policy) != current_policy:

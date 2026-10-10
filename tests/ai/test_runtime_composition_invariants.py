@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 """Runtime composition and ownership invariants."""
 
+import json
+import os
 import runpy
+import subprocess
+import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +36,94 @@ from linktools.ai.storage import StorageOverlay, StoredPayload
 from pydantic import BaseModel
 
 from ._runtime_test_helpers import RuntimeUsageModels
+
+
+def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    script = textwrap.dedent('''
+        import asyncio
+        import importlib.abc
+        import json
+        import sys
+
+        class UnavailableMCPClient(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname: str, path: object = None, target: object = None) -> None:
+                if fullname == "fastmcp" or fullname.startswith("fastmcp."):
+                    raise ModuleNotFoundError("MCP client is unavailable", name=fullname)
+                return None
+
+        sys.meta_path.insert(0, UnavailableMCPClient())
+
+        from pydantic_ai.models.test import TestModel
+        from linktools.ai.core import ExecutionStatus, TaskStatus
+        from linktools.ai.model import ModelRegistry
+        from linktools.ai.runtime import Runtime, RuntimeStorage
+        from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
+
+        class OfflineModelBinding:
+            route_id = "default"
+            provider = "test"
+            model_identity = "test:without-mcp"
+            vision = False
+            contract = {"provider": provider, "model_identity": model_identity}
+
+            def materialize(self) -> TestModel:
+                return TestModel(custom_output_text="offline answer")
+
+        async def answer(context: TaskNodeContext[None]) -> dict[str, int]:
+            return {"value": 42}
+
+        async def main() -> None:
+            models = ModelRegistry()
+            models.register(OfflineModelBinding())
+            task = Task("local.answer", answer, effect_policy="none")
+            async with Runtime.open(
+                "without-mcp-client", models=models, storage=RuntimeStorage.in_memory(),
+            ) as runtime:
+                agent_result = (await runtime.agents.get("default").run(
+                    "Answer offline", timeout_seconds=10,
+                )).result
+                assert agent_result.status is ExecutionStatus.SUCCEEDED
+                assert agent_result.output == {"text": "offline answer"}
+                graph = await runtime.tasks.bind(task).start(
+                    TaskGraph("local-graph", (TaskNode("answer", task=task),)),
+                    idempotency_key="local-graph-start",
+                )
+                graph_result = (await graph.wait(timeout_seconds=10)).result
+                assert graph_result.status is TaskStatus.SUCCEEDED
+                output = await graph.result("answer")
+                assert output == {"value": 42}
+            print(json.dumps({
+                "agent_status": agent_result.status.value,
+                "agent_output": agent_result.output,
+                "graph_status": graph_result.status.value,
+                "task_output": output,
+                "closed": True,
+            }))
+
+        asyncio.run(main())
+    ''')
+    environment = {
+        **os.environ,
+        "LINKTOOLS_PATH": str(tmp_path),
+        "PYTHONPATH": os.pathsep.join((
+            str(source_root / "linktools-ai" / "src"),
+            str(source_root / "linktools" / "src"),
+            os.environ.get("PYTHONPATH", ""),
+        )),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=source_root, env=environment,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "agent_status": "SUCCEEDED",
+        "agent_output": {"text": "offline answer"},
+        "graph_status": "SUCCEEDED",
+        "task_output": {"value": 42},
+        "closed": True,
+    }
 
 
 class _UncertainExecution:

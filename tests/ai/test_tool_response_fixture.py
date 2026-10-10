@@ -342,7 +342,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     monkeypatch.setattr(SandboxResource, "from_asset_versions", forbidden_live_path)
     monkeypatch.setattr(AssetMaterializer, "materialize", forbidden_live_path)
     monkeypatch.setattr(
-        "linktools.ai.runtime._agent_executor.prepare_mcp_projections", no_live_projection,
+        "linktools.ai.runtime._mcp.prepare_mcp_projections", no_live_projection,
     )
 
     async def lookup(query: str, options: dict[str, int]) -> dict[str, str]:
