@@ -149,6 +149,82 @@ principal originally admitted with its graph.
 The remaining snippets are focused extensions: run asynchronous calls inside an
 open Runtime and reuse or replace the example's Tasks, principal, and dimension.
 
+## Trial resource contexts
+
+Pass `trial_scope=...` to `start`, `cancel_admission`, `reconcile`, or `rescore`
+when each target/scorer submission needs its own Runtime and application
+resources. The callback is an asynchronous context manager accepting an
+`EvaluationTrialScope` and yielding a `TaskEngine`. Native evaluation registers
+the durable launch intent before entering the context; a cancelled admission
+does not open one merely to perform cancellation.
+
+The descriptor provides `experiment_id`, `trial`, `slot_id`, `scorer_slot_id`,
+the admitted `principal`, and the frozen `submission`. Resolve resources from
+these logical identities consistently on every reopen. A score-only experiment
+has its own `experiment_id` while `trial` still identifies the source target.
+Physical host paths are deployment choices, not additional contract digests.
+
+The yielded engine must belong to a separate Runtime with the same namespace,
+tenant, retained storage plan, and object-store identities as the coordinating
+Runtime. Use separate `RuntimeStorage.sql(shared_engine)` or SQLite wrappers,
+not the same RuntimeStorage instance. An externally supplied SQL engine remains
+borrowed and is not disposed by closing one trial. Filesystem storage retains
+its existing exclusive-writer restriction. Rebind Agent Tasks through the child
+Runtime's `tasks.from_agent`/`from_agent_capture` APIs; a runner bound to the
+planning Runtime cannot be reused in the child. Definitions must match the
+frozen contracts used during preflight.
+
+Open child Runtimes with `auto_recover=False`. The default remains `True`; the
+flag only disables startup-wide reconciliation. Explicit graph/execution
+recovery remains available. Evaluation reconciliation restores each submission
+and invokes graph-level recovery, including its bound Agent execution recovery.
+As with explicit graph recovery, callers must confirm previous executors have
+stopped before requesting takeover.
+
+The callback is trusted application setup, not a sandbox or an effect-policy
+override. Existing fixture, tool, and external-effect admission rules remain in
+force. The coordinating Runtime validates storage, authorization, and frozen
+definitions; scoped execution checks the yielded Runtime's actual environment
+before starting or recovering work. The existing `live` restriction still
+rejects a child with application state or a Workspace, even when the controller
+has neither. A controller with those resources may plan a scoped run, but its
+presence does not grant the child permission to execute effects. Separate
+Runtime ownership does not prove distinct Workspace paths or external tool
+targets: stable resource mapping and isolation remain the trusted host's
+responsibility. Cancellation and retention do not open contexts or require
+permission to start new effects.
+
+The callback must clean up partial entry if opening fails or is cancelled, and
+release the resources it owns on exit. It must not run the evaluated business
+operation itself during setup.
+
+Each coordinator exits only the contexts it entered, after terminal evidence
+collection, cancellation, or coordination shutdown/failure. Durable intent
+`released` means logical execution capacity is released; another process may
+still be finishing its own context exit. It does not certify remote resource
+closure. Cleanup failures remain visible and are not converted into successful
+resource release. Use of a scope is part of the admitted evaluation meaning:
+reopening a scoped evaluation without its callback fails rather than silently
+falling back to the planning Runtime. Existing unscoped evaluations retain their
+original meaning.
+
+Context exit stops new local engine use and waits for already issued native
+control calls to return. Cancellation closes the durable admission gate first;
+it uses an already opened local engine when available and never opens a context
+just to cancel. A graph's terminal status alone does not prove its control
+receipt has finished settling.
+
+Human decisions are persisted before resuming a scorer. For a scoped run, a
+coordinator without that locally opened context leaves the decision for its
+owning coordinator or explicit reconciliation to apply; it does not execute the
+scorer on the planning Runtime.
+
+Context exit and evaluation retention do not recursively delete persistent
+workspace directories. Retention continues to own native evaluation records,
+captures, and object references under its existing offline-exclusivity contract;
+it exits any locally held scopes before purging those objects. Directory
+retention and deletion remain the application's separate responsibility.
+
 ## Cases and candidate inputs
 
 `DatasetSpec.cases` is the single ordered collection. Supply `CaseSpec` values or

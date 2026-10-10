@@ -116,6 +116,7 @@ async def compose_runtime_components(
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
     authorization: "AuthorizationPolicy | None" = None,
+    auto_recover: bool = True,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
@@ -295,6 +296,7 @@ async def compose_runtime_components(
             payload_policy=payload_policy,
             input_materializer=input_materializer,
             session_execution_ready=True,
+            auto_recover=auto_recover,
             metrics=metrics,
         )
         try:
@@ -488,6 +490,7 @@ async def _build_local_components(
     payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
     session_execution_ready: bool,
+    auto_recover: bool,
     metrics: "Metrics | None",
 ) -> _RuntimeComponents:
     metric_buffer: _MetricBuffer | None = None
@@ -784,7 +787,7 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
-        if RuntimeDomain.RECOVERY in storage.plan.durable_domains:
+        if auto_recover and RuntimeDomain.RECOVERY in storage.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,
             )

@@ -3,17 +3,18 @@
 """Evaluation expiry and explicit, restartable retention maintenance."""
 
 from contextlib import AbstractAsyncContextManager, nullcontext
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ..core import AuthorizationAction, AuthorizationPolicy, Principal, ResourceKind, ResourceRef, TaskStatus, validate_page_limit
 from ..errors import AIError, ErrorCode
 from ..evaluation import EvaluationPurgeResult
-from ..task import TaskGraphService
+from ..task import TaskSubmissionCancellation
 from ..storage import ObjectRef
 from ._runtime_identity import task_graph_binding_capture_key
 from .state import RuntimeDomain, RuntimeStorage, SnapshotExclusiveGuard, input_capture_key
-from .state._evaluation_records import EvaluationRecord
+from .state._evaluation_records import EvaluationLaunchIntent, EvaluationRecord
 
 if TYPE_CHECKING:
     from ._input_capture import RuntimeInputCaptures
@@ -39,12 +40,15 @@ class _HeldExclusive:
 class EvaluationRetention:
     def __init__(
         self, storage: RuntimeStorage, authorization: AuthorizationPolicy,
-        graph: TaskGraphService, captures: "RuntimeInputCaptures",
+        cancel_submission: Callable[[EvaluationRecord, EvaluationLaunchIntent, Principal, str], Awaitable[TaskSubmissionCancellation]],
+        captures: "RuntimeInputCaptures",
+        *, release_scopes: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._storage = storage
         self._authorization = authorization
-        self._graph = graph
+        self._cancel_submission = cancel_submission
         self._captures = captures
+        self._release_scopes = release_scopes
 
     async def purge_expired(
         self, *, principal: Principal, now: datetime, exclusive: SnapshotExclusiveGuard,
@@ -68,13 +72,15 @@ class EvaluationRetention:
             for intent in record.intents:
                 if intent.released:
                     continue
-                outcome = await self._graph.cancel_submission(intent.submission.ref, principal=principal,
-                    idempotency_key=f"evaluation-expire:{record.experiment_id}:{intent.slot_id}")
+                outcome = await self._cancel_submission(record, intent, principal,
+                    f"evaluation-expire:{record.experiment_id}:{intent.slot_id}")
                 record = await repository.settle_intent(record.experiment_id, intent.slot_id,
                     confirmed=outcome.admitted, released=outcome.status in _TERMINAL)
             if any(not intent.released for intent in record.intents):
                 blocked.append(record.experiment_id)
                 continue
+            if self._release_scopes is not None:
+                await self._release_scopes(record.experiment_id)
             ready.append(record)
 
         async with exclusive.offline_exclusivity():

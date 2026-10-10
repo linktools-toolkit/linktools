@@ -280,7 +280,7 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
 
     principal = service_principal("tenant", "owner")
     storage = RuntimeStorage.filesystem(tmp_path)
-    monkeypatch.setattr(RuntimeEvaluations, "_watch", lambda *args: None)
+    monkeypatch.setattr(RuntimeEvaluations, "_watch", lambda *args, **kwargs: None)
     async with Runtime.open("evaluation-retention", storage=storage,
                             models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         tasks = (Task("retention.prepared", target, effect_policy="none"), Task("retention.score", score, effect_policy="none"))
@@ -429,9 +429,8 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
         async def expire_inputs(self, *, principal: Principal, now: datetime, limit: int) -> tuple[ObjectRef, ...]:
             return ()
 
-    class NoGraphs:
-        async def cancel_submission(self, submission: object, *, principal: Principal, idempotency_key: str) -> object:
-            raise AssertionError("no launch intent exists")
+    async def cancel_submission(record, intent, principal, idempotency_key):
+        raise AssertionError("no launch intent exists")
 
     guard = Offline()
     objects = CheckedObjects(guard)
@@ -448,7 +447,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
             attachments=(EvidenceAttachmentRef("raw", "text/plain", reference),))
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
         await storage.evaluation.records.publish_evidence(bundle)
-        retention = EvaluationRetention(storage, Authorization(), NoGraphs(), Captures())
+        retention = EvaluationRetention(storage, Authorization(), cancel_submission, Captures())
         original_delete = objects.delete_object
 
         async def fail_delete(key: str, *, expected_digest: str) -> bool:
@@ -469,7 +468,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
     reopened = RuntimeStorage.filesystem(tmp_path, object_store=objects)
     await reopened.initialize(namespace="evaluation", tenant_id="tenant")
     try:
-        result = await EvaluationRetention(reopened, Authorization(), NoGraphs(), Captures()).purge_expired(
+        result = await EvaluationRetention(reopened, Authorization(), cancel_submission, Captures()).purge_expired(
             principal=service_principal("tenant", "owner"), now=now + timedelta(seconds=120), exclusive=guard)
         assert result.objects_deleted == 1
         assert await objects.stat(reference.key) is None
