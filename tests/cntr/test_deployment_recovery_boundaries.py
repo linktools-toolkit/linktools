@@ -58,7 +58,7 @@ def test_inspection_cannot_overwrite_migration_recovery_input(tmp_path, saved_sn
 
     def check(context):
         assert yaml.safe_load(compose_file.read_text())["services"]["app"]["environment"] == {"VERSION": "new"}
-        old = yaml.safe_load(context.saved_compose[str(compose_file)])
+        old = yaml.safe_load(context.previous_compose_contents[str(compose_file)])
         if not saved_snapshot:
             assert old["services"]["app"]["environment"] == {"VERSION": "old"}
         recovered = yaml.safe_load(runner.saved_service_models(context, ("app",))["app"])

@@ -34,7 +34,7 @@ def _record(manager, monkeypatch):
 
     monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
-        name: {"image": name + ":current"} for container in context.containers for name in container.services}})
+        name: {"image": name + ":current"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(manager.image_preparer, "plan", fake_plan)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)

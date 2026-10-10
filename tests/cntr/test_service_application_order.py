@@ -76,7 +76,7 @@ def test_apply_service_always_waits_for_dependency_before_start(condition, metho
     manager = SimpleNamespace(runtime=SimpleNamespace(create_docker_process=lambda *a, **kw: process))
     runner = ComposeRunner(manager)
     runner._model_args = lambda context: nullcontext(["compose"])
-    context = SimpleNamespace(containers=(), is_full_containers=False, compose_model={"services": {
+    context = SimpleNamespace(project_containers=(), is_full_project=False, compose_model={"services": {
         "app": {"depends_on": {"provider": {"condition": condition}}}}})
     monkeypatch.setattr(runner, method, lambda ctx, service, timeout=None: calls.append((condition, service)))
     runner.apply_service(context, "app")
@@ -87,7 +87,7 @@ def test_apply_service_always_waits_for_dependency_before_start(condition, metho
 def test_completed_dependency_requires_observed_successful_exit(code):
     state = SimpleNamespace(services=(SimpleNamespace(service="job", state="exited", exit_code=code),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs: state)))
-    context = SimpleNamespace(containers=())
+    context = SimpleNamespace(project_containers=())
     if code == 0:
         runner.wait_service_completed(context, "job", timeout=0)
     else:
@@ -99,7 +99,7 @@ def test_running_dependency_is_not_completed():
     state = SimpleNamespace(services=(SimpleNamespace(service="job", state="running", exit_code=0),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs: state)))
     with pytest.raises(ContainerError, match="did not complete"):
-        runner.wait_service_completed(SimpleNamespace(containers=()), "job", timeout=0)
+        runner.wait_service_completed(SimpleNamespace(project_containers=()), "job", timeout=0)
 
 
 
@@ -109,7 +109,7 @@ def test_started_dependency_does_not_require_one_shot_service_to_keep_running():
     runner = ComposeRunner(SimpleNamespace(runtime=SimpleNamespace(
         create_docker_process=lambda *args, **kwargs: process)))
     runner._model_args = lambda context: nullcontext(["compose"])
-    context = SimpleNamespace(containers=(), is_full_containers=False, compose_model={"services": {
+    context = SimpleNamespace(project_containers=(), is_full_project=False, compose_model={"services": {
         "app": {"depends_on": ["job"]}}})
     runner.apply_service(context, "app")
     assert calls == ["apply"]

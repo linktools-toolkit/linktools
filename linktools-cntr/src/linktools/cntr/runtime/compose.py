@@ -106,7 +106,7 @@ class ComposeRunner:
 
     def collect_services(self, context: "OperationContext") -> "list[str]":
         """Service names for the targeted containers; empty for "all" runs."""
-        if context.is_full_containers:
+        if context.is_full_project:
             return []
         services: "list[str]" = []
         for container in context.target_containers:
@@ -169,7 +169,7 @@ class ComposeRunner:
     def final_model(self, context: "OperationContext") -> "dict[str, Any]":
         from ..artifacts import collect_candidates
         files = [content for kind, owner, content in collect_candidates(
-            self.manager, context.containers).values() if kind == "compose"]
+            self.manager, context.project_containers).values() if kind == "compose"]
         if not files:
             from ..errors import ContainerError
             raise ContainerError("No Compose files in selected project")
@@ -185,7 +185,7 @@ class ComposeRunner:
 
     def up(self, context: "OperationContext", options: ComposeOptions) -> int:
         return self.manager.runtime.create_docker_compose_process(
-            context.containers, *self.up_args(options)
+            context.project_containers, *self.up_args(options)
         ).check_call()
 
     def stop(self, context: "OperationContext", services: "Sequence[str]") -> int:
@@ -218,7 +218,7 @@ class ComposeRunner:
         from ..artifacts import collect_candidates
         from ..errors import ContainerError
         files = [content for kind, owner, content in collect_candidates(
-            self.manager, context.containers).values() if kind == "compose"]
+            self.manager, context.project_containers).values() if kind == "compose"]
         if not files:
             raise ContainerError("No Compose files in selected project")
         with self._saved_compose_args(context, files) as args:
@@ -320,7 +320,7 @@ class ComposeRunner:
         self.wait_service_dependencies(context, service)
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(
-                *args, *self.apply_service_args(service, recreate, context.is_full_containers)).check_call()
+                *args, *self.apply_service_args(service, recreate, context.is_full_project)).check_call()
     def restart_service(self, context: "OperationContext", service: str,
                         model: "dict[str, Any] | None" = None) -> int:
         """Restart the existing container without applying pending Compose changes."""
@@ -333,7 +333,7 @@ class ComposeRunner:
         from ..errors import ContainerError
         deadline = time.monotonic() + timeout
         while True:
-            state = self.manager.docker_inspector.get_project_state(context.containers)
+            state = self.manager.docker_inspector.get_project_state(context.project_containers)
             matches = [item for item in state.services if item.service == service]
             if matches and all(item.state == "running" for item in matches):
                 return
@@ -345,7 +345,7 @@ class ComposeRunner:
                      check: bool = True) -> "CommandResult":
         return self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_compose_process(
-                context.containers, "exec", "-T", service, *command, capture_output=True), check=check)
+                context.project_containers, "exec", "-T", service, *command, capture_output=True), check=check)
 
     def wait_service_healthy(self, context: "OperationContext", service: str,
                              timeout: "int | None" = 30) -> None:
@@ -353,7 +353,7 @@ class ComposeRunner:
         from ..errors import ContainerError
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            state = self.manager.docker_inspector.get_project_state(context.containers)
+            state = self.manager.docker_inspector.get_project_state(context.project_containers)
             matches = [item for item in state.services if item.service == service]
             if matches and all(item.state == "running" and item.health == "healthy" for item in matches):
                 return
@@ -381,7 +381,7 @@ class ComposeRunner:
             condition = options.get("condition", "service_started")
             if (options.get("required", True) is False and
                     dependency not in (getattr(context, "target_services", None) or ())):
-                state = self.manager.docker_inspector.get_project_state(context.containers)
+                state = self.manager.docker_inspector.get_project_state(context.project_containers)
                 matches = [item for item in state.services if item.service == dependency]
                 available = any(
                     item.state in ("running", "restarting") or
@@ -402,14 +402,14 @@ class ComposeRunner:
                     # Normal application already acknowledged each ordered `up`.
                     # Rollback does not start dependencies outside its restore set.
                     if restored:
-                        state = self.manager.docker_inspector.get_project_state(context.containers)
+                        state = self.manager.docker_inspector.get_project_state(context.project_containers)
                         matches = [item for item in state.services if item.service == dependency]
                         if not matches or any(not (item.state == "running" or
                                 (item.state == "exited" and item.exit_code == 0)) for item in matches):
                             raise ContainerError("Dependency service {} is unavailable".format(dependency))
             except ContainerError:
                 if options.get("required", True) is False:
-                    observed = self.manager.docker_inspector.get_project_state(context.containers)
+                    observed = self.manager.docker_inspector.get_project_state(context.project_containers)
                     matches = [item for item in observed.services if item.service == dependency]
                     unavailable = not matches or any(
                         item.state not in ("running", "restarting") or
@@ -426,7 +426,7 @@ class ComposeRunner:
         from ..errors import ContainerError
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            state = self.manager.docker_inspector.get_project_state(context.containers)
+            state = self.manager.docker_inspector.get_project_state(context.project_containers)
             matches = [item for item in state.services if item.service == service]
             if any(item.state == "dead" or
                    (item.state == "exited" and item.exit_code != 0) for item in matches):
@@ -465,7 +465,7 @@ class ComposeRunner:
 
         # Past service ownership comes from captured declarations, not today's owners.
         models = {}
-        for path, text in context.saved_compose.items():
+        for path, text in context.previous_compose_contents.items():
             try:
                 data = yaml.safe_load(text) or {}
             except yaml.YAMLError:
@@ -516,7 +516,7 @@ class ComposeRunner:
                     continue
                 included.add(path)
                 missing.difference_update(resources)
-        return [text for path, text in context.saved_compose.items() if path in included]
+        return [text for path, text in context.previous_compose_contents.items() if path in included]
 
     def saved_service_models(self, context: "OperationContext",
                              services: "Sequence[str]") -> "dict[str, str]":
@@ -530,7 +530,7 @@ class ComposeRunner:
                 model = yaml.safe_load(text)
             else:
                 if legacy is None:
-                    if not context.saved_compose:
+                    if not context.previous_compose_contents:
                         raise ContainerError("No previous Compose model available for service " + service)
                     old_files = self._legacy_rollback_files(context, services)
                     with self._saved_compose_args(context, old_files) as args:
@@ -540,7 +540,7 @@ class ComposeRunner:
                 text = yaml.safe_dump(model)
             texts[service] = text
             specifications[service] = model["services"][service]
-        return {service: texts[service] for service in order_service_subset(context.containers, specifications)}
+        return {service: texts[service] for service in order_service_subset(context.project_containers, specifications)}
     def apply_saved_services(self, context: "OperationContext", services: "Sequence[str]",
                              files: "dict[str, str]") -> None:
         import yaml
@@ -552,7 +552,7 @@ class ComposeRunner:
             raise ContainerError("No saved Compose files available")
         overlay = {}
         for service in services:
-            image = context.native_running_images.get(service)
+            image = context.initial_running_images.get(service)
             if not image:
                 raise ContainerError("No original image ID for service " + service)
             overlay[service] = {"image": image}
@@ -561,7 +561,7 @@ class ComposeRunner:
             model = self._resolved_model(self.manager.runtime.create_docker_process(
                 *args, *self.config_args(output_format="json"), capture_output=True))
             specifications = {service: model["services"][service] for service in services}
-            for service in order_service_subset(context.containers, specifications):
+            for service in order_service_subset(context.project_containers, specifications):
                 self.wait_service_dependencies(context, service, model=model)
                 self.manager.runtime.create_docker_process(
                     *args, *self.apply_service_args(service, recreate=True)).check_call()
@@ -602,7 +602,7 @@ class ComposeRunner:
             return False
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            actual = self.manager.docker_inspector.get_project_state(context.containers)
+            actual = self.manager.docker_inspector.get_project_state(context.project_containers)
             matches = [item for item in actual.services if item.service == service]
             if matches and all(
                     (item.state == "running" and item.health in (None, "healthy")) or

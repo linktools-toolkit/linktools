@@ -49,10 +49,10 @@ def _two_managers_with_both_containers_installed(tmp_path, monkeypatch):
 
 def _partial_ctx(manager, name):
     ctx = OperationContext()
-    ctx.commands = ["up"]
-    ctx.containers = manager.installed_state.get(resolve=True)
-    ctx.target_containers = [c for c in ctx.containers if c.name == name]
-    ctx.is_full_containers = False
+    ctx.actions = ["up"]
+    ctx.project_containers = manager.installed_state.get(resolve=True)
+    ctx.target_containers = [c for c in ctx.project_containers if c.name == name]
+    ctx.is_full_project = False
     return ctx
 
 

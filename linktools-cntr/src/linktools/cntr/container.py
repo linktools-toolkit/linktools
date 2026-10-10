@@ -345,10 +345,10 @@ class BaseContainer(metaclass=AbstractMetaClass):
             raise ContainerError(f"{self} is not installed")
 
         context = OperationContext()
-        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
-        context.containers = containers
+        context.actions = [commands] if isinstance(commands, str) else list(filter(None, commands))
+        context.project_containers = containers
         context.target_containers = [self]
-        context.is_full_containers = False
+        context.is_full_project = False
         return context
 
     def get_source_path(self, *paths: str) -> "Path":

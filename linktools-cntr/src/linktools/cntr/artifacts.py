@@ -285,8 +285,8 @@ def bind_prepared_files(context: "OperationContext", model: dict,
     import yaml
     from pathlib import Path
 
-    roots = [(container.get_app_path("generated"), context.prepared_files[container.name])
-             for container in context.containers if container.name in context.prepared_files]
+    roots = [(container.get_app_path("generated"), context.prepared_dirs[container.name])
+             for container in context.project_containers if container.name in context.prepared_dirs]
     services = dict(model["services"])
     for service, spec in model["services"].items():
         old = yaml.safe_load(previous[service])["services"][service] if service in previous else {}
@@ -339,7 +339,7 @@ def publish_prepared_files(context: "OperationContext", services: "Iterable[str]
     from pathlib import Path
 
     services = tuple(services)
-    unapplied = set() if context.is_full_containers else set(context.initial_running_services) - set(services)
+    unapplied = set() if context.is_full_project else set(context.initial_running_services) - set(services)
     if unapplied.intersection(context.service_models.untracked_services):
         # Without a saved model, any generated tree may still be mounted.
         return
@@ -350,7 +350,7 @@ def publish_prepared_files(context: "OperationContext", services: "Iterable[str]
     sources = [Path(item["source"]) for service in services
                for item in context.compose_model["services"][service].get("volumes", ())
                if isinstance(item, dict) and item.get("type") == "bind"]
-    for candidate in context.prepared_files.values():
+    for candidate in context.prepared_dirs.values():
         used = False
         for source in sources:
             try:
@@ -386,7 +386,7 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
     import yaml
     from pathlib import Path
 
-    if not context.is_full_containers and models.untracked_services.difference(context.target_services or ()):
+    if not context.is_full_project and models.untracked_services.difference(context.target_services or ()):
         return
     references = []
     for collection in (models.current, models.previous):
@@ -394,7 +394,7 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
             spec = yaml.safe_load(text)["services"][service]
             references.extend(Path(item["source"]) for item in spec.get("volumes", ())
                               if isinstance(item, dict) and item.get("type") == "bind")
-    for candidate in context.prepared_files.values():
+    for candidate in context.prepared_dirs.values():
         root = candidate.parent
         if any(source == root or source == root / "current" or
                root / "current" in source.parents for source in references):

@@ -80,7 +80,7 @@ class RunningStateStore:
     def mark_started(self, context: "OperationContext") -> None:
         """Record the context's target containers as running (after a successful up)."""
         targets = set(c.name for c in context.target_containers)
-        if context.is_full_containers:
+        if context.is_full_project:
             # Full up writes the actual target set (drops anything no longer installed).
             self._mutate(lambda current: targets)
         else:
@@ -89,7 +89,7 @@ class RunningStateStore:
     def mark_stopped(self, context: "OperationContext") -> None:
         """Record the context's target containers as stopped (after a successful down)."""
         targets = {c.name for c in context.target_containers}
-        if context.is_full_containers:
+        if context.is_full_project:
             # Full down stops everything -> clear the persisted running set.
             self._mutate(lambda current: set())
         else:

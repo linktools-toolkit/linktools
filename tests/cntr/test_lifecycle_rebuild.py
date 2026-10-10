@@ -127,7 +127,7 @@ class Runner:
                           for name in services}
         from linktools.cntr.runtime.compose import order_service_subset
         return {name: context.service_models.previous[name]
-                for name in order_service_subset(context.containers, specifications)}
+                for name in order_service_subset(context.project_containers, specifications)}
 
     def apply_saved_services(self, context, services, files):
         self.manager.events.append(("restore", tuple(services)))
@@ -295,7 +295,7 @@ def test_completed_job_not_marked_as_running(tmp_path):
 def test_effective_health_and_job_readiness(state, health, code, expected):
     actual = SimpleNamespace(services=(SimpleNamespace(service="app", state=state, health=health, exit_code=code),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c: actual)))
-    ctx = OperationContext(containers=[], target_services=("app",), compose_model={"services": {"app": {}}})
+    ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {"app": {}}})
     if expected == "error":
         with pytest.raises(ContainerError, match="failed to become ready"):
             runner.wait_service_ready(ctx, "app", timeout=0)
@@ -306,7 +306,7 @@ def test_effective_health_and_job_readiness(state, health, code, expected):
 def test_explicit_completed_dependency_requires_completion():
     actual = SimpleNamespace(services=(SimpleNamespace(service="migrate", state="running", health=None, exit_code=None),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c: actual)))
-    ctx = OperationContext(containers=[], target_services=("migrate", "web"), compose_model={"services": {
+    ctx = OperationContext(project_containers=[], target_services=("migrate", "web"), compose_model={"services": {
         "migrate": {}, "web": {"depends_on": {"migrate": {"condition": "service_completed_successfully"}}}}})
     with pytest.raises(ContainerError, match="did not complete successfully"):
         runner.wait_service_ready(ctx, "migrate", timeout=0)
@@ -315,7 +315,7 @@ def test_explicit_completed_dependency_requires_completion():
 def test_unselected_completed_dependency_does_not_change_selected_service_policy():
     actual = SimpleNamespace(services=(SimpleNamespace(service="app", state="running", health=None, exit_code=None),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c: actual)))
-    ctx = OperationContext(containers=[], target_services=("app",), compose_model={"services": {
+    ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {
         "app": {}, "unrelated": {"depends_on": {"app": {"condition": "service_completed_successfully"}}}}})
     assert runner.wait_service_ready(ctx, "app", timeout=0)
 
@@ -333,8 +333,8 @@ def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_pa
     runner = ComposeRunner(manager)
     runner._resolved_model = lambda process: {"services": {"app": {"image": "sha256:old"}}}
     runner.wait_service_dependencies = lambda *args, **kwargs: None
-    ctx = OperationContext(containers=[SimpleNamespace(name="app", services={"app": {}})])
-    ctx.native_running_images = {"app": "sha256:old"}
+    ctx = OperationContext(project_containers=[SimpleNamespace(name="app", services={"app": {}})])
+    ctx.initial_running_images = {"app": "sha256:old"}
     runner.apply_saved_services(ctx, ("app",), {"previous.yml": "services:\n  app:\n    image: mutable:tag\n"})
     overlay = yaml.safe_load(documents[-1][-1])
     assert overlay == {"services": {"app": {"image": "sha256:old"}}}

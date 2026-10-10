@@ -469,12 +469,12 @@ class Container(BaseContainer):
             lock_path = self.get_app_path("certs", ".acme.lock")
             with FileLock(str(lock_path)):
                 self.runtime.chmod(lock_path, 0o600)
-                if ("nginx" in context.initial_services and
+                if ("nginx" in context.initial_existing_services and
                         not os.path.lexists(str(self.get_app_path("generated", "current")))):
                     self._preserve_legacy_files()
                 account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
                 previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
-                                          for item in context.runtime_state.services
+                                          for item in context.initial_runtime_state.services
                                           if item.service == "nginx"), None)
                 if not account.is_dir() and previous_revision is not None:
                     if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):

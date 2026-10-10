@@ -23,14 +23,14 @@ def _no_proxy_env(monkeypatch):
 
 def _ctx(manager, target_names=None, is_full=False):
     ctx = OperationContext()
-    ctx.commands = ["up"]
-    ctx.containers = manager.installed_state.get(resolve=True)
+    ctx.actions = ["up"]
+    ctx.project_containers = manager.installed_state.get(resolve=True)
     if is_full:
-        ctx.target_containers = ctx.containers
-        ctx.is_full_containers = True
+        ctx.target_containers = ctx.project_containers
+        ctx.is_full_project = True
     else:
-        ctx.target_containers = [c for c in ctx.containers if c.name in (target_names or [])]
-        ctx.is_full_containers = False
+        ctx.target_containers = [c for c in ctx.project_containers if c.name in (target_names or [])]
+        ctx.is_full_project = False
     return ctx
 
 
@@ -47,10 +47,10 @@ def test_collect_services_partial_collects_target_services(fresh_manager):
 def test_collect_services_no_services_raises(fresh_manager):
     runner = fresh_manager.compose_runner
     ctx = OperationContext()
-    ctx.commands = ["up"]
-    ctx.containers = []
+    ctx.actions = ["up"]
+    ctx.project_containers = []
     ctx.target_containers = []
-    ctx.is_full_containers = False
+    ctx.is_full_project = False
     with pytest.raises(ContainerError):
         runner.collect_services(ctx)
 

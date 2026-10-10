@@ -24,7 +24,7 @@ def _neutralize_runtime(manager, monkeypatch):
                         lambda image: "sha256:fixture-image")
 
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
-        name: {"image": name + ":local"} for container in context.containers for name in container.services}})
+        name: {"image": name + ":local"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",

@@ -108,7 +108,7 @@ class LifecycleDispatcher:
         running_names = self.manager.running_state.get_persisted()
         removed = [self.manager.containers[name] for name in running_names
                    if name in self.manager.containers and
-                   self.manager.containers[name] not in context.containers]
+                   self.manager.containers[name] not in context.project_containers]
         if not removed:
             return
         for container in removed:

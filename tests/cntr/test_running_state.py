@@ -34,7 +34,7 @@ def _record(manager, monkeypatch, fail=False):
 
     monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
-        name: {"image": name + ":current"} for container in context.containers for name in container.services}})
+        name: {"image": name + ":current"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",
@@ -48,10 +48,10 @@ def _record(manager, monkeypatch, fail=False):
 
 def _partial_ctx(manager, name):
     ctx = OperationContext()
-    ctx.commands = ["up"]
-    ctx.containers = manager.installed_state.get(resolve=True)
-    ctx.target_containers = [c for c in ctx.containers if c.name == name]
-    ctx.is_full_containers = False
+    ctx.actions = ["up"]
+    ctx.project_containers = manager.installed_state.get(resolve=True)
+    ctx.target_containers = [c for c in ctx.project_containers if c.name == name]
+    ctx.is_full_project = False
     return ctx
 
 
@@ -113,23 +113,23 @@ def test_mark_stopped_partial_removes_targets(fresh_manager):
 def test_mark_started_full_writes_target_set(fresh_manager):
     fresh_manager.running_state._set(["stale"])
     ctx = OperationContext()
-    ctx.commands = ["up"]
-    ctx.containers = fresh_manager.installed_state.get(resolve=False)
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx.actions = ["up"]
+    ctx.project_containers = fresh_manager.installed_state.get(resolve=False)
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
     fresh_manager.running_state.mark_started(ctx)
     persisted = set(fresh_manager.running_state.get_persisted())
-    assert persisted == {c.name for c in ctx.containers}
+    assert persisted == {c.name for c in ctx.project_containers}
     assert "stale" not in persisted
 
 
 def test_mark_stopped_full_clears(fresh_manager):
     fresh_manager.running_state._set(["nginx", "portainer"])
     ctx = OperationContext()
-    ctx.commands = ["down"]
-    ctx.containers = fresh_manager.installed_state.get(resolve=False)
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx.actions = ["down"]
+    ctx.project_containers = fresh_manager.installed_state.get(resolve=False)
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
     fresh_manager.running_state.mark_stopped(ctx)
     assert fresh_manager.running_state.get_persisted() == []
 
@@ -194,10 +194,10 @@ def test_dispatcher_reconciles_removed_container_out_of_running_state(fresh_mana
     fresh_manager.running_state._set(["nginx", "flare"])
 
     ctx = OperationContext()
-    ctx.commands = ["up"]
-    ctx.containers = [c for c in fresh_manager.containers.values() if c.name != "flare"]
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx.actions = ["up"]
+    ctx.project_containers = [c for c in fresh_manager.containers.values() if c.name != "flare"]
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
 
     fresh_manager.lifecycle.reconcile_removed(ctx)
 

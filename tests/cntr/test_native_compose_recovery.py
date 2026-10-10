@@ -53,7 +53,7 @@ def test_optional_unavailable_dependency_does_not_block_old_model_recovery():
             get_project_state=lambda selected: inspected.append(True) or SimpleNamespace(services=())),
         logger=SimpleNamespace(warning=lambda *args: None))
     runner = ComposeRunner(manager)
-    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
     assert inspected == [True]
 
 
@@ -65,7 +65,7 @@ def test_optional_running_healthy_dependency_still_waits():
     runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
     calls = []
     runner.wait_service_healthy = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
-    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
     assert calls == [("metrics", None)]
 
 
@@ -75,7 +75,7 @@ def test_optional_selected_but_unavailable_dependency_retains_readiness_requirem
     runner = ComposeRunner(SimpleNamespace())
     calls = []
     runner.wait_service_healthy = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
-    context = SimpleNamespace(containers=(), target_services=("app", "metrics"))
+    context = SimpleNamespace(project_containers=(), target_services=("app", "metrics"))
     runner.wait_service_dependencies(context, "app", model=model)
     assert calls == [("metrics", None)]
 
@@ -88,7 +88,7 @@ def test_optional_completed_successfully_is_still_checked():
     runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
     calls = []
     runner.wait_service_completed = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
-    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
     assert calls == [("seed", None)]
 
 
@@ -101,7 +101,7 @@ def test_optional_stopped_dependency_is_not_polled_for_health():
         docker_inspector=inspector, logger=SimpleNamespace(warning=lambda *args: None)))
     runner.wait_service_healthy = lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("Stopped optional dependency must not block application"))
-    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
 
 
 def test_selected_optional_dependency_still_orders_before_consumer():
@@ -139,7 +139,7 @@ def test_optional_terminal_failure_warning_without_blocking(
         logger=SimpleNamespace(warning=lambda *args: logs.append(args)))
     model = {"services": {"app": {"depends_on": {
         "metrics": {"condition": condition, "required": False}}}}}
-    context = SimpleNamespace(containers=(),
+    context = SimpleNamespace(project_containers=(),
         target_services=("app", "metrics") if selected else ("app",))
     ComposeRunner(manager).wait_service_dependencies(context, "app", model=model)
     assert logs and "metrics" in logs[0][1]
@@ -152,7 +152,7 @@ def test_required_unhealthy_dependency_still_fails():
         docker_inspector=SimpleNamespace(get_project_state=lambda owners: runtime)))
     with pytest.raises(ContainerError, match="unhealthy"):
         runner.wait_service_dependencies(
-            SimpleNamespace(containers=()), "app",
+            SimpleNamespace(project_containers=()), "app",
             model={"services": {"app": {"depends_on": {
                 "metrics": {"condition": "service_healthy"}}}}})
 
@@ -164,7 +164,7 @@ def test_optional_dependency_does_not_swallow_runtime_inspection_failures():
         docker_inspector=SimpleNamespace(get_project_state=fail)))
     with pytest.raises(RuntimeError, match="inspection unavailable"):
         runner.wait_service_dependencies(
-            SimpleNamespace(containers=()), "app",
+            SimpleNamespace(project_containers=()), "app",
             model={"services": {"app": {"depends_on": {
                 "metrics": {"condition": "service_healthy", "required": False}}}}})
 
@@ -215,9 +215,9 @@ def test_legacy_dependency_removed_from_current_owner_uses_saved_declaration(tmp
         saved = {"app.yml": yaml.safe_dump({"services": {"web": old["services"]["web"]}}),
                  "provider.yml": yaml.safe_dump({"services": {name: old["services"][name] for name in ("db", "cache")}})}
     saved["unrelated.yml"] = "invalid: ["
-    context = SimpleNamespace(containers=(Owner("app", ("web", "cache") if not separate_owner else ("web",)),
+    context = SimpleNamespace(project_containers=(Owner("app", ("web", "cache") if not separate_owner else ("web",)),
                                           Owner("provider", ("cache",)) if separate_owner else Owner("empty", ())),
-                              saved_compose=saved,
+                              previous_compose_contents=saved,
                               compose_owners={"app.yml": "app", "provider.yml": "provider", "unrelated.yml": "unrelated"},
                               service_models=SimpleNamespace(previous={}))
     assert yaml.safe_load(runner.saved_service_models(context, services)["web"]) == old

@@ -45,8 +45,8 @@ def model(owner, base=True, acl=True):
 
 
 def context(owner, full=False):
-    ctx = OperationContext(containers=[owner], target_services=("auth", "admin"),
-                           is_full_containers=full)
+    ctx = OperationContext(project_containers=[owner], target_services=("auth", "admin"),
+                           is_full_project=full)
     ctx.initial_running_services = set()
     ctx.service_models = SimpleNamespace(previous={}, untracked_services=frozenset())
     return ctx
@@ -169,10 +169,10 @@ def test_confirmed_model_and_previous_snapshot_are_retained(owner):
     store.record(("auth", "admin"))
     publish_prepared_files(later, ("auth", "admin"))
     prune_prepared_files(later, store)
-    assert first.prepared_files["auth"].exists()
-    assert later.prepared_files["auth"].exists()
+    assert first.prepared_dirs["auth"].exists()
+    assert later.prepared_dirs["auth"].exists()
     assert not abandoned.exists()
-    assert owner.get_app_path("generated/current").resolve() == later.prepared_files["auth"]
+    assert owner.get_app_path("generated/current").resolve() == later.prepared_dirs["auth"]
 
 
 def test_unselected_legacy_consumer_keeps_current_pointer(owner):
@@ -209,16 +209,16 @@ def _apply_prepared(owner, value, services, running=(), desired_services=(), ful
 
 def test_running_removed_service_retains_inputs_across_generations(owner):
     first = _apply_prepared(owner, "A", ("auth", "admin"))
-    original = first.prepared_files["auth"]
+    original = first.prepared_dirs["auth"]
     generations = []
     for value in ("B", "C", "D"):
         ctx = _apply_prepared(owner, value, ("auth",), running=("auth", "admin"))
-        generations.append(ctx.prepared_files["auth"])
+        generations.append(ctx.prepared_dirs["auth"])
         assert (original / "base.yml").read_text() == "A"
         assert "admin" in ctx.service_models.previous
         assert "admin" not in ctx.service_models.current
         assert "admin" not in ctx.service_models.changed_services
-        assert owner.get_app_path("generated/current").resolve() == ctx.prepared_files["auth"]
+        assert owner.get_app_path("generated/current").resolve() == ctx.prepared_dirs["auth"]
     assert not generations[0].exists()
     assert generations[1].exists()
     retained_entry = str((original / "base.yml").relative_to(owner.manager.data_path))
@@ -250,7 +250,7 @@ def test_running_removed_legacy_service_keeps_current_pointer(owner, source):
 @pytest.mark.parametrize("desired_services", [("auth",), ("auth", "admin")])
 def test_unknown_unselected_service_preserves_current_and_all_generated_trees(owner, desired_services):
     first = _apply_prepared(owner, "A", ("auth",))
-    original = first.prepared_files["auth"]
+    original = first.prepared_dirs["auth"]
     unknown_input = stage_files(owner, {"base.yml": "orphan input", "acl.yml": "orphan input"})
     unknown_entry = str((unknown_input / "base.yml").relative_to(owner.manager.data_path))
     for value in ("B", "C", "D"):
@@ -265,7 +265,7 @@ def test_unknown_unselected_service_preserves_current_and_all_generated_trees(ow
 
     stopped = _apply_prepared(owner, "E", ("auth",), running=("auth",))
     assert not stopped.service_models.untracked_services
-    assert owner.get_app_path("generated/current").resolve() == stopped.prepared_files["auth"]
+    assert owner.get_app_path("generated/current").resolve() == stopped.prepared_dirs["auth"]
     assert not original.exists()
     assert not unknown_input.exists()
     assert unknown_entry not in owner.manager.artifact_index.load()
@@ -276,7 +276,7 @@ def test_successful_first_migration_publishes_and_prunes_prepared_files(owner):
     owner.get_app_path("generated/current").symlink_to(original.name)
     ctx = _apply_prepared(owner, "B", ("auth",), running=("auth",))
     assert ctx.service_models.untracked_services == {"auth"}
-    assert owner.get_app_path("generated/current").resolve() == ctx.prepared_files["auth"]
+    assert owner.get_app_path("generated/current").resolve() == ctx.prepared_dirs["auth"]
     assert not original.exists()
     stored = AppliedServiceModels(owner.manager, model(owner), retained_services=("auth",))
     assert not stored.untracked_services
@@ -285,13 +285,13 @@ def test_successful_first_migration_publishes_and_prunes_prepared_files(owner):
 @pytest.mark.parametrize("known_orphan", [False, True])
 def test_full_apply_retires_orphan_before_publishing_and_cleanup(owner, known_orphan):
     first = _apply_prepared(owner, "A", ("auth",))
-    original = first.prepared_files["auth"]
+    original = first.prepared_dirs["auth"]
     orphan_input = stage_files(owner, {"base.yml": "orphan input", "acl.yml": "orphan input"})
     if known_orphan:
         AppliedServiceModels(owner.manager, model(owner)).record(("admin",))
 
     ctx = _apply_prepared(owner, "B", ("auth",), running=("auth", "admin"), full=True)
-    assert owner.get_app_path("generated/current").resolve() == ctx.prepared_files["auth"]
+    assert owner.get_app_path("generated/current").resolve() == ctx.prepared_dirs["auth"]
     assert owner.get_app_path("generated/current/base.yml").read_text() == "B"
     assert original.exists()
     if known_orphan:

@@ -4,6 +4,21 @@ The public context is `OperationContext`. A container uses the existing
 `on_starting` and `on_check` callbacks; it does not implement a separate generated
 configuration lifecycle.
 
+## Operation context fields
+
+- `actions` contains operation labels such as `up`, `restart`, and `pull`, not process arguments
+- `project_containers` is the complete project scope; `target_containers` and `target_services` are the resolved operation targets
+- `is_full_project` identifies an unscoped project operation. Explicitly naming every container does not set it
+- `initial_runtime_state` is captured before preparation. `initial_existing_services` includes stopped containers; `initial_running_services` contains only initially running/restarting services, whose image IDs are in `initial_running_images`
+- `prepared_dirs` maps container names to immutable prepared directory roots; use `write_files` and `file_path` to create and read their contents
+- `previous_compose_contents` maps captured Compose source paths to their previous YAML text for recovery
+- `refresh_services` remains the explicit refresh selection; `metadata` remains hook extension data
+
+The former fields `commands`, `containers`, `is_full_containers`, `runtime_state`,
+`initial_services`, `native_running_images`, `prepared_files`, and `saved_compose`
+map to the corresponding names above without aliases. These are in-memory
+operation fields; persisted Compose/applied-model formats are unchanged.
+
 ## Ordering and responsibilities
 
 An `up` operation resolves the selected groups, required providers and declared

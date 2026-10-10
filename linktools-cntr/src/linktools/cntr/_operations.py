@@ -129,12 +129,12 @@ class ComposeOperations:
 
     def _make_context(self, commands, selection: ComposeSelection) -> OperationContext:
         return OperationContext(
-            commands=[commands] if isinstance(commands, str) else list(filter(None, commands)),
-            containers=list(selection.project_containers),
+            actions=[commands] if isinstance(commands, str) else list(filter(None, commands)),
+            project_containers=list(selection.project_containers),
             target_containers=list(selection.target_containers),
             target_services=selection.services or tuple(
                 service for container in selection.target_containers for service in container.services),
-            is_full_containers=selection.full,
+            is_full_project=selection.full,
         )
 
     def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
@@ -175,14 +175,14 @@ class ComposeOperations:
         refresh = frozenset(self.start_selection(explicit).services) if pull else frozenset()
         context = self._make_context(["restart" if restart else "up", pull and "pull"], selection)
         context.refresh_services = refresh
-        context.runtime_state = actual
-        context.initial_services = frozenset(item.service for item in actual.services)
-        context.native_running_images = {item.service: item.image_id for item in actual.services
+        context.initial_runtime_state = actual
+        context.initial_existing_services = frozenset(item.service for item in actual.services)
+        context.initial_running_images = {item.service: item.image_id for item in actual.services
                                          if item.service in initial and item.image_id}
         context.initial_running_services = frozenset(initial)
         context.compose_files = compose_files
         context.compose_owners = compose_owners
-        context.saved_compose = saved_compose
+        context.previous_compose_contents = saved_compose
 
         with manager.lifecycle.notify_start(context):
             if (tuple(context.target_containers) != selection.target_containers or
@@ -200,7 +200,7 @@ class ComposeOperations:
             legacy = set()
             if missing:
                 import yaml
-                for text in context.saved_compose.values():
+                for text in context.previous_compose_contents.values():
                     try:
                         old = yaml.safe_load(text) or {}
                     except yaml.YAMLError:
@@ -248,7 +248,7 @@ class ComposeOperations:
             stopped = False
             try:
                 if stop_set:
-                    stop_context = self._make_context(context.commands, explicit)
+                    stop_context = self._make_context(context.actions, explicit)
                     stop_context.compose_model = context.compose_model
                     with manager.lifecycle.notify_stop(stop_context):
                         stop_attempted = True
@@ -260,7 +260,7 @@ class ComposeOperations:
                 for service in selection.services:
                     failed = service
                     spec = context.compose_model["services"][service]
-                    before_image = context.native_running_images.get(service)
+                    before_image = context.initial_running_images.get(service)
                     image_changed = service in initial and before_image != target_image_ids[service]
                     binds = {str(spec.get(key)).split(":", 1)[1] for key in
                              ("network_mode", "ipc", "pid")
@@ -358,7 +358,7 @@ class ComposeOperations:
                         models = {service: (context.compose_model if service in successful else
                                             yaml.safe_load(saved[service])) for service in actions}
                         specifications = {service: model["services"][service] for service, model in models.items()}
-                        for service in order_service_subset(context.containers, specifications):
+                        for service in order_service_subset(context.project_containers, specifications):
                             if actions[service]:
                                 if service in successful:
                                     spec = specifications[service]
@@ -401,7 +401,7 @@ class ComposeOperations:
         import yaml
         # Unknown legacy services have no trustworthy dependency model to act on.
         known = set(context.service_models.previous) | set(applied)
-        if context.is_full_containers:
+        if context.is_full_project:
             known.intersection_update(context.compose_model["services"])
         running = set(running).intersection(known)
         definitions = {}
@@ -410,7 +410,7 @@ class ComposeOperations:
             model = yaml.safe_load(saved) if saved else context.compose_model
             definitions[name] = model["services"][name]
         pending = {name: definitions[name] for name in sorted(running - set(selected))}
-        for name in order_service_subset(context.containers, pending):
+        for name in order_service_subset(context.project_containers, pending):
             spec = definitions[name]
             binds = {str(spec.get(key)).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
                      if str(spec.get(key, "")).startswith("service:")}
@@ -458,7 +458,7 @@ class ComposeOperations:
         from .errors import ContainerError
         running = tuple(service for service in services if service in context.initial_running_services)
         for service in running:
-            if not context.native_running_images.get(service):
+            if not context.initial_running_images.get(service):
                 raise ContainerError("Cannot replace running service {} without its original image ID".format(service))
         if running:
             self.manager.compose_runner.saved_service_models(context, running)
@@ -468,7 +468,7 @@ class ComposeOperations:
         for container in containers:
             state = copy(context)
             state.target_containers = [container]
-            state.is_full_containers = False
+            state.is_full_project = False
             if set(container.services) & running:
                 self.manager.running_state.mark_started(state)
             else:

@@ -64,12 +64,12 @@ def test_notify_remove_registers_configs_for_a_repo_container_removed_while_runn
     manager.running_state._set(["repo_src"])
 
     ctx = OperationContext()
-    ctx.commands = ["up"]
+    ctx.actions = ["up"]
     # A full-project context that no longer includes this container --
     # simulates it having been uninstalled while still running.
-    ctx.containers = [c for c in manager.containers.values() if c.name != "repo_src"]
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx.project_containers = [c for c in manager.containers.values() if c.name != "repo_src"]
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
 
     manager.lifecycle.reconcile_removed(ctx)
 
