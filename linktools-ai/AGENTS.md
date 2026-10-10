@@ -45,7 +45,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Digests are reserved for anonymous/composite values, byte integrity, and request/idempotency contracts. Define each digest from one explicit minimal projection owned by that contract. Non-contract additions and default fields must not change it; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
 - Separate named identity from contract validation, byte integrity, and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter named identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
 - Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Named identity comparisons use the explicit reference directly; digest comparisons use the owning digest projection.
-- Every current writer output must be accepted by its matching reader. Define omitted optional fields in that wire contract, not through changing runtime defaults. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
+- Every current writer output must be accepted by its matching reader. Within an unchanged durable contract version, added fields must declare a semantically correct default that explicitly permits omission by earlier writers (`wire_optional` for Runtime dataclasses); constructor defaults alone are insufficient. Cover old-format reads and recovery. If no safe default exists, do not add a required field under that version or invent zero/None values that change budgets or authorization; do not automatically bump versions or add compatibility frameworks. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
 
 ### Persistence and concurrency
 
@@ -110,7 +110,7 @@ python manage.py install --editable
 python manage.py check linktools-ai
 ```
 
-Run the project gate after changing architecture boundaries, public exports, persistence contracts, or schema definitions. Current pre-release scope has no obligation to read superseded development data. Use the current wire contract as the single baseline; retain normal defaults of current codecs and current execution recovery semantics. Published-version fixtures are required only after a real compatibility commitment exists.
+Run the project gate after changing architecture boundaries, public exports, persistence contracts, or schema definitions. Use the current wire contract and its declared earlier-writer defaults as the baseline; retain current execution recovery semantics. Keep real-writer fixtures for committed compatibility obligations.
 
 For the current OpenAI binding, route_id, base_url, api_key and transport timeout/retry settings are connection concerns, not model semantic identity. Task execution timeout/retry policies and model-visible tool descriptions/schema have different responsibilities and remain semantic where used.
 

@@ -47,7 +47,7 @@ const sessions=new Map(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',s
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
 const timeline=id=>timelineOverrides.get(id) || ({items:[{execution_id:`${id}-run`,status:'SUCCEEDED',created_at:'2026-01-01T00:00:00Z',user_input:`${id} question`,conversation_committed:true,items:[{item_kind:'assistant',content:`${id} answer`}]}],next_cursor:null});
 function response(value,status=200){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});}
-function deferred(path){let release,reject;const promise=new Promise((resolve,fail)=>{release=resolve;reject=fail;});delays.set(path,promise);const resolve=value=>{delays.delete(path);release(response(value));};resolve.reject=error=>{delays.delete(path);reject(error);};return resolve;}
+function deferred(path){let release,reject;const promise=new Promise((resolve,fail)=>{release=resolve;reject=fail;});delays.set(path,promise);const resolve=(value,status=200)=>{delays.delete(path);release(response(value,status));};resolve.reject=error=>{delays.delete(path);reject(error);};return resolve;}
 let forkAttempts=0,cancelAttempts=0;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
@@ -143,6 +143,50 @@ const releaseSend=deferred('POST /api/sessions/a/messages');node('prompt').value
 node('composer').requestSubmit();node('composer').requestSubmit();await tick();
 assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').length,1);
 node('prompt').value='Next draft';releaseSend({execution_id:'a-run'});await settle();assert.equal(node('prompt').value,'Next draft');
+
+// Known admission rejection gets a new key only on the next explicit send.
+for(const code of ['SESSION_BUSY','SESSION_CONFLICT']) {
+  node('prompt').value=`Rejected ${code}`;
+  const rejected=deferred('POST /api/sessions/a/messages');
+  node('composer').requestSubmit();await tick();
+  rejected({code,operation_id:'web',safe_details:{reason:'<script>safe detail</script>'},exception_message:'private diagnostic'},409);await settle();
+  const first=calls.filter(call=>call.key==='/api/sessions/a/messages').at(-1);
+  assert.equal(node('prompt').value,`Rejected ${code}`);
+  assert.match(node('notice').textContent,/this message was not started/);
+  assert.match(node('notice').textContent,/POST \/api\/session\/messages/);
+  assert.match(node('notice').textContent,/<script>safe detail<\/script>/);
+  assert.doesNotMatch(node('notice').textContent,/private diagnostic/);
+  assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').at(-1),first);
+  const retried=deferred('POST /api/sessions/a/messages');
+  node('composer').requestSubmit();await tick();
+  const next=calls.filter(call=>call.key==='/api/sessions/a/messages').at(-1);
+  assert.notEqual(next.body.request_id,first.body.request_id);
+  assert.equal(next.body.prompt,first.body.prompt);
+  retried({execution_id:'a-run'});await settle();
+}
+
+// Unknown commit and network outcomes preserve the identity of the original send.
+for(const failure of ['STORAGE_COMMIT_UNKNOWN','network']) {
+  node('prompt').value=`Uncertain ${failure}`;
+  const uncertain=deferred('POST /api/sessions/a/messages');
+  node('composer').requestSubmit();await tick();
+  const first=calls.filter(call=>call.key==='/api/sessions/a/messages').at(-1);
+  if(failure==='network')uncertain.reject(new TypeError('Network unavailable'));
+  else uncertain({code:failure},503);
+  await settle();
+  const repeated=deferred('POST /api/sessions/a/messages');
+  node('composer').requestSubmit();await tick();
+  assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').at(-1).body.request_id,first.body.request_id);
+  repeated({execution_id:'a-run'});await settle();
+}
+
+// A rejected send cannot place its error in a newer conversation.
+node('prompt').value='Old selection draft';
+const oldSend=deferred('POST /api/sessions/a/messages');
+node('composer').requestSubmit();await tick();location.hash='#session=b';await settle();
+oldSend({code:'SESSION_BUSY'},409);await settle();
+assert.equal(node('conversation-title').textContent,'Beta');assert.equal(node('notice').textContent,'');
+location.hash='#session=a';await settle();
 
 // Refreshing an old turn must not clear a new live turn selected in the same session.
 executions.set('a-new',{...info('a-new'),status:'RUNNING'});

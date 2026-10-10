@@ -23,7 +23,14 @@ function button(label, action, className='quiet') {
 }
 function clear(id) { $(id).replaceChildren(); }
 function notice(message='') { $('notice').textContent=message; $('notice').hidden=!message; }
-function showError(error) { if (error.name !== 'AbortError') notice(error.message || String(error)); }
+function showError(error) {
+  if(error.name==='AbortError')return;
+  notice(error.message || String(error));
+  if(error.context)$('notice').append(element('div','',error.context));
+  if(error.details?.operation_id || Object.keys(error.details?.safe_details || {}).length) {
+    $('notice').append(rawDetail({operation_id:error.details.operation_id,safe_details:error.details.safe_details},'Error details'));
+  }
+}
 function connection(label, failed=false) { $('connection').textContent=label; $('connection').classList.toggle('error', failed); }
 async function api(path, {body, signal}={}) {
   const response = await fetch(path, {method:body ? 'POST':'GET', signal, cache:'no-store',
@@ -33,17 +40,21 @@ async function api(path, {body, signal}={}) {
   if (!response.ok) {
     const code = payload.error_code || payload.code || 'REQUEST_FAILED';
     const error = new Error(`${code}${payload.message ? ': '+payload.message : ''}`);
-    error.code=code; error.details=payload; throw error;
+    error.code=code; error.details=payload; error.context=`${body ? 'POST':'GET'} ${path.split('?')[0]}`; throw error;
   }
   return payload;
 }
-async function mutate(path, payload) {
+async function mutate(path, payload, {newAttemptOn=[]}={}) {
   const key = path + JSON.stringify(payload);
   let operation = state.pending.get(key);
   if (operation?.running) return operation.running;
   if (!operation) { operation={id:crypto.randomUUID()}; state.pending.set(key, operation); }
   operation.running=api(path, {body:{...payload, request_id:operation.id}});
   try { const result=await operation.running; state.pending.delete(key); return result; }
+  catch(error) {
+    if(newAttemptOn.includes(error.code))state.pending.delete(key);
+    throw error;
+  }
   finally { operation.running=null; }
 }
 function setDisabled() {
@@ -385,10 +396,15 @@ async function sendMessage(event) {
   if(!sessionId || !promptValue.trim())return;
   $('send').disabled=true;notice('');
   try {
-    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:$('thinking').checked,memory_scope:$('memory').value,files:$('files').value.split('\n').map(s=>s.trim()).filter(Boolean)});
+    // Rejected admission is terminal for its key; another explicit send is a new attempt.
+    const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:$('thinking').checked,memory_scope:$('memory').value,files:$('files').value.split('\n').map(s=>s.trim()).filter(Boolean)}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
     if(generation!==state.generation)return;
     if($('prompt').value===promptValue)$('prompt').value=''; await openSelection(sessionId,result.execution_id); await loadList();
-  } catch(error){showError(error);} finally {if(generation===state.generation)setDisabled();}
+  } catch(error){
+    if(generation!==state.generation || sessionId!==state.selectedSession)return;
+    if(['SESSION_BUSY','SESSION_CONFLICT'].includes(error.code))error.message+='; this message was not started. Check the current execution, then send again when the session is available.';
+    showError(error);
+  } finally {if(generation===state.generation)setDisabled();}
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;

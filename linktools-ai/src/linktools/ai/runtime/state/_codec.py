@@ -1872,6 +1872,7 @@ def _decode_domain(
     if origin in (Union, types.UnionType):
         if value is None and type(None) in arguments:
             return None
+        diagnostic_error: AIError | None = None
         for candidate in arguments:
             if candidate is type(None):
                 continue
@@ -1887,7 +1888,11 @@ def _decode_domain(
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
                     raise
+                if error.safe_details.get("missing_fields"):
+                    diagnostic_error = error
                 continue
+        if diagnostic_error is not None:
+            raise diagnostic_error
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value is None:
         if target is type(None):
@@ -2111,9 +2116,15 @@ def _decode_dataclass(
     # Constructor defaults do not make durable facts optional. Only explicit
     # wire defaults may fill omissions; factories and computed fields remain
     # required so recovery cannot invent timestamps or integrity evidence.
-    _require_required_keys(raw_fields, frozenset(
-        name for name, (_type, _init, required) in declared.items() if required
-    ))
+    missing_fields = sorted(
+        name for name, (_type, _init, required) in declared.items()
+        if required and name not in raw_fields
+    )
+    if missing_fields:
+        raise AIError(
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+            safe_details={"wire_type": wire_id, "missing_fields": missing_fields},
+        )
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
     for field_name, (field_type, field_init, _required) in declared.items():
