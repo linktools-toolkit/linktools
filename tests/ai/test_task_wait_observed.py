@@ -4,12 +4,14 @@
 import asyncio
 from datetime import datetime, timezone
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Runtime, RuntimeContext, TaskGraphRun, WaitResult
+from linktools.ai.runtime import _cursor
 from linktools.ai.runtime.service_api import ExecutionView, _ExecutionStreamFailure
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphInfo, TaskGraphState, TaskNode, TaskNodeView
 
@@ -104,10 +106,14 @@ class _BoundExecutionService:
 @pytest.mark.parametrize("status", [TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED,
                                     TaskStatus.BLOCKED, TaskStatus.WAITING, TaskStatus.RECOVERY_REQUIRED])
 @pytest.mark.parametrize("include_content, include_event_content", [(False, True), (True, False)])
-async def test_wait_observed_returns_authoritative_same_read(status, include_content, include_event_content):
+async def test_wait_observed_returns_authoritative_same_read(
+    status, include_content, include_event_content, monkeypatch,
+):
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(_cursor, "time", SimpleNamespace(time=lambda: now))
     graph = Graph(status)
     runtime, run = make_run(graph)
-    from linktools.ai.runtime._watch_cursor import encode_graph_watch_cursor
+    from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor, encode_graph_watch_cursor
     cursor = encode_graph_watch_cursor(
         "observed-test", "tenant", "graph", include_content=include_event_content,
         graph_event_seq=0, execution_event_seqs={},
@@ -116,10 +122,11 @@ async def test_wait_observed_returns_authoritative_same_read(status, include_con
         on_event=ignore, cursor=cursor, include_content=include_content,
         include_event_content=include_event_content,
     )
-    assert outcome.cursor == encode_graph_watch_cursor(
-        "observed-test", "tenant", "graph", include_content=include_event_content,
-        graph_event_seq=1, execution_event_seqs={},
-    )
+    now += 1
+    assert outcome.cursor is not None
+    assert decode_graph_watch_cursor(
+        "observed-test", "tenant", "graph", outcome.cursor, include_content=include_event_content,
+    ) == (1, {})
     assert isinstance(outcome, WaitResult)
     assert outcome.result.wait_status is status
     assert outcome.result.event_seq == 1
