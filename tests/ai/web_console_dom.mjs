@@ -212,7 +212,7 @@ if(process.argv[3]==='workspace'){
   const rendered=descendants(node('conversation')).filter(item=>item.className==='markdown').map(item=>item.innerHTML).join('');
   assert.match(rendered,/<h2>Question/);assert.match(rendered,/<table>/);
   assert.match(node('conversation').textContent,/src\/example.py/);
-  let copied;globalThis.navigator.clipboard={writeText:async value=>{copied=value;}};
+  let copied;Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
   descendants(node('conversation')).find(item=>item.textContent==='Copy Markdown' && item.tagName==='BUTTON').click();await settle();assert.equal(copied,markdown);
   node('prompt').value='Unsent **Alpha**';node('files').value='src/a.py';node('planning').checked=true;node('memory').value='alpha-memory';
   location.hash='#session=b';await settle();assert.equal(node('prompt').value,'');node('prompt').value='Beta draft';
