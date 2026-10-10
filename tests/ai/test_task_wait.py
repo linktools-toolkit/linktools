@@ -217,6 +217,58 @@ async def test_wait_includes_expanded_nodes_from_the_stopping_read() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ("notify_terminal", "retire_terminal", "retire_running"))
+async def test_wait_observes_activity_during_the_durable_read(
+    monkeypatch: pytest.MonkeyPatch, transition: str,
+) -> None:
+    succeeded = _state(TaskStatus.SUCCEEDED, event_seq=9)
+    generations: list[int | None] = []
+    delays: list[float] = []
+
+    class CompletingRepository(_Repository):
+        reads = 0
+
+        async def graph_state(self, graph_id: str, *, tenant_id: str) -> TaskGraphState:
+            snapshot = await super().graph_state(graph_id, tenant_id=tenant_id)
+            self.reads += 1
+            if self.reads == 1:
+                waiter.generation += 1
+                waiter.owned = transition == "notify_terminal"
+                if transition != "retire_running":
+                    self.current = succeeded
+            return snapshot
+
+    class CompletingWaiter(_Waiter):
+        generation = 0
+
+        def graph_activity_generation(self, graph_id: str, *, tenant_id: str) -> int:
+            del graph_id, tenant_id
+            return self.generation
+
+        async def wait_graph_activity(
+            self, graph_id: str, *, tenant_id: str, after_generation: int | None = None,
+        ) -> None:
+            del graph_id, tenant_id
+            generations.append(after_generation)
+            assert after_generation == 0, "Activity during the read must not become its starting watermark"
+
+    async def remote_progress(delay: float) -> None:
+        assert transition == "retire_running", "A completed local graph must not wait for polling"
+        assert repository.reads == 2, "Owner retirement must trigger one immediate durable recheck"
+        delays.append(delay)
+        repository.current = succeeded
+
+    repository = CompletingRepository(_state(TaskStatus.RUNNING))
+    waiter = CompletingWaiter(repository)
+    monkeypatch.setattr(asyncio, "sleep", remote_progress)
+
+    assert await _service(repository, waiter).wait("graph", principal=_PRINCIPAL) == succeeded
+    assert generations == ([0] if transition == "notify_terminal" else [])
+    assert delays == ([1.0] if transition == "retire_running" else [])
+    assert repository.reads == (3 if transition == "retire_running" else 2)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("owned,deferred_input", [(False, False), (True, True), (True, False)])
 async def test_wait_keeps_local_wait_ownership_and_deferred_input_semantics(
     owned: bool, deferred_input: bool,
