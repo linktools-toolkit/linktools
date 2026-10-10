@@ -214,13 +214,6 @@ class ComposeRunner:
         with self._saved_compose_args(context, files) as args:
             return self.manager.runtime.create_docker_process(
                 *args, *self.config_args(services, output_format, quiet), privilege=False).check_call()
-    ) -> int:
-        return self.manager.runtime.create_docker_compose_process(
-            context.containers,
-            *self.config_args(services=services, output_format=output_format, quiet=quiet),
-            privilege=False,
-        ).check_call()
-
     def isolated_service_args(self, model: "dict[str, Any]", service: str,
                               command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
                               network: bool = False,
