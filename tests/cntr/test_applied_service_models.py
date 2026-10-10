@@ -92,6 +92,39 @@ def test_saved_project_retains_removed_dependencies_for_rollback(manager):
     assert current.changed_services == frozenset({"app"})
 
 
+def test_retained_service_is_previous_only_and_does_not_change_desired_services(manager):
+    AppliedServiceModels(manager, _model()).record(("app", "worker"))
+    desired = _model()
+    desired["services"].pop("worker")
+    current = AppliedServiceModels(manager, desired, retained_services=("app", "worker", "worker"))
+    assert set(current.current) == {"app"}
+    assert set(current.previous) == {"app", "worker"}
+    assert not current.changed_services
+    assert not current.untracked_services
+    desired["services"]["app"]["environment"]["TOKEN"] = "new"
+    current.set_model(desired)
+    assert set(current.current) == {"app"}
+    assert current.changed_services == {"app"}
+    assert yaml.safe_load(current.previous["worker"]) == _model()
+
+
+def test_missing_retained_snapshot_is_untracked_but_not_desired(manager):
+    current = AppliedServiceModels(manager, _model(), retained_services=("app", "orphan"))
+    assert current.untracked_services == {"app", "orphan"}
+    assert set(current.current) == {"app", "worker"}
+    assert current.changed_services == {"app", "worker"}
+    assert not current.previous
+
+
+def test_removed_service_snapshot_is_not_retained_without_observation(manager):
+    AppliedServiceModels(manager, _model()).record(("app", "worker"))
+    desired = _model()
+    desired["services"].pop("worker")
+    current = AppliedServiceModels(manager, desired, retained_services=("app",))
+    assert set(current.previous) == {"app"}
+    assert not current.untracked_services
+
+
 def test_previous_environment_stays_resolved_after_external_file_changes(manager, tmp_path):
     env_file = tmp_path / "app.env"
     env_file.write_text("TOKEN=old\n")

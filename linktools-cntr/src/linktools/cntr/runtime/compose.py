@@ -76,6 +76,16 @@ def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[st
         pending.remove(name)
         result.append(name)
     return tuple(result)
+
+def order_service_subset(containers: "Iterable[BaseContainer]",
+                         specifications: "dict[str, dict[str, Any]]") -> "tuple[str, ...]":
+    """Order actions by their effective dependencies, leaving other services alone."""
+    graph = {service: {"depends_on": {
+        name: options for name, options in service_dependencies(spec).items()
+        if name in specifications}} for service, spec in specifications.items()}
+    return order_services(containers, tuple(specifications), {"services": graph})
+
+
 @dataclass
 class ComposeOptions:
     """Resolved options for a single compose build/up invocation."""
@@ -311,9 +321,10 @@ class ComposeRunner:
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(
                 *args, *self.apply_service_args(service, recreate, context.is_full_containers)).check_call()
-    def restart_service(self, context: "OperationContext", service: str) -> int:
+    def restart_service(self, context: "OperationContext", service: str,
+                        model: "dict[str, Any] | None" = None) -> int:
         """Restart the existing container without applying pending Compose changes."""
-        with self._model_args(context) as args:
+        with self._model_args(context, model=model) as args:
             return self.manager.runtime.create_docker_process(
                 *args, "restart", "--no-deps", service).check_call()
 
@@ -446,48 +457,37 @@ class ComposeRunner:
                     stream.write(content)
                 paths.append(path)
             yield self.compose_args(paths)
-    def _restore_order(self, context: "OperationContext",
-                       specifications: "dict[str, dict[str, Any]]") -> "tuple[str, ...]":
-        graph = {service: {"depends_on": {
-            name: options for name, options in service_dependencies(spec).items()
-            if name in specifications}} for service, spec in specifications.items()}
-        return order_services(context.containers, tuple(specifications), {"services": graph})
     def _legacy_rollback_files(self, context: "OperationContext",
                                services: "Sequence[str]") -> "list[str]":
         """Keep only old Compose files needed by these services and their references."""
         import yaml
         from ..errors import ContainerError
 
-        owners = {service: owner.name for owner in context.containers for service in owner.services}
-        included = set()
-        checked = set()
-        queue = list(services)
+        # Past service ownership comes from captured declarations, not today's owners.
         models = {}
+        for path, text in context.saved_compose.items():
+            try:
+                data = yaml.safe_load(text) or {}
+            except yaml.YAMLError:
+                continue
+            if isinstance(data, dict) and isinstance(data.get("services", {}), dict):
+                models[path] = data
+        included, checked = set(), set()
+        queue = list(services)
         while queue:
             name = queue.pop()
             if name in checked:
                 continue
             checked.add(name)
-            owner = owners.get(name)
-            files = [path for path in context.saved_compose
-                     if context.compose_owners[path] == owner]
+            files = [path for path, model in models.items() if name in model.get("services", {})]
             if not files:
-                raise ContainerError("No previous Compose file for service " + name)
+                raise ContainerError("No previous Compose declaration for service " + name)
             for path in files:
-                if path not in models:
-                    try:
-                        data = yaml.safe_load(context.saved_compose[path]) or {}
-                    except yaml.YAMLError:
-                        raise ContainerError("Invalid previous Compose file for service " + name) from None
-                    if not isinstance(data, dict) or not isinstance(data.get("services", {}), dict):
-                        raise ContainerError("Invalid previous Compose model for service " + name)
-                    models[path] = data
+                spec = models[path]["services"][name]
+                if not isinstance(spec, dict):
+                    raise ContainerError("Invalid previous Compose service " + name)
                 included.add(path)
-            spec = next((models[path].get("services", {})[name] for path in files
-                         if name in models[path].get("services", {})), None)
-            if not isinstance(spec, dict):
-                raise ContainerError("Missing previous Compose service " + name)
-            queue.extend(service_dependencies(spec))
+                queue.extend(service_dependencies(spec))
 
         # Shared resources can be defined by another owner, independently of
         # its services. Include those declarations only when referenced.
@@ -508,20 +508,13 @@ class ComposeRunner:
         for category, names in needed.items():
             defined = set().union(*(models[path].get(category, {}) for path in included))
             missing = names - defined
-            for path, content in context.saved_compose.items():
+            for path, data in models.items():
                 if path in included or not missing:
-                    continue
-                try:
-                    data = yaml.safe_load(content) or {}
-                except yaml.YAMLError:
-                    continue
-                if not isinstance(data, dict):
                     continue
                 resources = data.get(category)
                 if not isinstance(resources, dict) or not missing.intersection(resources):
                     continue
                 included.add(path)
-                models[path] = data
                 missing.difference_update(resources)
         return [text for path, text in context.saved_compose.items() if path in included]
 
@@ -547,7 +540,7 @@ class ComposeRunner:
                 text = yaml.safe_dump(model)
             texts[service] = text
             specifications[service] = model["services"][service]
-        return {service: texts[service] for service in self._restore_order(context, specifications)}
+        return {service: texts[service] for service in order_service_subset(context.containers, specifications)}
     def apply_saved_services(self, context: "OperationContext", services: "Sequence[str]",
                              files: "dict[str, str]") -> None:
         import yaml
@@ -568,7 +561,7 @@ class ComposeRunner:
             model = self._resolved_model(self.manager.runtime.create_docker_process(
                 *args, *self.config_args(output_format="json"), capture_output=True))
             specifications = {service: model["services"][service] for service in services}
-            for service in self._restore_order(context, specifications):
+            for service in order_service_subset(context.containers, specifications):
                 self.wait_service_dependencies(context, service, model=model)
                 self.manager.runtime.create_docker_process(
                     *args, *self.apply_service_args(service, recreate=True)).check_call()
@@ -585,9 +578,11 @@ class ComposeRunner:
         return args
 
     @contextmanager
-    def _model_args(self, context: "OperationContext") -> "Iterator[list[str]]":
+    def _model_args(self, context: "OperationContext",
+                    model: "dict[str, Any] | None" = None) -> "Iterator[list[str]]":
         import yaml
-        model = context.compose_model if context.compose_model is not None else self.final_model(context)
+        if model is None:
+            model = context.compose_model if context.compose_model is not None else self.final_model(context)
         with self._saved_compose_args(context, (yaml.safe_dump(model, sort_keys=True),)) as args:
             yield args
 

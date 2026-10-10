@@ -331,15 +331,18 @@ def bind_prepared_files(context: "OperationContext", model: dict,
 def publish_prepared_files(context: "OperationContext", services: "Iterable[str]") -> None:
     """Expose confirmed inputs for later read-only Compose rendering.
 
-    Running containers use immutable mount sources, never the current symlink.
-    AppliedServiceModels remains the authority for each running service.
+    AppliedServiceModels identifies each running service's immutable inputs.
+    Legacy or unknown running inputs must keep their current pointer untouched.
     """
     import uuid
     import yaml
     from pathlib import Path
 
     services = tuple(services)
-    unapplied = set(context.initial_running_services) - set(services)
+    unapplied = set() if context.is_full_containers else set(context.initial_running_services) - set(services)
+    if unapplied.intersection(context.service_models.untracked_services):
+        # Without a saved model, any generated tree may still be mounted.
+        return
     legacy_sources = [Path(item["source"]) for service in unapplied
                       if service in context.service_models.previous
                       for item in yaml.safe_load(context.service_models.previous[service])["services"][service].get("volumes", ())
@@ -383,6 +386,8 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
     import yaml
     from pathlib import Path
 
+    if not context.is_full_containers and models.untracked_services.difference(context.target_services or ()):
+        return
     references = []
     for collection in (models.current, models.previous):
         for service, text in collection.items():
@@ -419,7 +424,8 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
 class AppliedServiceModels:
     """Track each service's applied model, retaining project support for rollback."""
 
-    def __init__(self, manager: "ContainerManager", model: dict) -> None:
+    def __init__(self, manager: "ContainerManager", model: dict, *,
+                 retained_services: "Iterable[str]" = ()) -> None:
         from types import MappingProxyType
         import yaml
 
@@ -436,6 +442,10 @@ class AppliedServiceModels:
             # Compose validates dependencies even with --no-deps. Each service
             # snapshot therefore retains its full project's rollback support.
             current[service] = resolved
+        retained_services = tuple(retained_services)
+        for service in dict.fromkeys(tuple(current) + retained_services):
+            if not isinstance(service, str) or not service:
+                raise ContainerError("Retained Compose services must have names")
             path = self._path(service)
             try:
                 with open(path, encoding="utf-8") as stream:
@@ -452,11 +462,20 @@ class AppliedServiceModels:
                            for name, definition in saved["services"].items())):
                 raise ContainerError("Invalid applied Compose model for service {}".format(service))
             previous[service] = self._normalize(saved)
-            if self._projection(saved, service) == self._projection(model, service):
+            if service in current and self._projection(saved, service) == self._projection(model, service):
                 changed.remove(service)
         self.current = MappingProxyType(current)
         self.previous = MappingProxyType(previous)
         self.changed_services = frozenset(changed)
+        self.untracked_services = frozenset(service for service in retained_services if service not in previous)
+
+    def retain_previous(self, models: "Mapping[str, str]") -> None:
+        """Capture resolved legacy inputs without replacing per-service snapshots."""
+        from types import MappingProxyType
+        previous = dict(models)
+        previous.update(self.previous)
+        self.previous = MappingProxyType(previous)
+        self.untracked_services = self.untracked_services.difference(previous)
 
     @classmethod
     def _projection(cls, model: dict, service: str) -> str:

@@ -103,7 +103,7 @@ class Runner:
         if self.fail == service:
             raise ContainerError("apply failed " + service)
 
-    def restart_service(self, context, service):
+    def restart_service(self, context, service, model=None):
         self.manager.events.append(("restart", service))
         if self.fail == service:
             raise ContainerError("restart failed " + service)
@@ -125,9 +125,9 @@ class Runner:
             raise ContainerError("Missing restore input " + ",".join(missing))
         specifications = {name: yaml.safe_load(context.service_models.previous[name])["services"][name]
                           for name in services}
-        rt = ComposeRunner(self.manager)
+        from linktools.cntr.runtime.compose import order_service_subset
         return {name: context.service_models.previous[name]
-                for name in rt._restore_order(context, specifications)}
+                for name in order_service_subset(context.containers, specifications)}
 
     def apply_saved_services(self, context, services, files):
         self.manager.events.append(("restore", tuple(services)))

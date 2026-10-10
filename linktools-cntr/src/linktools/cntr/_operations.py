@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .errors import ContainerError
 from .context import OperationContext
 from .execution.model import get_records, record_phase, render_report
-from .runtime.compose import order_services, service_dependencies
+from .runtime.compose import order_services, order_service_subset, service_dependencies
 
 if TYPE_CHECKING:
     from collections.abc import Sequence, Iterable
@@ -193,12 +193,26 @@ class ComposeOperations:
             selection = ComposeSelection(selection.project_containers, selection.target_containers,
                                          ordered, selection.full)
             context.target_services = selection.services
-            model_store = AppliedServiceModels(manager, raw_model)
+            owners = {service: container for container in selection.project_containers for service in container.services}
+            model_store = AppliedServiceModels(manager, raw_model, retained_services=initial)
+            context.service_models = model_store
+            missing = initial.intersection(raw_model["services"]).difference(model_store.previous)
+            legacy = set()
+            if missing:
+                import yaml
+                for text in context.saved_compose.values():
+                    try:
+                        old = yaml.safe_load(text) or {}
+                    except yaml.YAMLError:
+                        continue
+                    if isinstance(old, dict) and isinstance(old.get("services", {}), dict):
+                        legacy.update(missing.intersection(old.get("services", {})))
+            if legacy:
+                model_store.retain_previous(runner.saved_service_models(context, tuple(sorted(legacy))))
             model = bind_prepared_files(context, raw_model, model_store.previous)
             context.compose_model = manager.image_preparer.with_build_revisions(
                 model, selection.project_containers, selection.services)
             model_store.set_model(context.compose_model)
-            context.service_models = model_store
             image_plan = manager.image_preparer.plan(
                 context.compose_model, selection.services, force_pull=pull,
                 refresh_services=context.refresh_services)
@@ -232,7 +246,6 @@ class ComposeOperations:
             updated, recreated = set(), set()
             stop_attempted = False
             stopped = False
-            owners = {service: container for container in selection.project_containers for service in container.services}
             try:
                 if stop_set:
                     stop_context = self._make_context(context.commands, explicit)
@@ -283,7 +296,8 @@ class ComposeOperations:
                 for service, recreate in self._dependent_actions(
                         context, selection.services, initial, updated, recreated):
                     failed = service
-                    with record_phase(context, "restart-dependent", container=owners[service].name,
+                    owner = owners.get(service)
+                    with record_phase(context, "restart-dependent", container=owner.name if owner else None,
                                       logger=manager.logger):
                         import yaml
                         saved = runner.saved_service_models(context, (service,))
@@ -292,7 +306,7 @@ class ComposeOperations:
                             runner.apply_saved_services(context, (service,),
                                                         {"previous.yml": saved[service]})
                         else:
-                            runner.restart_service(context, service)
+                            runner.restart_service(context, service, model=previous_model)
                         runner.wait_service_ready(context, service, model=previous_model)
                     failed = None
             except Exception as error:
@@ -316,28 +330,55 @@ class ComposeOperations:
                         restore.update(affected & initial)
                         cleanup = affected - initial
                         if cleanup:
+                            discarded = set(cleanup)
+                            for service, _ in self._dependent_actions(
+                                    context, restore | cleanup, running, set(cleanup), discarded,
+                                    applied=set(applied_services) - restore):
+                                if service in initial:
+                                    restore.add(service)
+                                else:
+                                    cleanup.add(service)
+                                discarded.add(service)
                             stopped_new = tuple(service for service in reversed(selection.services) if service in cleanup)
                             runner.stop(context, stopped_new)
                             model_store.restore(stopped_new)
                             running.difference_update(cleanup)
+                    touched = restore | cleanup
                     if restore:
-                        # Restoring creates new container IDs, including along restart edges.
-                        restore.update(service for service, _ in self._dependent_actions(
-                            context, restore, initial, set(restore), set(restore), recreate_restarts=True))
+                        import yaml
+                        successful = set(applied_services) - restore - cleanup
+                        actions = {service: True for service in (*context.compose_model["services"], *model_store.previous)
+                                   if service in restore}
+                        actions.update(self._dependent_actions(
+                            context, restore, running, set(restore), set(restore), applied=successful))
+                        # Capture all old inputs before mutation; order old and current actions together.
                         saved = runner.saved_service_models(context, tuple(
-                            service for service in context.compose_model["services"] if service in restore))
-                        for service, text in saved.items():
-                            runner.apply_saved_services(context, (service,), {"previous.yml": text})
-                            import yaml
-                            active = runner.wait_service_ready(context, service, model=yaml.safe_load(text))
-                            model_store.restore((service,))
+                            service for service in (*context.compose_model["services"], *model_store.previous)
+                            if service in actions and service not in successful))
+                        models = {service: (context.compose_model if service in successful else
+                                            yaml.safe_load(saved[service])) for service in actions}
+                        specifications = {service: model["services"][service] for service, model in models.items()}
+                        for service in order_service_subset(context.containers, specifications):
+                            if actions[service]:
+                                if service in successful:
+                                    spec = specifications[service]
+                                    if manager.image_preparer.image_id(spec["image"]) != target_image_ids[service]:
+                                        raise ContainerError("Selected image changed during recovery: " + service)
+                                    runner.apply_service(context, service, recreate=True)
+                                else:
+                                    runner.apply_saved_services(context, (service,), {"previous.yml": saved[service]})
+                            else:
+                                runner.restart_service(context, service, model=models[service])
+                            active = runner.wait_service_ready(context, service, model=models[service])
+                            if service in restore:
+                                model_store.restore((service,))
                             if active:
                                 running.add(service)
                             else:
                                 running.discard(service)
-                    touched = restore | cleanup
+                            touched.add(service)
                     self._update_running_state(context, running, tuple(dict.fromkeys(
-                        owners[service] for service in touched)))
+                        owners[service] for service in touched if service in owners)))
                 except Exception as recovery_error:
                     raise ContainerError("Operation failed: {}; recovery failed: {}".format(
                         error, recovery_error)) from error
@@ -355,36 +396,34 @@ class ComposeOperations:
             render_report(manager.logger, get_records(context))
 
     def _dependent_actions(self, context, selected, running, updated, recreated,
-                           recreate_restarts=False):
+                           applied=()):
         """Propagate only declared Compose restart edges and stale namespace binds."""
         import yaml
-        running = set(running).intersection(context.compose_model["services"])
+        # Unknown legacy services have no trustworthy dependency model to act on.
+        known = set(context.service_models.previous) | set(applied)
+        if context.is_full_containers:
+            known.intersection_update(context.compose_model["services"])
+        running = set(running).intersection(known)
         definitions = {}
         for name in running:
-            saved = context.service_models.previous.get(name)
+            saved = None if name in applied else context.service_models.previous.get(name)
             model = yaml.safe_load(saved) if saved else context.compose_model
             definitions[name] = model["services"][name]
-        waiting = set(running) - set(selected)
-        while waiting:
-            ready = [name for name in waiting if not (
-                set(service_dependencies(definitions[name])) & waiting)]
-            if not ready:
-                raise ContainerError("Compose dependency cycle among running services")
-            for name in sorted(ready):
-                spec = definitions[name]
-                binds = {str(spec.get(key)).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
-                         if str(spec.get(key, "")).startswith("service:")}
-                binds.update(str(value).split(":", 1)[0] for value in spec.get("volumes_from", ())
-                             if not str(value).startswith("container:"))
-                rebuild = bool(binds & recreated)
-                restart = any(options.get("restart") and parent in updated
-                              for parent, options in service_dependencies(spec).items())
-                if rebuild or restart:
-                    yield name, rebuild or recreate_restarts
-                    updated.add(name)
-                    if rebuild or recreate_restarts:
-                        recreated.add(name)
-                waiting.remove(name)
+        pending = {name: definitions[name] for name in sorted(running - set(selected))}
+        for name in order_service_subset(context.containers, pending):
+            spec = definitions[name]
+            binds = {str(spec.get(key)).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
+                     if str(spec.get(key, "")).startswith("service:")}
+            binds.update(str(value).split(":", 1)[0] for value in spec.get("volumes_from", ())
+                         if not str(value).startswith("container:"))
+            rebuild = bool(binds & recreated)
+            restart = any(options.get("restart") and parent in updated
+                          for parent, options in service_dependencies(spec).items())
+            if rebuild or restart:
+                yield name, rebuild
+                updated.add(name)
+                if rebuild:
+                    recreated.add(name)
 
     def _shared_input_consumers(self, context, failed, applied):
         """Restore applied peers only when they share a changed file input."""
@@ -392,6 +431,8 @@ class ComposeOperations:
         import yaml
 
         def changed_sources(service):
+            if service not in context.compose_model["services"]:
+                return []
             previous = context.service_models.previous.get(service)
             old = yaml.safe_load(previous)["services"][service] if previous is not None else {}
             mounts = {item["target"]: item["source"] for item in old.get("volumes", ())
