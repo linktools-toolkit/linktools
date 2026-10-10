@@ -12,6 +12,7 @@ from ..task import (
     TaskGraphService,
 )
 from ._evaluation import RuntimeEvaluations, EvaluationRun
+from ._evaluation_scope import EvaluationTrialScope, EvaluationTrialScopeCallback
 from ._input_capture import AgentInputCapture, CaptureInputRequest, CaptureGraphRequest, ExecutionInputCaptureRef
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
@@ -111,6 +112,8 @@ from .state import (
 __all__ = [
     "ExecutionInputContext",
     "RuntimeEvaluations",
+    "EvaluationTrialScope",
+    "EvaluationTrialScopeCallback",
     "EvaluationRun",
     "AgentInputCapture",
     "CaptureInputRequest",

@@ -8,6 +8,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, TypeVar
@@ -42,11 +43,12 @@ from ..evaluation import (
 )
 from ..task import (
     Task, TaskGraph, TaskGraphService, TaskGraphState, TaskInputSupplyRequest,
-    TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef, TaskGraphLimits,
+    TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef, TaskGraphLimits, TaskSubmissionCancellation,
 )
 from ._agent_task_input import AgentTaskInput
 from ._evaluation_compile import EvaluationCompiler, task_contract
 from ._evaluation_retention import EvaluationRetention, require_evaluation_content
+from ._evaluation_scope import EvaluationTrialScope, EvaluationTrialScopeCallback, _EnteredTrialScope
 from ._input import input_intent
 from ._input_capture import CaptureInputRequest
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
@@ -72,6 +74,7 @@ if TYPE_CHECKING:
     from ._tasks import TaskEngine
 
 AppT = TypeVar("AppT")
+ScopeAppT = TypeVar("ScopeAppT")
 _logger = environ.get_logger("ai.runtime.evaluation")
 _TERMINAL = frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED})
 _RECORDED = frozenset({"valid", "error", "not_applicable", "not_attempted"})
@@ -127,8 +130,10 @@ class RuntimeEvaluations:
         self._cursor_signer = cursor_signer
         self._asset_readers = asset_readers
         self._shared_environment = shared_environment
-        self._retention = EvaluationRetention(storage, authorization, graph, captures)
+        self._retention = EvaluationRetention(storage, authorization, self._cancel_submission, captures,
+                                             release_scopes=self._close_trial_scopes)
         self._watchers: dict[str, asyncio.Task[None]] = {}
+        self._trial_scopes: dict[tuple[str, str], _EnteredTrialScope] = {}
         self._closed = False
         self._recorder = Task("evaluation.record.v1", self._record_score, effect_policy="replay_safe")
 
@@ -159,6 +164,7 @@ class RuntimeEvaluations:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._watchers.clear()
+        await self._close_trial_scopes()
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -284,25 +290,28 @@ class RuntimeEvaluations:
 
     async def start(
         self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
+        trial_scope: EvaluationTrialScopeCallback[ScopeAppT] | None = None,
     ) -> "EvaluationRun":
-        record = await self._reserve_start(request, engine=engine)
-        self._watch(record.experiment_id, engine, request.principal)
+        record = await self._reserve_start(request, engine=engine, scope_required=trial_scope is not None)
+        self._watch(record.experiment_id, engine, request.principal, trial_scope=trial_scope)
         return EvaluationRun(self, record.experiment_id, request.principal)
 
     async def cancel_admission(
         self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
+        trial_scope: EvaluationTrialScopeCallback[ScopeAppT] | None = None,
     ) -> "EvaluationRun":
         """Cancel an admitted run or reserve its start request with a closed gate."""
         self._ensure_open()
         await self._authorize(request.principal, AuthorizationAction.EVALUATION_CANCEL,
                               idempotency_key_digest(request.idempotency_key))
-        record = await self._reserve_start(request, engine=engine, cancelled=True)
+        record = await self._reserve_start(request, engine=engine, cancelled=True,
+                                           scope_required=trial_scope is not None)
         await self._cancel(record.experiment_id, request.principal, request.idempotency_key)
         return EvaluationRun(self, record.experiment_id, request.principal)
 
     async def _reserve_start(
         self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
-        cancelled: bool = False,
+        cancelled: bool = False, scope_required: bool = False,
     ) -> EvaluationRecord:
         self._ensure_open()
         bound = self._engine(engine)
@@ -343,7 +352,8 @@ class RuntimeEvaluations:
                 await self._compiler.graph(candidate, case, graph_id="evaluation-preflight", principal=principal,
                     input_mode=spec.input_mode, owner_id=experiment_id, materialize=False, owned_captures=owned_captures)
         manifest = EvaluationManifest(experiment_id, "experiment", None, spec.dataset,
-            candidates, scorers, plans, (), spec.policy, spec.input_mode, principal)
+            candidates, scorers, plans, (), spec.policy, spec.input_mode, principal,
+            trial_scope_required=scope_required)
         payload = manifest.to_mapping()
         payload.pop("experiment_id")
         digest = canonical_sha256(payload)
@@ -366,32 +376,46 @@ class RuntimeEvaluations:
     async def reconcile(
         self, experiment_id: str, *, engine: "TaskEngine[AppT]", principal: Principal,
         idempotency_key: str,
+        trial_scope: EvaluationTrialScopeCallback[ScopeAppT] | None = None,
     ) -> "EvaluationRun":
         self._ensure_open()
         validate_idempotency_key(idempotency_key)
         record = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_RECONCILE)
         require_evaluation_content(record, now=_now())
         bound = self._engine(engine)
+        self._require_trial_scope(record, trial_scope)
         await self._validate_definitions(record.manifest, bound)
-        for intent in record.intents:
-            if intent.released:
-                continue
-            if record.gate == "closed_cancel":
-                await self._cancel_intent(record, intent, principal)
-                continue
-            selected = bound if intent.scorer_slot_id is None else bound.with_definitions(self._recorder)
-            result = await selected.start_prepared(intent.submission)
-            await self._state.settle_intent(experiment_id, intent.slot_id,
-                                           confirmed=result.admitted, released=not result.admitted)
-            if result.admitted and result.result.status not in _TERMINAL:
-                run = await selected.get(intent.submission.graph.graph_id, principal=principal)
-                await run.recover(idempotency_key=f"{idempotency_key}:{intent.slot_id}")
-                if intent.scorer_slot_id is not None:
-                    state = await self._graph.state(intent.submission.graph.graph_id, principal=principal)
-                    await self._resume_decision(record, intent, state)
-        await self._state.update(experiment_id, lambda value: replace(value,
-            dispositions=tuple(item for item in value.dispositions if item.disposition.terminal)))
-        self._watch(experiment_id, bound, principal)
+        previous_scopes = set(self._trial_scopes)
+        try:
+            for intent in record.intents:
+                if intent.released:
+                    continue
+                if record.gate == "closed_cancel":
+                    await self._cancel_intent(record, intent, principal)
+                    continue
+                async with self._trial_engine(record, intent, bound, trial_scope) as selected:
+                    result = await selected.start_prepared(intent.submission)
+                    if result.admitted:
+                        await self._state.settle_intent(experiment_id, intent.slot_id,
+                                                       confirmed=True, released=False)
+                    if result.admitted and result.result.status not in _TERMINAL:
+                        run = await selected.get(intent.submission.graph.graph_id, principal=principal)
+                        await run.recover(idempotency_key=f"{idempotency_key}:{intent.slot_id}")
+                if not result.admitted:
+                    await self._close_trial_scope((experiment_id, intent.slot_id))
+                    await self._state.settle_intent(experiment_id, intent.slot_id,
+                                                   confirmed=False, released=True)
+                if result.admitted and result.result.status not in _TERMINAL:
+                    if intent.scorer_slot_id is not None:
+                        state = await self._graph.state(intent.submission.graph.graph_id, principal=principal)
+                        await self._resume_decision(record, intent, state)
+            await self._state.update(experiment_id, lambda value: replace(value,
+                dispositions=tuple(item for item in value.dispositions if item.disposition.terminal)))
+            self._watch(experiment_id, bound, principal, trial_scope=trial_scope)
+        except BaseException:
+            await self._close_trial_scopes(experiment_id, keys=tuple(
+                key for key in self._trial_scopes if key not in previous_scopes))
+            raise
         return EvaluationRun(self, experiment_id, principal)
 
     async def _validate_definitions(self, manifest: EvaluationManifest, engine: "TaskEngine") -> None:
@@ -414,16 +438,91 @@ class RuntimeEvaluations:
                 if definitions != candidate.definition_contracts or expanders != template.expander_contracts:
                     raise AIError(ErrorCode.BINDING_CONFLICT)
 
-    def _watch(self, experiment_id: str, engine: "TaskEngine | None", principal: Principal) -> None:
+    def _require_trial_scope(
+        self, record: EvaluationRecord, trial_scope: EvaluationTrialScopeCallback | None,
+    ) -> None:
+        if record.manifest.trial_scope_required != (trial_scope is not None):
+            raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope mode differs from the admitted evaluation")
+
+    @asynccontextmanager
+    async def _trial_engine(
+        self, record: EvaluationRecord, intent: EvaluationLaunchIntent, engine: "TaskEngine",
+        trial_scope: EvaluationTrialScopeCallback | None,
+    ) -> AsyncIterator["TaskEngine"]:
+        self._require_trial_scope(record, trial_scope)
+        if trial_scope is None:
+            yield engine if intent.scorer_slot_id is None else engine.with_definitions(self._recorder)
+            return
+        self._ensure_open()
+        key = (record.experiment_id, intent.slot_id)
+        entered = self._trial_scopes.get(key)
+        if entered is None:
+            entered = _EnteredTrialScope(trial_scope(EvaluationTrialScope(
+                record.experiment_id, intent.trial, intent.slot_id, record.manifest.principal,
+                intent.submission, intent.scorer_slot_id)))
+            self._trial_scopes[key] = entered
+        try:
+            await entered.engine()
+            with entered.borrow_engine() as selected:
+                self._ensure_open()
+                if selected is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                runtime = selected.runtime
+                other = runtime.evaluations
+                if (other is self or runtime.namespace != self._namespace
+                        or runtime.tenant_id != self._storage.tenant_id
+                        or other._storage is self._storage or other._storage.plan != self._storage.plan):
+                    raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires independent Runtime ownership over shared storage")
+                for domain in (RuntimeDomain.EVALUATION, RuntimeDomain.TASK, RuntimeDomain.EXECUTION,
+                               RuntimeDomain.RECOVERY, RuntimeDomain.ARTIFACT):
+                    if (other._storage.plan.route(domain).retention is not RuntimeRetentionMode.DURABLE
+                            or other._storage.object_store(domain).store_id != self._storage.object_store(domain).store_id):
+                        raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires shared retained evidence stores")
+                await self._validate_definitions(record.manifest, selected)
+                yield selected if intent.scorer_slot_id is None else selected.with_definitions(self._recorder)
+        except BaseException:
+            await self._close_trial_scope(key)
+            raise
+
+    async def _close_trial_scope(self, key: tuple[str, str]) -> None:
+        entered = self._trial_scopes.get(key)
+        if entered is not None:
+            await entered.close()
+            self._trial_scopes.pop(key, None)
+
+    async def _close_trial_scopes(
+        self, experiment_id: str | None = None, *, keys: tuple[tuple[str, str], ...] | None = None,
+    ) -> None:
+        selected = tuple(self._trial_scopes) if keys is None else keys
+        results = await asyncio.gather(*(self._close_trial_scope(key) for key in selected
+            if experiment_id is None or key[0] == experiment_id), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    def _watch(
+        self, experiment_id: str, engine: "TaskEngine | None", principal: Principal,
+        *, trial_scope: EvaluationTrialScopeCallback | None = None,
+    ) -> None:
         self._ensure_open()
         current = self._watchers.get(experiment_id)
         if current is None or current.done():
-            self._watchers[experiment_id] = asyncio.create_task(self._coordinate(experiment_id, engine, principal))
+            task = asyncio.create_task(
+                self._coordinate(experiment_id, engine, principal, trial_scope=trial_scope))
+            task.add_done_callback(self._coordinate_done)
+            self._watchers[experiment_id] = task
 
-    async def _coordinate(self, experiment_id: str, engine: "TaskEngine | None", principal: Principal) -> None:
+    def _coordinate_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            _logger.warning("evaluation coordinator failed: exception_type=%s", type(error).__name__)
+
+    async def _coordinate(
+        self, experiment_id: str, engine: "TaskEngine | None", principal: Principal,
+        *, trial_scope: EvaluationTrialScopeCallback | None = None,
+    ) -> None:
         try:
             while not self._closed:
-                await self._tick(experiment_id, engine, principal)
+                await self._tick(experiment_id, engine, principal, trial_scope=trial_scope)
                 record = await self._record(experiment_id, principal, allow_expired=True)
                 if record.gate != "open" and all(item.released for item in record.intents):
                     try:
@@ -442,7 +541,14 @@ class RuntimeEvaluations:
             _logger.warning("evaluation needs reconciliation: experiment=%s", experiment_id, exc_info=environ.debug)
             await self._disposition(experiment_id, "coordinator", str(error.code) if isinstance(error, AIError) else type(error).__name__, retryable=True)
         finally:
-            self._watchers.pop(experiment_id, None)
+            try:
+                await self._close_trial_scopes(experiment_id)
+            except Exception as error:
+                await self._disposition(experiment_id, "coordinator",
+                    str(error.code) if isinstance(error, AIError) else type(error).__name__, retryable=True)
+                raise
+            finally:
+                self._watchers.pop(experiment_id, None)
 
     async def read_evidence(self, evidence_ref: EvidenceRef, *, principal: Principal) -> EvidenceBundle:
         if evidence_ref.namespace != self._namespace or evidence_ref.tenant_id != self._storage.tenant_id:
@@ -791,7 +897,10 @@ class RuntimeEvaluations:
             reason, not retryable, retryable, _now()))
         await self._state.append_slot_disposition(experiment_id, item)
 
-    async def _tick(self, experiment_id: str, engine: "TaskEngine | None", principal: Principal) -> None:
+    async def _tick(
+        self, experiment_id: str, engine: "TaskEngine | None", principal: Principal,
+        *, trial_scope: EvaluationTrialScopeCallback | None = None,
+    ) -> None:
         record = await self._record(experiment_id, principal, allow_expired=True)
         expired = False
         try:
@@ -805,8 +914,8 @@ class RuntimeEvaluations:
             if not intent.released and (record.gate == "closed_cancel" or intent.deadline_at is not None and intent.deadline_at <= _now()):
                 await self._cancel_intent(record, intent, principal)
             elif not intent.confirmed and not intent.released:
-                selected = engine if intent.scorer_slot_id is None else engine.with_definitions(self._recorder)
-                result = await selected.start_prepared(intent.submission)
+                async with self._trial_engine(record, intent, engine, trial_scope) as selected:
+                    result = await selected.start_prepared(intent.submission)
                 await self._state.settle_intent(experiment_id, intent.slot_id,
                                                confirmed=result.admitted, released=not result.admitted)
             state = await self._graph_state(intent, principal)
@@ -819,6 +928,7 @@ class RuntimeEvaluations:
                 elif state.status in _TERMINAL:
                     await self._capture_evidence(record, intent, state, principal)
             if state.status in _TERMINAL:
+                await self._close_trial_scope((experiment_id, intent.slot_id))
                 await self._state.settle_intent(experiment_id, intent.slot_id, confirmed=True, released=True)
         record = await self._record(experiment_id, principal, allow_expired=True)
         if record.gate == "open" and await self._budget_exhausted(record, principal):
@@ -859,7 +969,7 @@ class RuntimeEvaluations:
                     candidate = candidates[trial.candidate_slot_id]
                     limits = (record.manifest.policy.target_graph_limits if candidate.graph_template is None
                               else candidate.graph_template.limits)
-                    await self._launch(record, trial.trial, None, graph, limits, engine)
+                    await self._launch(record, trial.trial, None, graph, limits, engine, trial_scope=trial_scope)
                 except AIError as error:
                     await self._launch_error(experiment_id, slot, error)
             for scorer in record.manifest.scorers:
@@ -888,7 +998,7 @@ class RuntimeEvaluations:
                         target_input=None if evidence.input is None else evidence.input.value)
                     graph = self._scoring_graph(record, trial.trial, scorer, sample)
                     await self._launch(record, trial.trial, scorer, graph,
-                                       record.manifest.policy.scorer_graph_limits, engine)
+                                       record.manifest.policy.scorer_graph_limits, engine, trial_scope=trial_scope)
                 except AIError as error:
                     await self._launch_error(experiment_id, score_slot, error)
 
@@ -900,6 +1010,7 @@ class RuntimeEvaluations:
     async def _launch(
         self, record: EvaluationRecord, trial: TargetTrialRef, scorer: ScorerContract | None,
         graph: TaskGraph, limits: "TaskGraphLimits", engine: "TaskEngine",
+        *, trial_scope: EvaluationTrialScopeCallback | None = None,
     ) -> None:
         require_evaluation_content(record, now=_now())
         policy = record.manifest.policy
@@ -909,9 +1020,8 @@ class RuntimeEvaluations:
         if current.gate != "open" or sum(not item.released and (item.scorer_slot_id is None) == (scorer is None)
                                           for item in current.intents) >= capacity:
             return
-        if scorer is not None:
-            engine = engine.with_definitions(self._recorder)
-        submission = await engine.describe_submission(graph, principal=record.manifest.principal,
+        planning = engine if scorer is None else engine.with_definitions(self._recorder)
+        submission = await planning.describe_submission(graph, principal=record.manifest.principal,
             idempotency_key=f"evaluation:{record.experiment_id}:{slot}", limits=limits,
             correlation={"evaluation_experiment": record.experiment_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
@@ -926,7 +1036,10 @@ class RuntimeEvaluations:
         if registered.gate == "closed_cancel":
             await self._cancel_intent(registered, selected, record.manifest.principal)
             return
-        result = await engine.start_prepared(selected.submission)
+        async with self._trial_engine(registered, selected, engine, trial_scope) as scoped_engine:
+            result = await scoped_engine.start_prepared(selected.submission)
+        if not result.admitted:
+            await self._close_trial_scope((record.experiment_id, slot))
         await self._state.settle_intent(record.experiment_id, slot,
                                        confirmed=result.admitted, released=not result.admitted)
         if not result.admitted:
@@ -935,12 +1048,31 @@ class RuntimeEvaluations:
     async def _cancel_intent(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, principal: Principal,
     ) -> None:
-        result = await self._graph.cancel_submission(intent.submission.ref, principal=principal,
-            idempotency_key=f"evaluation-cancel:{record.experiment_id}:{intent.slot_id}")
+        result = await self._cancel_submission(record, intent, principal,
+            f"evaluation-cancel:{record.experiment_id}:{intent.slot_id}")
+        if result.status in _TERMINAL:
+            await self._close_trial_scope((record.experiment_id, intent.slot_id))
         await self._state.settle_intent(record.experiment_id, intent.slot_id,
                                        confirmed=result.admitted, released=result.status in _TERMINAL)
         if not result.admitted:
             await self._disposition(record.experiment_id, intent.slot_id, "submission_cancelled", cancelled=True)
+
+    async def _cancel_submission(
+        self, record: EvaluationRecord, intent: EvaluationLaunchIntent, principal: Principal,
+        idempotency_key: str,
+    ) -> TaskSubmissionCancellation:
+        scope = self._trial_scopes.get((record.experiment_id, intent.slot_id))
+        if scope is not None:
+            with scope.borrow_engine() as engine:
+                if engine is not None:
+                    return await engine.cancel_submission(intent.submission.ref, principal=principal,
+                                                          idempotency_key=idempotency_key)
+            if scope.closing:
+                await scope.close()
+            else:
+                scope.request_close()
+        return await self._graph.cancel_submission(intent.submission.ref, principal=principal,
+                                                  idempotency_key=idempotency_key)
 
     async def _capture_evidence(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
@@ -1274,6 +1406,7 @@ class RuntimeEvaluations:
 
     async def _rescore(
         self, experiment_id: str, principal: Principal, request: RescoreRequest, engine: "TaskEngine",
+        *, trial_scope: EvaluationTrialScopeCallback | None = None,
     ) -> "EvaluationRun":
         self._ensure_open()
         source = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_RESCORE)
@@ -1295,7 +1428,8 @@ class RuntimeEvaluations:
                 await self._project_evidence(evidence, scorer)
         manifest = EvaluationManifest(uuid.uuid4().hex, "score_only", experiment_id,
             source.manifest.dataset, source.manifest.candidates, scorers, (), tuple(item.trial for item in selected),
-            source.manifest.policy, source.manifest.input_mode, principal)
+            source.manifest.policy, source.manifest.input_mode, principal,
+            trial_scope_required=trial_scope is not None)
         data = manifest.to_mapping()
         data.pop("experiment_id")
         evidence = tuple(EvaluationTrialEvidence(item.trial, item.evidence_ref) for item in selected)
@@ -1308,7 +1442,7 @@ class RuntimeEvaluations:
             content_expires_at=min(source_deadlines) if source_deadlines else None,
             metadata_expires_at=None if source.manifest.policy.metadata_retention_seconds is None else
             now + timedelta(seconds=source.manifest.policy.metadata_retention_seconds)))
-        self._watch(record.experiment_id, bound, principal)
+        self._watch(record.experiment_id, bound, principal, trial_scope=trial_scope)
         return EvaluationRun(self, record.experiment_id, principal)
 
     async def _human_score(
@@ -1371,9 +1505,19 @@ class RuntimeEvaluations:
         decision = next((item for item in record.human_decisions if item.slot_id == intent.slot_id), None)
         node = next(item for item in state.node_states if item.node_id == "score")
         if decision is not None and node.status is TaskStatus.WAITING:
-            await self._graph.resume(state.graph_id, "score", TaskInputSupplyRequest(
+            request = TaskInputSupplyRequest(
                 decision.actor, node.execution_id, decision.score.to_mapping(),
-                f"evaluation-human:{decision.decision_id}"))
+                f"evaluation-human:{decision.decision_id}")
+            if not record.manifest.trial_scope_required:
+                await self._graph.resume(state.graph_id, "score", request)
+                return
+            scope = self._trial_scopes.get((record.experiment_id, intent.slot_id))
+            if scope is not None:
+                with scope.borrow_engine() as engine:
+                    if engine is not None:
+                        run = await engine.with_definitions(self._recorder).get(
+                            state.graph_id, principal=decision.actor)
+                        await run.resume("score", request)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1615,8 +1759,12 @@ class EvaluationRun:
     async def cancel(self, *, idempotency_key: str) -> EvaluationView:
         return await self._evaluations._cancel(self.experiment_id, self._principal, idempotency_key)
 
-    async def rescore(self, request: RescoreRequest, *, engine: "TaskEngine[AppT]") -> "EvaluationRun":
-        return await self._evaluations._rescore(self.experiment_id, self._principal, request, engine)
+    async def rescore(
+        self, request: RescoreRequest, *, engine: "TaskEngine[AppT]",
+        trial_scope: EvaluationTrialScopeCallback[ScopeAppT] | None = None,
+    ) -> "EvaluationRun":
+        return await self._evaluations._rescore(self.experiment_id, self._principal, request, engine,
+                                               trial_scope=trial_scope)
 
     async def submit_human_score(self, request: HumanScoreRequest) -> ScoreAttemptView:
         return await self._evaluations._human_score(self.experiment_id, self._principal, request)
