@@ -183,7 +183,18 @@ stopped before requesting takeover.
 
 The callback is trusted application setup, not a sandbox or an effect-policy
 override. Existing fixture, tool, and external-effect admission rules remain in
-force. It must clean up partial entry if opening fails or is cancelled, and
+force. The coordinating Runtime validates storage, authorization, and frozen
+definitions; scoped execution checks the yielded Runtime's actual environment
+before starting or recovering work. The existing `live` restriction still
+rejects a child with application state or a Workspace, even when the controller
+has neither. A controller with those resources may plan a scoped run, but its
+presence does not grant the child permission to execute effects. Separate
+Runtime ownership does not prove distinct Workspace paths or external tool
+targets: stable resource mapping and isolation remain the trusted host's
+responsibility. Cancellation and retention do not open contexts or require
+permission to start new effects.
+
+The callback must clean up partial entry if opening fails or is cancelled, and
 release the resources it owns on exit. It must not run the evaluated business
 operation itself during setup.
 

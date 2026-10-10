@@ -882,7 +882,10 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
 
 
 @pytest.mark.asyncio
-async def test_cancel_before_admission_never_opens_a_trial_scope(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shared_live", (False, True))
+async def test_cancel_before_admission_never_opens_a_trial_scope(
+    tmp_path: Path, shared_live: bool,
+) -> None:
     async def target(context: TaskNodeContext[Path]) -> JsonValue:
         pytest.fail("a cancelled admission must never execute")
 
@@ -897,19 +900,133 @@ async def test_cancel_before_admission_never_opens_a_trial_scope(tmp_path: Path)
         pytest.fail("a cancelled admission must not acquire application resources")
         yield
 
-    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
+        context=RuntimeContext(tmp_path if shared_live else None, tenant_id=PRINCIPAL.tenant_id),
+        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),)
+                     if shared_live else ()) as runtime:
         engine = runtime.tasks.bind(*tasks)
-        request = await _request(runtime, tasks)
+        request = await _request(runtime, tasks,
+            policy=EvaluationPolicy(external_effects="live" if shared_live else "deny"))
         cancelled = await runtime.evaluations.cancel_admission(request, engine=engine, trial_scope=scope)
         repeated = await runtime.evaluations.start(request, engine=engine, trial_scope=scope)
         assert cancelled.experiment_id == repeated.experiment_id
-        with pytest.raises(AIError) as mode_changed:
-            await runtime.evaluations.start(request, engine=engine)
-        assert mode_changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        if not shared_live:
+            with pytest.raises(AIError) as mode_changed:
+                await runtime.evaluations.start(request, engine=engine)
+            assert mode_changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert (await repeated.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
         record = await storage.evaluation.records.get(cancelled.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.intents == ()
         assert opened == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_environment", ("app", "workspace", "bare"))
+async def test_live_effects_are_admitted_by_the_trial_runtime_environment(
+    tmp_path: Path, child_environment: str,
+) -> None:
+    calls: list[Path | None] = []
+    opened: list[EvaluationTrialScope] = []
+    closed: list[EvaluationTrialScope] = []
+    child_stores: list[RuntimeStorage] = []
+
+    async def target(context: TaskNodeContext[Path]) -> JsonValue:
+        calls.append(context.app)
+        return dict(context.input)
+
+    async def score(context: TaskNodeContext[Path]) -> JsonValue:
+        sample = ScoringInput.from_mapping(context.input)
+        assert sample.target_output == sample.expected == {"answer": "private case input"}
+        return ScoreBundle(dimensions={"quality": 1.0}).to_mapping()
+
+    tasks = (Task("scopes.target", target, effect_policy="none"),
+             Task("scopes.score", score, effect_policy="none"))
+    storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
+    workspace = CapabilityGroup("workspace", workspace=Workspace.load(tmp_path))
+
+    @asynccontextmanager
+    async def scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
+        child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
+        child_stores.append(child_storage)
+        try:
+            async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=child_storage,
+                context=RuntimeContext(tmp_path if child_environment == "app" else None,
+                                       tenant_id=PRINCIPAL.tenant_id),
+                capabilities=(workspace,) if child_environment == "workspace" else (),
+                auto_recover=False) as child:
+                opened.append(descriptor)
+                yield child.tasks.bind(*tasks)
+        finally:
+            closed.append(descriptor)
+
+    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
+        context=RuntimeContext(tmp_path if child_environment == "bare" else None,
+                               tenant_id=PRINCIPAL.tenant_id),
+        capabilities=(workspace,) if child_environment == "bare" else ()) as runtime:
+        request = await _request(runtime, tasks, policy=EvaluationPolicy(external_effects="live"))
+        run = await runtime.evaluations.start(request, engine=runtime.tasks.bind(*tasks), trial_scope=scope)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
+        await _until(lambda: bool(opened) and closed == opened)
+        assert all(not child_storage.ready for child_storage in child_stores)
+        assert storage.ready
+        if child_environment == "bare":
+            assert view.completion == "complete", view.needs_attention
+            assert calls == [None]
+            assert [descriptor.scorer_slot_id for descriptor in opened] == [None, "quality"]
+            assert (await run.scores()).items[0].score.dimensions == {"quality": 1.0}
+        else:
+            assert view.completion == "needs_attention", view.needs_attention
+            assert calls == []
+            assert all(descriptor.scorer_slot_id is None for descriptor in opened)
+            record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            assert any(item.disposition.reason_code == str(ErrorCode.EVALUATION_INCOMPATIBLE)
+                       for item in record.dispositions)
+            assert await storage.task.admissions.submission_status(opened[0].submission.ref) in {None, "cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_refuses_unscoped_live_execution_in_a_shared_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def target(context: TaskNodeContext[Path]) -> JsonValue:
+        calls.append("target")
+        return dict(context.input)
+
+    tasks = (Task("scopes.target", target, effect_policy="none"),
+             Task("scopes.score", _score, effect_policy="none"))
+    storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
+    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+        engine = runtime.tasks.bind(*tasks)
+        request = await _request(runtime, tasks, policy=EvaluationPolicy(external_effects="live"))
+        with monkeypatch.context() as paused:
+            paused.setattr(runtime.evaluations, "_watch", lambda *args, **kwargs: None)
+            run = await runtime.evaluations.start(request, engine=engine)
+        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        trial = TargetTrialRef(run.experiment_id, record.manifest.trials[0].trial_id)
+        slot = f"target:{trial.trial_id}"
+        graph = TaskGraph(canonical_sha256({"experiment": run.experiment_id, "slot": slot}), (
+            TaskNode("target", task=tasks[0], input={"answer": "private case input"}),
+        ))
+        submission = await engine.describe_submission(graph, principal=PRINCIPAL,
+            idempotency_key=f"evaluation:{run.experiment_id}:{slot}",
+            correlation={"evaluation_experiment": run.experiment_id,
+                         "evaluation_trial": trial.trial_id, "evaluation_slot": slot})
+        await storage.evaluation.records.register_launch_intent(run.experiment_id,
+            EvaluationLaunchIntent(slot, trial, None, submission, None), capacity=1)
+
+    reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
+    async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened,
+        context=RuntimeContext(tmp_path, tenant_id=PRINCIPAL.tenant_id),
+        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),),
+        auto_recover=False) as runtime:
+        with pytest.raises(AIError, match="live effects require an isolated environment") as rejected:
+            await runtime.evaluations.reconcile(run.experiment_id, engine=runtime.tasks.bind(*tasks),
+                principal=PRINCIPAL, idempotency_key="resume-live")
+        assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
+        assert calls == []
+        assert await reopened.task.admissions.submission_status(submission.ref) is None
 
 
 @pytest.mark.asyncio
