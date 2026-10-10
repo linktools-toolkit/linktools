@@ -54,14 +54,26 @@ def _new_package(root: Path, name: str = "linktools-example") -> Path:
     return project
 
 
-def _collect_package(project: Path, group: str, capfd: pytest.CaptureFixture, *extra: str) -> "set":
+def _collect_package(
+    project: Path, group: str, capfd: pytest.CaptureFixture, *extra: str, tier: str = "merge",
+) -> "set":
     check = manage.load_project_checks(project.name, str(project))["pytest"]
     environment = manage._check_environment()
     environment["PYTEST_ADDOPTS"] = " ".join(
         shlex.quote(arg) for arg in ("--collect-only", "--test-group", group) + extra
     )
-    manage._run_pytest(project.name, check, environment, "merge")
+    manage._run_pytest(project.name, check, environment, tier)
     return {line for line in capfd.readouterr().out.splitlines() if "::test_example" in line}
+
+
+def _assert_collected_modules(repository: Path, included: "tuple", excluded: "tuple") -> None:
+    with (repository / "conftest.py").open("a", encoding="utf-8") as conftest:
+        conftest.write(
+            "\ndef pytest_collection_finish(session):\n"
+            "    import sys\n"
+            "    assert set(%r) <= set(sys.modules)\n"
+            "    assert not set(%r).intersection(sys.modules)\n" % (included, excluded)
+        )
 
 
 @pytest.mark.parametrize("groups,message", (
@@ -121,6 +133,105 @@ def test_yaml_only_changes_update_matrix_and_subprocess_selection(
         }
 
 
+@pytest.mark.parametrize("group,included,excluded", (
+    ("specific", ("test_alpha",), ("test_new_feature",)),
+    ("remaining", ("test_new_feature",), ("test_alpha",)),
+    ("all", ("test_alpha", "test_new_feature"), ()),
+))
+def test_group_selection_prevents_unselected_test_module_imports(
+    repository: Path, capfd: pytest.CaptureFixture, group: str, included: tuple, excluded: tuple,
+) -> None:
+    project = _new_package(repository)
+    _write_test(project / "tests" / "test_new_feature.py")
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    _assert_collected_modules(repository, included, excluded)
+    assert _collect_package(project, group, capfd) == {
+        "%s/tests/%s.py::test_example" % (project.name, name) for name in included
+    }
+
+
+@pytest.mark.parametrize("owned_path", ("suite", "suite/nested"))
+def test_group_selection_preserves_package_collectors(
+    repository: Path, capfd: pytest.CaptureFixture, owned_path: str,
+) -> None:
+    project = _new_package(repository)
+    nested = repository / "suite" / "nested"
+    _write_test(nested / "test_feature.py")
+    for directory in (nested.parent, nested):
+        (directory / "__init__.py").write_text("", encoding="utf-8")
+    _write_manifest(project, {"specific": ["test_feature.py"], "remaining": []}, ("../" + owned_path,))
+    with (repository / "conftest.py").open("a", encoding="utf-8") as conftest:
+        conftest.write(
+            "\ndef pytest_collection_finish(session):\n"
+            "    assert len(session.items) == 1\n"
+            "    assert any(type(node).__name__ == 'Package' and node.name == 'nested'\n"
+            "               for node in session.items[0].listchain())\n"
+        )
+    assert _collect_package(project, "specific", capfd) == {
+        "suite/nested/test_feature.py::test_example",
+    }
+
+
+@pytest.mark.parametrize("tier,count", (("daily", 2), ("merge", 4), ("all", 6)))
+def test_group_union_preserves_all_coverage_at_each_tier(
+    repository: Path, capfd: pytest.CaptureFixture, tier: str, count: int,
+) -> None:
+    project = _new_package(repository)
+    for name in ("test_alpha.py", "test_new_feature.py"):
+        (project / "tests" / name).write_text(
+            "import pytest\n"
+            "def test_example_daily(): pass\n"
+            "@pytest.mark.merge\n"
+            "def test_example_merge(): pass\n"
+            "@pytest.mark.manual\n"
+            "def test_example_manual(): pass\n",
+            encoding="utf-8",
+        )
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    selected = {
+        group: _collect_package(project, group, capfd, tier=tier)
+        for group in ("all", "specific", "remaining")
+    }
+    assert len(selected["all"]) == count
+    assert selected["all"] == selected["specific"] | selected["remaining"]
+    assert selected["specific"].isdisjoint(selected["remaining"])
+
+
+@pytest.mark.parametrize("suffix", ("", "::test_example"))
+def test_explicit_test_paths_still_obey_item_selection(
+    repository: Path, suffix: str,
+) -> None:
+    project = _new_package(repository)
+    other = project / "tests" / "test_other.py"
+    _write_test(other)
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    _assert_collected_modules(repository, ("test_alpha", "test_other"), ())
+    check = manage.load_project_checks(project.name, str(project))["pytest"]
+    # An enclosing directory argument can absorb explicit files during pytest normalization.
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--collect-only",
+         "--test-group=specific", str(project / "tests" / "test_alpha.py"), str(other) + suffix],
+        cwd=repository, env=dict(manage._check_environment(), LINKTOOLS_PYTEST=json.dumps(check)),
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {line for line in result.stdout.splitlines() if "::test_example" in line} == {
+        "linktools-example/tests/test_alpha.py::test_example",
+    }
+
+
+def test_empty_group_fails_without_importing_other_groups(
+    repository: Path, capfd: pytest.CaptureFixture,
+) -> None:
+    project = _new_package(repository)
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    _assert_collected_modules(repository, (), ("test_alpha",))
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        _collect_package(project, "remaining", capfd)
+    assert error.value.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
+    assert "no tests collected" in capfd.readouterr().out
+
+
 def test_new_package_and_new_files_remain_in_fallback(
     repository: Path, capfd: pytest.CaptureFixture,
 ) -> None:
@@ -167,8 +278,12 @@ def test_configured_roots_and_default_discovery_share_the_manifest_groups(
     }
 
 
+@pytest.mark.parametrize("group,selected", (
+    ("specific", ("nested/test_feature_match.py",)),
+    ("remaining", ("test_alpha.py", "test_feature_directory.py/test_plain.py")),
+))
 def test_group_globs_match_basenames_only_within_owned_roots(
-    repository: Path, capfd: pytest.CaptureFixture,
+    repository: Path, capfd: pytest.CaptureFixture, group: str, selected: tuple,
 ) -> None:
     project = _new_package(repository)
     _write_manifest(project, {"specific": ["test_feature*.py"], "remaining": []})
@@ -176,9 +291,28 @@ def test_group_globs_match_basenames_only_within_owned_roots(
     _write_test(project / "tests" / "test_feature_directory.py" / "test_plain.py")
     unrelated = repository / "unrelated" / "test_other.py"
     _write_test(unrelated)
-    assert _collect_package(project, "specific", capfd, str(unrelated)) == {
-        "linktools-example/tests/nested/test_feature_match.py::test_example",
+    assert _collect_package(project, group, capfd, str(unrelated)) == {
+        "linktools-example/tests/%s::test_example" % name for name in selected
+    } | {
         "unrelated/test_other.py::test_example",
+    }
+
+
+def test_owned_file_root_does_not_filter_its_unowned_siblings(
+    repository: Path, capfd: pytest.CaptureFixture,
+) -> None:
+    project = _new_package(repository)
+    owned = project / "acceptance" / "test_owned.py"
+    sibling = project / "acceptance" / "test_sibling.py"
+    _write_test(owned)
+    _write_test(sibling)
+    _write_manifest(
+        project, {"specific": ["test_owned.py", "test_sibling.py"], "remaining": []},
+        ("acceptance/test_owned.py",),
+    )
+    assert _collect_package(project, "remaining", capfd, str(sibling.parent)) == {
+        "linktools-example/tests/test_alpha.py::test_example",
+        "linktools-example/acceptance/test_sibling.py::test_example",
     }
 
 
@@ -203,7 +337,7 @@ def test_unknown_named_groups_fail_clearly_even_without_manifest_payload(
         assert "Unknown test group 'unknown'" in result.stderr
 
 
-@pytest.mark.parametrize("group", ("all", "specific"))
+@pytest.mark.parametrize("group", ("all", "specific", "remaining"))
 def test_overlapping_nonfallback_groups_fail_instead_of_duplicating_coverage(
     repository: Path, capfd: pytest.CaptureFixture, group: str,
 ) -> None:
@@ -213,6 +347,19 @@ def test_overlapping_nonfallback_groups_fail_instead_of_duplicating_coverage(
         _collect_package(project, group, capfd)
     assert error.value.returncode == pytest.ExitCode.USAGE_ERROR
     assert "Ambiguous test groups" in capfd.readouterr().err
+
+
+def test_overlapping_patterns_do_not_reject_uncollected_support_files(
+    repository: Path, capfd: pytest.CaptureFixture,
+) -> None:
+    project = _new_package(repository)
+    _write_test(project / "tests" / "helper.py")
+    _write_manifest(project, {
+        "specific": ["test_alpha.py", "helper.py"], "other": ["helper.py"], "remaining": [],
+    })
+    assert _collect_package(project, "specific", capfd) == {
+        "linktools-example/tests/test_alpha.py::test_example",
+    }
 
 
 def test_pytest_payload_does_not_leak_across_package_invocations(

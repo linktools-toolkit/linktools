@@ -76,14 +76,15 @@ async def test_web_reads_live_process_history_without_taking_ownership(tmp_path:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_first", (False, True))
+@pytest.mark.parametrize("control", ("recover", "cancel_live", "cancel_after_exit"))
 async def test_web_recovery_requires_explicit_control_after_process_exit(
-    tmp_path: Path, cancel_first: bool, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, control: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "runtime.db"
     owner = await asyncio.to_thread(_RuntimeProcess, database)
     identity = owner.initial["execution_id"]
     calls = []
+    cancel_first = control == "cancel_live"
 
     async def model(messages, info):
         del messages, info
@@ -141,20 +142,47 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
             for _ in range(2):
                 info = await _get(http, f"/api/executions/{identity}")
                 assert info["status"] == ("CANCELLING" if cancel_first else "STARTED")
+            session = await _get(http, "/api/session?session_id=session&include_timeline=false")
+            assert session["session"]["active_execution_id"] == identity
             assert not calls
-            recovered = await http.post(
-                f"/api/executions/{identity}/recover", json={"request_id": "recover"}, headers=_HEADERS,
-            )
-            assert recovered.status_code == 202, recovered.text
-            assert recovered.json()["execution_id"] == identity
-            expected = "CANCELLED" if cancel_first else "SUCCEEDED"
+            if control == "cancel_after_exit":
+                cancelled = await http.post(
+                    f"/api/executions/{identity}/cancel", json={"request_id": "cancel"}, headers=_HEADERS,
+                )
+                assert cancelled.status_code == 200, cancelled.text
+                info = await _get(http, f"/api/executions/{identity}")
+                assert info["status"] in {"CANCELLING", "CANCELLED"}
+                assert not calls
+        async with Runtime.open(
+            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
+            storage=RuntimeStorage.sqlite(database), capabilities=(_capabilities(),),
+        ) as runtime, client(create_app(runtime=runtime)) as http:
+            if control == "cancel_after_exit":
+                replay = await http.post(
+                    f"/api/executions/{identity}/cancel", json={"request_id": "cancel"}, headers=_HEADERS,
+                )
+                assert replay.status_code == 200, replay.text
+            info = await _get(http, f"/api/executions/{identity}")
+            assert info["status"] in ({"STARTED"} if control == "recover" else {"CANCELLING", "CANCELLED"})
+            assert not calls
+            if info["status"] != "CANCELLED":
+                recovered = await http.post(
+                    f"/api/executions/{identity}/recover", json={"request_id": "recover"}, headers=_HEADERS,
+                )
+                assert recovered.status_code == 202, recovered.text
+                assert recovered.json()["execution_id"] == identity
+            expected = "SUCCEEDED" if control == "recover" else "CANCELLED"
             await _wait_for_committed(
                 lambda: _get(http, f"/api/executions/{identity}"),
                 lambda value: value["status"] == expected, timeout=10,
             )
             result = await _get(http, f"/api/executions/{identity}/result")
             assert result["status"] == expected
-            assert result["output"] == (None if cancel_first else {"text": "recovered answer"})
-            assert calls == ([] if cancel_first else ["recovered"])
+            assert result["output"] == ({"text": "recovered answer"} if control == "recover" else None)
+            await _wait_for_committed(
+                lambda: _get(http, "/api/session?session_id=session&include_timeline=false"),
+                lambda value: value["session"]["active_execution_id"] != identity, timeout=10,
+            )
+            assert calls == (["recovered"] if control == "recover" else [])
     finally:
         await asyncio.to_thread(owner.close)
