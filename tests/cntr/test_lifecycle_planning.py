@@ -41,7 +41,6 @@ class _Container(BaseContainer):
 @pytest.fixture
 def lifecycle_case(fresh_manager, monkeypatch, tmp_path):
     events = []
-    monkeypatch.setattr(fresh_manager, "generated_configs", {})
     first = _Container(fresh_manager, tmp_path, "first", events, order=900)
     second = _Container(fresh_manager, tmp_path, "second", events, dependencies=("first",), order=100)
     monkeypatch.setattr(fresh_manager, "integration_snapshot", {"first": (), "second": ()})

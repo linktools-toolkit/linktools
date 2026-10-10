@@ -15,23 +15,13 @@ def test_partial_start_expands_required_integration_providers(fresh_manager):
     assert {"nginx", "portainer", "safeline-mgt", "authelia", "lldap"} <= set(expanded.services)
 
 
-def test_pending_authelia_redis_does_not_expand_owner_container_dependencies(fresh_manager):
-    from types import SimpleNamespace
-
+def test_unrelated_running_sidecar_does_not_expand_selected_scope(fresh_manager):
     operations = fresh_manager.compose_operations
     explicit = operations.select(("lldap",), metadata_only=True, for_start=True)
-    context = SimpleNamespace(
-        initial_running_services={"authelia-redis"},
-        changed_compose_services={"authelia-redis"},
-    )
-    selection = operations._reconcile_selection(explicit, context)
-    assert "authelia-redis" in selection.services
+    selection = operations.start_selection(explicit, running_services={"authelia-redis"})
     assert "lldap" in selection.services
+    assert "authelia-redis" not in selection.services
     assert "authelia" not in selection.services
-    assert "nginx" not in selection.services
-    assert "authelia-redis" in {
-        name for container in selection.target_containers for name in container.services
-    }
 
 
 def test_explicit_restart_targets_remain_narrow(fresh_manager):
