@@ -138,9 +138,12 @@ class ComposeRunner:
         return args
 
     def build(self, context: "OperationContext", options: "ComposeOptions") -> int:
+        from ..container import SourceContainer
         selected = set(options.services)
         for container in context.target_containers:
             if not selected or selected.intersection(container.services):
+                if isinstance(container, SourceContainer):
+                    container.prepare_build_context()
                 container.get_docker_file_path()
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(*args, *self.build_args(options)).check_call()
