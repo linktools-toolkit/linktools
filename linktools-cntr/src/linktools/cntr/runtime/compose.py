@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from linktools.runtime import Process
     from ..container import BaseContainer
     from ..context import OperationContext
-    from ..artifacts import GeneratedCandidate
     from .structured import CommandResult
     from ..manager import ContainerManager
 
@@ -49,59 +48,34 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
 
 
 def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]",
-                   model: "dict[str, Any] | None" = None,
-                   available_services: "Iterable[str]" = (),
-                   dependency_roots: "Iterable[str] | None" = None) -> "tuple[str, ...]":
-    """Topologically order applications; priority only breaks ready-node ties.
-
-    Availability is reserved for acknowledged bootstrap services, never the
-    general running set: ordinary dependencies must apply their new model first.
-    """
+                   model: "dict[str, Any] | None" = None) -> "tuple[str, ...]":
+    """Order real Compose dependencies; container grouping adds no start edge."""
     from ..errors import ContainerError
-    containers = tuple(containers)
-    installed = {container.name: container for container in containers}
     owners = {name: container for container in containers for name in container.services}
     selected = tuple(dict.fromkeys(services))
     pending = set(selected)
-    available = set(available_services)
     definitions = model["services"] if model is not None else {
         name: owner.services[name] for name, owner in owners.items()}
-    required = {owners[name].name for name in selected}
-    roots = required if dependency_roots is None else set(dependency_roots)
     dependencies = {}
     for name in selected:
-        owner = owners[name]
         edges = set()
-        if owner.name in roots:
-            for dependency in owner.dependencies:
-                edges.update(service for service in installed[dependency].services
-                             if service in pending and service not in available)
         for dependency, options in service_dependencies(definitions[name]).items():
-            condition = options.get("condition", "service_started")
-            if dependency in available and condition in ("service_started", "service_healthy"):
-                continue
             if dependency not in pending:
                 if options.get("required", True) is False:
                     continue
                 raise ContainerError("Unselected Compose dependency {} for {}".format(dependency, name))
             edges.add(dependency)
-        if owner.name in roots:
-            for provider, provider_services in owner.get_runtime_requirements(roots).items():
-                if provider != owner.name:
-                    edges.update(service for service in provider_services if service in pending)
         dependencies[name] = edges
     result = []
     positions = {name: index for index, name in enumerate(selected)}
     while pending:
-        ready = [name for name in pending if not (dependencies[name] & pending)]
+        ready = [name for name in pending if not dependencies[name] & pending]
         if not ready:
             raise ContainerError("Compose dependency cycle at " + ", ".join(sorted(pending)))
-        name = min(ready, key=lambda value: (owners[value].application_priority, positions[value]))
+        name = min(ready, key=positions.__getitem__)
         pending.remove(name)
         result.append(name)
     return tuple(result)
-
-
 @dataclass
 class ComposeOptions:
     """Resolved options for a single compose build/up invocation."""
@@ -163,26 +137,32 @@ class ComposeRunner:
         args.extend(options.services)
         return args
 
-    def build(self, context: "OperationContext", options: ComposeOptions) -> int:
-        return self.manager.runtime.create_docker_compose_process(
-            context.containers, *self.build_args(options)
-        ).check_call()
-
+    def build(self, context: "OperationContext", options: "ComposeOptions") -> int:
+        selected = set(options.services)
+        for container in context.target_containers:
+            if not selected or selected.intersection(container.services):
+                container.get_docker_file_path()
+        with self._model_args(context) as args:
+            return self.manager.runtime.create_docker_process(*args, *self.build_args(options)).check_call()
     def pull_args(self, services: "Sequence[str]") -> "list[str]":
         return ["pull", "--ignore-buildable", *services]
 
     def pull(self, context: "OperationContext", services: "Sequence[str]") -> int:
-        return self.manager.runtime.create_docker_compose_process(
-            context.containers, *self.pull_args(services)
-        ).check_call()
-
+        with self._model_args(context) as args:
+            return self.manager.runtime.create_docker_process(*args, *self.pull_args(services)).check_call()
     def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
         return ComposeOptions(pull=pull, services=list(services))
 
     def final_model(self, context: "OperationContext") -> "dict[str, Any]":
-        return self._resolved_model(self.manager.runtime.create_docker_compose_process(
-            context.containers, *self.config_args(output_format="json"), capture_output=True))
-
+        from ..artifacts import collect_candidates
+        files = [content for kind, owner, content in collect_candidates(
+            self.manager, context.containers).values() if kind == "compose"]
+        if not files:
+            from ..errors import ContainerError
+            raise ContainerError("No Compose files in selected project")
+        with self._saved_compose_args(context, files) as args:
+            return self._resolved_model(self.manager.runtime.create_docker_process(
+                *args, *self.config_args(output_format="json"), capture_output=True))
     def _resolved_model(self, process: "Process") -> "dict[str, Any]":
         result = self.manager.structured_runner.execute_json(process, check=True)
         if not isinstance(result, dict) or not isinstance(result.get("services"), dict):
@@ -196,15 +176,11 @@ class ComposeRunner:
         ).check_call()
 
     def stop(self, context: "OperationContext", services: "Sequence[str]") -> int:
-        return self.manager.runtime.create_docker_compose_process(
-            context.containers, "stop", *services
-        ).check_call()
-
+        with self._model_args(context) as args:
+            return self.manager.runtime.create_docker_process(*args, "stop", *services).check_call()
     def down(self, context: "OperationContext", services: "Sequence[str]") -> int:
-        return self.manager.runtime.create_docker_compose_process(
-            context.containers, "down", *services
-        ).check_call()
-
+        with self._model_args(context) as args:
+            return self.manager.runtime.create_docker_process(*args, "down", *services).check_call()
     def config_args(
             self,
             services: "Sequence[str]" = (),
@@ -224,12 +200,17 @@ class ComposeRunner:
         args.extend(services)
         return args
 
-    def config(
-            self,
-            context: "OperationContext",
-            services: "Sequence[str]" = (),
-            output_format: "str | None" = None,
-            quiet: bool = False,
+    def config(self, context: "OperationContext", services: "Sequence[str]" = (),
+               output_format: "str | None" = None, quiet: bool = False) -> int:
+        from ..artifacts import collect_candidates
+        from ..errors import ContainerError
+        files = [content for kind, owner, content in collect_candidates(
+            self.manager, context.containers).values() if kind == "compose"]
+        if not files:
+            raise ContainerError("No Compose files in selected project")
+        with self._saved_compose_args(context, files) as args:
+            return self.manager.runtime.create_docker_process(
+                *args, *self.config_args(services, output_format, quiet), privilege=False).check_call()
     ) -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers,
@@ -293,26 +274,7 @@ class ComposeRunner:
         return args
 
     def _native_validation_model(self, context: "OperationContext", service: str) -> "dict[str, Any]":
-        if service not in getattr(context, "bootstrap_fallback_services", ()):
-            saved = getattr(context, "rollback_service_models", {}).get(service)
-            if saved is not None:
-                import yaml
-                model = yaml.safe_load(saved)
-                model["services"][service]["image"] = context.native_running_images[service]
-                return model
-        model = getattr(context, "compose_model", None)
-        if model is None:
-            model = self.final_model(context)
-        running_image = getattr(context, "native_running_images", {}).get(service)
-        if (running_image and service not in getattr(context, "image_preparation_targets", ())
-                and not self.manager.image_preparer.image_exists(model["services"][service].get("image"))):
-            # An unselected running service can still need native validation.
-            # Its running image remains available even if its tag was removed.
-            specification = dict(model["services"][service])
-            specification["image"] = running_image
-            return dict(model, services=dict(model["services"], **{service: specification}))
-        return model
-
+        return context.compose_model if context.compose_model is not None else self.final_model(context)
     def validate_service(self, context: "OperationContext", service: str,
                          command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
                          network: bool = False, check: bool = True,
@@ -349,52 +311,10 @@ class ComposeRunner:
         return args
 
     def apply_service(self, context: "OperationContext", service: str, recreate: bool = False) -> int:
-        if service not in getattr(context, "bootstrap_fallback_services", ()):
-            previous = getattr(context, "rollback_service_models", {}).get(service)
-            if previous is not None:
-                self.apply_saved_services(context, (service,), {"previous.yml": previous})
-                return 0
-            saved = getattr(context, "rollback_compose_files", None)
-            if saved is not None:
-                self.apply_saved_services(context, (service,), saved)
-                return 0
         self.wait_service_dependencies(context, service)
-        args = self.apply_service_args(service, recreate, context.is_full_containers)
-        import tempfile
-        import yaml
-        candidates = getattr(context, "generated_candidates", {})
-        candidate = next((c for c in candidates.values() if service in c.container.generation_services), None)
-        label = candidate.container.generation_label(service, candidate.generation_id) if candidate else None
-        if label is None:
-            return self.manager.runtime.create_docker_compose_process(context.containers, *args).check_call()
-        overlay = {"services": {service: {"labels": {
-            "io.linktools.cntr.generation": label}}}}
-        with tempfile.TemporaryDirectory(prefix="cntr-apply-") as directory:
-            path = os.path.join(directory, "generation.yml")
-            with open(path, "w", encoding="utf-8") as stream:
-                yaml.safe_dump(overlay, stream)
-            return self.manager.runtime.create_docker_compose_process(
-                context.containers, "--file", path, *args).check_call()
-
-    def is_generation_current(self, context: "OperationContext", service: str, candidate: "GeneratedCandidate") -> bool:
-        if (service in getattr(context, "changed_image_services", ()) or
-                service in getattr(context, "changed_compose_services", ())):
-            return False
-        if not candidate.container.is_generation_current(context, service, candidate):
-            return False
-        state = self.manager.docker_inspector.get_project_state(context.containers)
-        matches = [item for item in state.services if item.service == service]
-        model = getattr(context, "compose_model", None)
-        if model is None:
-            model = self.final_model(context)
-        spec = model["services"][service]
-        target = spec.get("image") or (self.manager.project_name + "-" + service)
-        result = self.manager.structured_runner.execute(
-            self.manager.runtime.create_docker_process(
-                "image", "inspect", "--format", "{{.Id}}", target, capture_output=True), check=True)
-        target_id = result.stdout.strip()
-        return bool(target_id) and all(item.image_id == target_id for item in matches)
-
+        with self._model_args(context) as args:
+            return self.manager.runtime.create_docker_process(
+                *args, *self.apply_service_args(service, recreate, context.is_full_containers)).check_call()
     def wait_service_running(self, context: "OperationContext", service: str, timeout: int = 30) -> None:
         import time
         from ..errors import ContainerError
@@ -516,29 +436,20 @@ class ComposeRunner:
     def _saved_compose_args(self, context: "OperationContext",
                             contents: "Iterable[str]") -> "Iterator[list[str]]":
         import tempfile
-        # Normal Compose commands take their base directory from the first
-        # generated file. Temporary rollback files must not change that base.
-        project_directory = os.path.dirname(os.path.abspath(next(iter(context.compose_files))))
-        with tempfile.TemporaryDirectory(prefix="cntr-rollback-") as directory:
-            args = ["compose", "--project-directory", project_directory,
-                    "--project-name", self.manager.project_name]
+        with tempfile.TemporaryDirectory(prefix="cntr-compose-") as directory:
+            paths = []
             for index, content in enumerate(contents):
                 path = os.path.join(directory, "{}.yml".format(index))
                 with open(path, "w", encoding="utf-8") as stream:
                     stream.write(content)
-                args.extend(["--file", path])
-            yield args
-
+                paths.append(path)
+            yield self.compose_args(paths)
     def _restore_order(self, context: "OperationContext",
                        specifications: "dict[str, dict[str, Any]]") -> "tuple[str, ...]":
-        # Order only the restore set; external dependencies are checked before
-        # application, never expanded into additional startup targets.
         graph = {service: {"depends_on": {
             name: options for name, options in service_dependencies(spec).items()
             if name in specifications}} for service, spec in specifications.items()}
-        return order_services(context.containers, tuple(specifications),
-                              {"services": graph}, dependency_roots=())
-
+        return order_services(context.containers, tuple(specifications), {"services": graph})
     def _legacy_rollback_files(self, context: "OperationContext",
                                services: "Sequence[str]") -> "list[str]":
         """Keep only old Compose files needed by these services and their references."""
@@ -614,36 +525,29 @@ class ComposeRunner:
 
     def saved_service_models(self, context: "OperationContext",
                              services: "Sequence[str]") -> "dict[str, str]":
-        """Resolve and order the original per-service models for one restore set."""
         import yaml
+        from ..errors import ContainerError
         texts, specifications = {}, {}
         legacy = None
         for service in dict.fromkeys(services):
-            if service in getattr(context, "bootstrap_fallback_services", ()):
-                model = context.compose_model
-                text = yaml.safe_dump(model)
+            text = context.service_models.previous.get(service)
+            if text is not None:
+                model = yaml.safe_load(text)
             else:
-                text = context.service_models.previous.get(service)
-                if text is not None:
-                    model = yaml.safe_load(text)
-                else:
-                    if legacy is None:
-                        if not context.saved_compose:
-                            from ..errors import ContainerError
-                            raise ContainerError("No previous Compose model available for service " + service)
-                        old_files = self._legacy_rollback_files(context, services)
-                        with self._saved_compose_args(context, old_files) as args:
-                            legacy = self._resolved_model(self.manager.runtime.create_docker_process(
-                                *args, *self.config_args(output_format="json"), capture_output=True))
-                    model = legacy
-                    text = yaml.safe_dump(model)
+                if legacy is None:
+                    if not context.saved_compose:
+                        raise ContainerError("No previous Compose model available for service " + service)
+                    old_files = self._legacy_rollback_files(context, services)
+                    with self._saved_compose_args(context, old_files) as args:
+                        legacy = self._resolved_model(self.manager.runtime.create_docker_process(
+                            *args, *self.config_args(output_format="json"), capture_output=True))
+                model = legacy
+                text = yaml.safe_dump(model)
             texts[service] = text
             specifications[service] = model["services"][service]
         return {service: texts[service] for service in self._restore_order(context, specifications)}
-
     def apply_saved_services(self, context: "OperationContext", services: "Sequence[str]",
                              files: "dict[str, str]") -> None:
-        """Restore original images, paths and dependency conditions, not mutable tags."""
         import yaml
         from ..errors import ContainerError
         services = tuple(dict.fromkeys(services))
@@ -657,13 +561,6 @@ class ComposeRunner:
             if not image:
                 raise ContainerError("No original image ID for service " + service)
             overlay[service] = {"image": image}
-        candidates = getattr(context, "generated_candidates", {})
-        for service in services:
-            candidate = next((c for c in candidates.values() if service in c.container.generation_services), None)
-            if candidate is not None:
-                label = candidate.container.generation_label(service, candidate.generation_id)
-                if label is not None:
-                    overlay[service]["labels"] = {"io.linktools.cntr.generation": label}
         contents = [*files.values(), yaml.safe_dump({"services": overlay})]
         with self._saved_compose_args(context, contents) as args:
             model = self._resolved_model(self.manager.runtime.create_docker_process(
@@ -673,3 +570,53 @@ class ComposeRunner:
                 self.wait_service_dependencies(context, service, model=model)
                 self.manager.runtime.create_docker_process(
                     *args, *self.apply_service_args(service, recreate=True)).check_call()
+
+    def compose_args(self, files: "Sequence[str]") -> "list[str]":
+        """Shared project/file argument construction for planning and execution."""
+        from ..errors import ContainerError
+        if not files:
+            raise ContainerError("No Compose files in selected project")
+        args = ["compose", "--project-directory", os.path.join(str(self.manager.data_path), "compose"),
+                "--project-name", self.manager.project_name]
+        for path in files:
+            args.extend(["--file", str(path)])
+        return args
+
+    @contextmanager
+    def _model_args(self, context: "OperationContext") -> "Iterator[list[str]]":
+        import yaml
+        model = context.compose_model if context.compose_model is not None else self.final_model(context)
+        with self._saved_compose_args(context, (yaml.safe_dump(model, sort_keys=True),)) as args:
+            yield args
+
+    def wait_service_ready(self, context: "OperationContext", service: str,
+                           model: "dict[str, Any] | None" = None, timeout: "int | None" = None) -> bool:
+        """Confirm readiness; return whether any instance remains running."""
+        import time
+        from ..errors import ContainerError
+        if model is None:
+            model = context.compose_model
+        completed = any(
+            service_dependencies(spec).get(service, {}).get("condition") == "service_completed_successfully"
+            for name, spec in model["services"].items()
+            if context.target_services is None or name in context.target_services)
+        if completed:
+            self.wait_service_completed(context, service, timeout=timeout)
+            return False
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            actual = self.manager.docker_inspector.get_project_state(context.containers)
+            matches = [item for item in actual.services if item.service == service]
+            if matches and all(
+                    (item.state == "running" and item.health in (None, "healthy")) or
+                    (item.state == "exited" and item.exit_code == 0 and item.health is None)
+                    for item in matches):
+                return any(item.state == "running" for item in matches)
+            if any(item.state in ("dead", "exited") or item.health == "unhealthy" for item in matches):
+                raise ContainerError("Service {} failed to become ready".format(service))
+            if timeout is None and (not matches or any(
+                    item.state not in ("running", "restarting", "exited") for item in matches)):
+                raise ContainerError("Service {} is unavailable".format(service))
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ContainerError("Service {} did not become ready".format(service))
+            time.sleep(0.5)

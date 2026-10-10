@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from typing import AbstractSet, Any, Mapping
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
-    from .artifacts import GeneratedCandidate
     from .integration import Integrations
     from .manager import ContainerManager
     from .context import OperationContext
@@ -219,65 +218,10 @@ class BaseContainer(metaclass=AbstractMetaClass):
     def on_init(self) -> None:
         pass
 
-    def on_prepare(self) -> None:
-        pass
-
-    # An explicit capability keeps metadata discovery side-effect free and
-    # avoids guessing ownership from overridden lifecycle methods.
-    generates_config: bool = False
-    application_priority: int = 0
-    bootstrap_services: "tuple[str, ...]" = ()
-
-    @property
-    def generation_services(self) -> "tuple[str, ...]":
-        """Services that actually consume this owner's generated configuration."""
-        return tuple(self.services)
 
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         """Declare native providers needed by the selected project services."""
         return {}
-
-    def on_prepare_config(self, context: "OperationContext") -> None:
-        """Prepare native inputs after images are ready, before validation."""
-        pass
-
-    def render_config(self, generation_id: str) -> "dict[str, str]":
-        raise NotImplementedError
-
-    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
-        raise NotImplementedError
-
-    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
-                     services: "Iterable[str]") -> None:
-        raise NotImplementedError
-
-    def rollback_config(self, context: "OperationContext") -> None:
-        """Restore native state when no previously generated configuration exists."""
-        pass
-
-    def generation_label(self, service: str, generation_id: str) -> "str | None":
-        """Return the Compose generation marker for this native service."""
-        return generation_id if self.generates_config and service in self.generation_services else None
-
-    def is_generation_current(self, context: "OperationContext", service: str,
-                              candidate: "GeneratedCandidate") -> bool:
-        """Confirm that the running service actually uses this generation."""
-        marker = self.generation_label(service, candidate.generation_id)
-        if marker is None:
-            return False
-        state = self.manager.docker_inspector.get_project_state(context.containers)
-        matches = [item for item in state.services if item.service == service]
-        return bool(matches and all(
-            item.state == "running" and
-            item.labels.get("io.linktools.cntr.generation") == marker for item in matches))
-
-    def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
-        """Render an intermediate configuration that can establish readiness."""
-        raise NotImplementedError
-
-    def on_service_started(self, context: "OperationContext", service: str) -> None:
-        """Confirm native readiness before dependent services are applied."""
-        pass
 
     def on_check(self, context: "OperationContext") -> None:
         pass

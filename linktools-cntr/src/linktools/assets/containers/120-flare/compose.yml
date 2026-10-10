@@ -18,8 +18,9 @@ services:
 #   {% endif %}
       - 'FLARE_GUIDE=1'
     volumes:
-      - '{{ (APP_PATH/"generated") | mkdir | chown }}:/generated:ro'
-      - '{{ (APP_PATH/"app") | mkdir | chown }}:/app'
+      - '{{ APP_PATH/"runtime-app" }}:/app'
+      - '{{ APP_PATH/"generated/current/apps.yml" }}:/app/apps.yml:ro'
+      - '{{ APP_PATH/"generated/current/bookmarks.yml" }}:/app/bookmarks.yml:ro'
     networks:
       - nginx
 

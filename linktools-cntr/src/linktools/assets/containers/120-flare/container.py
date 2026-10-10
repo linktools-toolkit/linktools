@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from typing import Any
     from linktools.cntr import OperationContext, Integrations
-    from linktools.cntr.artifacts import GeneratedCandidate
 
 
 class Container(BaseContainer):
@@ -77,8 +76,6 @@ class Container(BaseContainer):
         ]
 
 
-    generates_config = True
-    application_priority = 200
 
     def _iter_links(self) -> "Iterator[FlareLink]":
         manager = self.manager
@@ -99,7 +96,41 @@ class Container(BaseContainer):
                 if declaration.consumer == "flare":
                     yield declaration
 
-    def render_config(self, generation_id: str) -> "dict[str, str]":
+
+    def on_starting(self, context: "OperationContext") -> None:
+        import shutil
+        import tempfile
+        app = self.get_app_path("runtime-app")
+        if not app.exists():
+            self.get_app_path().mkdir(parents=True, exist_ok=True)
+            temporary = Path(tempfile.mkdtemp(prefix=".flare-app-", dir=str(self.get_app_path())))
+            try:
+                legacy = self.get_app_path("app")
+                if legacy.is_dir():
+                    for source in legacy.iterdir():
+                        if source.name in ("apps.yml", "bookmarks.yml"):
+                            continue
+                        destination = temporary / source.name
+                        if source.is_symlink():
+                            destination.symlink_to(os.readlink(str(source)))
+                        elif source.is_dir():
+                            shutil.copytree(str(source), str(destination), symlinks=True)
+                        else:
+                            shutil.copy2(str(source), str(destination))
+                self.runtime.chown(temporary, self.user, recursive=True)
+                self.runtime.chmod(temporary, 0o750)
+                os.rename(str(temporary), str(app))
+            except BaseException:
+                shutil.rmtree(str(temporary))
+                raise
+        context.write_files(self, self._navigation_files(), mode=0o640,
+                            group=self.get_config("DOCKER_GID", type=int))
+
+    def on_check(self, context: "OperationContext") -> None:
+        for name in ("apps.yml", "bookmarks.yml"):
+            yaml.safe_load(context.file_path(self, name).read_text(encoding="utf-8"))
+
+    def _navigation_files(self) -> "dict[str, str]":
 
         categories = OrderedDict()
         apps = {"links": []}
@@ -136,59 +167,3 @@ class Container(BaseContainer):
             "apps.yml": yaml.safe_dump(apps, allow_unicode=True),
             "bookmarks.yml": yaml.safe_dump(bookmarks, allow_unicode=True),
         }
-
-    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
-        group = self.get_config("DOCKER_GID", type=int)
-        for name in ("apps.yml", "bookmarks.yml"):
-            path = Path(candidate.path) / name
-            yaml.safe_load(path.read_text())
-            # The service's configured group needs read access; the host owner
-            # retains access for content comparison and future rollback.
-            if path.stat().st_gid != group:
-                self.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
-            self.runtime.chmod(path, 0o640)
-
-    def rollback_config(self, context: "OperationContext") -> None:
-        for path, backup in reversed(getattr(context, "flare_migrated_paths", ())):
-            if path.is_symlink():
-                path.unlink()
-            if backup is not None:
-                backup.rename(path)
-
-    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
-                 services: "Iterable[str]") -> None:
-        if "flare" not in services:
-            return
-        app = self.get_app_path("app")
-        app.mkdir(parents=True, exist_ok=True)
-        migrated = []
-        try:
-            for name in ("apps.yml", "bookmarks.yml"):
-                path = app / name
-                target = "../generated/current/" + name
-                if path.is_symlink() and os.readlink(str(path)) == target:
-                    continue
-                backup = None
-                if path.exists() or path.is_symlink():
-                    backup = app / (name + ".pre-cntr")
-                    if backup.exists() or backup.is_symlink():
-                        raise ContainerError("Flare migration backup already exists for " + name)
-                    path.rename(backup)
-                migrated.append((path, backup))
-                temporary = app / (name + ".cntr-link")
-                if temporary.exists() or temporary.is_symlink():
-                    temporary.unlink()
-                temporary.symlink_to(target)
-                os.replace(str(temporary), str(path))
-            runner = self.manager.compose_runner
-            recreate = candidate.changed or not runner.is_generation_current(context, "flare", candidate)
-            runner.apply_service(context, "flare", recreate=recreate)
-            runner.wait_service_running(context, "flare")
-            context.flare_migrated_paths = tuple(migrated)
-        except Exception:
-            for path, backup in reversed(migrated):
-                if path.is_symlink():
-                    path.unlink()
-                if backup is not None:
-                    backup.rename(path)
-            raise

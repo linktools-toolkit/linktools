@@ -60,7 +60,3 @@ class Container(BaseContainer):
             "resetadmin"
         ).call()
 
-
-    def on_service_started(self, context: "OperationContext", service: str) -> None:
-        if service == "safeline-mgt":
-            self.manager.compose_runner.wait_service_healthy(context, service)

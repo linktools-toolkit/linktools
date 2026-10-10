@@ -10,13 +10,13 @@ services:
         - cntr_acme_dns
 #   {% endif %}
     volumes:
-      - '{{ (APP_PATH/"generated") | mkdir | chown }}:/etc/nginx/generated:ro'
+      - '{{ container.get_app_path("generated", "current") }}:/etc/nginx/cntr:ro'
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
       - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
 #   {% if NGINX_HTTPS_ENABLE %}
       - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
 #   {% endif %}
-    command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-g", "daemon off;"]
+    command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/cntr/nginx.conf", "-g", "daemon off;"]
 #   {% if NGINX_HTTPS_ENABLE %}
     environment:
       NGINX_HTTPS_PORT: '{{ NGINX_HTTPS_PORT }}'
@@ -27,7 +27,7 @@ services:
       - '{{ NGINX_HTTPS_PORT }}:{{ NGINX_HTTPS_PORT }}'
 #     {% endif %}
     healthcheck:
-      test: [ "CMD", "curl", "--fail", "--silent", "--unix-socket", "/run/nginx-health.sock", "http://localhost/health" ]
+      test: ["CMD", "curl", "--fail", "--silent", "--unix-socket", "/run/nginx-health.sock", "http://localhost/health"]
       interval: 5s
       start_period: 1s
       start_interval: 1s

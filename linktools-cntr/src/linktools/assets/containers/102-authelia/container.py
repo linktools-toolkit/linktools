@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any, Mapping
     from linktools.cntr import OperationContext, Integrations
-    from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
 
 
@@ -151,12 +150,19 @@ class Container(BaseContainer):
         )
 
     def on_check(self, context: "OperationContext") -> None:
-        if context.target_services is not None and not any(
-                service in context.target_services for service in self.generation_services):
+        if context.target_services is not None and not set(context.target_services).intersection(self._config_services):
             return
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
-
+        command = ["authelia", "config", "validate"]
+        command.extend("--config=/generated/" + name for name in (
+            "configuration.yml", "configuration.acl.yml", "configuration.2fa.yml", "configuration.oidc.yml"))
+        result = self.manager.compose_runner.validate_service(context, "authelia", command, check=False)
+        if not result.succeeded:
+            match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
+            location = " at {}:{}".format(*match.groups()) if match else ""
+            raise ContainerError("Native validation failed for authelia{} (exit {})".format(
+                location, result.returncode))
     @subcommand("show-notification", help="show notification")
     def on_show_notification(self) -> None:
         path = self.get_app_path("config", "notification.txt")
@@ -178,68 +184,6 @@ class Container(BaseContainer):
         )
 
 
-    generates_config = True
-    generation_services = ("authelia", "authelia-admin")
-
-    def generation_label(self, service: str, generation_id: str) -> "str | None":
-        if service == "authelia-admin":
-            from linktools.cntr.artifacts import sha256_of
-            path = self.get_app_path("generated", generation_id, "configuration.yml")
-            return sha256_of(path.read_text(encoding="utf-8"))
-        return super().generation_label(service, generation_id)
-
-    def on_prepare_config(self, context: "OperationContext") -> None:
-        secret_path = self.get_app_path("secrets")
-        secret_path.mkdir(parents=True, exist_ok=True)
-        self.get_app_path("config").mkdir(parents=True, exist_ok=True)
-        self.runtime.chmod(secret_path, 0o700, recursive=True)
-        for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
-            self._create_secret_file(secret_path / name)
-        self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
-
-    def render_config(self, generation_id: str) -> "dict[str, str]":
-        result = {
-            name: self.render_template(self.get_source_path("templates", name))
-            for name in ("configuration.yml", "configuration.acl.yml",
-                         "configuration.2fa.yml", "configuration.oidc.yml")
-        }
-        result["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
-        return result
-
-    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
-        root = "/generated/" + candidate.generation_id
-        command = ["authelia", "config", "validate"]
-        command.extend("--config=" + root + "/" + name for name in (
-            "configuration.yml", "configuration.acl.yml",
-            "configuration.2fa.yml", "configuration.oidc.yml"))
-        result = self.manager.compose_runner.validate_service(
-            context, "authelia", command,
-            environment={"AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
-                         root + "/authentication_backend_ldap_password"}, check=False,
-        )
-
-        if not result.succeeded:
-            # Do not expose credentials from the native validator's output.
-            match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
-            diagnostic = " at {}:{}".format(*match.groups()) if match else ""
-            raise ContainerError("Native validation failed for service authelia{} (exit {})".format(
-                diagnostic, result.returncode))
-
-    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
-                 services: "Iterable[str]") -> None:
-        runner = self.manager.compose_runner
-        services = tuple(services)
-        for service in services:
-            if service not in ("authelia", "authelia-admin"):
-                runner.apply_service(context, service)
-        if "authelia" in services:
-            recreate = candidate.changed or not runner.is_generation_current(context, "authelia", candidate)
-            runner.apply_service(context, "authelia", recreate=recreate)
-            runner.wait_service_healthy(context, "authelia")
-        if "authelia-admin" in services:
-            base_changed = "configuration.yml" in candidate.changed_files
-            recreate = base_changed or not runner.is_generation_current(context, "authelia-admin", candidate)
-            runner.apply_service(context, "authelia-admin", recreate=recreate)
 
     @classmethod
     def _create_secret_file(cls, path: "PathType", length: int = 48) -> None:
@@ -260,3 +204,19 @@ class Container(BaseContainer):
         public_key, private_key = rsa.newkeys(nbits=2048, exponent=65537)
         private_pem = private_key.save_pkcs1(format="PEM")
         utils.write_file(path, private_pem)
+
+
+    def on_starting(self, context: "OperationContext") -> None:
+        if context.target_services is not None and not set(context.target_services).intersection(self._config_services):
+            return
+        secret_path = self.get_app_path("secrets")
+        secret_path.mkdir(parents=True, exist_ok=True)
+        self.get_app_path("config").mkdir(parents=True, exist_ok=True)
+        self.runtime.chmod(secret_path, 0o700, recursive=True)
+        for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
+            self._create_secret_file(secret_path / name)
+        self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
+        files = {name: self.render_template(self.get_source_path("templates", name)) for name in (
+            "configuration.yml", "configuration.acl.yml", "configuration.2fa.yml", "configuration.oidc.yml")}
+        files["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
+        context.write_files(self, files)

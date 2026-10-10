@@ -3,10 +3,10 @@ services:
     image: 'authelia/authelia:{{ AUTHELIA_TAG }}'
     command:
       - 'authelia'
-      - '--config=/generated/current/configuration.yml'
-      - '--config=/generated/current/configuration.acl.yml'
-      - '--config=/generated/current/configuration.2fa.yml'
-      - '--config=/generated/current/configuration.oidc.yml'
+      - '--config=/generated/configuration.yml'
+      - '--config=/generated/configuration.acl.yml'
+      - '--config=/generated/configuration.2fa.yml'
+      - '--config=/generated/configuration.oidc.yml'
     environment:
       - AUTHELIA_LOG_LEVEL=debug
       - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
@@ -16,18 +16,25 @@ services:
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS={{ AUTHELIA_LDAP_ADDRESS }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN={{ AUTHELIA_LDAP_BASE_DN }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid={{ AUTHELIA_LDAP_USER }},ou=people,{{ AUTHELIA_LDAP_BASE_DN }}
-      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/current/authentication_backend_ldap_password
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/authentication_backend_ldap_password
       - X_AUTHELIA_CONFIG_FILTERS=template
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
-      - '{{ (APP_PATH/"generated") | mkdir | chown }}:/generated:ro'
+      - '{{ APP_PATH/"generated/current/configuration.yml" }}:/generated/configuration.yml:ro'
+      - '{{ APP_PATH/"generated/current/configuration.acl.yml" }}:/generated/configuration.acl.yml:ro'
+      - '{{ APP_PATH/"generated/current/configuration.2fa.yml" }}:/generated/configuration.2fa.yml:ro'
+      - '{{ APP_PATH/"generated/current/configuration.oidc.yml" }}:/generated/configuration.oidc.yml:ro'
+      - '{{ APP_PATH/"generated/current/authentication_backend_ldap_password" }}:/generated/authentication_backend_ldap_password:ro'
     networks:
       authelia:
       nginx:
       lldap:
     depends_on:
-     - authelia-redis
+      authelia-redis:
+        condition: service_started
+      lldap:
+        condition: service_healthy
 
   authelia-redis:
     image: redis:alpine
@@ -42,10 +49,10 @@ services:
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
-      - '{{ (APP_PATH/"generated") | mkdir | chown }}:/generated:ro'
+      - '{{ APP_PATH/"generated/current/configuration.yml" }}:/generated/configuration.yml:ro'
     environment:
       - AAD_LOGLEVEL=DEBUG
-      - AAD_AUTHELIA_CONFIG_PATH=/generated/current/configuration.yml
+      - AAD_AUTHELIA_CONFIG_PATH=/generated/configuration.yml
       - AAD_AUTHELIA_DOMAIN={{ container.public_authority }}
       - AAD_AUTHELIA_COOKIE_NAME={{ manager.project_name }}-auth-session
       - AAD_AUTHELIA_MIN_AUTH_LEVEL=1
@@ -63,7 +70,8 @@ services:
       nginx:
       lldap:
     depends_on:
-     - authelia
+      authelia:
+        condition: service_healthy
 
 networks:
   authelia:

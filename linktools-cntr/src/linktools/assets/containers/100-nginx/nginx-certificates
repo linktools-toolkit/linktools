@@ -2,19 +2,21 @@
 set -eu
 umask 077
 
-root=/etc/certs
-versions="$root/versions"
+base=/etc/certs
 seed=/opt/nginx-initial
-acme=/opt/acme/acme.sh
+revision=$(cat "$seed/revision")
+main=$(cat "$seed/primary")
+root="$base/$revision"
+versions="$root/versions"
+owner=$(stat -c '%u:%g' "$base")
 mkdir -p "$versions"
-owner=$(stat -c '%u:%g' "$root")
-exec 9>"$root/.acme.lock"
+touch "$base/.acme.lock"
+chown "$owner" "$base/.acme.lock"
+exec 9>"$base/.acme.lock"
 flock -x 9
 
-verify() {
+verify() (
     directory=$1
-    main=$2
-    domains_file=$3
     fullchain="$directory/${main}_fullchain.pem"
     key="$directory/${main}_key.pem"
     test -s "$fullchain" && test -s "$key" || return 1
@@ -31,161 +33,107 @@ verify() {
                     grep -Fx -- "DNS:$domain" >/dev/null || return 1 ;;
             *) openssl x509 -in "$fullchain" -noout -checkhost "$domain" >/dev/null || return 1 ;;
         esac
-    done < "$domains_file"
+    done < "$seed/domains"
+)
+
+configure() (
+    directory=$1
+    /opt/acme/acme.sh --home /opt/acme --config-home "$directory/acme" --install-cert -d "$main" \
+        --cert-file "$directory/renewal/${main}_cert.pem" \
+        --key-file "$directory/renewal/${main}_key.pem" \
+        --fullchain-file "$directory/renewal/${main}_fullchain.pem" --reloadcmd ':' >/dev/null
+)
+
+publish() {
+    ln -s "versions/$1" "$root/.next-$$"
+    mv -Tf "$root/.next-$$" "$root/live"
 }
 
-configure() {
-    main=$1
-    account=$2
-    renewal=$3
-    mkdir -p "$renewal"
-    "$acme" --home /opt/acme --config-home "$account" --install-cert -d "$main" \
-        --cert-file "$renewal/${main}_cert.pem" \
-        --key-file "$renewal/${main}_key.pem" \
-        --fullchain-file "$renewal/${main}_fullchain.pem" \
-        --reloadcmd ':' >/dev/null
-    chown -R "$owner" "$account" "$renewal"
-}
-
-load_tls() {
-    id=$1
-    directory="$versions/$id"
-    main=$(cat "$directory/primary")
-    port=${NGINX_HTTPS_PORT:?NGINX_HTTPS_PORT is required}
-    if test "$(readlink "$root/live" 2>/dev/null || :)" != "versions/$id"; then
-        echo 'The requested TLS certificate is not active' >&2
-        return 1
-    fi
-    if ! verify "$directory" "$main" "$directory/domains"; then
-        echo 'The active TLS certificate failed verification' >&2
-        return 1
-    fi
-    if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
-       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-        echo 'Nginx rejected the new TLS certificate' >&2
-        return 1
-    fi
+reload_tls() (
+    directory="$versions/$1"
+    verify "$directory" || return 1
+    nginx -p /etc/nginx/ -c /etc/nginx/cntr/nginx.conf -t || return 1
+    nginx -p /etc/nginx/ -c /etc/nginx/cntr/nginx.conf -s reload || return 1
     expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256) || return 1
     deadline=$(($(date +%s) + 30))
-    while :; do
-        remaining=$((deadline - $(date +%s)))
-        test "$remaining" -gt 0 || break
-        probe_timeout=$remaining
-        test "$probe_timeout" -le 2 || probe_timeout=2
-        actual=$(timeout "$probe_timeout" openssl s_client -connect "127.0.0.1:$port" -servername "$main" </dev/null 2>/dev/null |
+    while test "$(date +%s)" -lt "$deadline"; do
+        actual=$(timeout 2 openssl s_client -connect "127.0.0.1:${NGINX_HTTPS_PORT:?}" \
+                 -servername "$main" </dev/null 2>/dev/null |
                  openssl x509 -noout -fingerprint -sha256 2>/dev/null || :)
         test "$actual" = "$expected" && return 0
-        test "$(date +%s)" -ge "$deadline" || sleep 1
+        sleep 1
     done
-    echo 'Nginx did not serve the new TLS certificate' >&2
     return 1
-}
-
-activate() {
-    id=$1
-    directory="$versions/$id"
-    main=$(cat "$directory/primary")
-    verify "$directory" "$main" "$directory/domains"
-    previous=$(readlink "$root/live" 2>/dev/null || :)
-    if test "$previous" = "versions/$id" && ! test -s /var/run/nginx.pid; then
-        return 0
-    fi
-    if test -z "$previous" && test -s /var/run/nginx.pid; then
-        echo 'Cannot switch running TLS certificate without a previous version' >&2
-        return 1
-    fi
-    ln -s "versions/$id" "$root/.next-$$"
-    mv -Tf "$root/.next-$$" "$root/live"
-    if ! test -s /var/run/nginx.pid; then
-        return 0
-    fi
-    # Cron renewal owns rollback; orchestrated updates use load_tls and
-    # let ComposeOperations restore the previous generation on failure.
-    if load_tls "$id"; then
-        return 0
-    fi
-    if ! ln -s "$previous" "$root/.next-$$" ||
-       ! mv -Tf "$root/.next-$$" "$root/live" ||
-       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
-       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-        echo 'Nginx TLS renewal failed; local certificate rollback failed' >&2
-        return 2
-    fi
-    echo 'Nginx TLS renewal failed; local certificate pointer restored' >&2
-    return 1
-}
+)
 
 case "$1" in
-    check)
-        shift
-        main=$1
-        shift
-        verify "$root/live" "$main" "$1"
-        ;;
-    prepare)
-        shift
-        id=$1
-        main=$2
-        directory="$versions/$id"
-        test -f "$directory/domains"
-        test -s "$seed/certs/${main}_fullchain.pem"
-        test -s "$seed/certs/${main}_key.pem"
-        for name in cert key fullchain; do
-            if test -f "$seed/certs/${main}_${name}.pem"; then
-                cp "$seed/certs/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+    install|check)
+        action=$1
+        if test -L "$root/live" && verify "$root/live"; then
+            if test "$action" = install; then
+                test -d "$root/live/acme" || { echo 'Active certificate has no ACME state' >&2; exit 1; }
+            fi
+            exit 0
+        fi
+        source="$seed/certs"
+        account="$seed/acme"
+        if test "$action" = check && test -d "$root/previous" && verify "$root/previous"; then
+            source="$root/previous"
+        elif test ! -e "$root/live" && test -L "$base/live" &&
+             test -f "$base/live/build-revision" &&
+             test "$(cat "$base/live/build-revision")" = "$revision" && verify "$base/live"; then
+            source="$base/live"
+            if test -d "$base/live/acme"; then account="$base/live/acme"; fi
+        fi
+        verify "$source"
+        destination=$(mktemp -d "$versions/initial-XXXXXXXXXX")
+        id=$(basename "$destination")
+        for suffix in cert key fullchain; do
+            if test -f "$source/${main}_${suffix}.pem"; then
+                cp "$source/${main}_${suffix}.pem" "$destination/${main}_${suffix}.pem"
             fi
         done
-        mkdir "$directory/acme"
-        cp -a "$seed/acme/." "$directory/acme/"
-        verify "$directory" "$main" "$directory/domains"
-        configure "$main" "$directory/acme" "$directory/renewal"
-        chown -R "$owner" "$directory"
-        ;;
-    configure)
-        shift
-        configure "$1" "$root/live/acme" "$root/live/renewal"
-        ;;
-    activate)
-        shift
-        activate "$1"
-        ;;
-    load)
-        shift
-        load_tls "$1"
-        ;;
-    unpublish)
-        test ! -s /var/run/nginx.pid
-        if test -L "$root/live"; then rm "$root/live"; fi
+        if test "$action" = install; then
+            mkdir "$destination/acme" "$destination/renewal"
+            cp -a "$account/." "$destination/acme/"
+            configure "$destination"
+        fi
+        chown -R "$owner" "$root"
+        publish "$id"
         ;;
     renew)
-        if test -L "$root/live"; then
-            main=$(cat "$root/live/primary")
-            account="$root/live/acme"
-            renewal="$root/live/renewal"
-            /usr/local/bin/nginx-acme "$account" --cron >/dev/null
-            chown -R "$owner" "$account" "$renewal"
-            if test -s "$renewal/${main}_fullchain.pem" &&
-               { ! cmp -s "$renewal/${main}_fullchain.pem" "$root/live/${main}_fullchain.pem" ||
-                 ! cmp -s "$renewal/${main}_key.pem" "$root/live/${main}_key.pem"; }; then
-                id="renew-$(date +%s)-$$"
-                directory="$versions/$id"
-                mkdir "$directory"
-                cp "$root/live/domains" "$root/live/primary" "$directory/"
-                if test -f "$root/live/build-revision"; then
-                    cp "$root/live/build-revision" "$directory/build-revision"
+        test -L "$root/live" || exit 0
+        previous=$(basename "$(readlink "$root/live")")
+        directory="$versions/$previous"
+        /usr/local/bin/nginx-acme "$directory/acme" --cron >/dev/null
+        chown -R "$owner" "$directory/acme" "$directory/renewal"
+        renewal="$directory/renewal"
+        if test -s "$renewal/${main}_fullchain.pem" &&
+           { ! cmp -s "$renewal/${main}_fullchain.pem" "$directory/${main}_fullchain.pem" ||
+             ! cmp -s "$renewal/${main}_key.pem" "$directory/${main}_key.pem"; }; then
+            verify "$renewal"
+            destination=$(mktemp -d "$versions/renew-XXXXXXXXXX")
+            id=$(basename "$destination")
+            mkdir "$destination/renewal"
+            cp -a "$directory/acme" "$destination/acme"
+            for suffix in cert key fullchain; do
+                if test -f "$renewal/${main}_${suffix}.pem"; then
+                    cp "$renewal/${main}_${suffix}.pem" "$destination/${main}_${suffix}.pem"
                 fi
-                cp -a "$account" "$directory/acme"
-                for name in cert key fullchain; do
-                    if test -s "$renewal/${main}_${name}.pem"; then
-                        cp "$renewal/${main}_${name}.pem" "$directory/${main}_${name}.pem"
-                    fi
-                done
-                verify "$directory" "$main" "$directory/domains"
-                configure "$main" "$directory/acme" "$directory/renewal"
-                chown -R "$owner" "$directory"
-                activate "$id" "$NGINX_HTTPS_PORT"
+            done
+            configure "$destination"
+            chown -R "$owner" "$destination"
+            publish "$id"
+            if ! reload_tls "$id"; then
+                publish "$previous"
+                if ! reload_tls "$previous"; then
+                    echo 'TLS renewal failed; restoring the served certificate also failed' >&2
+                    exit 2
+                fi
+                echo 'TLS renewal failed; previous served certificate restored' >&2
+                exit 1
             fi
         fi
         ;;
-    *) echo 'Usage: nginx-certificates {check|prepare|configure|activate|load|unpublish|renew}' >&2; exit 2 ;;
+    *) echo 'Usage: nginx-certificates {install|check|renew}' >&2; exit 2 ;;
 esac

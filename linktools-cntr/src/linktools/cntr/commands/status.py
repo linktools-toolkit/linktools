@@ -142,75 +142,77 @@ def collect_status(
     a default-zero exit code. ``RuntimeInspectionOutputError`` (a
     structurally invalid response) is left to propagate -- a corrupted
     response must never masquerade as "every container is missing"."""
-    project_containers = tuple(manager.prepare_installed_containers())
-    target = select_status_containers(list(project_containers), names)
+    from linktools.core import Config
+    with Config.read_only_resolution():
+        project_containers = tuple(manager.load_installed_config_metadata())
+        target = select_status_containers(list(project_containers), names)
 
-    error = None
-    try:
-        state = manager.docker_inspector.get_project_state(project_containers)
-        queryable = True
-    except RuntimeInspectionUnavailable as exc:
-        state = None
-        queryable = False
-        error = str(exc)
+        error = None
+        try:
+            state = manager.docker_inspector.get_project_state(project_containers)
+            queryable = True
+        except RuntimeInspectionUnavailable as exc:
+            state = None
+            queryable = False
+            error = str(exc)
 
-    services_by_container: "dict[str, list[ServiceRuntimeState]]" = {}
-    if state is not None:
-        for svc in state.services:
-            for owner in svc.logical_containers:
-                services_by_container.setdefault(owner, []).append(svc)
+        services_by_container: "dict[str, list[ServiceRuntimeState]]" = {}
+        if state is not None:
+            for svc in state.services:
+                for owner in svc.logical_containers:
+                    services_by_container.setdefault(owner, []).append(svc)
 
-    containers_payload = []
-    for container in target:
-        expected = list(container.services.keys())
-        if not expected:
-            continue
-        observed_by_service = {svc.service: svc for svc in services_by_container.get(container.name, [])}
+        containers_payload = []
+        for container in target:
+            expected = list(container.services.keys())
+            if not expected:
+                continue
+            observed_by_service = {svc.service: svc for svc in services_by_container.get(container.name, [])}
 
-        service_statuses = []
-        for service_name in expected:
-            observed_svc = observed_by_service.get(service_name)
-            if observed_svc is not None:
-                service_statuses.append(ServiceStatus(
-                    logical_container=container.name, service=service_name,
-                    state=observed_svc.state, observed=True,
-                    runtime_name=observed_svc.runtime_name, health=observed_svc.health,
-                    image=observed_svc.image, exit_code=observed_svc.exit_code,
-                ))
-            else:
-                service_statuses.append(ServiceStatus(
-                    logical_container=container.name, service=service_name,
-                    state="missing", observed=False,
-                ))
+            service_statuses = []
+            for service_name in expected:
+                observed_svc = observed_by_service.get(service_name)
+                if observed_svc is not None:
+                    service_statuses.append(ServiceStatus(
+                        logical_container=container.name, service=service_name,
+                        state=observed_svc.state, observed=True,
+                        runtime_name=observed_svc.runtime_name, health=observed_svc.health,
+                        image=observed_svc.image, exit_code=observed_svc.exit_code,
+                    ))
+                else:
+                    service_statuses.append(ServiceStatus(
+                        logical_container=container.name, service=service_name,
+                        state="missing", observed=False,
+                    ))
 
-        status = "unknown" if not queryable else _aggregate_container_state(service_statuses)
-        containers_payload.append(dict(
-            container=container.name,
-            status=status,
-            services=[
-                dict(service=s.service, runtime_name=s.runtime_name, state=s.state,
-                     health=s.health, observed=s.observed)
-                for s in service_statuses
-            ],
-        ))
+            status = "unknown" if not queryable else _aggregate_container_state(service_statuses)
+            containers_payload.append(dict(
+                container=container.name,
+                status=status,
+                services=[
+                    dict(service=s.service, runtime_name=s.runtime_name, state=s.state,
+                         health=s.health, observed=s.observed)
+                    for s in service_statuses
+                ],
+            ))
 
-    orphans = []
-    if all_services and state is not None:
-        for svc in state.services:
-            if not svc.logical_containers:
-                orphans.append(dict(service=svc.service, runtime_name=svc.runtime_name,
-                                    state=svc.state, health=svc.health, observed=True))
+        orphans = []
+        if all_services and state is not None:
+            for svc in state.services:
+                if not svc.logical_containers:
+                    orphans.append(dict(service=svc.service, runtime_name=svc.runtime_name,
+                                        state=svc.state, health=svc.health, observed=True))
 
-    payload = dict(
-        schema_version=STATUS_SCHEMA_VERSION,
-        project=manager.project_name,
-        queryable=queryable,
-        containers=containers_payload,
-        orphan_services=orphans,
-    )
-    if error is not None:
-        payload["error"] = error
-    return payload
+        payload = dict(
+            schema_version=STATUS_SCHEMA_VERSION,
+            project=manager.project_name,
+            queryable=queryable,
+            containers=containers_payload,
+            orphan_services=orphans,
+        )
+        if error is not None:
+            payload["error"] = error
+        return payload
 
 
 def render_status(logger: "logging.Logger", payload: "dict[str, Any]") -> None:

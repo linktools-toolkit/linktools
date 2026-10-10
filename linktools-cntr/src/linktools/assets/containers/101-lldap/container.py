@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any
     from linktools.cntr import OperationContext, Integrations
-    from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
     from linktools.core import ConfigResolver
 
@@ -52,39 +51,9 @@ class Container(BaseContainer):
     def on_check(self, context: "OperationContext") -> None:
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if not domain or "." not in domain:
-            raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
-                                 f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
-
-
-    generates_config = True
-
-    def on_prepare_config(self, context: "OperationContext") -> None:
-        secret_path = self.get_app_path("secrets")
-        secret_path.mkdir(parents=True, exist_ok=True)
-        self.get_app_path("data").mkdir(parents=True, exist_ok=True)
-        self.runtime.chmod(secret_path, 0o700, recursive=True)
-        self._create_secret_file(secret_path / "jwt_secret", length=64)
-
-    def render_config(self, generation_id: str) -> "dict[str, str]":
-        return {
-            "lldap_config.toml": self.render_template(self.get_source_path("templates", "lldap_config.toml")),
-            "ldap_user_pass": str(self.get_config("LLDAP_ADMIN_PASSWORD")),
-        }
-
-    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
-        # The builtin TOML contains only fixed database/key locations. LLDAP has
-        # no standalone config validator; readiness is checked after application.
+            raise ContainerError("Invalid LDAP domain; configure NGINX_ROOT_DOMAIN")
         if not self.get_config("LLDAP_ADMIN_PASSWORD"):
             raise ContainerError("LLDAP administrator password must not be empty")
-
-    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
-                 services: "Iterable[str]") -> None:
-        if "lldap" not in services:
-            return
-        runner = self.manager.compose_runner
-        recreate = candidate.changed or not runner.is_generation_current(context, "lldap", candidate)
-        runner.apply_service(context, "lldap", recreate=recreate)
-        runner.wait_service_healthy(context, "lldap")
 
     @classmethod
     def _create_secret_file(cls, path: "PathType", length: int = 48) -> None:
@@ -94,3 +63,15 @@ class Container(BaseContainer):
             return
 
         utils.write_file(path, utils.random_string(length))
+
+
+    def on_starting(self, context: "OperationContext") -> None:
+        secret_path = self.get_app_path("secrets")
+        secret_path.mkdir(parents=True, exist_ok=True)
+        self.get_app_path("data").mkdir(parents=True, exist_ok=True)
+        self.runtime.chmod(secret_path, 0o700, recursive=True)
+        self._create_secret_file(secret_path / "jwt_secret", length=64)
+        context.write_files(self, {
+            "lldap_config.toml": self.render_template(self.get_source_path("templates", "lldap_config.toml")),
+            "ldap_user_pass": str(self.get_config("LLDAP_ADMIN_PASSWORD")),
+        })

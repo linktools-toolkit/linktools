@@ -71,10 +71,7 @@ class ExecutionPlanner:
         # forms its --file set the same way, one container at a time, and
         # Compose's multi-file merge is order-sensitive. Never re-sort this.
         compose_files = [p for p in candidate_files if p.endswith((".yml", ".yaml"))]
-        file_args = []
-        for path in compose_files:
-            file_args.extend(["--file", path])
-        file_args.extend(["--project-name", manager.project_name])
+        file_args = manager.compose_runner.compose_args(compose_files)[1:]
 
         commands = []
         services = list(selection.services)
@@ -110,24 +107,12 @@ class ExecutionPlanner:
 
         warnings = []
         if action in ("up", "restart"):
-            warnings.append("Configuration is reconciled across the complete installed project. "
-                            "Other running services with pending configuration changes may also be updated; "
-                            "unrelated stopped services stay stopped. Runtime inspection and native "
-                            "candidate validation determine those additional updates during execution. "
-                            "CHECK and BEFORE_START may also prepare installed owners with running services, "
-                            "because their hooks can change configuration inputs. AFTER_START runs only "
-                            "for the final application targets.")
-            sync = start_selection.project_containers
-            for container in sync:
-                if container.name in manager.generated_configs:
-                    warnings.append("{}: generated candidate native validation is pending execution; "
-                                    "no hooks, secrets or generated files were prepared".format(container.name))
-            for container in sync:
-                if container.bootstrap_services:
-                    warnings.append("{}: cold starts acknowledge health-only bootstrap before provider "
-                                    "readiness and final configuration application".format(container.name))
+            warnings.append("Only selected services, their requirements and running declared consumers are applied. "
+                            "Prepared file content changes recreate affected consumers; ordinary configuration "
+                            "updates do not invoke a container-specific reload lifecycle. Preparation, image "
+                            "availability and native checks are resolved during execution, before restart stops.")
         if action == "restart":
-            warnings.append("Restart prepares start hooks, images and all generated candidates, then validates "
+            warnings.append("Restart prepares selected inputs and images, then checks "
                             "them before stopping only the explicitly selected services. Runtime providers "
                             "are included in startup hooks and application, not in the explicit stop set.")
         preflight = "skipped"

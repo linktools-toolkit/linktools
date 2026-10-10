@@ -341,13 +341,6 @@ class ContainerManager:
             result[producer.name] = declarations
         return MappingProxyType(result)
 
-    @cached_property
-    def generated_configs(self) -> "Mapping[str, BaseContainer]":
-        """Installed containers explicitly owning generated configuration."""
-        from types import MappingProxyType
-        return MappingProxyType({name: self.containers[name] for name in self.integration_snapshot
-                                 if self.containers[name].generates_config})
-
     def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Optional[str], Integration]]":
         """Yield read-only declaration inputs from the command's installed snapshot."""
         if consumer_name not in self.containers:
@@ -367,15 +360,13 @@ class ContainerManager:
 
     def load_installed_config_metadata(self) -> "list[BaseContainer]":
         """Load installed containers and register their own config fields,
-        without running any container's ``on_prepare()`` (arbitrary
-        third-party file writes, network access, hook registration) or
-        touching ``docker_file``/``docker_compose``.
+        without preparing operation inputs or touching
+        ``docker_file``/``docker_compose``.
 
         Safe for anything that only needs config metadata: config
         set/get/list/explain/validate/reload, Root ``list``, Plan, Doctor.
         Returns ``[]`` when nothing is installed instead of raising -- see
-        ``prepare_installed_containers`` for the raising, side-effectful
-        variant real execution (up/down/restart/exec) needs.
+        ``prepare_installed_containers`` for the variant that rejects an empty installed project.
         """
         containers = self.installed_state.get(resolve=True)
         for container in self.containers.values():
@@ -385,15 +376,8 @@ class ContainerManager:
         return containers
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
-        self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
+        """Load installed declarations without lifecycle side effects."""
         containers = self.load_installed_config_metadata()
         if not containers:
             raise NoContainerInstalledError("No container installed")
-        for container in containers:
-            container.on_prepare()
-        for container in containers:
-            if self.debug and container.docker_file:  # 加载每个容器的dockerfile
-                self.logger.debug(f"Generate Dockerfile for {container.name}")
-            if self.debug and container.docker_compose:  # 加载每个容器的docker-compose.yml
-                self.logger.debug(f"Generate docker-compose.yml for {container.name}")
         return containers

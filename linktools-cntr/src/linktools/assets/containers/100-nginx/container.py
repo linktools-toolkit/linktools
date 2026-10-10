@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from typing import AbstractSet, Any, Mapping
     from linktools.cntr import OperationContext
-    from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
 
 
@@ -155,16 +154,17 @@ class Container(BaseContainer):
 
     @cached_property
     def cert_image_revision(self) -> str:
-        """Image identity changes only when build-time TLS requirements change."""
+        """Identify build code and TLS inputs without including DNS credentials."""
         parts = [self.get_config("NGINX_TAG"),
-                 str(self.get_config("NGINX_HTTPS_ENABLE", type=bool))]
+                 str(self.get_config("NGINX_HTTPS_ENABLE", type=bool)),
+                 self.get_source_path("Dockerfile").read_text(encoding="utf-8")]
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            parts.extend((self.get_config("ACME_SERVER"),
-                          self.get_config("ACME_DNS_API"),
+            parts.extend((self.get_config("ACME_SERVER"), self.get_config("ACME_DNS_API"),
                           self.get_config("ACME_ACCOUNT_EMAIL")))
             parts.extend(self.acme_ssl_domains)
+            parts.extend(self.get_source_path(name).read_text(encoding="utf-8")
+                         for name in ("nginx-certificates", "nginx-acme", "dnsapi.json"))
         return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
-
     @cached_property
     def acme_ssl_domains_args(self) -> str:
         return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)
@@ -193,13 +193,37 @@ class Container(BaseContainer):
         )
 
     def on_check(self, context: "OperationContext") -> None:
+        import shutil
+        import tempfile
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
-
+        runner = self.manager.compose_runner
+        command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/cntr/nginx.conf", "-t")
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
+                source = self.get_app_path("certs", self.cert_image_revision, "live").resolve()
+                previous = Path(directory) / self.cert_image_revision / "previous"
+                previous.mkdir(parents=True, mode=0o700)
+                domain = self.get_config("NGINX_ROOT_DOMAIN")
+                for suffix in ("cert", "key", "fullchain"):
+                    path = source / (domain + "_" + suffix + ".pem")
+                    if path.is_file():
+                        shutil.copy2(str(path), str(previous / path.name))
+                result = runner.validate_service(context, "nginx", (
+                    "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
+                    "exec nginx -p /etc/nginx/ -c /etc/nginx/cntr/nginx.conf -t"),
+                    mount_overrides={"/etc/certs": directory}, check=False)
+        else:
+            result = runner.validate_service(context, "nginx", command, check=False)
+        if not result.succeeded or "conflicting server name" in (result.stdout + result.stderr).lower():
+            match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
+            location = " at {}:{}".format(*match.groups()) if match else ""
+            raise ContainerError("Native validation failed for nginx{} (exit {})".format(
+                location, result.returncode))
     def quote(self, value: "Any") -> str:
         return self._nginx_literal(value)
 
@@ -291,21 +315,6 @@ class Container(BaseContainer):
             ])
         return "\n".join(lines)
 
-    generates_config = True
-    application_priority = 100
-    bootstrap_services = ("nginx",)
-
-    def generation_label(self, service: str, generation_id: str) -> "str | None":
-        return None
-
-    def is_generation_current(self, context: "OperationContext", service: str,
-                              candidate: "GeneratedCandidate") -> bool:
-        if service != "nginx":
-            return super().is_generation_current(context, service, candidate)
-        result = self.manager.compose_runner.exec_service(context, "nginx", (
-            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-            "/run/nginx-health.sock", "http://localhost/health"), check=False)
-        return bool(result.succeeded and result.stdout.strip() == candidate.generation_id)
 
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         manager = self.manager
@@ -437,155 +446,62 @@ class Container(BaseContainer):
                 leader, business="\n".join(routes), sites=sites, route_auth=route_auth)
         return result, any(site.waf for site in active)
 
-    def render_config(self, generation_id: str) -> "dict[str, str]":
-        """Render a generation marker around the immutable business snapshot."""
-        from types import SimpleNamespace
-        files, waf = self._rendered_site_files
-        result = dict(files)
-        root_site = SimpleNamespace(vars={
-            "generation_id": generation_id, "waf": waf,
-            "site_files": tuple(files),
-        })
-        result["nginx.conf"] = self._render_site_template(
-            self, self.get_source_path("templates", "nginx.conf"), root_site)
-        if getattr(self, "_certificate_version", None) is not None:
-            result["certificate.version"] = self._certificate_version + "\n"
-        return result
-
-    def _initialize_certificate_mount(self, domain: str) -> None:
-        """Make existing TLS files available under the stable live pointer."""
-        import shutil
-        from uuid import uuid4
-
-        root = self.get_app_path("certs")
-        link = root / "live"
-        if os.path.lexists(str(link)):
-            if not link.is_symlink():
-                raise ContainerError("Nginx live certificate path must be a symbolic link")
-            return
-        required = tuple(root / (domain + "_" + suffix + ".pem")
-                         for suffix in ("fullchain", "key"))
-        if not all(path.is_file() for path in required):
-            return
-        directory = root / "versions" / ("legacy-" + uuid4().hex)
-        directory.mkdir(parents=True, mode=0o700)
-        for name in ("cert", "fullchain", "key"):
-            source = root / (domain + "_" + name + ".pem")
-            if source.is_file():
-                shutil.copy2(str(source), str(directory / source.name))
-        self.runtime.chmod(directory / (domain + "_key.pem"), 0o600)
-        account = self.get_app_path("acme")
-        if account.is_dir():
-            import shutil
-            shutil.copytree(str(account), str(directory / "acme"), symlinks=True)
-            self.runtime.chmod(directory / "acme", 0o700)
-        (directory / "primary").write_text(domain + "\n", encoding="utf-8")
-        (directory / "domains").write_text("", encoding="utf-8")
-        (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
-        os.symlink("versions/" + directory.name, str(link))
-
-    def on_prepare(self) -> None:
-        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            return
-        secret_path = self.get_app_path("acme-secrets", "dns.env", create_parent=True)
-        self.runtime.chmod(secret_path.parent, 0o700)
-        if not secret_path.exists():
-            secret_path.touch(mode=0o600)
-        self.runtime.chmod(secret_path, 0o600)
-        archive = self.get_app_path("acme-build-account.tar", create_parent=True)
-        if not archive.exists():
-            archive.touch(mode=0o600)
-        self.runtime.chmod(archive, 0o600)
-
     def on_starting(self, context: "OperationContext") -> None:
-        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            return
-        from linktools.cntr.artifacts import atomic_write_text_if_changed
-        values = []
-        for key, field in self.extend_configs.items():
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-                raise ContainerError("Invalid DNS environment variable name: " + key)
-            value = str(self.get_config(field))
-            if "\n" in value or "\r" in value:
-                raise ContainerError("DNS credentials must be single-line values")
-            values.append("export {}={}\n".format(key, shlex.quote(value)))
-        atomic_write_text_if_changed(self.get_app_path("acme-secrets", "dns.env"),
-                                     "".join(values), mode=0o600)
-        live = self.get_app_path("certs", "live")
-        context.nginx_certificate_previous = os.readlink(str(live)) if live.is_symlink() else None
-        for name in ("certs", "acme"):
-            self.get_app_path(name).mkdir(parents=True, exist_ok=True)
-        if ("nginx" in context.initial_services and
-                not os.path.lexists(self.get_app_path("generated", "current"))):
-            self._preserve_legacy_files()
         import tarfile
         import tempfile
-        account = self.get_app_path("certs", "live", "acme")
-        if not account.is_dir():
-            account = self.get_app_path("acme")
-        archive = self.get_app_path("acme-build-account.tar")
-        with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
-            temp = stream.name
-            try:
-                if account.is_dir():
-                    with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as output:
-                        for entry in account.iterdir():
-                            output.add(str(entry), arcname=entry.name)
-            except Exception:
-                os.unlink(temp)
-                raise
-        os.replace(temp, str(archive))
+        from filelock import FileLock
+        from types import SimpleNamespace
+        from linktools.cntr.artifacts import atomic_write_text_if_changed
 
-    def on_prepare_config(self, context: "OperationContext") -> None:
-        from uuid import uuid4
-        import shutil
-
-        for name in ("generated", "certs", "acme"):
-            self.get_app_path(name).mkdir(parents=True, exist_ok=True)
-        self._certificate_version = None
-        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            return
-
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        self._initialize_certificate_mount(domain)
-        root = self.get_app_path("certs")
-        current = root / "live"
-        version = uuid4().hex
-        directory = root / "versions" / version
-        directory.mkdir(parents=True, mode=0o700)
-        (directory / "primary").write_text(domain + "\n", encoding="utf-8")
-        (directory / "domains").write_text(
-            "\n".join(self.acme_ssl_domains) + "\n", encoding="utf-8")
-        (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
-        runner = self.manager.compose_runner
-        request = "/etc/certs/versions/{}/domains".format(version)
-        valid = runner.validate_service(
-            context, "nginx",
-            ("/usr/local/bin/nginx-certificates", "check", domain, request),
-            check=False,
-        )
-        revision_file = current / "build-revision"
-        if valid.succeeded and (
-                not revision_file.exists() or
-                revision_file.read_text(encoding="utf-8") == self.cert_image_revision):
-            self._certificate_version = os.path.basename(os.readlink(str(current)))
-            shutil.rmtree(str(directory))
-            runner.validate_service(
-                context, "nginx",
-                ("/usr/local/bin/nginx-certificates", "configure", domain),
-            )
-            return
-
-        try:
-            runner.validate_service(
-                context, "nginx",
-                ("/usr/local/bin/nginx-certificates", "prepare", version, domain),
-            )
-        except Exception:
-            shutil.rmtree(str(directory))
-            raise
-        self._certificate_version = version
-
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            for name in ("certs", "acme", "acme-secrets"):
+                self.get_app_path(name).mkdir(parents=True, exist_ok=True)
+            self.runtime.chmod(self.get_app_path("acme-secrets"), 0o700)
+            values = []
+            for key, field in self.extend_configs.items():
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ContainerError("Invalid DNS environment variable name: " + key)
+                value = str(self.get_config(field))
+                if "\n" in value or "\r" in value:
+                    raise ContainerError("DNS credentials must be single-line values")
+                values.append("export {}={}\n".format(key, shlex.quote(value)))
+            atomic_write_text_if_changed(self.get_app_path("acme-secrets", "dns.env"),
+                                         "".join(values), mode=0o600)
+            lock_path = self.get_app_path("certs", ".acme.lock")
+            with FileLock(str(lock_path)):
+                self.runtime.chmod(lock_path, 0o600)
+                if ("nginx" in context.initial_services and
+                        not os.path.lexists(str(self.get_app_path("generated", "current")))):
+                    self._preserve_legacy_files()
+                account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
+                previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
+                                          for item in context.runtime_state.services
+                                          if item.service == "nginx"), None)
+                if not account.is_dir() and previous_revision is not None:
+                    if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):
+                        raise ContainerError("Invalid running nginx certificate revision")
+                    account = self.get_app_path("certs", previous_revision, "live", "acme")
+                if not account.is_dir():
+                    account = self.get_app_path("certs", "live", "acme")
+                if not account.is_dir():
+                    account = self.get_app_path("acme")
+                archive = self.get_app_path("acme-build-account.tar")
+                with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
+                    temporary = stream.name
+                    try:
+                        with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as output:
+                            for entry in account.iterdir():
+                                output.add(str(entry), arcname=entry.name)
+                    except BaseException:
+                        os.unlink(temporary)
+                        raise
+                os.replace(temporary, str(archive))
+        files, waf = self._rendered_site_files
+        result = dict(files)
+        root_site = SimpleNamespace(vars={"waf": waf, "site_files": tuple(files)})
+        result["nginx.conf"] = self._render_site_template(
+            self, self.get_source_path("templates", "nginx.conf"), root_site)
+        context.write_files(self, result)
     def _preserve_legacy_files(self) -> None:
         import shutil
         import tempfile
@@ -619,123 +535,3 @@ class Container(BaseContainer):
                     destination.mkdir()
                 else:
                     shutil.copy2(str(path), str(destination))
-
-    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
-        manager = self.manager
-        command = ("nginx", "-p", "/etc/nginx/", "-c",
-                   "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t")
-        marker = Path(candidate.path) / "certificate.version"
-        version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
-        if version:
-            root = self.get_app_path("certs")
-            live = root / "live"
-        if version and (not live.is_symlink() or os.readlink(str(live)) != "versions/" + version):
-            import shutil
-            import tempfile
-            domain = self.get_config("NGINX_ROOT_DOMAIN")
-            with tempfile.TemporaryDirectory(prefix=".validate-", dir=str(root)) as path:
-                certs = Path(path) / "live"
-                certs.mkdir()
-                for kind in ("fullchain", "key"):
-                    name = "{}_{}.pem".format(domain, kind)
-                    shutil.copy2(str(root / "versions" / version / name), str(certs / name))
-                result = manager.compose_runner.validate_service(
-                    context, "nginx", command, check=False,
-                    mount_overrides={"/etc/certs": path})
-        else:
-            result = manager.compose_runner.validate_service(context, "nginx", command, check=False)
-
-        if result.succeeded and "conflicting server name" not in (result.stdout + result.stderr).lower():
-            return
-        # Native output may contain expanded secrets; expose only source identity.
-        match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
-        diagnostic = " at {}:{}".format(*match.groups()) if match else ""
-        identity = re.search(r"(?:site|s)_([0-9a-f]+)_([0-9a-f]+)", match.group(1)) if match else None
-        if identity:
-            try:
-                producer, local_id = (bytes.fromhex(value).decode("utf-8") for value in identity.groups())
-                diagnostic += " (site {!r}/{!r})".format(producer, local_id)
-                site = manager.nginx_sites.get((producer, local_id))
-                if site is not None:
-                    diagnostic += " template {!r}".format(site.template or "nginx/default.conf")
-            except (ValueError, UnicodeDecodeError):
-                pass
-        raise ContainerError("Native validation failed for service nginx{} (exit {})".format(
-            diagnostic, result.returncode))
-
-    def confirm(self, context: "OperationContext", generation_id: str,
-                timeout: int = 30) -> None:
-        import time
-        deadline = time.monotonic() + timeout
-        while True:
-            result = self.manager.compose_runner.exec_service(context, "nginx", (
-                "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-                "/run/nginx-health.sock", "http://localhost/health"), check=False)
-            if result.succeeded and result.stdout.strip() == generation_id:
-                return
-            if time.monotonic() >= deadline:
-                raise ContainerError("Nginx did not acknowledge the generated configuration")
-            time.sleep(0.25)
-
-    def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
-        return {"nginx.conf": 'events {}\nhttp {\n'
-                'server { listen unix:/run/nginx-health.sock; '
-                'location = /health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
-                'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
-
-    def rollback_config(self, context: "OperationContext") -> None:
-        previous = getattr(context, "nginx_certificate_previous", MISSING)
-        if previous is MISSING:
-            return
-        live = self.get_app_path("certs", "live")
-        if previous is None:
-            if live.is_symlink():
-                live.unlink()
-        elif not live.is_symlink() or os.readlink(str(live)) != previous:
-            import uuid
-            temporary = live.parent / (".live-" + uuid.uuid4().hex)
-            try:
-                temporary.symlink_to(previous)
-                os.replace(str(temporary), str(live))
-            finally:
-                if temporary.is_symlink():
-                    temporary.unlink()
-
-    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
-                     services: "Iterable[str]") -> None:
-        if "nginx" not in services:
-            return
-        runner = self.manager.compose_runner
-        live = self.get_app_path("certs", "live")
-        marker = Path(candidate.path) / "certificate.version"
-        version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
-        rollback = hasattr(context, "rollback_service_models")
-        previous = getattr(context, "nginx_certificate_previous", MISSING)
-        if rollback and previous is not MISSING:
-            version = os.path.basename(previous) if previous is not None else None
-        changed = bool(version and (not live.is_symlink() or
-                                    os.readlink(str(live)) != "versions/" + version))
-        if changed and not rollback and previous is MISSING:
-            context.nginx_certificate_previous = os.readlink(str(live)) if live.is_symlink() else None
-        if rollback and previous is None and live.is_symlink():
-            runner.run_isolated_service(context, "nginx",
-                                        ("/usr/local/bin/nginx-certificates", "unpublish"))
-        if changed:
-            command = ("/usr/local/bin/nginx-certificates", "activate", version)
-            # A one-shot container switches the mount before Compose can start
-            # nginx against a configuration referencing the new certificate.
-            runner.run_isolated_service(context, "nginx", command)
-        runner.apply_service(context, "nginx")
-        runner.wait_service_healthy(context, "nginx")
-        if changed:
-            runner.exec_service(context, "nginx",
-                                ("/usr/local/bin/nginx-certificates", "load", version))
-        result = runner.exec_service(context, "nginx", (
-            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-            "/run/nginx-health.sock", "http://localhost/health"), check=False)
-        if result.succeeded and result.stdout.strip() == candidate.generation_id:
-            return
-        runner.exec_service(context, "nginx", (
-            "nginx", "-p", "/etc/nginx/", "-c",
-            "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
-        self.confirm(context, candidate.generation_id)

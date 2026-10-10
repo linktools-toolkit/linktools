@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 from linktools import utils
 
-from .container import ContainerError
+from .errors import ContainerError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from linktools.types import PathType
     from .container import BaseContainer
+    from .context import OperationContext
+    from typing import Mapping
     from .manager import ContainerManager
 
 INDEX_SCHEMA_VERSION = 1
@@ -220,110 +222,194 @@ class ArtifactIndex:
             return atomic_write_text_if_changed(path, content)
 
 
-class GeneratedCandidate:
-    """An immutable generated tree with an atomic, reversible current link."""
+def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
+                mode: int = 0o600, group: "int | None" = None) -> "Path":
+    """Materialize immutable inputs; no current pointer or service is changed."""
+    import shutil
+    import tempfile
+    from pathlib import Path, PurePosixPath
 
-    def __init__(self, container: "BaseContainer",
-                 render: "Callable[[str], dict[str, str]]") -> None:
-        import uuid
-        self.container = container
-        self.root = str(container.get_app_path("generated"))
-        self.previous_id = self.current_id(self.root)
-        self.generation_id = self.previous_id or uuid.uuid4().hex
-        files = render(self.generation_id)
-        self.changed = not self.previous_id or not self.matches(files)
-        if self.changed and self.previous_id:
-            self.generation_id = uuid.uuid4().hex
-            files = render(self.generation_id)
-        self.path = os.path.join(self.root, self.generation_id)
-        self.changed_files = tuple(sorted(name for name, content in files.items()
-                                          if self.read_previous(name) != content))
-        if self.changed:
-            os.makedirs(self.path, mode=0o755)
-            entries = {}
-            for name, content in files.items():
-                if os.path.isabs(name) or '..' in name.split('/'):
-                    raise ContainerError("Generated file must stay within its candidate tree")
-                path = os.path.join(self.path, name)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                atomic_write_text_if_changed(path, content)
-                entries[os.path.relpath(path, str(container.manager.data_path))] = dict(
-                    kind="generated-config", container=container.name, sha256=sha256_of(content))
-            container.manager.artifact_index.record(entries)
+    for name in files:
+        path = PurePosixPath(name)
+        if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
+            raise ContainerError("Prepared file must stay within its tree: " + name)
+    payload = json.dumps([mode, group, sorted(files.items())], ensure_ascii=True,
+                         separators=(",", ":"))
+    root = container.get_app_path("generated")
+    destination = root / sha256_of(payload)
+    if destination.exists():
+        actual = {path.relative_to(destination).as_posix() for path in destination.rglob("*")
+                  if path.is_file()}
+        if actual != set(files) or any(
+                (destination / name).is_symlink() or
+                (destination / name).read_text(encoding="utf-8") != content or
+                stat.S_IMODE((destination / name).stat().st_mode) != mode or
+                (group is not None and (destination / name).stat().st_gid != group)
+                for name, content in files.items()):
+            raise ContainerError("Prepared file tree was modified: " + str(destination))
+        return destination
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
+    try:
+        container.runtime.chmod(temporary, 0o755)
+        for name, content in files.items():
+            path = temporary / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            utils.atomic_write(path, content, encoding="utf-8")
+            if group is not None and path.stat().st_gid != group:
+                container.runtime.create_process(
+                    "chgrp", str(group), str(path), privilege=True).check_call()
+            container.runtime.chmod(path, mode)
+        os.rename(str(temporary), str(destination))
+    except BaseException:
+        shutil.rmtree(str(temporary))
+        raise
+    container.manager.artifact_index.record({
+        os.path.relpath(str(destination / name), str(container.manager.data_path)): {
+            "kind": "generated-config", "container": container.name,
+            "sha256": sha256_of(content),
+        } for name, content in files.items()
+    })
+    return destination
 
-    @classmethod
-    def current_id(cls, root: str) -> "str | None":
-        link = os.path.join(root, "current")
-        if not os.path.lexists(link):
-            return None
-        if not os.path.islink(link):
-            raise ContainerError("Generated current must be a symbolic link")
-        value = os.readlink(link)
-        if not value or os.path.basename(value) != value or value in (".", ".."):
-            raise ContainerError("Invalid generated current target")
-        return value
 
-    def read_previous(self, name: str) -> "str | None":
-        if self.previous_id:
+def bind_prepared_files(context: "OperationContext", model: dict,
+                        previous: "Mapping[str, str]") -> dict:
+    """Bind immutable inputs, reusing unchanged single-file mounts per consumer."""
+    import yaml
+    from pathlib import Path
+
+    roots = [(container.get_app_path("generated"), context.prepared_files[container.name])
+             for container in context.containers if container.name in context.prepared_files]
+    services = dict(model["services"])
+    for service, spec in model["services"].items():
+        old = yaml.safe_load(previous[service])["services"][service] if service in previous else {}
+        old_mounts = {item["target"]: item for item in old.get("volumes", ())
+                      if isinstance(item, dict) and item.get("type") == "bind"}
+        volumes = []
+        changed = False
+        for item in spec.get("volumes", ()):
+            replacement = item
+            if isinstance(item, dict) and item.get("type") == "bind":
+                source = Path(item["source"])
+                for root, candidate in roots:
+                    try:
+                        relative = source.relative_to(root / "current")
+                    except ValueError:
+                        continue
+                    prepared = candidate / relative
+                    if not prepared.exists():
+                        raise ContainerError("Missing prepared input for {}: {}".format(service, relative))
+                    prior = old_mounts.get(item["target"])
+                    if prior is not None and prepared.is_file():
+                        old_source = Path(prior["source"])
+                        try:
+                            old_relative = old_source.relative_to(root)
+                        except ValueError:
+                            old_relative = None
+                        if (old_relative is not None and old_relative.parts
+                                and old_relative.parts[0] != "current" and old_source.is_file()
+                                and old_source.stat().st_mode == prepared.stat().st_mode
+                                and old_source.stat().st_gid == prepared.stat().st_gid
+                                and old_source.read_bytes() == prepared.read_bytes()):
+                            prepared = old_source
+                    replacement = dict(item, source=str(prepared))
+                    changed = True
+                    break
+            volumes.append(replacement)
+        if changed:
+            services[service] = dict(spec, volumes=volumes)
+    return dict(model, services=services)
+
+
+def publish_prepared_files(context: "OperationContext", services: "Iterable[str]") -> None:
+    """Expose confirmed inputs for later read-only Compose rendering.
+
+    Running containers use immutable mount sources, never the current symlink.
+    AppliedServiceModels remains the authority for each running service.
+    """
+    import uuid
+    import yaml
+    from pathlib import Path
+
+    services = tuple(services)
+    unapplied = set(context.initial_running_services) - set(services)
+    legacy_sources = [Path(item["source"]) for service in unapplied
+                      if service in context.service_models.previous
+                      for item in yaml.safe_load(context.service_models.previous[service])["services"][service].get("volumes", ())
+                      if isinstance(item, dict) and item.get("type") == "bind"]
+    sources = [Path(item["source"]) for service in services
+               for item in context.compose_model["services"][service].get("volumes", ())
+               if isinstance(item, dict) and item.get("type") == "bind"]
+    for candidate in context.prepared_files.values():
+        used = False
+        for source in sources:
             try:
-                with open(os.path.join(self.root, self.previous_id, name), encoding="utf-8") as stream:
-                    return stream.read()
-            except FileNotFoundError:
-                pass
-        return None
-
-    def matches(self, files: "dict[str, str]") -> bool:
-        root = os.path.join(self.root, self.generation_id)
-        actual = set()
-        for directory, _, names in os.walk(root):
-            actual.update(os.path.relpath(os.path.join(directory, name), root) for name in names)
-        return actual == set(files) and all(self.read_previous(name) == text for name, text in files.items())
-
-    def activate(self, generation_id: "str | None") -> None:
-        import uuid
-        current = os.path.join(self.root, "current")
-        if generation_id is None:
-            if os.path.lexists(current):
-                os.unlink(current)
-            return
-        temporary = os.path.join(self.root, ".current-" + uuid.uuid4().hex)
-        os.symlink(generation_id, temporary)
+                source.relative_to(candidate)
+            except ValueError:
+                continue
+            used = True
+            break
+        if not used:
+            continue
+        current = candidate.parent / "current"
+        # An unselected legacy service may still dereference generated/current.
+        # Its existing input must not change as a side effect of this deployment.
+        if any(source == candidate.parent or source == current or
+               current in source.parents for source in legacy_sources):
+            continue
+        if current.is_symlink() and os.readlink(str(current)) == candidate.name:
+            continue
+        if os.path.lexists(str(current)) and not current.is_symlink():
+            raise ContainerError("Generated current must be a symbolic link")
+        temporary = candidate.parent / (".current-" + uuid.uuid4().hex)
+        temporary.symlink_to(candidate.name)
         try:
-            os.replace(temporary, current)
+            os.replace(str(temporary), str(current))
         finally:
-            if os.path.lexists(temporary):
-                os.unlink(temporary)
-
-    def publish(self) -> None:
-        self.activate(self.generation_id)
-
-    def restore(self) -> None:
-        self.activate(self.previous_id)
-
-    def prune(self) -> None:
-        """Retain the active generation and the preceding rollback version."""
-        import shutil
-
-        keep = {self.current_id(self.root), self.previous_id}
-        obsolete = [
-            entry.path for entry in os.scandir(self.root)
-            if entry.name not in keep and len(entry.name) == 32
-            and all(char in "0123456789abcdef" for char in entry.name)
-            and entry.is_dir(follow_symlinks=False)
-        ]
-        if not obsolete:
-            return
-        base = str(self.container.manager.data_path)
-        prefixes = tuple(os.path.relpath(path, base) + os.sep for path in obsolete)
-        index = self.container.manager.artifact_index
-        stale = tuple(path for path in index.load()
-                      if any(path.startswith(prefix) for prefix in prefixes))
-        if stale:
-            index.record({}, remove=stale)
-        for path in obsolete:
-            shutil.rmtree(path)
+            if temporary.is_symlink():
+                temporary.unlink()
 
 
+def prune_prepared_files(context: "OperationContext", models: "AppliedServiceModels") -> None:
+    """Retain every applied input and the preceding rollback inputs."""
+    import shutil
+    import yaml
+    from pathlib import Path
+
+    references = []
+    for collection in (models.current, models.previous):
+        for service, text in collection.items():
+            spec = yaml.safe_load(text)["services"][service]
+            references.extend(Path(item["source"]) for item in spec.get("volumes", ())
+                              if isinstance(item, dict) and item.get("type") == "bind")
+    for candidate in context.prepared_files.values():
+        root = candidate.parent
+        if any(source == root or source == root / "current" or
+               root / "current" in source.parents for source in references):
+            # A legacy directory model does not identify its concrete file tree.
+            # Keep those inputs until subsequent applied models use immutable paths.
+            continue
+        keep = {candidate.name}
+        current = root / "current"
+        if current.is_symlink():
+            keep.add(os.readlink(str(current)))
+        for source in references:
+            try:
+                relative = source.relative_to(root)
+            except ValueError:
+                continue
+            if relative.parts:
+                keep.add(relative.parts[0])
+        for path in root.iterdir():
+            if (path.name in keep or len(path.name) not in (32, 64)
+                    or any(char not in "0123456789abcdef" for char in path.name)
+                    or path.is_symlink() or not path.is_dir()):
+                continue
+            index = models.manager.artifact_index
+            prefix = os.path.relpath(str(path), str(models.manager.data_path)) + os.sep
+            index.record({}, remove=tuple(key for key in index.load() if key.startswith(prefix)))
+            shutil.rmtree(str(path))
 class AppliedServiceModels:
     """Track each service's applied model, retaining project support for rollback."""
 
@@ -438,3 +524,14 @@ class AppliedServiceModels:
                 kind="compose-applied-service", container=service, sha256=sha256_of(previous))
         if entries or removed:
             self.manager.artifact_index.record(entries, remove=removed)
+
+
+    def set_model(self, model: dict) -> None:
+        """Compare prepared mount identities with the same captured old models."""
+        from types import MappingProxyType
+        import yaml
+        normalized = self._normalize(model)
+        self.current = MappingProxyType({name: normalized for name in model["services"]})
+        self.changed_services = frozenset(
+            name for name in model["services"] if name not in self.previous or
+            self._projection(yaml.safe_load(self.previous[name]), name) != self._projection(model, name))

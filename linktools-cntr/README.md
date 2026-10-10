@@ -233,113 +233,19 @@ ct-cntr repo validate --json
 ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意仓库更新失败或不兼容都会让命令非零退出
 ```
 
-## 容器事件时序
+## 容器操作时序
 
-linktools-cntr 通过一套生命周期事件系统统一管理容器的启动、停止流程。Manager 按依赖顺序对目标容器依次触发各阶段事件，再驱动 Docker Compose 执行。
+共享上下文为 `OperationContext`。容器使用已有的准备与检查回调，不再实现一套生成配置生命周期。
 
-> **target_containers**：默认为全部已安装容器；指定容器名（如 `ct-cntr up nginx`）时仅为指定的子集。
+`up`：确定范围 → `on_starting / BEFORE_START` → 准备镜像 → `on_check / CHECK` → 框架应用服务并确认就绪 → `on_started / AFTER_START`。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant CLI
-    participant ContainerManager
-    participant Container
+`restart` 在准备和检查全部通过后才停止显式目标；依赖方不进入显式停止集合。`down` 不准备启动配置或密钥。状态查询不调用有副作用的准备回调。
 
-    %% ─── 初始化 & 准备 ───
-    rect rgb(240, 240, 220)
-        Note over CLI,Container: 初始化阶段（每次执行任意 ct-cntr 命令）
-        User->>CLI: ct-cntr <command>
-        CLI->>ContainerManager: 扫描 container.py / docker-compose.yml
-        loop 每个容器
-            ContainerManager->>Container: on_init()
-        end
-    end
+准备阶段通过 `context.write_files(self, files)` 写入不可变候选文件；检查阶段验证相同输入。框架依据实际文件挂载和 Compose 模型决定哪些服务需要重建，并统一记录应用结果与恢复旧模型。普通配置部署不再对 Nginx 执行热加载；ACME 续期仍由证书脚本负责 reload。
 
-    rect rgb(230, 235, 245)
-        Note over CLI,Container: 准备阶段（up / restart / down / config / exec 等）
-        CLI->>ContainerManager: prepare_installed_containers()
-        ContainerManager->>ContainerManager: resolve_depend_containers()（依赖解析 & 排序）
-        loop 每个容器（逆序，低优先级先写默认配置）
-            ContainerManager->>Container: configs（写入全局默认配置）
-        end
-        loop 每个容器
-            ContainerManager->>Container: on_prepare()
-        end
-        loop 每个容器（正序）
-            ContainerManager->>Container: docker_file（渲染 Dockerfile 模板）
-            ContainerManager->>Container: docker_compose（渲染 docker-compose.yml 模板）
-            ContainerManager->>Container: hooks.call(AFTER_COMPOSE_RENDER, compose)
-        end
-    end
+容器组依赖用于选择参与服务，真正的启动先后由 Compose `depends_on` 等依赖决定。实际依赖环直接报错，不再自动使用 Bootstrap 配置。配置检查失败不停止旧服务；后置通知失败明确报告“已应用、后置处理失败”，不反向触发部署回滚。
 
-    %% ─── 启动流程 ───
-    rect rgb(220, 240, 220)
-        Note over CLI,Container: ct-cntr up
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_check(ctx)
-            ContainerManager->>Container: on_starting(ctx)
-            ContainerManager->>Container: hooks.call(BEFORE_START, ctx)（mkdir / chown / 写 Nginx 配置…）
-        end
-        ContainerManager->>ContainerManager: manager.hooks.call(BEFORE_START, ctx)
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose build / up --detach
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_started(ctx)
-        end
-        alt is_full_containers == True
-            ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
-        end
-    end
-
-    %% ─── 停止流程 ───
-    rect rgb(240, 220, 220)
-        Note over CLI,Container: ct-cntr down
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_stopping(ctx)
-        end
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose stop / down
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_stopped(ctx)
-            ContainerManager->>Container: hooks.call(AFTER_STOP, ctx)
-        end
-        ContainerManager->>ContainerManager: manager.hooks.call(AFTER_STOP, ctx)
-        alt is_full_containers == True
-            ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
-        end
-    end
-
-    %% ─── 重启流程 ───
-    rect rgb(235, 225, 245)
-        Note over CLI,Container: ct-cntr restart（= down 流程 + up 流程）
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_stopping(ctx)
-        end
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose stop
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_stopped(ctx)
-            ContainerManager->>Container: hooks.call(AFTER_STOP, ctx)
-        end
-        ContainerManager->>ContainerManager: manager.hooks.call(AFTER_STOP, ctx)
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_check(ctx)
-            ContainerManager->>Container: on_starting(ctx)
-            ContainerManager->>Container: hooks.call(BEFORE_START, ctx)
-        end
-        ContainerManager->>ContainerManager: manager.hooks.call(BEFORE_START, ctx)
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose build / up --detach
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_started(ctx)
-        end
-        alt is_full_containers == True
-            ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
-        end
-    end
-```
+详见 [生命周期与文件准备](docs/lifecycle.md)。
 
 ## 相关链接
 
@@ -362,8 +268,8 @@ return [
 `Flare.public` 创建带描述的应用；`Flare.bookmark` 支持自定义分区。
 使用 `Flare.category("tool", "工具", order=5)` 可进一步设置分区标题和顺序。
 域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
-共享声明位于 `integration/` 包中；具体配置生成、启动依赖和发布策略
-放在各自的 asset `container.py`，由 `Container` 的原生生命周期方法直接实现。
+共享声明位于 `integration/` 包中；容器在已有准备、检查回调中处理自己的输入，
+服务应用、文件变更判断和恢复统一由框架负责。
 导航 URL 不再负责注册代理。
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
 外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
