@@ -246,6 +246,25 @@ class TaskEngine(Generic[AppT]):
                 admitted=False,
             )
 
+    async def _prepare_trial_submission(
+        self, submission: TaskGraphSubmission,
+    ) -> tuple[TaskGraphSubmission, bool]:
+        runtime = self._runtime
+        runtime._ensure_open()
+        task_runtime = runtime._require_task_node_runtime()
+        activation = await task_runtime.activate_graph(
+            submission.graph, tuple(self._tasks.values()),
+            tuple(self._expanders.values()), track_pre_admission=True,
+        )
+        assert activation is not None
+        try:
+            return await self._graph_service.prepare_described_with_disposition(submission)
+        finally:
+            await task_runtime.finish_graph_activation(
+                submission.graph.graph_id, submission.ref.tenant_id,
+                activation, admitted=False,
+            )
+
     async def start_prepared(
         self, submission: TaskGraphSubmission,
     ) -> TaskSubmissionResult:

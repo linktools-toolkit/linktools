@@ -164,6 +164,22 @@ these logical identities consistently on every reopen. A score-only experiment
 has its own `experiment_id` while `trial` still identifies the source target.
 Physical host paths are deployment choices, not additional contract digests.
 
+Before entry, evaluation atomically prepares the native submission without
+launching its graph. `newly_prepared` is true only for the call that definitively
+created that submission. A host may use this one-time permission to initialize
+missing trial resources. Existing, cancelled, and uncertain-commit submissions
+return false: reopen retained resources or reject the entry with a diagnostic
+error instead of silently creating an empty replacement. The returned
+`submission` includes native input normalization and the frozen binding capture.
+This flag is call-local, not a lease, a liveness test, or an isolation guarantee.
+
+A crash after preparation but before resource creation intentionally leaves no
+new creation permission on retry. Restore the same logical resources before
+reconciling, or cancel the existing evaluation; cancellation does not need to
+open the resource context. Context-entry failure remains observable as
+`needs_attention`, and a new recovery key does not make the old trial fresh.
+Shared SQL does not transfer application-generated files between hosts.
+
 The yielded engine must belong to a separate Runtime with the same namespace,
 tenant, retained storage plan, and object-store identities as the coordinating
 Runtime. Use separate `RuntimeStorage.sql(shared_engine)` or SQLite wrappers,
