@@ -10,13 +10,13 @@ services:
         - cntr_acme_dns
 #   {% endif %}
     volumes:
-      - '{{ container.get_app_path("generated", "current") }}:/etc/nginx/cntr:ro'
+      - '{{ container.get_app_path("generated", "current") }}:/etc/nginx/managed:ro'
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
       - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
 #   {% if NGINX_HTTPS_ENABLE %}
       - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
 #   {% endif %}
-    command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/cntr/nginx.conf", "-g", "daemon off;"]
+    command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-g", "daemon off;"]
 #   {% if NGINX_HTTPS_ENABLE %}
     environment:
       NGINX_HTTPS_PORT: '{{ NGINX_HTTPS_PORT }}'
@@ -33,7 +33,7 @@ services:
       start_interval: 1s
     networks:
       nginx:
-#     {% if "safeline" in manager.installed_state.load_names() %}
+#     {% if containers["safeline"].enable %}
       safeline-ce:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.253'
         aliases:

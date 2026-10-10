@@ -274,3 +274,15 @@ return [
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
 外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
 详见 [集成协议与迁移说明](docs/integrations.md)。
+
+### Nginx 与 SafeLine 网络
+
+SafeLine 独立拥有 `safeline-ce` 网络，Tengine 和其他 SafeLine 服务只加入这个网络。
+启用 SafeLine 时，Nginx 额外加入该网络，固定为 `.253`；Tengine 固定为 `.254`。
+Nginx 保留自己的应用网络，但 Tengine 不加入它。网段沿用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.242`。
+
+回源契约仍是 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`，已有正确配置无需改名。
+固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。
+回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS；SafeLine 必须保留原始 Host 和 `X-Proxy-Original-*` 头。
+该端口不发布到宿主机，并只信任 Tengine 的精确地址。不能把回源指向 Nginx 的公开入口，否则会形成循环。
+详见 [网络与回源契约](docs/integrations.md#nginx-and-safeline-networks)。

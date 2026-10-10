@@ -38,6 +38,17 @@ def prepared_config(nginx):
     return dict(files, **{"nginx.conf": rendered})
 
 
+def test_waf_forwarding_and_origin_trust_use_only_tengine_peer(fresh_manager):
+    fresh_manager.env_config.set("SAFELINE_SUBNET_PREFIX", "172.29.171")
+    fresh_manager.env_config.set("NGINX_WAF_PORT", 8880)
+    nginx = fresh_manager.containers["nginx"]
+    rendered = nginx._render_site_template(nginx, nginx.get_source_path("templates", "server.conf"), make_site())
+    assert 'set $waf_target "http://172.29.171.254:8880";' in rendered
+    assert 'set_real_ip_from 172.29.171.254;' in rendered
+    assert 'if ($peer_address != "172.29.171.254") { return 403; }' in rendered
+    assert "set_real_ip_from 172.29.171.0/24" not in rendered
+
+
 def test_header_macros_merge_case_insensitively_and_preserve_native_values(fresh_manager, tmp_path):
     nginx = fresh_manager.containers["nginx"]
     source = tmp_path / "business.conf"
@@ -373,7 +384,8 @@ def test_generated_sites_are_self_contained_and_internal_names_are_purpose_speci
     assert "location = /_internal/auth" in rendered
     assert "location / {" in rendered
     assert "include sites/" not in rendered
-    assert "include /etc/nginx/cntr/sites/s_test.conf;" in files["nginx.conf"]
+    assert "include /etc/nginx/managed/sites/s_test.conf;" in files["nginx.conf"]
+    assert all("cntr" not in text for text in files.values())
     assert "map $server_port $original_uri" in files["nginx.conf"]
     assert "map $server_port $request_uri" not in files["nginx.conf"]
 

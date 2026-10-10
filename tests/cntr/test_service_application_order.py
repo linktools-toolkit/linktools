@@ -113,3 +113,32 @@ def test_started_dependency_does_not_require_one_shot_service_to_keep_running():
         "app": {"depends_on": ["job"]}}})
     runner.apply_service(context, "app")
     assert calls == ["apply"]
+
+
+@pytest.mark.parametrize("scale", [{"scale": 0}, {"deploy": {"replicas": 0}}])
+def test_zero_scale_service_reports_no_running_instances(scale):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("zero replicas must not wait for a container")
+    runner = ComposeRunner(SimpleNamespace(
+        docker_inspector=SimpleNamespace(get_project_state=unexpected)))
+    context = SimpleNamespace(project_containers=(), target_services=("job", "web"),
+                              compose_model={"services": {
+                                  "job": scale,
+                                  "web": {"depends_on": {"job": {"condition": "service_completed_successfully"}}}}})
+    assert runner.wait_service_ready(context, "job") is False
+
+
+@pytest.mark.parametrize("scale", [{"scale": 0}, {"deploy": {"replicas": 0}}])
+@pytest.mark.parametrize("condition", ["service_started", "service_healthy", "service_completed_successfully"])
+@pytest.mark.parametrize("restored", [False, True])
+def test_zero_scale_dependency_is_not_waited_for(scale, condition, restored):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Compose skips readiness for zero-replica dependencies")
+    runner = ComposeRunner(SimpleNamespace(
+        docker_inspector=SimpleNamespace(get_project_state=unexpected)))
+    runner.wait_service_healthy = unexpected
+    runner.wait_service_completed = unexpected
+    model = {"services": {"dependency": scale,
+                          "app": {"depends_on": {"dependency": {"condition": condition}}}}}
+    context = SimpleNamespace(project_containers=(), target_services=("dependency", "app"), compose_model=model)
+    runner.wait_service_dependencies(context, "app", model=model if restored else None)

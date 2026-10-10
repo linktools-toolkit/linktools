@@ -36,7 +36,6 @@ services:
       safeline-fvm:
         condition: service_started
     networks:
-      nginx:
       safeline-ce:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.4'
   safeline-detector:
@@ -48,7 +47,6 @@ services:
     environment:
       - LOG_DIR=/logs/detector
     networks:
-      nginx:
       safeline-ce:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.5'
   safeline-tengine:
@@ -78,7 +76,6 @@ services:
     ulimits:
       nofile: 131072
     networks:
-      nginx:
       safeline-ce:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.254'
   safeline-luigi:
@@ -116,7 +113,6 @@ services:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.10'
 
 networks:
-  nginx:
   safeline-ce:
     driver: bridge
     ipam:

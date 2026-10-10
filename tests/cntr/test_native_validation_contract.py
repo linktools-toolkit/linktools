@@ -37,6 +37,22 @@ def test_isolated_mount_override_replaces_only_certificate_volume():
     args = runner.isolated_service_args(
         model, "nginx", ("nginx", "-t"),
         mount_overrides={"/etc/certs": "/host/candidate"})
-    assert "type=bind,source=/host/candidate,target=/etc/certs,readonly" in args
+    assert "type=bind,source=/host/candidate,target=/etc/certs" in args
     assert "type=bind,source=/host/generated,target=/etc/nginx/generated,readonly" in args
     assert "/host/certs" not in " ".join(args)
+
+
+def test_isolated_override_preserves_readonly_configuration_and_secrets():
+    runner = ComposeRunner(SimpleNamespace(project_name="project"))
+    model = {
+        "services": {"nginx": {"image": "nginx:target", "volumes": [
+            {"type": "bind", "source": "/host/generated", "target": "/generated", "read_only": True},
+        ], "secrets": [{"source": "dns"}], "configs": [{"source": "config"}]}},
+        "secrets": {"dns": {"file": "/host/dns.env"}},
+        "configs": {"config": {"file": "/host/config"}},
+    }
+    args = runner.isolated_service_args(
+        model, "nginx", ("nginx", "-t"), mount_overrides={"/generated": "/host/candidate"})
+    assert "type=bind,source=/host/candidate,target=/generated,readonly" in args
+    assert "type=bind,source=/host/dns.env,target=/run/secrets/dns,readonly" in args
+    assert "type=bind,source=/host/config,target=/config,readonly" in args

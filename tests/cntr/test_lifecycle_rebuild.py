@@ -129,7 +129,7 @@ class Runner:
         return {name: context.service_models.previous[name]
                 for name in order_service_subset(context.project_containers, specifications)}
 
-    def apply_saved_services(self, context, services, files):
+    def apply_saved_services(self, context, services, files, *, image_ids=None):
         self.manager.events.append(("restore", tuple(services)))
         if self.restore_fails:
             raise ContainerError("restore failed")

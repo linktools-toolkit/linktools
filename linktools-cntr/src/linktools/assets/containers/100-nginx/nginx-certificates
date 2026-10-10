@@ -52,8 +52,8 @@ publish() {
 reload_tls() (
     directory="$versions/$1"
     verify "$directory" || return 1
-    nginx -p /etc/nginx/ -c /etc/nginx/cntr/nginx.conf -t || return 1
-    nginx -p /etc/nginx/ -c /etc/nginx/cntr/nginx.conf -s reload || return 1
+    nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t || return 1
+    nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -s reload || return 1
     expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256) || return 1
     deadline=$(($(date +%s) + 30))
     while test "$(date +%s)" -lt "$deadline"; do

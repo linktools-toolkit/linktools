@@ -418,7 +418,7 @@ def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monk
     selected = ComposeSelection(explicit.project_containers,
                                 (fresh_manager.containers["authelia"], fresh_manager.containers["portainer"]),
                                 ("authelia-redis", "portainer", "authelia"), False)
-    monkeypatch.setattr(operations, "start_selection", lambda selection: selected)
+    monkeypatch.setattr(operations, "start_selection", lambda selection, **kwargs: selected)
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
     plan = fresh_manager.planner.plan("up", ["portainer"])
     assert [command.args[-1] for command in plan.commands if command.phase == "up"] == list(selected.services)
@@ -437,3 +437,33 @@ def test_plan_loads_artifact_index_once_per_call(fresh_manager, monkeypatch):
         plan = fresh_manager.planner.plan(action)
         assert len(plan.artifacts) > 1
     assert len(loads) == 2
+
+
+def test_plan_reports_unresolved_native_profile_selection(fresh_manager, monkeypatch):
+    from linktools.cntr.runtime.structured import StructuredCommandError
+
+    def unresolved(*args, **kwargs):
+        raise StructuredCommandError("native profile resolution unavailable")
+
+    monkeypatch.setattr(fresh_manager.compose_operations, "start_selection", unresolved)
+    plan = fresh_manager.planner.plan("restart")
+    assert plan.commands == ()
+    assert plan.hooks == ()
+    assert any("profile selection could not be resolved" in warning for warning in plan.warnings)
+
+
+def test_plan_restart_stop_hooks_match_resolved_active_services(fresh_manager, monkeypatch):
+    from linktools.cntr._operations import ComposeSelection
+    selection = fresh_manager.compose_operations.select(for_start=True)
+    active = selection.project_containers[0]
+    resolved = ComposeSelection(selection.project_containers, (active,), tuple(active.services), True)
+    def start_selection(*args, **kwargs):
+        assert kwargs["privilege"] is False
+        return resolved
+
+    monkeypatch.setattr(fresh_manager.compose_operations, "start_selection", start_selection)
+    seen = []
+    monkeypatch.setattr(fresh_manager.lifecycle, "iter_steps", lambda *a, **kw: seen.append(kw["stop_containers"]) or ())
+    plan = fresh_manager.planner.plan("restart")
+    assert seen == [(active,)]
+    assert plan.commands[0].args[-len(active.services):] == tuple(active.services)

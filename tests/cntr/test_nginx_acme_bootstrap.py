@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,6 +132,40 @@ def test_check_uses_revision_specific_state(certificate_case):
     assert (base / revision / "live").is_symlink()
     assert (base / revision / "live/example.test_key.pem").is_file()
     assert (seed / "acme/account.key").read_text() == "existing-account"
+
+
+def test_https_validation_uses_writable_disposable_certificate_tree(certificate_case, monkeypatch):
+    container, _, base, _, _, _ = certificate_case
+    assert any(mount.endswith(":/etc/certs")
+               for mount in container.docker_compose["services"]["nginx"]["volumes"])
+    generated = base.parent / "generated"
+    credentials = base.parent / "dns.env"
+    model = {"services": {"nginx": {"image": "nginx:target", "volumes": [
+        {"type": "bind", "source": str(base), "target": "/etc/certs"},
+        {"type": "bind", "source": str(generated), "target": "/etc/nginx/managed", "read_only": True},
+        {"type": "bind", "source": str(credentials), "target": "/run/acme-secrets", "read_only": True},
+    ]}}}
+    observed = []
+
+    def execute(args, **kwargs):
+        mounts = [args[index + 1] for index, arg in enumerate(args) if arg == "--mount"]
+        certs = next(mount for mount in mounts if "target=/etc/certs" in mount)
+        assert not certs.endswith(",readonly")
+        source = Path(certs.split("source=", 1)[1].split(",", 1)[0])
+        assert source != base
+        assert not any("source=" + str(base) + "," in mount for mount in mounts)
+        assert (source / container.cert_image_revision / "previous").is_dir()
+        assert "type=bind,source={},target=/etc/nginx/managed,readonly".format(generated) in mounts
+        assert "type=bind,source={},target=/run/acme-secrets,readonly".format(credentials) in mounts
+        assert "/usr/local/bin/nginx-certificates check && " in args[-1]
+        observed.append(source)
+        return SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(container.runtime, "create_docker_process", lambda *args, **kwargs: args)
+    monkeypatch.setattr(container.manager.structured_runner, "execute", execute)
+    container.on_check(SimpleNamespace(compose_model=model))
+    assert len(observed) == 1
+    assert not observed[0].exists()
 
 
 def test_new_revision_does_not_modify_older_certificate(certificate_case):

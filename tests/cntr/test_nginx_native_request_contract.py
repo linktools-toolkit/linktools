@@ -134,7 +134,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         root = render("nginx.conf", SimpleNamespace(vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
         # The fixture changes only sandbox resources and loopback endpoint addresses.
         root = root.replace("include /etc/nginx/mime.types;", "")
-        root = root.replace("/etc/nginx/cntr/", str(tmp_path) + "/")
+        root = root.replace("/etc/nginx/managed/", str(tmp_path) + "/")
         root = root.replace("/var/log/nginx/error.log", str(tmp_path / "error.log"))
         root = root.replace("/var/log/nginx/access.log", str(tmp_path / "access.log"))
         root = root.replace("/var/run/nginx.pid", str(tmp_path / "nginx.pid"))
@@ -382,7 +382,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
             SimpleNamespace(vars={"generation_id": "native", "waf": False,
                                   "site_files": ("sites/shared.conf",)}))
         root = root.replace("include /etc/nginx/mime.types;", "")
-        root = root.replace("/etc/nginx/cntr/", str(tmp_path) + "/")
+        root = root.replace("/etc/nginx/managed/", str(tmp_path) + "/")
         root = root.replace("/var/log/nginx/error.log", str(tmp_path / "error.log"))
         root = root.replace("/var/log/nginx/access.log", str(tmp_path / "access.log"))
         root = root.replace("/var/run/nginx.pid", str(tmp_path / "nginx.pid"))

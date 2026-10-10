@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
-from ..runtime.structured import redact_command
+from ..runtime.structured import StructuredCommandError, redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
 if TYPE_CHECKING:
@@ -56,7 +56,12 @@ class ExecutionPlanner:
         # network access/hook registration) just to describe what a real
         # up/restart/down would do.
         selection = manager.compose_operations.select(names, metadata_only=True, for_start=action != "down")
-        start_selection = manager.compose_operations.start_selection(selection) if action != "down" else selection
+        unresolved_selection = False
+        try:
+            start_selection = manager.compose_operations.start_selection(selection, privilege=False) if action != "down" else selection
+        except (StructuredCommandError, OSError):
+            unresolved_selection = True
+            start_selection = selection
 
         candidates = collect_candidates(manager, selection.project_containers)
         artifact_index = manager.artifact_index.load()
@@ -75,9 +80,12 @@ class ExecutionPlanner:
 
         commands = []
         services = list(selection.services)
-        if action == "restart" and (selection.full or services):
-            commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
-        if action in ("up", "restart"):
+        stop_services = ()
+        if not unresolved_selection and action == "restart" and (selection.full or services):
+            stop_services = tuple(service for service in start_selection.services
+                                  if selection.full or service in services)
+            commands.append(self._planned_command("stop", [*file_args, "stop", *stop_services]))
+        if not unresolved_selection and action in ("up", "restart"):
             services_to_start = start_selection.services
             for service in services_to_start:
                 commands.append(self._planned_command(
@@ -87,8 +95,13 @@ class ExecutionPlanner:
 
         hooks = []
         lifecycle_action = "up" if action == "restart" and not selection.full and not services else action
-        for step in manager.lifecycle.iter_steps(
-                lifecycle_action, start_selection.target_containers, stop_containers=selection.target_containers):
+        stop_containers = selection.target_containers
+        if action == "restart":
+            stop_containers = tuple(container for container in selection.target_containers
+                                    if set(container.services).intersection(stop_services))
+        steps = () if unresolved_selection else manager.lifecycle.iter_steps(
+            lifecycle_action, start_selection.target_containers, stop_containers=stop_containers)
+        for step in steps:
             if step.phase is None:
                 continue
             owner = step.container if step.container is not None else manager
@@ -106,6 +119,9 @@ class ExecutionPlanner:
                 ))
 
         warnings = []
+        if unresolved_selection:
+            warnings.append("Compose profile selection could not be resolved; startup commands and hooks "
+                            "are omitted until native Compose configuration is available.")
         if action in ("up", "restart"):
             warnings.append("Only selected services, their requirements and running declared consumers are applied. "
                             "Prepared file content changes recreate affected consumers; ordinary configuration "

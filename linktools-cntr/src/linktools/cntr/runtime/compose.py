@@ -166,16 +166,33 @@ class ComposeRunner:
     def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
         return ComposeOptions(pull=pull, services=list(services))
 
-    def final_model(self, context: "OperationContext") -> "dict[str, Any]":
+    def final_model(self, context: "OperationContext", preserve_disabled: bool = False,
+                    privilege: "bool | None" = None) -> "dict[str, Any]":
         from ..artifacts import collect_candidates
         files = [content for kind, owner, content in collect_candidates(
             self.manager, context.project_containers).values() if kind == "compose"]
         if not files:
             from ..errors import ContainerError
             raise ContainerError("No Compose files in selected project")
+        services = ()
+        if not context.is_full_project and any(
+                spec.get("profiles") for container in context.project_containers for spec in container.services.values()):
+            services = context.target_services or ()
         with self._saved_compose_args(context, files) as args:
-            return self._resolved_model(self.manager.runtime.create_docker_process(
-                *args, *self.config_args(output_format="json"), capture_output=True))
+            model = self._resolved_model(self.manager.runtime.create_docker_process(
+                *args, *self.config_args(services=services, output_format="json"), privilege=privilege, capture_output=True))
+            if preserve_disabled:
+                # Native un-interpolated output retains disabled services without
+                # loading their env_files. Keep those definitions for orphan detection.
+                complete = self._resolved_model(self.manager.runtime.create_docker_process(
+                    *args, *self.config_args(output_format="json"), "--no-interpolate", privilege=privilege, capture_output=True))
+                for name, value in model.items():
+                    if isinstance(value, dict) and isinstance(complete.get(name), dict):
+                        complete[name].update(value)
+                    else:
+                        complete[name] = value
+                model = complete
+            return model
     def _resolved_model(self, process: "Process") -> "dict[str, Any]":
         result = self.manager.structured_runner.execute_json(process, check=True)
         if not isinstance(result, dict) or not isinstance(result.get("services"), dict):
@@ -247,11 +264,11 @@ class ComposeRunner:
                 source = model.get("volumes", {}).get(source, {}).get("name", source)
             target = raw(mount["target"])
             if target in overrides:
-                value = "type=bind,source={},target={},readonly".format(overrides.pop(target), target)
+                value = "type=bind,source={},target={}".format(overrides.pop(target), target)
             else:
                 value = "type={},source={},target={}".format(mount["type"], raw(source), target)
-                if mount.get("read_only"):
-                    value += ",readonly"
+            if mount.get("read_only"):
+                value += ",readonly"
             args.extend(["--mount", value])
         if overrides:
             raise ValueError("No resolved service mount for " + ", ".join(overrides))
@@ -370,6 +387,10 @@ class ComposeRunner:
                 raise ContainerError("Service {} did not become healthy".format(service))
             time.sleep(0.5)
 
+    @staticmethod
+    def _is_scaled_to_zero(spec: "Mapping[str, Any]") -> bool:
+        return spec.get("scale") == 0 or spec.get("deploy", {}).get("replicas") == 0
+
     def wait_service_dependencies(self, context: "OperationContext", service: str,
                                   model: "dict[str, Any] | None" = None) -> None:
         """Use the executing model's conditions without imposing a task deadline."""
@@ -378,6 +399,8 @@ class ComposeRunner:
         if model is None:
             model = getattr(context, "compose_model", None) or self.final_model(context)
         for dependency, options in service_dependencies(model["services"][service]).items():
+            if self._is_scaled_to_zero(model["services"].get(dependency, {})):
+                continue
             condition = options.get("condition", "service_started")
             if (options.get("required", True) is False and
                     dependency not in (getattr(context, "target_services", None) or ())):
@@ -464,13 +487,31 @@ class ComposeRunner:
         from ..errors import ContainerError
 
         # Past service ownership comes from captured declarations, not today's owners.
-        models = {}
+        models, pinned = {}, set()
+        actual = getattr(context, "initial_runtime_state", None)
+        namespaces = {item.service: item.namespace_bindings for item in actual.services
+                      if getattr(item, "namespace_bindings", None) is not None} if actual is not None else {}
         for path, text in context.previous_compose_contents.items():
             try:
                 data = yaml.safe_load(text) or {}
             except yaml.YAMLError:
                 continue
             if isinstance(data, dict) and isinstance(data.get("services", {}), dict):
+                for service, spec in data.get("services", {}).items():
+                    bindings = namespaces.get(service)
+                    if bindings is not None and isinstance(spec, dict):
+                        replacement = dict(spec)
+                        for field in ("network_mode", "ipc", "pid", "volumes_from"):
+                            if field not in bindings:
+                                replacement.pop(field, None)
+                                continue
+                            value = bindings[field]
+                            shared = (bool(value) if field == "volumes_from" else
+                                      str(value).startswith(("service:", "container:")))
+                            if field in replacement or shared:
+                                replacement[field] = value
+                        data["services"][service] = replacement
+                        pinned.add(path)
                 models[path] = data
         included, checked = set(), set()
         queue = list(services)
@@ -516,7 +557,8 @@ class ComposeRunner:
                     continue
                 included.add(path)
                 missing.difference_update(resources)
-        return [text for path, text in context.previous_compose_contents.items() if path in included]
+        return [yaml.safe_dump(models[path]) if path in pinned else text
+                for path, text in context.previous_compose_contents.items() if path in included]
 
     def saved_service_models(self, context: "OperationContext",
                              services: "Sequence[str]") -> "dict[str, str]":
@@ -535,14 +577,15 @@ class ComposeRunner:
                     old_files = self._legacy_rollback_files(context, services)
                     with self._saved_compose_args(context, old_files) as args:
                         legacy = self._resolved_model(self.manager.runtime.create_docker_process(
-                            *args, *self.config_args(output_format="json"), capture_output=True))
+                            *args, *self.config_args(services=services, output_format="json"), capture_output=True))
                 model = legacy
                 text = yaml.safe_dump(model)
             texts[service] = text
             specifications[service] = model["services"][service]
         return {service: texts[service] for service in order_service_subset(context.project_containers, specifications)}
     def apply_saved_services(self, context: "OperationContext", services: "Sequence[str]",
-                             files: "dict[str, str]") -> None:
+                             files: "dict[str, str]", *,
+                             image_ids: "Mapping[str, str] | None" = None) -> None:
         import yaml
         from ..errors import ContainerError
         services = tuple(dict.fromkeys(services))
@@ -552,14 +595,14 @@ class ComposeRunner:
             raise ContainerError("No saved Compose files available")
         overlay = {}
         for service in services:
-            image = context.initial_running_images.get(service)
+            image = (context.initial_running_images if image_ids is None else image_ids).get(service)
             if not image:
                 raise ContainerError("No original image ID for service " + service)
             overlay[service] = {"image": image}
         contents = [*files.values(), yaml.safe_dump({"services": overlay})]
         with self._saved_compose_args(context, contents) as args:
             model = self._resolved_model(self.manager.runtime.create_docker_process(
-                *args, *self.config_args(output_format="json"), capture_output=True))
+                *args, *self.config_args(services=services, output_format="json"), capture_output=True))
             specifications = {service: model["services"][service] for service in services}
             for service in order_service_subset(context.project_containers, specifications):
                 self.wait_service_dependencies(context, service, model=model)
@@ -593,6 +636,8 @@ class ComposeRunner:
         from ..errors import ContainerError
         if model is None:
             model = context.compose_model
+        if self._is_scaled_to_zero(model["services"][service]):
+            return False
         completed = any(
             service_dependencies(spec).get(service, {}).get("condition") == "service_completed_successfully"
             for name, spec in model["services"].items()

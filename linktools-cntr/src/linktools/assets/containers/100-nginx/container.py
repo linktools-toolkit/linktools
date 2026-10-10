@@ -204,7 +204,7 @@ class Container(BaseContainer):
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
         runner = self.manager.compose_runner
-        command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/cntr/nginx.conf", "-t")
+        command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
                 source = self.get_app_path("certs", self.cert_image_revision, "live").resolve()
@@ -217,7 +217,7 @@ class Container(BaseContainer):
                         shutil.copy2(str(path), str(previous / path.name))
                 result = runner.validate_service(context, "nginx", (
                     "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
-                    "exec nginx -p /etc/nginx/ -c /etc/nginx/cntr/nginx.conf -t"),
+                    "exec nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t"),
                     mount_overrides={"/etc/certs": directory}, check=False)
         else:
             result = runner.validate_service(context, "nginx", command, check=False)
@@ -469,13 +469,16 @@ class Container(BaseContainer):
             lock_path = self.get_app_path("certs", ".acme.lock")
             with FileLock(str(lock_path)):
                 self.runtime.chmod(lock_path, 0o600)
+                legacy = None
                 if ("nginx" in context.initial_existing_services and
                         not os.path.lexists(str(self.get_app_path("generated", "current")))):
-                    self._preserve_legacy_files()
-                account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
+                    legacy = self._preserve_legacy_files()
+                    self._preserve_legacy_compose(context, legacy)
                 previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
                                           for item in context.initial_runtime_state.services
                                           if item.service == "nginx"), None)
+                account = (legacy / "acme" if legacy is not None and previous_revision is None else
+                           self.get_app_path("certs", self.cert_image_revision, "live", "acme"))
                 if not account.is_dir() and previous_revision is not None:
                     if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):
                         raise ContainerError("Invalid running nginx certificate revision")
@@ -483,7 +486,7 @@ class Container(BaseContainer):
                 if not account.is_dir():
                     account = self.get_app_path("certs", "live", "acme")
                 if not account.is_dir():
-                    account = self.get_app_path("acme")
+                    account = legacy / "acme" if legacy is not None else self.get_app_path("acme")
                 archive = self.get_app_path("acme-build-account.tar")
                 with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
                     temporary = stream.name
@@ -501,24 +504,57 @@ class Container(BaseContainer):
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
         context.write_files(self, result)
-    def _preserve_legacy_files(self) -> None:
+    def _preserve_legacy_compose(self, context: "OperationContext", backup: Path) -> None:
+        import yaml
+        for path, text in tuple(context.previous_compose_contents.items()):
+            if context.compose_owners.get(path) != self.name:
+                continue
+            data = yaml.safe_load(text)
+            if not isinstance(data, dict):
+                continue
+            service = data.get("services", {}).get("nginx")
+            if not isinstance(service, dict):
+                continue
+            volumes = list(service.get("volumes") or ())
+            targets = set()
+            for volume in volumes:
+                if isinstance(volume, dict):
+                    targets.add(volume.get("target"))
+                elif isinstance(volume, str):
+                    parts = volume.rsplit(":", 2)
+                    target = parts[-1]
+                    if not target.startswith("/") and len(parts) > 1:
+                        target = parts[-2]
+                    targets.add(target)
+            additions = [{"type": "bind", "source": str(backup / name), "target": target}
+                         for name, target in (("certs", "/etc/certs"), ("acme", "/root/.acme.sh"))
+                         if target not in targets]
+            if additions:
+                service["volumes"] = volumes + additions
+                context.previous_compose_contents[path] = yaml.safe_dump(data)
+
+    def _preserve_legacy_files(self) -> Path:
         import shutil
         import tempfile
         from pathlib import Path
-        backup = self.get_app_path("migration-backup")
-        if not backup.exists():
-            temporary = Path(tempfile.mkdtemp(
-                prefix="migration-backup-", dir=str(self.get_app_path())))
-            self.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
-            for source, name in (("/etc/certs/.", "certs"), ("/root/.acme.sh/.", "acme")):
-                destination = temporary / name
-                destination.mkdir()
-                self.runtime.create_docker_process("cp", "{}:{}".format(
-                    self.get_service_name("nginx"), source), str(destination)).check_call()
-            previous = self.get_app_path("conf.d")
-            if previous.exists():
-                shutil.copytree(str(previous), str(temporary / "conf.d"), symlinks=True)
-            os.rename(str(temporary), str(backup))
+        # A prior snapshot may already be mounted by the restored legacy service.
+        backup = Path(tempfile.mkdtemp(prefix="migration-backup-", dir=str(self.get_app_path())))
+        self.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
+        for source, name in (("/etc/certs/.", "certs"), ("/root/.acme.sh/.", "acme")):
+            destination = backup / name
+            destination.mkdir()
+            service = self.get_service_name("nginx")
+            process = self.runtime.create_docker_process(
+                "cp", "{}:{}".format(service, source), str(destination), capture_output=True)
+            result = self.manager.structured_runner.execute(process, check=False)
+            if not result.succeeded:
+                missing = "Error response from daemon: Could not find the file {} in container {}".format(
+                    source, service)
+                if result.stderr.strip() != missing:
+                    raise ContainerError("Cannot preserve legacy nginx {}: {}".format(source, result.stderr.strip()))
+        previous = self.get_app_path("conf.d")
+        if previous.exists():
+            shutil.copytree(str(previous), str(backup / "conf.d"), symlinks=True)
         if (self.manager.system in ("darwin", "linux") and self.manager.uid != 0
                 and self.manager.container_type == "docker"):
             # sudo docker cp preserves private modes but makes copied files root-owned.
@@ -541,3 +577,4 @@ class Container(BaseContainer):
                     destination.mkdir()
                 else:
                     shutil.copy2(str(path), str(destination))
+        return backup

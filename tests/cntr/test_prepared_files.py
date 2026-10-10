@@ -30,7 +30,8 @@ class Index:
 def owner(tmp_path):
     manager = SimpleNamespace(data_path=tmp_path, artifact_index=Index())
     root = tmp_path / "app/auth"
-    return SimpleNamespace(name="auth", manager=manager, get_app_path=lambda *parts: root.joinpath(*parts),
+    return SimpleNamespace(name="auth", services={"auth": {}, "admin": {}}, manager=manager,
+                           get_app_path=lambda *parts: root.joinpath(*parts),
                            runtime=SimpleNamespace(chmod=lambda path, mode: os.chmod(path, mode)))
 
 
@@ -134,6 +135,19 @@ def test_acl_change_recreates_only_its_actual_consumer(owner):
     assert new_model["services"]["auth"]["volumes"][1] != old.compose_model["services"]["auth"]["volumes"][1]
 
 
+def test_inactive_profile_input_is_not_rebound_or_required_in_active_prepared_tree(owner):
+    ctx = context(owner, full=True)
+    ctx.target_services = ("auth",)
+    candidate = ctx.write_files(owner, {"base.yml": "current", "acl.yml": "allow"})
+    desired = model(owner)
+    inactive = desired["services"]["admin"]
+    inactive["profiles"] = ["debug"]
+    inactive["volumes"][0]["source"] = str(owner.get_app_path("generated/current/old.yml"))
+    bound = bind_prepared_files(ctx, desired, {})
+    assert bound["services"]["admin"] == inactive
+    assert bound["services"]["auth"]["volumes"][0]["source"] == str(candidate / "base.yml")
+
+
 def test_no_change_reuses_identical_paths_and_model(owner):
     first = context(owner)
     first.write_files(owner, {"base.yml": "same", "acl.yml": "same"})
@@ -190,13 +204,14 @@ def test_unselected_legacy_consumer_keeps_current_pointer(owner):
     assert Path(ctx.compose_model["services"]["auth"]["volumes"][0]["source"]).read_text() == "new"
 
 
-def _apply_prepared(owner, value, services, running=(), desired_services=(), full=False):
+def _apply_prepared(owner, value, services, running=(), desired_services=(), full=False, declared_services=()):
     ctx = context(owner, full=full)
     ctx.target_services = tuple(services)
     ctx.initial_running_services = frozenset(running)
     ctx.write_files(owner, {"base.yml": value, "acl.yml": value})
     desired = model(owner)
     desired["services"] = {name: desired["services"][name] for name in desired_services or services}
+    owner.services = {name: {} for name in declared_services or desired["services"]}
     models = AppliedServiceModels(owner.manager, desired, retained_services=running)
     ctx.compose_model = bind_prepared_files(ctx, desired, models.previous)
     ctx.service_models = models
@@ -301,6 +316,41 @@ def test_full_apply_retires_orphan_before_publishing_and_cleanup(owner, known_or
         assert not orphan_input.exists()
         orphan_entry = str((orphan_input / "base.yml").relative_to(owner.manager.data_path))
         assert orphan_entry not in owner.manager.artifact_index.load()
+
+
+@pytest.mark.parametrize("source", ["generated", "generated/current", "generated/current/base.yml"])
+def test_full_apply_preserves_defined_unapplied_legacy_consumer(owner, source):
+    original = stage_files(owner, {"base.yml": "A", "acl.yml": "A"})
+    owner.get_app_path("generated/current").symlink_to(original.name)
+    legacy = model(owner)
+    legacy["services"]["admin"]["volumes"] = [
+        {"type": "bind", "source": str(owner.get_app_path(source)), "target": "/legacy"}]
+    AppliedServiceModels(owner.manager, legacy).record(("auth", "admin"))
+    for value in ("B", "C", "D"):
+        ctx = _apply_prepared(owner, value, ("auth",), running=("auth", "admin"), full=True,
+                              declared_services=("auth", "admin"))
+        assert owner.get_app_path("generated/current").resolve() == original
+        assert owner.get_app_path("generated/current/base.yml").read_text() == "A"
+        assert Path(ctx.compose_model["services"]["auth"]["volumes"][0]["source"]).read_text() == value
+
+
+def test_full_apply_retains_unknown_running_disabled_profile_inputs(owner):
+    first = _apply_prepared(owner, "A", ("auth",))
+    original = first.prepared_dirs["auth"]
+    unknown_input = stage_files(owner, {"base.yml": "untracked", "acl.yml": "untracked"})
+    entry = str((unknown_input / "base.yml").relative_to(owner.manager.data_path))
+    for value in ("B", "C", "D"):
+        ctx = _apply_prepared(owner, value, ("auth",), running=("auth", "admin"), full=True,
+                              declared_services=("auth", "admin"))
+        assert ctx.service_models.untracked_services == {"admin"}
+        assert owner.get_app_path("generated/current").resolve() == original
+        assert unknown_input.exists() and original.exists()
+        assert entry in owner.manager.artifact_index.load()
+        assert Path(ctx.compose_model["services"]["auth"]["volumes"][0]["source"]).read_text() == value
+
+    removed = _apply_prepared(owner, "E", ("auth",), running=("auth", "admin"), full=True)
+    assert owner.get_app_path("generated/current").resolve() == removed.prepared_dirs["auth"]
+    assert not unknown_input.exists()
 
 
 def test_snapshot_restore_does_not_undo_successful_sibling(owner):

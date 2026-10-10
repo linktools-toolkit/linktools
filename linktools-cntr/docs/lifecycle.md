@@ -29,6 +29,13 @@ Container requirements select what participates; only Compose
 service dependency edges determine startup order. A real Compose dependency cycle
 is an error. There is no implicit bootstrap configuration.
 
+Compose resolves profiles before startup hooks. Full-project operations apply only
+active services; explicit service selection enables its profiles through native
+Compose. Disabled definitions remain available for orphan detection, while their
+running containers and existing generated inputs stay unchanged unless a real
+dependency action requires rebinding. A plan that cannot resolve native profiles
+reports the unresolved selection rather than guessing startup commands.
+
 The operation then runs:
 
 1. `on_starting`, container `BEFORE_START`, manager `BEFORE_START`: prepare build
@@ -46,6 +53,9 @@ The operation then runs:
 were not explicitly selected are not included in the stop set. `down` only uses
 the stop callbacks and performs no start preparation, build or native check.
 Status reads metadata and actual state without invoking preparation callbacks.
+Partial `up` warns before changing a service outside the explicitly requested
+containers, identifying the action and dependency/configuration reason. Unchanged
+services produce no such warning; recovery reports additional actions when needed.
 
 Existing callbacks are retained for loading, stopping and removal. The former
 `on_prepare` side-effectful loading hook is removed. The existing seven
@@ -90,6 +100,12 @@ stopped services not yet reapplied, and related consumers sharing a changed file
 input. Newly started related consumers without a prior instance are stopped.
 Independent successful siblings are retained. Initial migration may read old saved Compose files, but
 new operations do not write a second container-level applied snapshot.
+Live namespace consumers are rebound after a retained provider changes, even if
+an independent service later fails. Restoring a live consumer may temporarily
+start its previously stopped namespace provider with the old model and image;
+the provider is stopped again after recovery. Interrupting deployment runs
+recovery before propagating the interrupt; interrupting recovery itself stops
+that attempt immediately and may leave it incomplete.
 
 Running new containers bind immutable inputs, not `generated/current`. The latter
 is a convenience reference, updated after successful application and not changed

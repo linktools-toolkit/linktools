@@ -289,6 +289,8 @@ def bind_prepared_files(context: "OperationContext", model: dict,
              for container in context.project_containers if container.name in context.prepared_dirs]
     services = dict(model["services"])
     for service, spec in model["services"].items():
+        if context.target_services is not None and service not in context.target_services:
+            continue
         old = yaml.safe_load(previous[service])["services"][service] if service in previous else {}
         old_mounts = {item["target"]: item for item in old.get("volumes", ())
                       if isinstance(item, dict) and item.get("type") == "bind"}
@@ -328,6 +330,14 @@ def bind_prepared_files(context: "OperationContext", model: dict,
     return dict(model, services=services)
 
 
+def _unapplied_running_services(context: "OperationContext", services: "Iterable[str]") -> "set[str]":
+    unapplied = set(context.initial_running_services) - set(services)
+    if context.is_full_project:
+        declared = {service for container in context.project_containers for service in container.services}
+        unapplied.intersection_update(declared)
+    return unapplied
+
+
 def publish_prepared_files(context: "OperationContext", services: "Iterable[str]") -> None:
     """Expose confirmed inputs for later read-only Compose rendering.
 
@@ -339,7 +349,7 @@ def publish_prepared_files(context: "OperationContext", services: "Iterable[str]
     from pathlib import Path
 
     services = tuple(services)
-    unapplied = set() if context.is_full_project else set(context.initial_running_services) - set(services)
+    unapplied = _unapplied_running_services(context, services)
     if unapplied.intersection(context.service_models.untracked_services):
         # Without a saved model, any generated tree may still be mounted.
         return
@@ -386,7 +396,8 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
     import yaml
     from pathlib import Path
 
-    if not context.is_full_project and models.untracked_services.difference(context.target_services or ()):
+    unapplied = _unapplied_running_services(context, context.target_services or ())
+    if models.untracked_services.intersection(unapplied):
         return
     references = []
     for collection in (models.current, models.previous):

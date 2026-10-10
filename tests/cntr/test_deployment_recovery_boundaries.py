@@ -271,3 +271,505 @@ def test_unknown_untouched_service_does_not_use_pending_dependency(tmp_path):
     manager.compose_operations.up(["db"])
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["db"]
     assert not any(event[0] in ("restore", "restart") for event in manager.events)
+
+
+@pytest.mark.parametrize("phase", ["apply", "ready"])
+def test_restart_interrupt_restores_pending_services_and_reraises_original(tmp_path, phase):
+    manager = setup_case(tmp_path, [
+        ("app", {name: {"image": name + ":new"} for name in ("first", "second", "third")}),
+    ], running=("first", "second", "third"))
+    interrupt = KeyboardInterrupt()
+    method = "apply_service" if phase == "apply" else "wait_service_ready"
+    original = getattr(manager.compose_runner, method)
+
+    def interrupted(context, service, *args, **kwargs):
+        if service == "second" and kwargs.get("model") is None:
+            raise interrupt
+        return original(context, service, *args, **kwargs)
+
+    setattr(manager.compose_runner, method, interrupted)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        manager.compose_operations.restart(["app"])
+    assert caught.value is interrupt
+    assert [event[1] for event in manager.events if event[0] == "restore"] == [("second",), ("third",)]
+    assert manager.running_state.get_persisted() == ["app"]
+    snapshots = AppliedServiceModels(manager, manager.model).previous
+    for name, version in (("first", "new"), ("second", "old"), ("third", "old")):
+        assert yaml.safe_load(snapshots[name])["services"][name]["image"] == name + ":" + version
+
+
+def test_restart_interrupt_during_partial_stop_restores_only_stopped_services(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("app", {name: {"image": name + ":new"} for name in ("first", "second")}),
+    ], running=("first", "second"))
+    initial = manager.docker_inspector.get_project_state(None)
+    observed = deepcopy(initial)
+    observed.services[0].state = "exited"
+    interrupt = KeyboardInterrupt()
+
+    def interrupted(context, services):
+        manager.docker_inspector.get_project_state = lambda containers: observed
+        raise interrupt
+
+    manager.compose_runner.stop = interrupted
+    with pytest.raises(KeyboardInterrupt) as caught:
+        manager.compose_operations.restart(["app"])
+    assert caught.value is interrupt
+    assert [event[1] for event in manager.events if event[0] == "restore"] == [("first",)]
+    assert not any(event[0] == "apply" for event in manager.events)
+
+
+def test_deployment_recovery_remains_interruptible(tmp_path):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}})], running=("app",))
+    first, second = KeyboardInterrupt("deploy"), KeyboardInterrupt("recovery")
+
+    def interrupted(context, service, recreate=False):
+        raise first
+
+    def interrupted_recovery(context, services, files):
+        raise second
+
+    manager.compose_runner.apply_service = interrupted
+    manager.compose_runner.apply_saved_services = interrupted_recovery
+    with pytest.raises(KeyboardInterrupt) as caught:
+        manager.compose_operations.restart(["app"])
+    assert caught.value is second
+
+
+def test_interrupted_deployment_reports_recovery_failure(tmp_path):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}})], running=("app",))
+    interrupt = KeyboardInterrupt()
+
+    def interrupted(context, service, recreate=False):
+        raise interrupt
+
+    manager.compose_runner.apply_service = interrupted
+    manager.compose_runner.restore_fails = True
+    with pytest.raises(ContainerError, match="Operation failed: KeyboardInterrupt; recovery failed: restore failed") as caught:
+        manager.compose_operations.restart(["app"])
+    assert caught.value.__cause__ is interrupt
+
+
+def stopped_provider_case(tmp_path, binding):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:local"}}),
+        ("net", {"net": dict(binding, image="net:local")}),
+        ("child", {"child": {"image": "child:local", "network_mode": "service:net"}}),
+        ("stopped", {"stopped": {"image": "stopped:local", "network_mode": "service:db"}}),
+    ], running=("net", "child"))
+    AppliedServiceModels(manager, manager.model).record(("db", "net", "child", "stopped"))
+    manager.model["services"]["db"]["environment"] = {"VERSION": "new"}
+    actual = manager.docker_inspector.get_project_state(None)
+    actual.services += (SimpleNamespace(service="db", state="exited", image_id="sha256:stopped-db",
+                                       labels={}, health=None, exit_code=0),)
+    return manager
+
+
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("binding", [
+    {"network_mode": "service:db"}, {"ipc": "service:db"},
+    {"pid": "service:db"}, {"volumes_from": ["db:ro"]},
+])
+def test_stopped_provider_replacement_rebinds_live_namespace_consumers(tmp_path, full, binding):
+    manager = stopped_provider_case(tmp_path, binding)
+    manager.compose_operations.up(None if full else ["db"])
+    if full:
+        assert ("apply", "net", True) in manager.events
+        assert ("apply", "child", True) in manager.events
+    else:
+        assert [event[1] for event in manager.events if event[0] == "restore"] == [("net",), ("child",)]
+        assert not any(event[0] == "apply" and event[1] == "stopped" for event in manager.events)
+
+
+@pytest.mark.parametrize("provider_running", [False, True])
+@pytest.mark.parametrize("failed_running", [False, True])
+def test_later_failure_rebinds_dependents_of_retained_successful_provider(tmp_path, provider_running, failed_running):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:new"}}),
+        ("net", {"net": {"image": "net:new", "network_mode": "service:db"}}),
+        ("child", {"child": {"image": "child:new", "network_mode": "service:net"}}),
+        ("fail", {"fail": {"image": "fail:new"}}),
+    ], running=("net", "child") + (("db",) if provider_running else ()) + (("fail",) if failed_running else ()))
+    manager.compose_runner.fail = "fail"
+    with pytest.raises(ContainerError, match="apply failed fail"):
+        manager.compose_operations.up(["db", "fail"])
+    restored = [event[1] for event in manager.events if event[0] == "restore"]
+    assert ("net",) in restored and ("child",) in restored
+    assert ("db",) not in restored
+    snapshots = AppliedServiceModels(manager, manager.model).previous
+    assert yaml.safe_load(snapshots["db"])["services"]["db"]["image"] == "db:new"
+
+
+@pytest.mark.parametrize("binding", [
+    {"network_mode": "service:db"}, {"ipc": "service:db"},
+    {"pid": "service:db"}, {"volumes_from": ["db:ro"]},
+])
+def test_failed_stopped_provider_restores_live_bindings_then_stops_old_provider(tmp_path, binding):
+    manager = stopped_provider_case(tmp_path, binding)
+    manager.compose_runner.fail = "db"
+    restore = manager.compose_runner.apply_saved_services
+    stop = manager.compose_runner.stop
+    active = {"net", "child"}
+    original_contexts = []
+
+    def restore_with_dependencies(context, services, files, *, image_ids=None):
+        service, = services
+        if service == "db":
+            assert image_ids[service] == "sha256:stopped-db"
+            assert service not in context.initial_running_images
+            assert yaml.safe_load(next(iter(files.values())))["services"][service].get("environment") is None
+            original_contexts.append(context)
+        if service == "net":
+            assert "db" in active
+        if service == "child":
+            assert "net" in active
+        restore(context, services, files, image_ids=image_ids)
+        active.update(services)
+
+    def stop_after_rebinding(context, services):
+        if "db" in services:
+            assert ("restore", ("child",)) in manager.events
+        stop(context, services)
+        active.difference_update(services)
+
+    manager.compose_runner.apply_saved_services = restore_with_dependencies
+    manager.compose_runner.stop = stop_after_rebinding
+    with pytest.raises(ContainerError, match="apply failed db"):
+        manager.compose_operations.up(["db"])
+    assert [event[1] for event in manager.events if event[0] == "restore"] == [("db",), ("net",), ("child",)]
+    assert active == {"net", "child"}
+    assert manager.running_state.get_persisted() == ["child", "net"]
+    assert original_contexts and "db" not in original_contexts[0].initial_running_images
+
+
+@pytest.mark.parametrize("missing", ["image", "model"])
+def test_stopped_namespace_provider_requires_recovery_input_before_mutation(tmp_path, missing):
+    manager = stopped_provider_case(tmp_path, {"network_mode": "service:db"})
+    if missing == "image":
+        manager.docker_inspector.get_project_state(None).services[-1].image_id = None
+    else:
+        snapshots = AppliedServiceModels(manager, manager.model)
+        Path(snapshots._path("db")).unlink()
+    with pytest.raises(ContainerError, match="original image ID|Missing restore input"):
+        manager.compose_operations.up(["db"])
+    assert not any(event[0] in ("apply", "stop", "restore") for event in manager.events)
+
+
+def test_failed_temporary_provider_recovery_stops_it_again(tmp_path):
+    manager = stopped_provider_case(tmp_path, {"network_mode": "service:db"})
+    manager.compose_runner.fail = "db"
+    restore = manager.compose_runner.apply_saved_services
+
+    def fail_dependent_restore(context, services, files, *, image_ids=None):
+        if "net" in services:
+            raise ContainerError("dependent restore failed")
+        restore(context, services, files, image_ids=image_ids)
+
+    manager.compose_runner.apply_saved_services = fail_dependent_restore
+    with pytest.raises(ContainerError, match="recovery failed: dependent restore failed"):
+        manager.compose_operations.up(["db"])
+    assert ("stop", ("db",)) in manager.events
+    assert manager.running_state.get_persisted() == ["child", "net"]
+
+
+def test_explicit_recovery_image_ids_do_not_change_initial_running_images(tmp_path):
+    commands = []
+    files = []
+
+    def process(*args, **kwargs):
+        commands.append(args)
+        files.append([Path(args[index + 1]).read_text() for index, value in enumerate(args[:-1]) if value == "--file"])
+        return SimpleNamespace(check_call=lambda: 0)
+
+    runner = ComposeRunner(SimpleNamespace(data_path=tmp_path, project_name="test",
+                                            runtime=SimpleNamespace(create_docker_process=process)))
+    runner._resolved_model = lambda process: {"services": {"db": {"image": "sha256:old-stopped"}}}
+    runner.wait_service_dependencies = lambda *args, **kwargs: None
+    context = SimpleNamespace(initial_running_images={}, project_containers=())
+    runner.apply_saved_services(context, ("db",), {"old.yml": "services: {db: {image: mutable:tag}}"},
+                                image_ids={"db": "sha256:old-stopped"})
+    assert yaml.safe_load(files[-1][-1]) == {"services": {"db": {"image": "sha256:old-stopped"}}}
+    assert context.initial_running_images == {}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_recovery_configuration_explicitly_selects_profiled_service(tmp_path, legacy):
+    commands = []
+    model = {"services": {"optional": {"image": "optional:old", "profiles": ["debug"]}}}
+
+    def process(*args, **kwargs):
+        commands.append(args)
+        return SimpleNamespace(args=args, check_call=lambda: 0)
+
+    runner = ComposeRunner(SimpleNamespace(data_path=tmp_path, project_name="test",
+                                          runtime=SimpleNamespace(create_docker_process=process)))
+    runner._resolved_model = lambda process: model if process.args[-1] == "optional" else {"services": {}}
+    runner.wait_service_dependencies = lambda *args, **kwargs: None
+    context = SimpleNamespace(initial_running_images={"optional": "sha256:original"}, project_containers=(),
+                              service_models=SimpleNamespace(previous={}),
+                              previous_compose_contents={"old.yml": yaml.safe_dump(model)})
+    if legacy:
+        assert "optional" in runner.saved_service_models(context, ("optional",))
+    else:
+        runner.apply_saved_services(context, ("optional",), context.previous_compose_contents)
+    config = next(command for command in commands if "config" in command)
+    assert config[-4:] == ("config", "--format", "json", "optional")
+
+
+@pytest.mark.parametrize("binding", [None, {"network_mode": "service:db"},
+                                     {"depends_on": {"db": {"restart": True}}}])
+def test_legacy_capture_only_resolves_live_profiled_consumers_of_selected_provider(tmp_path, binding):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:new"}}),
+        ("optional", {"optional": {"image": "optional:new", "profiles": ["debug"]}}),
+    ], running=("db", "optional"))
+    old = deepcopy(manager.model)
+    old["services"]["db"]["image"] = "db:old"
+    old["services"]["optional"].update(binding or {"env_file": ["/missing.env"]})
+    optional_snapshot = AppliedServiceModels(manager, old)._path("optional")
+    Path(optional_snapshot).unlink()
+    (tmp_path / "compose" / "optional.yml").write_text(yaml.safe_dump(old))
+    manager.compose_runner.final_model = lambda context, preserve_disabled=False, privilege=None: deepcopy(
+        manager.model if preserve_disabled else {"services": {"db": manager.model["services"]["db"]}})
+    capture = manager.compose_runner.saved_service_models
+
+    def capture_needed(context, services):
+        if "optional" in services:
+            assert binding is not None, "unrelated disabled env_file must not be loaded"
+            context.service_models.retain_previous({"optional": yaml.safe_dump(old)})
+        return capture(context, services)
+
+    manager.compose_runner.saved_service_models = capture_needed
+    manager.compose_operations.up()
+    assert [event[1] for event in manager.events if event[0] == "apply"] == ["db"]
+    if binding and "network_mode" in binding:
+        assert ("restore", ("optional",)) in manager.events
+    elif binding:
+        assert ("restart", "optional") in manager.events
+    else:
+        assert not any(event[0] in ("restore", "restart") for event in manager.events)
+
+
+def legacy_labeled_case(tmp_path, binding, label, child_restart=False):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:new"}}),
+        ("worker", {"worker": {"image": "worker:new"}}),
+        ("child", {"child": {"image": "child:new"}}),
+    ], running=("db", "worker", "child"))
+    old = deepcopy(manager.model)
+    old["services"]["worker"].update(binding)
+    old["services"]["child"].update(network_mode="service:worker", depends_on={
+        "worker": {"condition": "service_started", "restart": child_restart}})
+    store = AppliedServiceModels(manager, old)
+    for name in ("worker", "child"):
+        Path(store._path(name)).unlink()
+        (tmp_path / "compose" / (name + ".yml")).write_text(yaml.safe_dump(old))
+    actual = manager.docker_inspector.get_project_state(None)
+    actual.services[1].labels["com.docker.compose.depends_on"] = label
+    actual.services[2].labels["com.docker.compose.depends_on"] = "worker:service_started:" + str(child_restart).lower()
+    actual.services[1].namespace_bindings = {"network_mode": "service:db"} if "network_mode" in binding else {}
+    actual.services[2].namespace_bindings = {"network_mode": "service:worker"}
+    manager.runtime = SimpleNamespace(create_docker_process=lambda *args, **kwargs: SimpleNamespace(args=args))
+    native = ComposeRunner(manager)
+
+    def resolve(process):
+        path = process.args[process.args.index("--file") + 1]
+        resolved = yaml.safe_load(Path(path).read_text())
+        if "network_mode" in binding:
+            assert resolved["services"]["worker"]["network_mode"] == "service:db"
+        return resolved
+
+    native._resolved_model = resolve
+
+    def capture(context, services):
+        manager.events.append(("capture-restore", tuple(services)))
+        return native.saved_service_models(context, services)
+
+    manager.compose_runner.saved_service_models = capture
+    return manager
+
+
+@pytest.mark.parametrize("label", ["db", "db:service_started", "db:service_started:true", "db:service_started:false"])
+def test_native_labels_capture_interpolated_namespace_and_then_its_child(tmp_path, label):
+    manager = legacy_labeled_case(tmp_path, {"network_mode": "${REVIEW_NETWORK_MODE}"}, label)
+    manager.compose_operations.up(["db"])
+    captures = [event[1] for event in manager.events if event[0] == "capture-restore"]
+    assert {"worker", "child"}.issubset(set().union(*captures))
+    assert [event[1] for event in manager.events if event[0] == "restore"] == [("worker",), ("child",)]
+
+
+@pytest.mark.parametrize("label", ["db:service_started:false", ""])
+def test_native_false_or_empty_dependency_label_does_not_capture_unrelated_legacy_consumer(tmp_path, label):
+    manager = legacy_labeled_case(tmp_path, {"depends_on": {"db": {"restart": False}},
+                                           "env_file": ["/missing.env"]}, label)
+    manager.compose_operations.up(["db"])
+    assert not any(event[0] in ("restore", "restart") for event in manager.events)
+    assert all(event[1] == ("db",) for event in manager.events if event[0] == "capture-restore")
+
+
+def test_native_implicit_restart_edge_restarts_child_without_recreating_namespace(tmp_path):
+    manager = legacy_labeled_case(tmp_path, {"depends_on": {"db": {"restart": True}}},
+                                 "db:service_started:true", child_restart=True)
+    manager.compose_operations.up(["db"])
+    assert [event[1] for event in manager.events if event[0] == "restart"] == ["worker", "child"]
+    assert not any(event[0] == "restore" for event in manager.events)
+
+
+def test_nonshared_runtime_namespace_and_false_restart_do_not_capture_dynamic_legacy_consumer(tmp_path):
+    manager = legacy_labeled_case(tmp_path, {"network_mode": "${REVIEW_NETWORK_MODE}",
+                                           "env_file": ["/missing.env"]}, "db:service_started:false")
+    manager.docker_inspector.get_project_state(None).services[1].namespace_bindings = {"network_mode": "host"}
+    manager.compose_operations.up(["db"])
+    assert all(event[1] == ("db",) for event in manager.events if event[0] == "capture-restore")
+
+
+@pytest.mark.parametrize("bindings", [
+    {}, {"network_mode": "host"}, {"network_mode": "bridge"},
+    {"network_mode": "service:db"}, {"network_mode": "container:external-db"},
+    {"volumes_from": ["db:ro", "container:external-db:rw"]},
+])
+def test_legacy_namespace_pinning_precedes_native_interpolation(tmp_path, bindings):
+    old = {"services": {"worker": {"image": "worker:old", "network_mode": "${CHANGED_MODE}",
+                                    "volumes_from": ["${CHANGED_VOLUME}"]}, "db": {"image": "db:old"}}}
+    runner = ComposeRunner(SimpleNamespace(data_path=tmp_path, project_name="test", runtime=SimpleNamespace(
+        create_docker_process=lambda *args, **kwargs: SimpleNamespace(args=args))))
+    context = SimpleNamespace(service_models=SimpleNamespace(previous={}), project_containers=(),
+                              previous_compose_contents={"old.yml": yaml.safe_dump(old)},
+                              initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(
+                                  service="worker", namespace_bindings=bindings),)))
+
+    def resolve(process):
+        path = process.args[process.args.index("--file") + 1]
+        model = yaml.safe_load(Path(path).read_text())
+        assert model["services"]["worker"] == dict(image="worker:old", **bindings)
+        return model
+
+    runner._resolved_model = resolve
+    recovered = yaml.safe_load(runner.saved_service_models(context, ("worker",))["worker"])
+    assert recovered["services"]["worker"] == dict(image="worker:old", **bindings)
+    assert context.previous_compose_contents["old.yml"] == yaml.safe_dump(old)
+
+
+def test_legacy_namespace_pinning_does_not_add_network_mode_to_networks_service(tmp_path):
+    old = {"services": {"worker": {"image": "worker:old", "networks": {"default": {}}}}}
+    runner = ComposeRunner(SimpleNamespace(data_path=tmp_path, project_name="test", runtime=SimpleNamespace(
+        create_docker_process=lambda *args, **kwargs: SimpleNamespace(args=args))))
+    context = SimpleNamespace(service_models=SimpleNamespace(previous={}), project_containers=(),
+                              previous_compose_contents={"old.yml": yaml.safe_dump(old)},
+                              initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(service="worker",
+                                  namespace_bindings={"network_mode": "test_default", "ipc": "private",
+                                                      "pid": "", "volumes_from": []}),)))
+    runner._resolved_model = lambda process: yaml.safe_load(Path(process.args[process.args.index("--file") + 1]).read_text())
+    assert yaml.safe_load(runner.saved_service_models(context, ("worker",))["worker"]) == old
+
+
+def test_second_interrupt_does_not_force_temporary_provider_cleanup(tmp_path):
+    manager = stopped_provider_case(tmp_path, {"network_mode": "service:db"})
+    manager.compose_runner.fail = "db"
+    restore = manager.compose_runner.apply_saved_services
+    interrupt = KeyboardInterrupt("cancel recovery")
+
+    def interrupted_restore(context, services, files, *, image_ids=None):
+        if "net" in services:
+            raise interrupt
+        restore(context, services, files, image_ids=image_ids)
+
+    manager.compose_runner.apply_saved_services = interrupted_restore
+    with pytest.raises(KeyboardInterrupt) as caught:
+        manager.compose_operations.up(["db"])
+    assert caught.value is interrupt
+    assert ("restore", ("db",)) in manager.events
+    assert not any(event[0] == "stop" for event in manager.events)
+    assert manager.running_state.get_persisted() == ["child", "db", "net"]
+
+
+def test_temporary_provider_cleanup_failure_preserves_both_recovery_errors(tmp_path):
+    manager = stopped_provider_case(tmp_path, {"network_mode": "service:db"})
+    manager.compose_runner.fail = "db"
+    restore = manager.compose_runner.apply_saved_services
+
+    def failed_restore(context, services, files, *, image_ids=None):
+        if "net" in services:
+            raise ContainerError("consumer restore failed")
+        restore(context, services, files, image_ids=image_ids)
+
+    def failed_stop(context, services):
+        raise ContainerError("provider stop failed")
+
+    manager.compose_runner.apply_saved_services = failed_restore
+    manager.compose_runner.stop = failed_stop
+    with pytest.raises(ContainerError, match="consumer restore failed; stopping temporary providers failed: provider stop failed"):
+        manager.compose_operations.up(["db"])
+    assert manager.running_state.get_persisted() == ["child", "db", "net"]
+
+
+def test_stopped_unrelated_service_does_not_add_a_recovery_requirement(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:new"}}),
+        ("net", {"net": {"image": "net:new"}}),
+    ], running=("net",))
+    actual = manager.docker_inspector.get_project_state(None)
+    actual.services += (SimpleNamespace(service="db", state="exited", image_id=None,
+                                       labels={}, health=None, exit_code=0),)
+    manager.compose_operations.up(["db"])
+    assert ("apply", "db", True) in manager.events
+
+
+def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("vpn", {"vpn": {"image": "vpn:new"}}),
+        ("db", {"db": {"image": "db:new", "network_mode": "service:vpn"}}),
+        ("net", {"net": {"image": "net:new", "network_mode": "service:db"}}),
+    ], running=("net",))
+    actual = manager.docker_inspector.get_project_state(None)
+    actual.services += tuple(SimpleNamespace(service=name, state="exited", image_id="sha256:old-" + name,
+                                             labels={}, health=None, exit_code=0) for name in ("db", "vpn"))
+    original = manager.compose_runner.saved_service_models
+    captured = []
+
+    def saved_models(context, services):
+        captured.extend(services)
+        known = tuple(service for service in services if service in context.service_models.previous)
+        results = original(context, known)
+        for service in services:
+            if service not in results:
+                results[service] = yaml.safe_dump(manager.model)
+        return results
+
+    manager.compose_runner.saved_service_models = saved_models
+    manager.compose_operations.up(["db"])
+    first_apply = next(index for index, event in enumerate(manager.events) if event[0] == "apply")
+    assert "db" in captured and "vpn" in captured
+    assert ("capture-restore", ("net",)) in manager.events[first_apply:]
+
+
+def test_recovery_metadata_failure_keeps_observed_restoration_state(tmp_path, monkeypatch):
+    manager = setup_case(tmp_path, [
+        (name, {name: {"image": name + ":new"}}) for name in ("first", "second")
+    ], running=("first", "second"))
+    manager.compose_runner.fail = "first"
+
+    def fail_snapshot_restore(self, services):
+        raise OSError("snapshot write failed")
+
+    monkeypatch.setattr(AppliedServiceModels, "restore", fail_snapshot_restore)
+    with pytest.raises(ContainerError, match="recovery failed: snapshot write failed"):
+        manager.compose_operations.restart(["first", "second"])
+    assert manager.running_state.get_persisted() == ["first"]
+
+
+def test_failed_recovery_does_not_retain_running_state_for_cleaned_new_peer(tmp_path):
+    shared = [{"type": "bind", "source": str(tmp_path / "new"), "target": "/config"}]
+    manager = setup_case(tmp_path, [
+        ("new", {"new": {"image": "new:local", "volumes": shared}}),
+        ("fail", {"fail": {"image": "fail:local", "volumes": shared}}),
+    ], running=("fail",))
+    old = deepcopy(manager.model)
+    old["services"]["fail"]["volumes"][0]["source"] = str(tmp_path / "old")
+    AppliedServiceModels(manager, old).record(("fail",))
+    manager.compose_runner.fail = "fail"
+    manager.compose_runner.restore_fails = True
+    with pytest.raises(ContainerError, match="recovery failed: restore failed"):
+        manager.compose_operations.up()
+    assert ("stop", ("new",)) in manager.events
+    assert "new" not in manager.running_state.get_persisted()

@@ -292,6 +292,44 @@ upstreams to Docker runtime DNS.
 
 ## Selection, publication and migration
 
+### Nginx and SafeLine networks
+
+SafeLine owns the `safeline-ce` bridge and its existing `SAFELINE_SUBNET_PREFIX`
+(default `172.22.242`). All SafeLine services, including Tengine and management,
+join only this bridge. When SafeLine is enabled, Nginx also joins it at `.253`,
+while retaining its own `nginx` bridge for application backends. Tengine keeps
+its fixed `.254` address. Nginx only references SafeLine's network; it does not
+own or redefine its IPAM. Dependency-only SafeLine installations use the same
+attachment rules as direct installations.
+
+The SafeLine origin contract remains `http://nginx:<NGINX_WAF_PORT>` (default
+`http://nginx:8000`). Compose supplies the `nginx` service DNS name on the shared
+bridge; `nginx-origin` is an optional additional alias. The fixed `.253`/`.254`
+addresses prevent either hop from retaining an obsolete peer IP after container
+recreation. A normal restart usually retains its endpoint; recreation replaces
+it. Neither service borrows the other's network namespace. Nginx's Unix-socket
+healthcheck does not wait for Tengine; only Tengine's startup dependency points
+to healthy Nginx.
+
+Public requests enter Nginx's HTTP/HTTPS listeners and WAF-protected requests
+are forwarded to Tengine at `.254:<NGINX_WAF_PORT>`. SafeLine returns them to
+Nginx's separate HTTP origin listener at `nginx:<NGINX_WAF_PORT>`. That listener
+runs the application/authentication routes without forwarding into WAF again.
+SafeLine must preserve the original Host and `X-Proxy-Original-*` metadata;
+Nginx validates those values and accepts them only from the exact Tengine peer,
+not the entire subnet. Pointing the origin at the public HTTP/HTTPS listener
+instead would create a forwarding loop. The WAF port is not published to the
+host. `SAFELINE_PORT=0` disables the optional management host port; its default
+remains `9200` mapped to `1443`.
+
+No new subnet setting or Nginx network recreation is required. Existing valid
+`http://nginx:<NGINX_WAF_PORT>` origins remain valid and are not rewritten.
+Changing `SAFELINE_SUBNET_PREFIX` separately remains a network migration, not a
+partial service update. Check it against host/VPN/other Docker routes before
+changing it. Scoped SafeLine removal does not remove a bridge still used by
+Nginx; after uninstalling SafeLine, reapplying Nginx without WAF removes its old
+attachment. The tool does not automatically tear down shared networks.
+
 `dependencies` defines required installed dependencies and startup order
 for an explicitly selected container. A different running service selected only
 for configuration reconciliation follows its own Compose service dependencies,

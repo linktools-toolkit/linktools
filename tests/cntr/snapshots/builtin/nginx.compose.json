@@ -27,7 +27,7 @@
         "-p",
         "/etc/nginx/",
         "-c",
-        "/etc/nginx/cntr/nginx.conf",
+        "/etc/nginx/managed/nginx.conf",
         "-g",
         "daemon off;"
       ],
@@ -50,7 +50,7 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx:5cc1b8c44f587744",
+      "image": "aio-nginx:fa7c4a5f0dab0c12",
       "logging": {
         "driver": "json-file",
         "options": {
@@ -72,7 +72,7 @@
       ],
       "restart": "unless-stopped",
       "volumes": [
-        "<APP_DATA>/nginx/generated/current:/etc/nginx/cntr:ro",
+        "<APP_DATA>/nginx/generated/current:/etc/nginx/managed:ro",
         "<APP_DATA>/nginx/certs:/etc/certs",
         "<APP_DATA>/nginx/acme:/root/.acme.sh",
         "<APP_DATA>/nginx/acme-secrets:/run/acme-secrets:ro"
