@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.integration import load_config_url, load_nginx_url, load_port_url
+from linktools.cntr.ext import load_config_url, load_nginx_url, load_port_url
 from linktools.runtime import Proxy
 
 

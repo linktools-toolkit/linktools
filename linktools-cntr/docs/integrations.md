@@ -1,7 +1,7 @@
 # Container integrations
 
 `integrations` returns a flat list of `Integration` declarations. Each declaration
-identifies its consumer. `NginxSite` identifies a site by
+identifies its consumer. `Nginx` identifies a site by
 `(producer.name, local_id)`; the local ID is a nonempty string. Consumers
 read the complete installed declaration snapshot, even for partial operations.
 Unknown consumer names are errors. Known optional consumers that are not
@@ -9,7 +9,7 @@ installed do not consume declarations.
 
 ```python
 from linktools.cntr import Flare, Integrations, Nginx
-from linktools.cntr.integration import load_port_url
+from linktools.cntr.ext import load_port_url
 
 
 @cached_property
@@ -33,18 +33,18 @@ def integrations(self) -> "Integrations":
 ```
 
 `Nginx` and `Flare` provide the declaration factories. `Nginx.site(...)` returns
-a `NginxSite`; `Flare.public(...)` and `Flare.bookmark(...)` return a `FlareLink`.
-The `integration/` package owns these factories and public declaration types, also
+a `Nginx`; `Flare.public(...)` and `Flare.bookmark(...)` return a `Flare`.
+The `ext/` package owns these factories and public declaration types, also
 re-exported from `linktools.cntr`. `Integration` declares public `consumer` and
 `local_id` metadata. A declaration with `requires_local_id=True` must supply a
 nonempty local ID, including nginx site declarations.
-`NginxSite.consumer` is `"nginx"`; `FlareLink.consumer` is `"flare"`. New
+`Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`. New
 consumer-specific subclasses set their own `consumer` name and optionally a
 `local_id`. `Integrations` is the Python 3.6-compatible alias
 `Iterable[Integration]`: return a finite list, tuple, or iterator of declarations.
 The former consumer-keyed mappings and nested named mappings are not accepted.
 
-`NginxSite.local_id` defaults to `"web"`. Give additional sites explicit IDs,
+`Nginx.local_id` defaults to `"web"`. Give additional sites explicit IDs,
 for example `Nginx.site("api.example.com", local_id="api")`. IDs must be nonempty
 strings and unique for each `(producer, consumer)` pair. Different producers or
 consumers can reuse the same ID. Flare links have no local ID and do not need
@@ -62,14 +62,14 @@ The generic `iter_integrations` filters by the declaration's consumer and yields
 `(producer, declaration.local_id, declaration)`. It returns only explicit
 declarations for an installed consumer; unnamed declarations have `local_id=None`.
 
-`NginxSite.expose` optionally attaches a `FlareLink` for navigation. Omitting
+`Nginx.expose` optionally attaches a `Flare` for navigation. Omitting
 its URL lazily inherits the resolved site's URL. Explicit `None` or `""` disables
 the link; an explicit URL stays unchanged. An omitted URL on a standalone link
 has no site to inherit from and is skipped. The link's category is presentation
 metadata, not an authentication policy; there is no `public` site boolean.
 Sites without `expose` create no navigation.
 
-Standalone `FlareLink` values in the list supply independent navigation entries.
+Standalone `Flare` values in the list supply independent navigation entries.
 Use `Flare.public(name, icon, desc, url)` for application entries; their
 descriptions are included in `apps.yml`. Use
 `Flare.bookmark(name, icon, url, category="tool")` for bookmarks, which do not
@@ -77,7 +77,7 @@ need an application description. A custom string category creates a bookmark
 group with that ID and title. The standard IDs `private`, `container`, and
 `other` use their predefined titles and orders; omitting `category` uses `other`.
 
-Pass a `FlareCategory` created by
+Pass the internal category value created by
 `Flare.category(name, desc=None, *, apps=False, order=None)` instead of a string
 to customize a bookmark group's title or order. Custom categories default to
 their ID as the title and order 100; smaller order values come first. Calling
@@ -104,15 +104,15 @@ order. A custom app category created with `Flare.category(..., apps=True)` is
 callable as `category(name, icon, desc, url)` to create application links.
 `Flare.bookmark` requires a bookmark category; app categories are rejected.
 The old `ExposeCategory` and `ExposeLink` names are removed; use `Nginx` and
-`Flare` factories for declarations, and `FlareCategory` and `FlareLink` for value
-types. The former `exposes` property
+`Flare` factories for declarations. `NginxSite`, `FlareLink`, and `FlareCategory`
+are not public exports. The former `exposes` property
 and `self.expose_*` helpers are removed without aliases or fallbacks.
 Links keep their category, name, icon, description and lazy URL; direct-port,
 external and non-HTTP links do not need an nginx site. Flare preserves container
 `order` (and snapshot order for ties). Within each producer, attached links follow
 nginx declaration order, then independent links follow their declaration order.
 App links keep traversal order across all app categories;
-`FlareCategory.order` applies to bookmark categories. Links within each bookmark
+Category `order` applies to bookmark categories. Links within each bookmark
 category keep traversal order.
 Flare merges these two inputs itself; the manager's `iter_integrations` returns
 only explicit declarations. It skips empty URLs and rejects conflicting
@@ -137,10 +137,10 @@ APP_DOMAIN = ConfigField(provider=Nginx.domain(self))
 It keeps the shared nginx root-domain, wildcard and disabled-provider behavior.
 The former `BaseContainer.get_nginx_domain` method is removed.
 
-Import the URL factories from `linktools.cntr.integration` and pass the owning container:
+Import the URL factories from `linktools.cntr.ext` and pass the owning container:
 
 ```python
-from linktools.cntr.integration import load_config_url, load_nginx_url, load_port_url
+from linktools.cntr.ext import load_config_url, load_nginx_url, load_port_url
 
 load_config_url(self, "APP_URL", "ui", queries={"mode": "compact"})
 load_port_url(self, "APP_PORT", "ui", https=False)
@@ -179,14 +179,38 @@ templates retain only the explicit context described below.
   authentication; bypass and explicit native auth-off preserve client tokens
 - `auth_rule` is an optional native Authelia rule; a literal domain is filled in
   when omitted. Pattern domains need an explicit native domain/domain_regex
-- `oidc_redirects`: absolute URI, empty string for the exact public URL, or a
-  root-relative path. Protocol-relative URLs and fragments are rejected
 - Only a single literal hostname implies a public URL. Pattern/default sites
   need explicit `url`; navigation placeholders such as `{{port}}` remain literal
 - `cert_domains` declares additional certificate names; `vars` owns business
   template variables
 
-Authelia exposes a read-only `oidc_client` mapping with `client_id`,
+## Authelia OIDC callbacks
+
+Declare callbacks independently of nginx sites:
+
+```python
+from linktools.cntr.ext import Authelia, load_nginx_url
+
+Authelia.oidc(
+    redirect_uris=(load_nginx_url(self, "web", "sso/callback"),),
+    enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
+)
+```
+
+`Authelia.oidc` contributes URLs to the existing shared client; it never declares
+a second client or changes client IDs, credentials, scopes, or authorization policy.
+Use lazy URL/config references to defer evaluation. Disabled declarations do not
+resolve callbacks. Empty URLs are omitted, including disabled optional services;
+nonempty callbacks must be absolute and have no fragment or template placeholder.
+Provider-specific URI rules remain subject to [native Authelia validation](https://www.authelia.com/configuration/identity-providers/openid-connect/clients/#redirect_uris).
+Deduplication preserves exact strings and order,
+including path, query, and trailing slash differences.
+
+Move former `Nginx.site(..., oidc_redirects=...)` values to an `Authelia.oidc`
+declaration. Replace empty/root-relative site callbacks with explicit lazy public
+URLs, and keep existing enable conditions for optional services.
+
+The built-in Authelia exposes a read-only `oidc_client` mapping with `client_id`,
 `client_name`, `client_secret`, `issuer_url`, `authorization_url`, `token_url`,
 `userinfo_url`, `user_identifier`, and tuple `scopes`/`redirect_uris`. Consumers
 must not mutate or restore historical derived ACL/OIDC settings.
@@ -282,3 +306,11 @@ Container declarations remain independent of execution. Prepared files, checks,
 service recreation, recovery and ACME handling are specified in
 [the lifecycle contract](lifecycle.md). There is no separate generated-config
 or bootstrap interface on BaseContainer.
+
+## Module path migration
+
+Import extension declarations and URL factories from `linktools.cntr.ext`.
+Downstream code using the former `linktools.cntr.integration` package must update
+its imports; the former package is not retained as a compatibility alias.
+The `integrations` declaration property and existing root-level declaration exports
+keep their names and behavior.

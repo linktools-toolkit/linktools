@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 def render_template(container: "BaseContainer", source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
-    from .. import integration
+    from .. import ext
 
     config = container.env_config
 
@@ -64,7 +64,7 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         docker_user=container.get_config_later("DOCKER_USER"),
 
         utils=utils,
-        urls=integration,
+        urls=ext,
         mkdir=mkdir,
         chown=chown,
         chmod=chmod,

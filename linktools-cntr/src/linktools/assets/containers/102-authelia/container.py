@@ -13,7 +13,7 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
-from linktools.cntr.integration import load_nginx_url
+from linktools.cntr.ext import Authelia, load_nginx_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -128,11 +128,12 @@ class Container(BaseContainer):
     @cached_property
     def oidc_redirects(self) -> "tuple[str, ...]":
         redirects = [self._oidc_identity["issuer_url"]]
-        for site in self.containers["nginx"].sites.values():
-            if site.enabled:
-                for redirect in site.oidc_redirects:
-                    if redirect not in redirects:
-                        redirects.append(redirect)
+        for producer, _, declaration in self.manager.iter_integrations("authelia"):
+            if not isinstance(declaration, Authelia):
+                raise ContainerError("Invalid Authelia declaration in " + producer.name)
+            for redirect in declaration.redirect_uris:
+                if redirect not in redirects:
+                    redirects.append(redirect)
         return tuple(redirects)
 
     @cached_property

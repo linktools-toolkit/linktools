@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Lazy URL references exported through the integration package."""
+"""Lazy URL references exported through the extension package."""
 from typing import TYPE_CHECKING
 
 from linktools import utils

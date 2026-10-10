@@ -73,8 +73,10 @@ def test_authelia_never_rotates_existing_secret_or_jwks(tmp_path, monkeypatch):
 
 def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
     module = builtin("102-authelia")
-    site = SimpleNamespace(enabled=True, oidc_redirects=("https://app.test", "https://app.test"))
-    container = instance(module, project_name="project", containers={"nginx": SimpleNamespace(sites={"app": site})})
+    from linktools.cntr.ext import Authelia
+    declaration = Authelia.oidc(("https://app.test", "https://app.test"))
+    container = instance(module, project_name="project")
+    container.manager.iter_integrations = lambda consumer: iter(((SimpleNamespace(name="app"), None, declaration),))
     monkeypatch.setitem(container.__dict__, "public_url", "https://sso.test")
     monkeypatch.setattr(container, "get_config", lambda key: "saved-secret")
     client = container.oidc_client
@@ -94,9 +96,9 @@ def test_portainer_callback_declaration_is_lazy_and_auth_conditioned(monkeypatch
         return key == "PORTAINER_AUTH_ENABLE"
     monkeypatch.setattr(container, "get_config", config)
     monkeypatch.setattr(container, "get_config_later", lambda key: "portainer.test")
-    declaration = next(value for value in container.integrations if value.consumer == "nginx")
+    declaration = next(value for value in container.integrations if value.consumer == "authelia")
     assert calls == ["PORTAINER_AUTH_ENABLE"]
-    assert tuple(declaration.oidc_redirects) == ()
+    assert declaration.redirect_uris == ()
     assert calls == ["PORTAINER_AUTH_ENABLE", "PORTAINER_AUTH_ENABLE", "NGINX_AUTH_ENABLE"]
 
 

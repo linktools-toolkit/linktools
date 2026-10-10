@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from typing import Optional
 
 
-class FlareCategory:
+class _FlareCategory:
     """A Flare display group with an explicit output area and bookmark order."""
 
     def __init__(self, name: str, desc: str, *, apps: bool = False, order: int = 100) -> None:
@@ -19,15 +19,15 @@ class FlareCategory:
         self.apps = apps
         self.order = order
 
-    def __call__(self, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> "FlareLink":
-        return FlareLink(self, name, icon, desc or name, url)
+    def __call__(self, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> "Flare":
+        return Flare(self, name, icon, desc or name, url)
 
 
-class FlareLink(Integration):
+class Flare(Integration):
     consumer = "flare"
 
-    def __init__(self, category: "FlareCategory", name: str, icon: str, desc: str, url: "str | None" = MISSING) -> None:
-        self.category = category
+    def __init__(self, category: "_FlareCategory", name: str, icon: str, desc: str, url: "str | None" = MISSING) -> None:
+        self.display_category = category
         self.name = name
         self.icon = icon
         self.desc = desc
@@ -39,50 +39,42 @@ class FlareLink(Integration):
             return None
         return str(self._url)
 
-    def with_default_url(self, url: str) -> "FlareLink":
+    def with_default_url(self, url: str) -> "Flare":
         """Bind only an omitted URL, preserving explicit empty/None values."""
         if self._url is not MISSING:
             return self
-        return FlareLink(self.category, self.name, self.icon, self.desc, url)
+        return Flare(self.display_category, self.name, self.icon, self.desc, url)
 
-    @property
-    def is_valid(self) -> bool:
-        return not not self.url
-
-
-class Flare:
-    """Factories for Flare applications, bookmarks, and display categories."""
-
-    _public = FlareCategory("public", "Public", apps=True)
+    _public = _FlareCategory("public", "Public", apps=True)
     _bookmarks = {
-        "private": FlareCategory("private", "Private", order=10),
-        "container": FlareCategory("container", "Internal", order=20),
-        "other": FlareCategory("other", "Tools", order=30),
+        "private": _FlareCategory("private", "Private", order=10),
+        "container": _FlareCategory("container", "Internal", order=20),
+        "other": _FlareCategory("other", "Tools", order=30),
     }
 
     @classmethod
-    def public(cls, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> FlareLink:
+    def public(cls, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> "Flare":
         """Declare an application with a description."""
         return cls._public(name, icon, desc, url)
 
     @classmethod
     def category(cls, name: str, desc: "Optional[str]" = None, *,
-                 apps: bool = False, order: "Optional[int]" = None) -> FlareCategory:
+                 apps: bool = False, order: "Optional[int]" = None) -> _FlareCategory:
         """Select a standard bookmark group or declare a custom display group."""
         existing = cls._bookmarks.get(name)
         if existing is not None and desc is None and not apps and order is None:
             return existing
-        return FlareCategory(name, name if desc is None else desc,
+        return _FlareCategory(name, name if desc is None else desc,
                              apps=apps, order=100 if order is None else order)
 
     @classmethod
     def bookmark(cls, name: str, icon: str, url: "str | None" = MISSING, *,
-                 category: "str | FlareCategory" = "other") -> FlareLink:
+                 category: "str | _FlareCategory" = "other") -> "Flare":
         """Declare a bookmark using a category ID or explicit display group."""
         if isinstance(category, str):
             category = cls.category(category)
-        if not isinstance(category, FlareCategory):
-            raise TypeError("bookmark category must be a string or FlareCategory")
+        if not isinstance(category, _FlareCategory):
+            raise TypeError("bookmark category must be a string or _FlareCategory")
         if category.apps:
             raise ValueError("bookmark category must use the bookmarks output area")
-        return FlareLink(category, name, icon, name, url)
+        return Flare(category, name, icon, name, url)

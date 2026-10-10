@@ -3,6 +3,6 @@
 """Docker container management (``ct-cntr``): public entry points."""
 
 from .container import ContainerError, BaseContainer, SourceContainer
-from .integration import Integration, Integrations, Nginx, NginxSite, Flare, FlareLink, FlareCategory
+from .ext import Integration, Integrations, Nginx, Flare, Authelia
 from .manager import ContainerManager
 from .context import OperationContext

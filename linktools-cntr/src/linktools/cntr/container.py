@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from typing import AbstractSet, Any, Mapping
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
-    from .integration import Integrations
+    from .ext import Integrations
     from .manager import ContainerManager
     from .context import OperationContext
     from .repo.context import RepositoryConfigContext

@@ -14,7 +14,7 @@ def test_navigation_attached_to_nginx_site_refreshes_running_flare(tmp_path):
         ("nginx", {"nginx": {"image": "nginx:new"}}),
         ("flare", {"flare": {"image": "flare:new"}}),
     ], running=("nginx", "flare"))
-    # NginxSite carries an attached FlareLink through its public expose field.
+    # Nginx carries an attached Flare through its public expose field.
     manager.integration_snapshot["app"] = (
         SimpleNamespace(consumer="nginx", expose=SimpleNamespace(consumer="flare")),
     )

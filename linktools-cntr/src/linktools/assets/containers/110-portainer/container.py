@@ -7,7 +7,7 @@ from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.runtime import lazy_load
 from linktools.cntr import BaseContainer, Flare, Nginx
-from linktools.cntr.integration import load_port_url
+from linktools.cntr.ext import Authelia, load_nginx_url, load_port_url
 
 if TYPE_CHECKING:
     from linktools.cntr import Integrations
@@ -38,8 +38,10 @@ class Container(BaseContainer):
                 proxy="http://portainer:9000",
                 auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
-                oidc_redirects=lazy_load(lambda: ("",) if (
-                    self.get_config("PORTAINER_AUTH_ENABLE")
-                    and self.get_config("NGINX_AUTH_ENABLE")) else ()),
+            ),
+            Authelia.oidc(
+                (load_nginx_url(self, "web"),),
+                enabled=lazy_load(lambda: self.get_config("PORTAINER_AUTH_ENABLE")
+                                  and self.get_config("NGINX_AUTH_ENABLE")),
             ),
         ]

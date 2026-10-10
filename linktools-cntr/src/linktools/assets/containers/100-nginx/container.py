@@ -22,7 +22,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from types import SimpleNamespace
-    from linktools.cntr.integration import ResolvedSite
+    from linktools.cntr.ext import ResolvedSite
     from collections.abc import Iterable, Sequence
     from typing import AbstractSet, Any, Mapping
     from linktools.cntr import OperationContext

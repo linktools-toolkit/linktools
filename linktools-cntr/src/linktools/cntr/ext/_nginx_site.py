@@ -14,14 +14,14 @@ from linktools.types import MISSING
 if TYPE_CHECKING:
     from typing import Any, Optional
     from ..container import BaseContainer
-    from ._flare import FlareLink
-    from ._nginx import NginxSite
+    from ._flare import Flare
+    from ._nginx import Nginx
 
 
 class ResolvedSite:
     """A command-local lazy view shared by navigation and configuration consumers."""
 
-    def __init__(self, producer: "BaseContainer", local_id: str, declaration: "NginxSite") -> None:
+    def __init__(self, producer: "BaseContainer", local_id: str, declaration: "Nginx") -> None:
         self.producer = producer
         self.local_id = local_id
         self.identity = (producer.name, local_id)
@@ -41,15 +41,15 @@ class ResolvedSite:
         return str(value)
 
     @cached_property
-    def expose(self) -> "Optional[FlareLink]":
-        from ._flare import FlareLink
+    def expose(self) -> "Optional[Flare]":
+        from ._flare import Flare
         from linktools.runtime import lazy_load
 
         value = self._declaration.expose
         if value is None:
             return None
-        if not isinstance(value, FlareLink):
-            self._error("expose must be a FlareLink or None")
+        if not isinstance(value, Flare):
+            self._error("expose must be a Flare or None")
         return value.with_default_url(lazy_load(lambda: self.get_url(default="")))
 
     @cached_property
@@ -179,32 +179,6 @@ class ResolvedSite:
         return MappingProxyType(rule)
 
     @cached_property
-    def oidc_redirects(self) -> "tuple[str, ...]":
-        values = self._sequence("oidc_redirects")
-        if values and "authelia" not in self.producer.manager.integration_snapshot:
-            self._error("OIDC redirects require installed authelia")
-        result = []
-        for value in values:
-            parsed = urlsplit(value)
-            if "#" in value or value.startswith("//"):
-                self._error("invalid OIDC redirect URI")
-            if parsed.scheme:
-                resolved = value
-            elif value == "" or value.startswith("/"):
-                base = self.url
-                base_parts = urlsplit(base)
-                if (not base_parts.scheme or not base_parts.netloc or "{{" in base
-                        or "}}" in base or base_parts.fragment):
-                    self._error("relative OIDC redirect requires a concrete public URL")
-                resolved = base if value == "" else urlunsplit((base_parts.scheme, base_parts.netloc,
-                                                                parsed.path, parsed.query, ""))
-            else:
-                self._error("OIDC redirect must be absolute, empty, or an absolute path")
-            if resolved not in result:
-                result.append(resolved)
-        return tuple(result)
-
-    @cached_property
     def cert_domains(self) -> "tuple[str, ...]":
         return self._sequence("cert_domains")
 
@@ -218,7 +192,7 @@ class ResolvedSite:
         if not self.template and not self.proxy:
             self._error("default proxy template requires a nonempty proxy")
         for field in ("default", "https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
-                      "auth_rule", "oidc_redirects", "cert_domains", "vars"):
+                      "auth_rule", "cert_domains", "vars"):
             getattr(self, field)
         if self.producer.name == "authelia" and not self.https:
             self._error("Authelia public site requires HTTPS")

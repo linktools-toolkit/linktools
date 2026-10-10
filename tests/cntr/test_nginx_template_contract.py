@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from typing import Any, Mapping, Optional
     from linktools.cntr import ContainerManager
     from linktools.cntr.container import BaseContainer
-    from linktools.cntr.integration import ResolvedSite
+    from linktools.cntr.ext import ResolvedSite
 
 
 
@@ -161,7 +161,7 @@ def test_default_listeners_are_explicit_and_independent_of_server_name(
 def generation_site(nginx: "BaseContainer", local_id: str = "web",
                     ports: "Optional[Mapping[str, int]]" = None, **kwargs: "Any") -> "ResolvedSite":
     from types import SimpleNamespace
-    from linktools.cntr.integration import ResolvedSite
+    from linktools.cntr.ext import ResolvedSite
 
     def get_config(key: str, **options: "Any") -> "Any":
         return ports[key] if ports and key in ports else nginx.get_config(key, **options)

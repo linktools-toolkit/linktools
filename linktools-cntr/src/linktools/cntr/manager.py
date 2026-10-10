@@ -13,7 +13,7 @@ from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvi
 from linktools.decorator import cached_property
 
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
-from .integration import Integration
+from .ext import Integration
 from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from .repo.service import RepoService
     from .artifacts import ArtifactIndex
     from .execution.planner import ExecutionPlanner
-    from .integration import ResolvedSite
+    from .ext import ResolvedSite
 
 
 def describe_origin(container: "BaseContainer") -> str:
@@ -355,8 +355,22 @@ class ContainerManager:
 
     @cached_property
     def nginx_sites(self) -> "Mapping[tuple[str, str], ResolvedSite]":
-        from .integration import Nginx
-        return Nginx.resolve_sites(self)
+        from collections import OrderedDict
+        from types import MappingProxyType
+        from .ext import Nginx, ResolvedSite
+
+        result = OrderedDict()
+        # Preserve declared identities even when the optional nginx consumer is absent.
+        for producer_name, declarations in self.integration_snapshot.items():
+            producer = self.containers[producer_name]
+            for declaration in declarations:
+                if declaration.consumer != "nginx":
+                    continue
+                local_id = declaration.local_id
+                if not isinstance(declaration, Nginx):
+                    raise ContainerError("Invalid nginx site %s/%s: expected Nginx" % (producer_name, local_id))
+                result[(producer_name, local_id)] = ResolvedSite(producer, local_id, declaration)
+        return MappingProxyType(result)
 
     def load_installed_config_metadata(self) -> "list[BaseContainer]":
         """Load installed containers and register their own config fields,

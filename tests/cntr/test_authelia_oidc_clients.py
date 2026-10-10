@@ -5,7 +5,7 @@
 import pytest
 
 from linktools.cntr import Nginx
-from linktools.cntr.integration import ResolvedSite
+from linktools.cntr.ext import Authelia, ResolvedSite
 
 
 @pytest.fixture(autouse=True)
@@ -27,23 +27,15 @@ def test_oidc_client_is_read_only_and_uses_saved_secret(fresh_manager):
         client["client_id"] = "overwritten"
 
 
-def test_oidc_redirects_derive_only_from_current_sites(fresh_manager, monkeypatch):
+def test_oidc_redirects_derive_only_from_current_declarations(fresh_manager, monkeypatch):
     authelia = fresh_manager.containers["authelia"]
     producer = fresh_manager.containers["portainer"]
-    site = Nginx.site(
-        server_name="service.example.com",
-        proxy="http://app:8080",
-        oidc_redirects=("", "/callback", "https://external.example.com/callback", "/callback"),
-    )
-    monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", {
-        (producer.name, "web"): ResolvedSite(producer, "web", site),
-    })
-    url = "https://service.example.com"
+    declaration = Authelia.oidc(("https://service.example.com", "https://service.example.com/callback",
+                                 "https://external.example.com/callback", "https://service.example.com/callback"))
+    monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, None, declaration),)))
     assert authelia.oidc_redirects == (
-        authelia.oidc_client["issuer_url"],
-        url,
-        url + "/callback",
-        "https://external.example.com/callback",
+        authelia.oidc_client["issuer_url"], "https://service.example.com",
+        "https://service.example.com/callback", "https://external.example.com/callback",
     )
     assert isinstance(authelia.oidc_client["redirect_uris"], tuple)
 

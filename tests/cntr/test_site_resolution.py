@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr import ContainerError, ContainerManager, Flare, Integration, Nginx
-from linktools.cntr.integration import load_nginx_url
-from linktools.cntr.integration import ResolvedSite
+from linktools.cntr.ext import load_nginx_url
+from linktools.cntr.ext import ResolvedSite
 from linktools.runtime import lazy_load
 
 
@@ -34,7 +34,7 @@ def fail():
 
 def test_url_only_resolves_required_values():
     producer = Producer(Nginx.site("app.example.com", proxy=lazy_load(fail),
-                                 auth_headers=lazy_load(fail), oidc_redirects=lazy_load(fail)))
+                                 auth_headers=lazy_load(fail)))
     assert str(load_nginx_url(producer, "web")) == "https://app.example.com"
     assert str(load_nginx_url(producer, "web", "ui", queries={"a": "b"})) == "https://app.example.com/ui?a=b"
 
@@ -42,8 +42,7 @@ def test_url_only_resolves_required_values():
 @pytest.mark.parametrize("installed,domain", [((), None), (("nginx",), "")])
 def test_disabled_sites_do_not_resolve_unrelated_fields(installed, domain):
     domain = lazy_load(fail) if domain is None else domain
-    producer = Producer(Nginx.site(domain, proxy=lazy_load(fail), template=lazy_load(fail),
-                                 oidc_redirects=lazy_load(fail)), installed=installed)
+    producer = Producer(Nginx.site(domain, proxy=lazy_load(fail), template=lazy_load(fail)), installed=installed)
     assert str(load_nginx_url(producer, "web")) == ""
     assert producer.site.resolve() is producer.site
     with pytest.raises(ContainerError, match="Unknown nginx site"):
@@ -92,36 +91,18 @@ def test_nonliteral_domain_requires_explicit_url(domain):
         producer.site.url
 
 
-def test_placeholder_domain_skips_navigation_but_not_required_oidc_url():
+def test_placeholder_domain_skips_navigation_without_oidc_coupling():
     producer = Producer(Nginx.site(
-        "_", proxy="http://app",
-        expose=Flare.public("App", "app", "Application"),
-        oidc_redirects=("/callback",),
+        "_", proxy="http://app", expose=Flare.public("App", "app", "Application"),
     ))
     assert producer.site.expose.url is None
     assert str(load_nginx_url(producer, "web")) == ""
-    with pytest.raises(ContainerError, match="explicit public URL"):
-        producer.site.resolve()
+    assert producer.site.resolve() is producer.site
 
 
-def test_literal_template_url_is_not_executed_or_relative_oidc_base():
-    producer = Producer(Nginx.site("~^app", proxy="http://app", url="https://app:{{port}}", oidc_redirects=("/callback",)))
+def test_literal_template_url_is_not_executed():
+    producer = Producer(Nginx.site("~^app", proxy="http://app", url="https://app:{{port}}"))
     assert producer.site.url == "https://app:{{port}}"
-    with pytest.raises(ContainerError, match="concrete public URL"):
-        producer.site.oidc_redirects
-
-
-def test_oidc_preserves_empty_callback_and_stably_deduplicates():
-    producer = Producer(Nginx.site("a.test", proxy="http://app", url="https://a.test/base?x=1",
-                                 oidc_redirects=lazy_load(lambda: ("", "/callback?q=2", "custom:callback", ""))))
-    assert producer.site.oidc_redirects == ("https://a.test/base?x=1", "https://a.test/callback?q=2", "custom:callback")
-
-
-@pytest.mark.parametrize("value", ["//evil.test/path", "/cb#", "https://a.test/#bad", "callback"])
-def test_invalid_oidc_redirects_fail(value):
-    producer = Producer(Nginx.site("a.test", proxy="http://app", oidc_redirects=(value,)))
-    with pytest.raises(ContainerError, match="OIDC"):
-        producer.site.oidc_redirects
 
 
 def test_auth_rule_preserves_native_fields_and_is_read_only():
@@ -294,7 +275,7 @@ def test_nginx_rejects_declarations_of_another_type() -> None:
     declaration.local_id = "web"
     app = SimpleNamespace(name="app", integrations=[declaration])
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
-    with pytest.raises(ContainerError, match="expected NginxSite"):
+    with pytest.raises(ContainerError, match="expected Nginx"):
         manager.nginx_sites
 
 

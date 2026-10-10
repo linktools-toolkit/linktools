@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from linktools.cntr import BaseContainer, Flare, FlareLink, Nginx, ContainerError
-from linktools.cntr.integration import load_port_url
+from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
+from linktools.cntr.ext import load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -77,7 +77,7 @@ class Container(BaseContainer):
 
 
 
-    def _iter_links(self) -> "Iterator[FlareLink]":
+    def _iter_links(self) -> "Iterator[Flare]":
         manager = self.manager
         snapshot = manager.integration_snapshot
         producers = sorted(
@@ -136,12 +136,12 @@ class Container(BaseContainer):
         apps = {"links": []}
 
         for link in self._iter_links():
-            if not isinstance(link, FlareLink):
+            if not isinstance(link, Flare):
                 continue
             url = link.url
             if not url:
                 continue
-            category = link.category
+            category = link.display_category
             existing = categories.get(category.name)
             if existing is None:
                 existing = (category, [])

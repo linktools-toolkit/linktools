@@ -4,7 +4,7 @@
 from types import SimpleNamespace
 
 from linktools.cntr import BaseContainer, Nginx
-from linktools.cntr.integration import load_nginx_url
+from linktools.cntr.ext import load_nginx_url
 from linktools.cntr.lifecycle import HookRegistry
 
 

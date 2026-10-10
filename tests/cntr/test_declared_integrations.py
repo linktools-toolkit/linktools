@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Declarative integrations do not depend on navigation registration."""
 
-from linktools.cntr import Nginx, NginxSite
-from linktools.cntr.integration import load_nginx_url
+from linktools.cntr import Nginx
+from linktools.cntr.ext import load_nginx_url
 from linktools.cntr.lifecycle import HookPhase
 
 
@@ -11,11 +11,11 @@ def test_portainer_site_is_independent_of_navigation(fresh_manager):
     portainer = fresh_manager.containers["portainer"]
     baseline = len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START)))
 
-    first = next(value for value in portainer.integrations if isinstance(value, NginxSite))
-    assert isinstance(first, NginxSite)
+    first = next(value for value in portainer.integrations if isinstance(value, Nginx))
+    assert isinstance(first, Nginx)
     assert first.proxy == "http://portainer:9000"
     assert first.auth_bypass == (r"\.(css|js)$",)
-    assert first is next(value for value in portainer.integrations if isinstance(value, NginxSite))
+    assert first is next(value for value in portainer.integrations if isinstance(value, Nginx))
     assert first.local_id == "web"
 
     load_nginx_url(portainer, "web")
@@ -36,7 +36,7 @@ def test_nginx_consumes_sites_without_exposure_side_effects(fresh_manager):
 
 
 def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monkeypatch):
-    from linktools.cntr import BaseContainer, FlareLink
+    from linktools.cntr import BaseContainer, Flare
 
     def fail(*args, **kwargs):
         raise AssertionError("navigation URLs must stay lazy")
@@ -47,11 +47,11 @@ def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monke
         original = container.get_config
         monkeypatch.setattr(container, "get_config", lambda key, *args, _get=original, **kwargs:
                             _get(key, *args, **kwargs) if key.endswith("AUTH_ENABLE") else fail())
-        links = [value for value in container.integrations if isinstance(value, FlareLink)]
+        links = [value for value in container.integrations if isinstance(value, Flare)]
         links.extend(site.expose for site in container.integrations
-                     if isinstance(site, NginxSite) and site.expose is not None)
+                     if isinstance(site, Nginx) and site.expose is not None)
         assert links
-        assert all(isinstance(link, FlareLink) for link in links)
+        assert all(isinstance(link, Flare) for link in links)
     assert not hasattr(BaseContainer, "exposes")
 
 
@@ -122,7 +122,7 @@ def test_integrations_public_type_is_a_flat_iterable() -> None:
 def _site_navigation_manager(declarations, links=None, nginx=True):
     from collections.abc import Mapping
     from types import SimpleNamespace
-    from linktools.cntr.integration import ResolvedSite
+    from linktools.cntr.ext import ResolvedSite
 
     reads = []
     def config(key, **kwargs):
@@ -215,7 +215,7 @@ def test_attached_navigation_rejects_invalid_values_and_category_conflicts():
     from linktools.cntr import ContainerError, Flare
 
     manager, _ = _site_navigation_manager({"web": Nginx.site("app.test", expose=True)})
-    with pytest.raises(ContainerError, match="expose must be a FlareLink"):
+    with pytest.raises(ContainerError, match="expose must be a Flare"):
         _render_navigation(manager)
     manager, _ = _site_navigation_manager({"web": Nginx.site(
         "app.test", expose=Flare.category("team", "Team")("Root", "web", ""),
@@ -243,7 +243,7 @@ def test_builtin_navigation_matches_complete_output_baseline(fresh_manager):
 def test_navigation_merge_preserves_producer_ties_and_local_id_collisions():
     from types import SimpleNamespace
     from linktools.cntr import Flare
-    from linktools.cntr.integration import ResolvedSite
+    from linktools.cntr.ext import ResolvedSite
 
     public = Flare.category("public", "Public", apps=True)
     manager, _ = _site_navigation_manager({
@@ -281,16 +281,15 @@ def test_absent_flare_does_not_resolve_attached_navigation(fresh_manager, monkey
 def test_declarations_have_canonical_public_identity_and_nominal_marker():
     import importlib.util
     from linktools import cntr
-    from linktools.cntr import container, integration
+    from linktools.cntr import container, ext
 
-    for name in ("Integration", "Integrations", "Nginx", "NginxSite", "Flare", "FlareCategory", "FlareLink"):
-        assert getattr(cntr, name) is getattr(integration, name)
-    assert issubclass(cntr.NginxSite, cntr.Integration)
-    assert issubclass(cntr.FlareLink, cntr.Integration)
-    assert not issubclass(cntr.FlareCategory, cntr.Integration)
-    for name in ("ExposeCategory", "ExposeLink"):
+    for name in ("Integration", "Integrations", "Nginx", "Flare", "Authelia"):
+        assert getattr(cntr, name) is getattr(ext, name)
+    assert issubclass(cntr.Nginx, cntr.Integration)
+    assert issubclass(cntr.Flare, cntr.Integration)
+    for name in ("ExposeCategory", "ExposeLink", "FlareCategory", "FlareLink", "NginxSite"):
         assert not hasattr(cntr, name)
-        assert not hasattr(integration, name)
+        assert not hasattr(ext, name)
     for name in ("ExposeMixin", "NginxMixin", "FlareCategory", "FlareLink", "Integrations"):
         assert not hasattr(container, name)
     assert importlib.util.find_spec("linktools.cntr._container.expose") is None
@@ -298,12 +297,12 @@ def test_declarations_have_canonical_public_identity_and_nominal_marker():
                               ("container", "Internal"), ("other", "Tools")):
         link = (cntr.Flare.public("App", "icon", "") if name == "public"
                 else cntr.Flare.bookmark("App", "icon", category=name))
-        category = link.category
-        assert isinstance(category, cntr.FlareCategory)
+        category = link.display_category
+        assert not isinstance(category, cntr.Integration)
         assert (category.name, category.desc) == (name, description)
         assert category.apps is (name == "public")
         assert category.order == {"public": 100, "private": 10, "container": 20, "other": 30}[name]
-        assert isinstance(link, cntr.FlareLink)
+        assert isinstance(link, cntr.Flare)
         assert link.desc == "App"
         assert link.url is None
 
@@ -444,7 +443,7 @@ def test_flare_bookmarks_reject_application_categories() -> None:
 
     with pytest.raises(ValueError, match="bookmarks output area"):
         Flare.bookmark("App", "web", category=Flare.category("public", "Public", apps=True))
-    with pytest.raises(TypeError, match="string or FlareCategory"):
+    with pytest.raises(TypeError, match="string or _FlareCategory"):
         Flare.bookmark("Invalid", "web", category=None)
 
 
@@ -473,13 +472,13 @@ def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
 
 def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
     import inspect
-    from linktools.cntr import Flare, FlareLink
+    from linktools.cntr import Flare
 
-    assert inspect.signature(Nginx.site) == inspect.signature(NginxSite)
+    assert "server_name" in inspect.signature(Nginx.site).parameters
     declarations = [Nginx.site("app.example.com"),
                     Flare.bookmark("Tools", "web", "https://tools.example.com", category="tool")]
-    assert isinstance(declarations[0], NginxSite)
-    assert isinstance(declarations[1], FlareLink)
+    assert isinstance(declarations[0], Nginx)
+    assert isinstance(declarations[1], Flare)
     assert declarations[0].server_name == "app.example.com"
     assert declarations[0].local_id == "web"
 
@@ -503,3 +502,13 @@ def test_integration_containers_preserve_dependencies(fresh_manager):
     selection = fresh_manager.compose_operations.select(["portainer"], metadata_only=True, for_start=True)
     started = fresh_manager.compose_operations.start_selection(selection)
     assert "lldap" in started.services
+
+
+def test_flare_display_category_does_not_shadow_factory():
+    from linktools.cntr.ext import Flare
+
+    category = Flare.category("team", "Team")
+    link = category("Docs", "web", "Docs")
+    assert link.display_category is category
+    assert callable(link.category)
+    assert link.with_default_url("https://docs.test").display_category is category
