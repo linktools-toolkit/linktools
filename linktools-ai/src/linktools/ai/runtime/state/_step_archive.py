@@ -2683,6 +2683,9 @@ class StateStepArchive(AgentRunStore):
             if checkpoint.context_messages is None
             else checkpoint.context_messages
         )
+        transcript_message_count = stored.transcript_message_count
+        if transcript_message_count is None and self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            transcript_message_count = await self._history.transcript_message_count(owner_id)
         return (
             stored.agent_run_id == checkpoint.agent_run_id
             and stored.step_index == checkpoint.step_index
@@ -2692,7 +2695,7 @@ class StateStepArchive(AgentRunStore):
             == (checkpoint.context_messages is not None)
             and stored.pending_request_index == checkpoint.pending_request_index
             and (self._runtime_domain is RuntimeDomain.CONVERSATION
-                 or stored.transcript_message_count == len(checkpoint.messages))
+                 or transcript_message_count == len(checkpoint.messages))
             and context.model_messages() == tuple(expected_messages)
         )
 
@@ -2729,8 +2732,11 @@ class StateStepArchive(AgentRunStore):
             else agent_run_id
         )
         messages = (await self._history.load_model_context(owner_id)).model_messages()
+        transcript_message_count = latest.transcript_message_count
+        if transcript_message_count is None:
+            transcript_message_count = await self._history.transcript_message_count(owner_id)
         raw_messages = await self._history.load_message_span(
-            owner_id, 0, latest.transcript_message_count,
+            owner_id, 0, transcript_message_count,
         )
         if not raw_messages and not latest.has_context_projection:
             raw_messages = tuple(messages)
@@ -2871,13 +2877,9 @@ class StateStepArchive(AgentRunStore):
             "history_association", [agent_run_id, family, identity],
         )
 
-    async def index_history_events_in_transaction(
-        self, transaction: StateTransaction, run: AgentRunRecord,
-        events: Sequence[tuple[int, StepEvent]],
-    ) -> None:
-        """Derive direct event locators without copying event semantic data."""
-        if self._runtime_domain is not RuntimeDomain.EXECUTION:
-            return
+    def _history_association_records(
+        self, agent_run_id: str, events: Sequence[tuple[int, StepEvent]],
+    ) -> dict[bytes, StoredRecord]:
         derived: dict[bytes, StoredRecord] = {}
         for sequence, event in events:
             locators: list[tuple[str, str]] = (
@@ -2896,9 +2898,9 @@ class StateStepArchive(AgentRunStore):
                              and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
                 locators.append((event.event_type, event.tool_call_id))
             for family, identity in locators:
-                key = self._history_association_key(run.agent_run_id, family, identity)
+                key = self._history_association_key(agent_run_id, family, identity)
                 record = StoredRecord(
-                    key, None, self._agent_run_key(run.agent_run_id), "history_association",
+                    key, None, self._agent_run_key(agent_run_id), "history_association",
                     (f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{sequence:020d}"
                      if family == "trace" else f"{sequence:020d}"),
                     None, 1, None, 0, None, {"sequence": sequence},
@@ -2907,9 +2909,32 @@ class StateStepArchive(AgentRunStore):
                 if previous is not None and previous.data != record.data:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 derived[key] = record
-        if not derived:
+        return derived
+
+    def _history_association_coverage(self, agent_run_id: str, record: StoredRecord | None) -> int:
+        if record is None:
+            return 0
+        sequence = record.data.get("sequence")
+        if (record.key_digest != self._history_association_key(agent_run_id, "coverage", "event")
+                or record.kind != "history_association" or record.sort_key != "coverage:event"
+                or record.parent_digest != self._agent_run_key(agent_run_id)
+                or set(record.data) != {"sequence"} or isinstance(sequence, bool)
+                or not isinstance(sequence, int) or sequence < 1):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return sequence
+
+    async def index_history_events_in_transaction(
+        self, transaction: StateTransaction, run: AgentRunRecord,
+        events: Sequence[tuple[int, StepEvent]],
+    ) -> None:
+        """Derive event locators and certify only a continuously indexed prefix."""
+        if self._runtime_domain is not RuntimeDomain.EXECUTION or not events:
             return
-        existing = await transaction.get_records(tuple(derived))
+        derived = self._history_association_records(run.agent_run_id, events)
+        coverage_key = self._history_association_key(run.agent_run_id, "coverage", "event")
+        existing = await transaction.get_records((*derived, coverage_key))
+        coverage_record = existing.get(coverage_key)
+        coverage = self._history_association_coverage(run.agent_run_id, coverage_record)
         inserts: list[StoredRecord] = []
         for key, record in derived.items():
             previous = existing.get(key)
@@ -2917,8 +2942,37 @@ class StateStepArchive(AgentRunStore):
                 inserts.append(record)
             elif previous.data != record.data:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        sequences = tuple(sequence for sequence, _ in events)
+        if sequences == tuple(range(coverage + 1, coverage + 1 + len(events))):
+            if coverage_record is None:
+                inserts.append(StoredRecord(
+                    coverage_key, None, self._agent_run_key(run.agent_run_id), "history_association",
+                    "coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
+                ))
+            elif not await transaction.replace_record(
+                replace(coverage_record, storage_version=coverage_record.storage_version + 1,
+                        data={"sequence": sequences[-1]}),
+                expected_storage_version=coverage_record.storage_version,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         if inserts:
             await transaction.insert_records(tuple(inserts))
+
+    async def _captured_history_events(
+        self, transaction: StateTransaction, agent_run_id: str, event_high_water: int,
+    ) -> list[tuple[int, StepEvent]]:
+        facts = await transaction.list_facts(FactQuery(
+            self._stream(agent_run_id, "event"), after_sequence=0, limit=event_high_water,
+        )) if event_high_water else ()
+        if len(facts) != event_high_water:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        events: list[tuple[int, StepEvent]] = []
+        for sequence, fact in enumerate(facts, 1):
+            event = _decode_step(fact.data)
+            if fact.sequence != sequence or not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            events.append((sequence, event))
+        return events
 
     async def read_history_associations(
         self, *, agent_run_id: str, message_seqs: Sequence[int],
@@ -2937,26 +2991,52 @@ class StateStepArchive(AgentRunStore):
 
         async def read(transaction: StateTransaction) -> list[StepEvent]:
             selected: dict[int, StepEvent] = {}
+            coverage_key = self._history_association_key(agent_run_id, "coverage", "event")
+            records = await transaction.get_records((*keys, coverage_key))
+            coverage = self._history_association_coverage(agent_run_id, records.get(coverage_key))
+            captured = (
+                dict(await self._captured_history_events(transaction, agent_run_id, event_high_water))
+                if coverage < event_high_water else None
+            )
+            derived = self._history_association_records(agent_run_id, tuple(captured.items())) if captured is not None else {}
 
-            async def resolve(index_keys: Sequence[bytes]) -> None:
-                records = await transaction.get_records(index_keys)
-                for record in records.values():
+            async def resolve(
+                index_keys: Sequence[bytes], indexed: Mapping[bytes, StoredRecord] | None = None,
+            ) -> None:
+                if indexed is None:
+                    indexed = await transaction.get_records(index_keys)
+                for key in index_keys:
+                    record = indexed.get(key)
+                    if record is None:
+                        record = derived.get(key)
+                    if record is None:
+                        continue
                     sequence = record.data.get("sequence")
                     if record.kind != "history_association" or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if sequence > event_high_water or sequence in selected:
+                    if captured is not None and (key in derived or sequence <= event_high_water):
+                        if derived.get(key) != record:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if sequence > event_high_water:
                         continue
-                    facts = await transaction.list_facts(FactQuery(
-                        self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
-                    ))
-                    if len(facts) != 1 or facts[0].sequence != sequence:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    event = _decode_step(facts[0].data)
-                    if not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if captured is not None:
+                        event = captured[sequence]
+                    else:
+                        event = selected.get(sequence)
+                        if event is None:
+                            facts = await transaction.list_facts(FactQuery(
+                                self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
+                            ))
+                            if len(facts) != 1 or facts[0].sequence != sequence:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            event = _decode_step(facts[0].data)
+                            if not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if self._history_association_records(agent_run_id, ((sequence, event),)).get(key) != record:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     selected[sequence] = event
 
-            await resolve(keys)
+            await resolve(keys, records)
             requests = tuple(dict.fromkeys(
                 event.metadata["linktools.ai.model_request_seq"]
                 for event in selected.values()
@@ -3004,25 +3084,27 @@ class StateStepArchive(AgentRunStore):
             )
 
         async def scan_captured(transaction: StateTransaction) -> list[tuple[int, StepEvent]]:
-            # Selective filters and stale cuts are one finite canonical scan,
-            # rather than N singleton SQL reads or repeated full index scans.
-            facts = await transaction.list_facts(FactQuery(
-                self._stream(agent_run_id, "event"), after_sequence=0, limit=event_high_water,
+            events = await self._captured_history_events(transaction, agent_run_id, event_high_water)
+            expected = self._history_association_records(agent_run_id, events)
+            records = await transaction.get_records(tuple(
+                key for key, record in expected.items() if record.sort_key.startswith("trace:")
             ))
-            if len(facts) != event_high_water:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result: list[tuple[int, StepEvent]] = []
-            for sequence, fact in enumerate(facts, 1):
-                event = _decode_step(fact.data)
-                if fact.sequence != sequence or not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
+            for key, record in records.items():
+                if expected.get(key) != record:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result: list[tuple[int, StepEvent]] = []
+            for sequence, event in events:
                 if matches(sequence, event):
                     result.append((sequence, event))
             result.sort(key=lambda value: (value[1].timestamp, value[0]))
             return result[:limit]
 
         async def read(transaction: StateTransaction) -> list[tuple[int, StepEvent]]:
-            if filtered:
+            coverage_record = await transaction.get_record(
+                self._history_association_key(agent_run_id, "coverage", "event"),
+            )
+            coverage = self._history_association_coverage(agent_run_id, coverage_record)
+            if filtered or coverage < event_high_water:
                 return await scan_captured(transaction)
             records = await transaction.list_records(RecordQuery(
                 parent_digest=self._agent_run_key(agent_run_id), kind="history_association",

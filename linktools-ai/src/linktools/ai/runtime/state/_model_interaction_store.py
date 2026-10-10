@@ -31,12 +31,15 @@ from ._step_archive import (
     StateStepArchive,
     _decode_step,
     _encode_step,
+    _step_subject,
     _validate_interaction_page,
 )
 from ._store import (
+    FactQuery,
     RecordQuery,
     RecordReplacement,
     StateTransaction,
+    StoredFact,
     StoredRecord,
     record_key_digest,
     require_no_run_history_lock,
@@ -233,9 +236,27 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             if not keys:
                 return []
             records = await transaction.get_records(keys)
+            legacy: dict[int, ModelInteractionRecord] = {}
             if len(records) != len(keys):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return [self._decode_interaction_record(records[key]) for key in keys]
+                facts = await transaction.list_facts(FactQuery(
+                    self._stream(agent_run_id, "interaction"),
+                    after_sequence=start - 1, limit=end - start,
+                ))
+                legacy = {
+                    fact.sequence: self._decode_interaction_fact(fact, agent_run_id)
+                    for fact in facts if fact.sequence < end
+                }
+            result: list[object] = []
+            for sequence, key in zip(range(start, end), keys, strict=True):
+                record = records.get(key)
+                value = (
+                    self._decode_interaction_record(record)
+                    if record is not None else legacy.get(sequence)
+                )
+                if value is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result.append(value)
+            return result
 
         return await self._store.read(read)
 
@@ -268,6 +289,23 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             or record.lease_owner is not None
             or record.lease_fence != 0
             or record.lease_expires_at is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
+
+    def _decode_interaction_fact(
+        self, fact: StoredFact, agent_run_id: str,
+    ) -> ModelInteractionRecord:
+        value = _decode_step(fact.data)
+        if not isinstance(value, ModelInteractionRecord) or (
+            value.agent_run_id != agent_run_id
+            or fact.stream_digest != self._stream(agent_run_id, "interaction")
+            or fact.owner_key_digest != self._agent_run_key(agent_run_id)
+            or fact.kind != "model_interaction"
+            or fact.sequence != value.model_request_seq
+            or fact.subject_digest != _step_subject(value)
+            or value.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or fact.state != value.status
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
@@ -408,7 +446,15 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                 fresh.append(self._stored_interaction(value))
                 continue
             if previous is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                facts = await transaction.list_facts(FactQuery(
+                    self._stream(run.agent_run_id, "interaction"),
+                    after_sequence=value.model_request_seq - 1, limit=1,
+                ))
+                if len(facts) != 1 or facts[0].sequence != value.model_request_seq:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                previous_value = self._decode_interaction_fact(facts[0], run.agent_run_id)
+                previous_value.validate_successor(value)
+                continue
             previous_value = self._decode_interaction_record(previous)
             previous_value.validate_successor(value)
             if previous_value != value:

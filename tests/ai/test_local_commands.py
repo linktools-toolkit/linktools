@@ -21,6 +21,14 @@ from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
 
 
+def test_ai_command_group_exposes_only_execution_acp_and_web() -> None:
+    from linktools.cli import iter_module_commands
+    import linktools.commands.ai as ai_commands
+
+    names = {entry.command.name for entry in iter_module_commands(ai_commands) if entry.command is not None}
+    assert names == {"run", "acp", "web"}
+
+
 def test_ai_local_commands_share_runtime_arguments() -> None:
     common = {"project", "api_key", "base_url", "model", "vision", "memory"}
     for command in (run_command, acp_command):
@@ -134,8 +142,9 @@ def test_ai_cli_rejects_unknown_commands() -> None:
     ("arguments", "expected_output"),
     (
         (("--help",), "ai"),
-        (("ai", "status"), "AI Runtime Status"),
-        (("ai", "metrics"), "Executions"),
+        (("ai", "run", "--help"), "prompt"),
+        (("ai", "acp", "--help"), "ai acp"),
+        (("ai", "web", "--help"), "--read-only"),
     ),
 )
 def test_lightweight_cli_commands_do_not_load_execution_dependencies(

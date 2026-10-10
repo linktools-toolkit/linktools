@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import timezone
 from typing import cast
 
-from ...core import BudgetUsage, OperationLedgerInput
+from ...core import BudgetUsage, OperationLedgerInput, canonical_sha256
 from ._budget_records import BudgetModelReservation, BudgetToolReservation
 from ...errors import AIError, ErrorCode
 from ...evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
@@ -230,10 +230,24 @@ def validate_snapshot_domain(
         values,
     )
     associations = _history_association_records(namespace, tenant_id, domain, facts, values)
-    if {record.key_digest for record in records if record.kind == "history_association"} != set(associations):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    associations_by_owner: dict[bytes | None, dict[bytes, StoredRecord]] = {}
+    for key, association in associations.items():
+        associations_by_owner.setdefault(association.parent_digest, {})[key] = association
+    event_counts: dict[bytes, int] = {}
+    for fact in facts:
+        if fact.kind == "step_event":
+            event_counts[fact.owner_key_digest] = max(event_counts.get(fact.owner_key_digest, 0), fact.sequence)
+    # Associations are derived indexes; older stores contain only their facts.
+    # Any stored index must still agree exactly with its authoritative event.
     for record in records:
         if record.kind == "history_association":
+            if record.sort_key == "coverage:event":
+                _validate_history_association_coverage(
+                    namespace, tenant_id, domain, record, records_by_key,
+                    event_counts.get(record.parent_digest, 0), values,
+                    associations_by_owner.get(record.parent_digest, {}),
+                )
+                continue
             expected = associations.get(record.key_digest)
             if expected is None or not _same_physical_identity(record, expected) or record.data != expected.data:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -282,6 +296,7 @@ def validate_snapshot_domain(
 
 def validate_snapshot_references(
     records: Mapping[RuntimeDomain, tuple[StoredRecord, ...]],
+    facts: Mapping[RuntimeDomain, tuple[StoredFact, ...]],
 ) -> None:
     """Validate cross-domain references against the snapshot's durable owners."""
     transcript_heads: dict[tuple[RuntimeDomain, str], TranscriptHeadRecord] = {}
@@ -293,6 +308,11 @@ def validate_snapshot_references(
                 transcript_heads[domain, head.owner_id] = head
             elif record.kind == "model_interaction":
                 interactions.append(_decode_enveloped_domain(record.data, ModelInteractionRecord))
+    for domain_facts in facts.values():
+        interactions.extend(
+            _decode_enveloped_domain(fact.data, ModelInteractionRecord)
+            for fact in domain_facts if fact.kind == "model_interaction"
+        )
     for interaction in interactions:
         for context in (interaction.request_context, interaction.response_context):
             if context is None:
@@ -460,6 +480,35 @@ def _history_association_records(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result[key] = candidate
     return result
+
+
+def _validate_history_association_coverage(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    record: StoredRecord,
+    records: Mapping[bytes, StoredRecord],
+    event_count: int,
+    values: Mapping[bytes, object],
+    associations: Mapping[bytes, StoredRecord],
+) -> None:
+    run = values.get(record.parent_digest)
+    if domain is not RuntimeDomain.EXECUTION or not isinstance(run, AgentRunRecord):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    covered = cast(int, record.data["sequence"])
+    expected = StoredRecord(
+        record_key_digest(namespace, tenant_id, domain.value, "history_association",
+                          [run.agent_run_id, "coverage", "event"]),
+        None, record.parent_digest, "history_association", "coverage:event",
+        None, record.storage_version, None, 0, None, {"sequence": covered},
+    )
+    if covered > event_count or record.storage_version < 1 or not _same_physical_identity(record, expected):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for key, association in associations.items():
+        if association.data["sequence"] <= covered:
+            stored = records.get(key)
+            if stored is None or not _same_physical_identity(stored, association) or stored.data != association.data:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _decode_session_turn_commit(value: object) -> Mapping[str, object]:
@@ -721,7 +770,8 @@ def _expected_record(
             "transcript_head",
             agent_run_id,
         )
-        _require_anchor(namespace, tenant_id, domain, records, "agent_run", agent_run_id)
+        anchor_kind = "conversation_history" if domain is RuntimeDomain.CONVERSATION else "agent_run"
+        _require_anchor(namespace, tenant_id, domain, records, anchor_kind, agent_run_id)
         if parent not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sort_key = agent_run_id
@@ -956,15 +1006,20 @@ def _validate_facts(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, AgentRunRecord) and fact.kind == "step_checkpoint":
             checkpoint = _decode_enveloped_domain(fact.data, StoredAgentRunCheckpoint)
+            transcript_owner_id = (
+                owner.metadata.get("history_id") or owner.agent_run_id
+                if domain is RuntimeDomain.CONVERSATION else owner.agent_run_id
+            )
             head_key = record_key_digest(
-                namespace, tenant_id, domain.value, "transcript_head", owner.agent_run_id,
+                namespace, tenant_id, domain.value, "transcript_head", transcript_owner_id,
             )
             head = values.get(head_key)
             if (
                 checkpoint.agent_run_id != owner.agent_run_id
                 or checkpoint.state != fact.state
                 or not isinstance(head, TranscriptHeadRecord)
-                or checkpoint.transcript_message_count > head.message_count
+                or (checkpoint.transcript_message_count is not None
+                    and checkpoint.transcript_message_count > head.message_count)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, TranscriptHeadRecord):
@@ -1074,6 +1129,21 @@ def _fact_storage_identity(
         )
         return relation, owner.owner_id
     if isinstance(owner, AgentRunRecord):
+        if fact.kind == "model_interaction":
+            interaction = _decode_enveloped_domain(fact.data, ModelInteractionRecord)
+            expected_subject = bytes.fromhex(canonical_sha256({
+                "agent_run_id": interaction.agent_run_id,
+                "model_request_seq": interaction.model_request_seq,
+            }))
+            if (
+                interaction.agent_run_id != owner.agent_run_id
+                or interaction.model_request_seq != fact.sequence
+                or interaction.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                or interaction.status != fact.state
+                or fact.subject_digest != expected_subject
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return "interaction", owner.agent_run_id
         relation = {
             "step_event": "event",
             "step_checkpoint": "checkpoint",
@@ -1096,15 +1166,24 @@ def _canonical_sequences(
     values: Mapping[bytes, object],
 ) -> Mapping[bytes, int]:
     sequences: dict[bytes, int] = {}
-    interactions: dict[str, set[int]] = {}
+    interactions: dict[str, dict[int, ModelInteractionRecord]] = {}
     for value in values.values():
         if isinstance(value, ModelInteractionRecord):
-            admitted = interactions.setdefault(value.agent_run_id, set())
+            admitted = interactions.setdefault(value.agent_run_id, {})
             if value.model_request_seq in admitted:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            admitted.add(value.model_request_seq)
+            admitted[value.model_request_seq] = value
+    for fact in facts:
+        if fact.kind != "model_interaction":
+            continue
+        value = _decode_enveloped_domain(fact.data, ModelInteractionRecord)
+        admitted = interactions.setdefault(value.agent_run_id, {})
+        previous = admitted.get(value.model_request_seq)
+        if previous is not None and previous != value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        admitted[value.model_request_seq] = value
     for agent_run_id, admitted in interactions.items():
-        if admitted != set(range(1, len(admitted) + 1)):
+        if set(admitted) != set(range(1, len(admitted) + 1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = sequence_key(
             namespace, tenant_id, domain.value, "interaction", agent_run_id

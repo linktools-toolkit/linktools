@@ -53,10 +53,25 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 Useful options:
 
 - `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
-- `--storage filesystem|sqlite` selects the Runtime storage backend.
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
+
+### Local Web console
+
+```bash
+python manage.py install --editable 'linktools-ai[web]'
+ai-web --project /workspace/project --model your-model
+ai-web --project /workspace/project --read-only
+```
+
+Open `http://127.0.0.1:8765` for conversations, live execution, history,
+model/tool details, metrics and Runtime status. The command surface is
+`ai-run`, `ai-acp`, and `ai-web` (also `lt ai run`, `lt ai acp`, and `lt ai web`).
+The former history, session, status, trace and metrics commands are consolidated
+into the Web console; their old entry points are removed without aliases.
+See the [Web console guide](docs/web-console.md) for command coverage, local
+security, read-only operation and explicit recovery of stopped executors.
 
 ### Python
 
@@ -775,8 +790,9 @@ those high-water marks; it does not switch to a second query mode. `cutoffs=()`
 selects an empty snapshot. Cursors retain their captured high-water marks but
 do not freeze lifecycle state: a captured RUNNING request may be terminal when
 read later. Root queries include recursive descendants; selecting a SUBAGENT
-reads only that execution. Model interactions can read process-local staging,
-while aggregate `usage()` reads archived usage and may lag. See the
+reads only that execution. Retained model interactions and aggregate `usage()`
+read committed active identities; explicit TRANSIENT routes use process-local
+history. Running and interrupted requests retain unknown usage as unknown. See the
 [history guide](docs/runtime-history.md) for query scopes and content budgets.
 
 The live event buffer can fall back to durable replay before an uncommitted
