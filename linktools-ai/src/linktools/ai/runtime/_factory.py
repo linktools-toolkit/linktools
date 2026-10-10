@@ -677,6 +677,8 @@ async def _build_local_components(
             task_state=storage.task.tasks,
             input_captures=input_captures,
             task_admissions=storage.task.admissions,
+            execution_state=storage.execution.executions,
+            recovery_backend=backend,
             budgets=storage.execution.budgets,
             task_objects=storage.object_store(RuntimeDomain.TASK),
             artifact_state=storage.artifact,
@@ -717,6 +719,7 @@ async def _build_local_components(
             task_launcher,
             local_waiter=task_launcher,
             preflight=task_runner,
+            bound_execution_recovery=task_runner,
             metric_recorder=metric_buffer,
             metric_source_namespace=metric_source_namespace,
         )

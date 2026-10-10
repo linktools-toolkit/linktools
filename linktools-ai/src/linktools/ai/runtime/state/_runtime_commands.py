@@ -17,6 +17,7 @@ from ...core import (
     ExecutionStatus,
     ExternalCallStatus,
     IdempotencyStatus,
+    OperationLedgerInput,
     SessionStatus,
     ToolOperationStatus,
     canonical_sha256,
@@ -44,6 +45,7 @@ from ._contracts import (
     ExternalCallRecord,
     ExternalCallRepository,
     PendingToolContinuation,
+    OperationLedgerRepository,
     RecoveryCheckpoint,
     RecoveryCheckpointRepository,
     RecoveryCheckpointState,
@@ -75,6 +77,7 @@ from ._step_archive import (
     PreparedAgentRunCheckpointBatch,
     StateStepArchive,
 )
+from ._repository_common import operation_identity_matches, validate_recovery_operation
 from ._store import StateGroupTransaction, StateStore, StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.commands")
@@ -131,7 +134,7 @@ class RuntimeStateCommands:
         *,
         namespace: str,
         events: EventRepository,
-        operations: object | None = None,
+        operations: OperationLedgerRepository | None = None,
         approvals: ApprovalRepository | None = None,
         external_calls: ExternalCallRepository | None = None,
         conversation: SessionRepository | None = None,
@@ -1069,14 +1072,24 @@ class RuntimeStateCommands:
     async def commit_agent_attempt_checkpoint(
         self,
         claim: AgentAttemptClaim,
+        *,
+        recovery_operation: OperationLedgerInput | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
         """Atomically publish the execution sequence and active recovery run."""
         self._require_recovery()
         stores = [self._execution.state_store, self._recovery.state_store]
+        operations = self._operations
+        if recovery_operation is not None:
+            if operations is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stores.append(operations.state_store)
+        stores = list(_dedupe_stores(stores))
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = claim.expected_agent_run_seq + 1
-        producer_claim_id = uuid4().hex
+        producer_claim_id = (
+            recovery_operation.result_ref if recovery_operation is not None else uuid4().hex
+        )
         producer_generation = claim.expected_execution_revision + 1
         next_agent_run_id = agent_run_id(
             namespace=self._namespace,
@@ -1090,6 +1103,25 @@ class RuntimeStateCommands:
         ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
             execution_transaction = group.transaction(self._execution.state_store)
             recovery_transaction = group.transaction(self._recovery.state_store)
+            existing_operation = None
+            if recovery_operation is not None:
+                if operations is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                existing_operation = await operations.get_in_transaction(
+                    group.transaction(operations.state_store),
+                    recovery_operation.operation_id, tenant_id=self._tenant_id,
+                )
+                if existing_operation is not None:
+                    if (
+                        existing_operation.execution_id != claim.execution_id
+                        or not operation_identity_matches(existing_operation, recovery_operation)
+                    ):
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                else:
+                    validate_recovery_operation(
+                        recovery_operation, execution_id=claim.execution_id,
+                        tenant_id=self._tenant_id, producer=True,
+                    )
             current_execution = await self._execution.get_in_transaction(
                 execution_transaction,
                 claim.execution_id,
@@ -1104,6 +1136,8 @@ class RuntimeStateCommands:
             )
             if current_recovery is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if existing_operation is not None:
+                return current_execution, current_recovery
             if (
                 current_execution.revision != claim.expected_execution_revision
                 or current_execution.agent_run_seq
@@ -1139,7 +1173,65 @@ class RuntimeStateCommands:
                 expected_revision=claim.expected_recovery_revision,
                 next_record=updated_recovery,
             )
+            if recovery_operation is not None:
+                if operations is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                await operations.append_in_transaction(
+                    group.transaction(operations.state_store), recovery_operation,
+                )
             return updated_execution, updated_recovery
+
+        if recovery_operation is not None:
+            async def readback() -> CommitObservation[tuple[ExecutionRecord, RecoveryCheckpoint]]:
+                if operations is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                existing = await operations.get(
+                    recovery_operation.operation_id, tenant_id=self._tenant_id,
+                )
+                if existing is None:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if (
+                    existing.execution_id != claim.execution_id
+                    or not operation_identity_matches(existing, recovery_operation)
+                ):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                    )
+                current_execution = await self._execution.get(
+                    claim.execution_id, tenant_id=self._tenant_id,
+                )
+                current_recovery = await self._recovery.get(
+                    claim.execution_id, tenant_id=self._tenant_id,
+                )
+                if current_execution is None or current_recovery is None:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=(current_execution, current_recovery),
+                )
+
+            outcome = await run_durable_commit(
+                lambda: stores[0].storage_group.mutate(stores, callback),
+                readback,
+                background_tasks=self._background_tasks,
+            )
+            if outcome.state is DurableCommitState.COMMITTED:
+                if outcome.value is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if outcome.cancelled:
+                    raise asyncio.CancelledError
+                return outcome.value
+            if outcome.state is DurableCommitState.NOT_COMMITTED:
+                if outcome.error is not None:
+                    raise outcome.error
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
         _logger.debug(
             "agent attempt checkpoint requested: execution=%s sequence=%s",

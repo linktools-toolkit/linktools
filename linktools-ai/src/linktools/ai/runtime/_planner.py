@@ -4,22 +4,26 @@
 
 import asyncio
 import re
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Generic, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
-from ..agent import bind_output, restore_output
+from ..agent import AgentBindingContract, bind_output, restore_output
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
     ExecutionStatus,
     JsonValue,
+    OperationKind,
+    OperationLedgerInput,
+    OperationStatus,
     Principal,
     ResourceKind,
     ResourceRef,
@@ -28,6 +32,7 @@ from ..core import (
     ThinkingValue,
     canonical_sha256,
     deterministic_id,
+    idempotency_key_digest,
     normalize_json_value,
     normalize_thinking,
     principal_identity_payload,
@@ -35,6 +40,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore
 from ..task import (
+    RecoverGraphRequest,
     TaskBindingContract,
     TaskDependency,
     TaskDependencyState,
@@ -45,6 +51,7 @@ from ..task import (
     TaskGraphState,
     TaskLease,
     TaskNode,
+    TaskNodeView,
     Task,
     TaskExpansionContext,
     TaskExpander,
@@ -72,6 +79,8 @@ from ._input import (
 )
 from .state._codec import encode_domain
 from .state._contracts import (
+    ExecutionRecord,
+    ExecutionRepository,
     StoredUserInput,
     TaskAdmissionRepository,
     TaskPreparedInputRecord,
@@ -87,6 +96,9 @@ from .service_api import ExecutionService, ExecutionView
 from .service_api import ExecutionResult
 from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 from .state._contracts import BudgetRepository
+
+if TYPE_CHECKING:
+    from ._execution import ExecutionBackend
 
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
@@ -339,6 +351,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         authorization: AuthorizationPolicy,
         task_state: _TaskStateReader,
         task_admissions: TaskAdmissionRepository,
+        execution_state: ExecutionRepository | None = None,
+        recovery_backend: "ExecutionBackend | None" = None,
         budgets: BudgetRepository | None = None,
         task_objects: ObjectStore,
         artifact_state: ArtifactRepositories | None = None,
@@ -359,6 +373,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._execution = execution
         self._task_state = task_state
         self._task_admissions = task_admissions
+        self._execution_state = execution_state
+        self._recovery_backend = recovery_backend
         self._budgets = budgets
         self._budget_scopes: dict[str, str] = {}
         self._task_objects = task_objects
@@ -1272,6 +1288,161 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         del resolution
         if node.effect_policy != "non_replay_safe":
             raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def recover_bound_executions(
+        self,
+        graph_id: str,
+        request: RecoverGraphRequest,
+    ) -> None:
+        tenant_id = request.principal.tenant_id
+        header = await self._task_state.get_header(graph_id, tenant_id=tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            request.principal, AuthorizationAction.TASK_RUN, header,
+        )
+        admission = await self._task_admissions.get(graph_id, tenant_id=tenant_id)
+        state = await self._task_state.graph_state(graph_id, tenant_id=tenant_id)
+        if (
+            header.kind is not ResourceKind.TASK_GRAPH
+            or header.id != graph_id
+            or header.tenant_id != tenant_id
+            or admission is None
+            or admission.graph_id != graph_id
+            or admission.principal.tenant_id != tenant_id
+            or state is None
+            or state.graph_id != graph_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self.load_admission(admission)
+        self.validate_recovery(state)
+        candidates: list[tuple[TaskNode, TaskNodeView, ExecutionRecord]] = []
+        for node, node_state in zip(state.nodes, state.node_states, strict=True):
+            if node_state.status in {
+                TaskStatus.SUCCEEDED, TaskStatus.FAILED,
+                TaskStatus.BLOCKED, TaskStatus.CANCELLED,
+            } or node_state.execution_id is None:
+                continue
+            if (
+                node_state.graph_id != graph_id
+                or node_state.node_id != node.node_id
+                or node_state.fence < 1
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            task_id, task_revision, _body = _parse_node(node, request=False)
+            handler = self._handler(
+                task_id, task_revision, graph_id=graph_id,
+                node_id=node.node_id, request=False,
+            )
+            if not isinstance(handler, _TaskRunnerAdapter) or not isinstance(
+                handler.runner, RuntimeAgentTaskRunner,
+            ):
+                continue
+            if self._execution_state is None or self._recovery_backend is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            execution_id = node_state.execution_id
+            execution_header = await self._execution_state.get_header(
+                execution_id, tenant_id=tenant_id,
+            )
+            execution = await self._execution_state.get(execution_id, tenant_id=tenant_id)
+            declaration = self._validate_task_declaration(
+                task_id, task_revision, graph_id=graph_id, node_id=node.node_id,
+            )
+            config = declaration.get("config")
+            if not isinstance(config, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected_binding = AgentBindingContract.from_payload(config.get("binding_contract"))
+            if node.output_contract is not None:
+                output = _restore_output_contract(node.output_contract)
+                expected_binding = replace(
+                    expected_binding, output_mode=output.mode,
+                    output_schema=output.schema_definition,
+                )
+            if (
+                execution_header is None
+                or execution_header.kind is not ResourceKind.EXECUTION
+                or execution_header.id != execution_id
+                or execution_header.tenant_id != tenant_id
+                or execution is None
+                or execution.execution_id != execution_id
+                or execution.principal_id != admission.principal.principal_id
+                or execution.principal_kind != admission.principal.kind
+                or not execution.requires_task_invocation_capture
+                or not isinstance(execution.binding, AgentBindingContract)
+                or execution.binding.binding_digest != expected_binding.binding_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution.status not in {
+                ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.PENDING_START,
+                ExecutionStatus.STARTED, ExecutionStatus.CANCELLING,
+            }:
+                continue
+            candidates.append((node, node_state, execution))
+
+        for node, node_state, execution in candidates:
+            await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+            now = datetime.now(timezone.utc)
+            operation = OperationLedgerInput(
+                operation_id=canonical_sha256({
+                    "action": "task.bound_execution.recover",
+                    "graph_operation_id": idempotency_key_digest(request.idempotency_key),
+                    "graph_id": graph_id,
+                    "node_id": node.node_id,
+                    "execution_id": execution.execution_id,
+                }),
+                tenant_id=tenant_id,
+                resource_kind=ResourceKind.EXECUTION,
+                resource_id=execution.execution_id,
+                execution_id=execution.execution_id,
+                operation_kind=OperationKind.EXECUTION_RECOVER,
+                status=OperationStatus.RUNNING,
+                request_digest=canonical_sha256({
+                    "action": "task.bound_execution.recover",
+                    "principal": principal_identity_payload(request.principal),
+                    "graph_id": graph_id,
+                    "node_id": node.node_id,
+                    "execution_id": execution.execution_id,
+                }),
+                result_ref=uuid.uuid4().hex,
+                result_digest=None,
+                error_code=None,
+                compactable=False,
+                created_at=now,
+                updated_at=now,
+            )
+            assert self._recovery_backend is not None and self._execution_state is not None
+            await self._recovery_backend.recover_execution(
+                execution.execution_id, tenant_id=tenant_id,
+                expected_revision=execution.revision, recovery_operation=operation,
+            )
+            latest = await self._execution_state.get(execution.execution_id, tenant_id=tenant_id)
+            if latest is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if latest.status is ExecutionStatus.RECOVERY_REQUIRED:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+
+    async def _validate_recovery_node_binding(
+        self,
+        graph_id: str,
+        node: TaskNode,
+        node_state: TaskNodeView,
+        tenant_id: str,
+    ) -> None:
+        state = await self._task_state.graph_state(graph_id, tenant_id=tenant_id)
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current_node = next((item for item in state.nodes if item.node_id == node.node_id), None)
+        current = next((item for item in state.node_states if item.node_id == node.node_id), None)
+        if (
+            state.graph_id != graph_id
+            or current_node != node
+            or current is None
+            or current.graph_id != graph_id
+            or current.execution_id != node_state.execution_id
+            or current.fence != node_state.fence
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def validate_recovery(self, graph_state: TaskGraphState) -> None:
         for node, node_state in zip(

@@ -485,8 +485,11 @@ class OperationQuery:
     through_sequence: int | None = None
     compactable: bool | None = None
     limit: int | None = None
+    after_sequence: int | None = None
 
     def __post_init__(self) -> None:
+        if self.after_sequence is not None:
+            _require_nonnegative_int(self.after_sequence, "after_sequence")
         if self.stream_digest is not None:
             _require_digest(self.stream_digest, "stream_digest")
         if self.through_sequence is not None:

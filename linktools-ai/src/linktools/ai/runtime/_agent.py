@@ -310,10 +310,13 @@ class Execution(Generic[AppT]):
             ),
         )
 
-    async def recover(self) -> "Execution[AppT]":
+    async def recover(
+        self, *, idempotency_key: str | None = None,
+    ) -> "Execution[AppT]":
         await self._runtime.executions.recover(
             self.execution_id,
             principal=self._principal,
+            idempotency_key=idempotency_key,
         )
         return self
 
