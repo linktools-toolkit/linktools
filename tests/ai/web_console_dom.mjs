@@ -74,12 +74,14 @@ globalThis.fetch=async(path,options={})=>{
   if(key.endsWith('/models')||key.endsWith('/trace')||key.endsWith('/transcript')||key.endsWith('/recovery'))return response({items:[],next_cursor:null});
   if(endMode && key==='/api/executions/orphan/cancel'){
     if(endMode.cancelError){const error=endMode.cancelError;endMode.cancelError=null;if(endMode.commitCancel)executions.get('orphan').status='CANCELLING';throw new Error(error);}
-    if(!endMode.blockCancel)executions.get('orphan').status=endMode.directTerminal?'CANCELLED':'CANCELLING';
+    if(endMode.blockCancel)return response({code:'STORAGE_CONFLICT'},409);
+    endMode.cancelAccepted=true;
+    executions.get('orphan').status=endMode.keepRecovery?'RECOVERY_REQUIRED':endMode.directTerminal?'CANCELLED':'CANCELLING';
     if(endMode.directTerminal)sessions.get('a').active_execution_id=null;
     return response({execution_id:'orphan',cancelled:Boolean(endMode.directTerminal)});
   }
   if(endMode && key==='/api/executions/orphan/recover'){
-    assert.equal(executions.get('orphan').status,'CANCELLING','must prove durable cancellation before recovery');
+    assert.ok(executions.get('orphan').status==='CANCELLING' || executions.get('orphan').status==='RECOVERY_REQUIRED' && endMode.cancelAccepted,'must prove durable cancellation before recovery');
     if(endMode.recoverError){const error=endMode.recoverError;endMode.recoverError=null;throw new Error(error);}
     if(endMode.effectError)return response({code:'TOOL_EFFECT_OUTCOME_UNKNOWN',safe_details:{operation_id:'effect'}},409);
     if(!endMode.keepCancelling)executions.get('orphan').status='CANCELLED';
@@ -126,7 +128,7 @@ assert.equal(node('action-menu').open,false);assert.equal(document.activeElement
 node('options-toggle').click();assert.equal(node('composer-options').hidden,false);
 assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('options-toggle').click();
 for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
-assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="end-stopped"[\s\S]*?<\/details>/);
+assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="fork-run"[\s\S]*?<\/details>/);
 assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
 assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','trace','recovery']);
 if(readOnly){
@@ -373,6 +375,11 @@ for(const commitCancel of [false,true]){
   if(!commitCancel)assert.equal(sent[0].body.request_id,sent[1].body.request_id);
   assert.match(node('notice').textContent,/ended and session released/);
 }
+await resetEnd({keepRecovery:true},'RECOVERY_REQUIRED');const beforeRecoveryRequired=recoveries().length;
+assert.equal(node('end-stopped').hidden,false);assert.match(node('end-stopped').textContent,/free session/);
+await node('end-stopped').click();await settle();
+assert.equal(recoveries().length,beforeRecoveryRequired+1);assert.match(node('notice').textContent,/ended and session released/);
+
 // Interruption after durable cancel is safe: a fresh attempt reads CANCELLING first.
 await resetEnd({},'CANCELLING');const beforeResumeCancel=cancellations().length;
 await node('end-stopped').click();await settle();assert.equal(cancellations().length,beforeResumeCancel);
@@ -387,8 +394,28 @@ node('refresh').click();await settle();assert.equal(node('end-stopped').disabled
 await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeUnknownRecovery+1);
 assert.match(node('notice').textContent,/ended and session released/);
 
+// Uncertain recovery keeps its key, while Resume and End use separate operations.
+await resetEnd({recoverError:'unknown end response'});
+await node('end-stopped').click();await settle();const uncertainEnd=recoveries().at(-1);
+await node('end-stopped').click();await settle();
+assert.equal(recoveries().at(-1).body.request_id,uncertainEnd.body.request_id);
+assert.match(node('notice').textContent,/ended and session released/);
+
+await resetEnd({recoverError:'unknown end response'});tab('recovery').click();await settle();
+await node('end-stopped').click();await settle();const endBeforeResume=recoveries().at(-1);
+await node('resume-run').click();await settle();
+assert.notEqual(recoveries().at(-1).body.request_id,endBeforeResume.body.request_id);
+
+await resetEnd();tab('recovery').click();await settle();
+const failedResume=deferred('POST /api/executions/orphan/recover');
+node('resume-run').click();await tick();const resumeBeforeEnd=recoveries().at(-1);
+failedResume.reject(new Error('unknown resume response'));await settle();
+await node('end-stopped').click();await settle();
+assert.notEqual(recoveries().at(-1).body.request_id,resumeBeforeEnd.body.request_id);
+assert.match(node('notice').textContent,/ended and session released/);
+
 for(const [mode,status,message] of [
-  [{blockCancel:true},'RECOVERY_REQUIRED',/still RECOVERY_REQUIRED/],
+  [{blockCancel:true},'RECOVERY_REQUIRED',/STORAGE_CONFLICT/],
   [{keepCancelling:true},'STARTED',/still CANCELLING/],
   [{keepOwner:true},'STARTED',/session release is not confirmed/],
   [{effectError:true},'STARTED',/TOOL_EFFECT_OUTCOME_UNKNOWN/],
@@ -445,6 +472,43 @@ const cancels=cancellations().slice(-2);
 assert.equal(cancels[0].body.request_id,cancels[1].body.request_id);
 assert.match(node('notice').textContent,/terminal outcome is not yet confirmed/);
 
+// Stop feedback follows canonical terminal and session-owner readback, not the request reply.
+executions.get('orphan').session_id='a';sessions.get('a').active_execution_id='orphan';
+executions.get('orphan').status='CANCELLED';node('refresh').click();await settle();
+assert.match(node('notice').textContent,/Cancellation confirmed.*release is not yet confirmed/);
+sessions.get('a').active_execution_id='a-new';node('refresh').click();await settle();
+assert.match(node('notice').textContent,/Cancellation confirmed.*Another execution now owns/);
+assert.equal(node('stop-run').hidden,true);
+
+// Cancellation is a normal turn outcome rather than a raw API error.
+const cancelledTurn={...timeline('a').items[0],status:'CANCELLED',error_code:'EXECUTION_CANCELLED',safe_error_details:{}};
+timelineOverrides.set('a',{items:[cancelledTurn],next_cursor:null});location.hash='#session=a';await settle();
+assert.match(node('conversation').textContent,/Execution cancelled\./);assert.doesNotMatch(node('conversation').textContent,/EXECUTION_CANCELLED|\{\}/);
+timelineOverrides.delete('a');location.hash='#execution=orphan';await settle();
+
+// A terminal snapshot also reconciles a pending Stop notice without manual refresh.
+executions.set('orphan',{...info('orphan','a'),status:'STARTED'});sessions.get('a').active_execution_id='orphan';
+const stopStream={};streamBlocks.set('orphan',stopStream);node('refresh').click();await settle();
+await node('stop-run').click();await settle();
+executions.get('orphan').status='CANCELLED';sessions.get('a').active_execution_id=null;
+stopStream.controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('orphan'))+'\n\n'));
+stopStream.controller.close();streamBlocks.delete('orphan');await settle();
+assert.match(node('notice').textContent,/Cancellation confirmed.*Session released/);
+
+// Unrelated errors are not replaced by later cancellation readback.
+executions.set('orphan',{...info('orphan','a'),status:'STARTED'});
+const unrelatedStream={};streamBlocks.set('orphan',unrelatedStream);node('refresh').click();await settle();
+await node('stop-run').click();await settle();
+const unrelated=deferred('GET /api/executions/orphan/models');tab('models').click();await tick();
+unrelated.reject(new Error('new detail error'));await settle();
+executions.get('orphan').status='CANCELLED';
+const oldNotice=node('notice').textContent;
+assert.match(oldNotice,/new detail error/);
+tab('overview').click();await settle();
+unrelatedStream.controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('orphan'))+'\n\n'));
+unrelatedStream.controller.close();streamBlocks.delete('orphan');await settle();
+assert.equal(node('notice').textContent,oldNotice);tab('overview').click();await settle();
+
 // A failed cancellation readback must not post its error into a newer selection.
 executions.set('orphan',{...info('orphan',null),status:'STARTED'});node('refresh').click();await settle();
 cancelAttempts=0;
@@ -455,6 +519,42 @@ const newerNotice=node('notice').textContent;
 failedCancelRead.reject(new Error('old readback unavailable'));await settle();
 assert.equal(node('conversation-title').textContent,'Beta');
 assert.equal(node('notice').textContent,newerNotice);
+
+// A late failed Stop response cannot replace another conversation's notice.
+executions.set('orphan',{...info('orphan',null),status:'STARTED'});location.hash='#execution=orphan';await settle();
+const failedStop=deferred('POST /api/executions/orphan/cancel');node('stop-run').click();await tick();
+location.hash='#session=b';await settle();const otherConversationNotice=node('notice').textContent;
+failedStop.reject(new Error('old Stop response lost'));await settle();
+assert.equal(node('notice').textContent,otherConversationNotice);
+
+// Newer detail errors own the notice even when Stop completes in the same view.
+for(const success of [false,true]){
+  executions.set('orphan',{...info('orphan',null),status:'STARTED'});location.hash='#execution=orphan';await settle();
+  const lateStop=deferred('POST /api/executions/orphan/cancel');node('stop-run').click();await tick();
+  const detailFailure=deferred('GET /api/executions/orphan/models');tab('models').click();await tick();
+  detailFailure.reject(new Error('new detail error'));await settle();const ownedNotice=node('notice').textContent;
+  if(success)lateStop({execution_id:'orphan',cancelled:false});else lateStop.reject(new Error('old Stop response lost'));
+  await settle();assert.equal(node('notice').textContent,ownedNotice);tab('overview').click();await settle();
+}
+
+// Failed terminal owner readback cannot report an old Stop into another conversation.
+executions.set('orphan',{...info('orphan','a'),status:'STARTED'});location.hash='#execution=orphan';await settle();
+await node('stop-run').click();await settle();executions.get('orphan').status='CANCELLED';
+const staleOwnerRead=deferred('GET /api/sessions/a');node('refresh').click();await tick();
+location.hash='#session=b';await settle();const newOwnerNotice=node('notice').textContent;
+staleOwnerRead.reject(new Error('old session release readback failed'));await settle();
+assert.equal(node('notice').textContent,newOwnerNotice);
+
+// A newer canonical release wins over a failed older owner readback.
+executions.set('orphan',{...info('orphan','a'),status:'STARTED'});location.hash='#execution=orphan';await settle();
+await node('stop-run').click();await settle();executions.get('orphan').status='CANCELLED';
+const olderOwnerRead=deferred('GET /api/sessions/a');node('refresh').click();await tick();
+const newerOwnerRead=deferred('GET /api/sessions/a');node('refresh').click();await tick();
+newerOwnerRead({session:{...sessions.get('a'),active_execution_id:null},timeline:null});await settle();
+assert.match(node('notice').textContent,/Cancellation confirmed.*Session released/);
+const settledNotice=node('notice').textContent;
+olderOwnerRead.reject(new Error('outdated owner readback failed'));await settle();
+assert.equal(node('notice').textContent,settledNotice);
 
 // Exact-ID lookup preserves opaque sessions and distinguishes standalone executions.
 const opaque=' ../team/conversation?notes#你好 ';

@@ -50,8 +50,9 @@ an older turn does not substitute that turn's status for the session's owner.
   full JSON, result export, parent/subagent links, and detail paging stay here.
   Inspecting a turn or opening an exact execution reveals the panel. Closing it
   returns focus to Details without stopping observation or changing selection.
-- **Actions** groups conversation rename/fork/close and execution retry/fork/end.
-  Stop remains directly available outside the collapsed panel. Resume and
+- **Actions** groups conversation rename/fork/close and execution retry/fork.
+  Stop and **End previous execution and free session** remain directly available
+  outside the collapsed panel. Resume and
   external-effect decisions remain in Recovery; read-only mode disables writes.
 - **Message options** contains planning, thinking, memory scope and attachments.
   The send shortcut and earlier-turn paging remain available in the main view.
@@ -74,9 +75,13 @@ can run concurrently; a second execution in the same session is rejected with
 SQL startup does not infer that an unfinished execution is abandoned. A stopped
 process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and
 observation never take ownership. After confirming the previous executor has
-stopped, use **End stopped execution** to cancel the old work and release its
-session in one action. The console reads the durable cancellation state before
-finishing it through Runtime recovery, then verifies a terminal execution and
+stopped, use **End previous execution and free session** beside the session
+status to cancel the old work and release its session in one action. Standalone
+executions label this action **End stopped execution**. The console requires
+durable `CANCELLING` state or a successful cancellation receipt for the same
+execution before finishing it through Runtime recovery. Unknown external effects
+may keep `RECOVERY_REQUIRED` visible even after cancellation is recorded. The
+console then verifies a terminal execution and
 released session owner. It does not resume model or tool work. Unknown outcomes
 are not reported as complete; another explicit attempt reads the current state
 before continuing. Resolve unknown external effects in **Recovery** if needed.
@@ -85,7 +90,11 @@ To continue the original work instead, **Recovery → Resume stopped execution**
 retains the explicit stopped-executor confirmation and may call models or tools.
 **Stop execution** remains available for a running executor. A cancellation
 request may remain `CANCELLING` until the owner finishes or the stopped-execution
-action completes its cancellation.
+action completes its cancellation. Its pending notice updates after terminal and
+session-owner readback, without replacing an unrelated error. Cancellation is
+shown as a normal turn outcome. Recovery uses the existing Runtime idempotency
+key so a repeated request cannot start another recovery attempt; ending and
+resuming work keep separate request identities.
 
 Runtime owns producer fencing, terminal handoff, and local staging release.
 The console does not introduce a private lock, heartbeat, background result
