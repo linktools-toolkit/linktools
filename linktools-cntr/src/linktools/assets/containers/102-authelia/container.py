@@ -67,6 +67,7 @@ class Container(BaseContainer):
                 link=Flare.public(
                     "Authelia", "account", "单点登录", load_nginx_url(self, "web", "auth-admin")),
                 template=self.get_source_path("templates", "nginx.conf"),
+                waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
                 auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
                 auth_rule={"subject": ["group:lldap_admin"]} if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else None,

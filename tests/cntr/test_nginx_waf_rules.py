@@ -2,10 +2,17 @@
 # -*- coding: utf-8 -*-
 """Nginx bypass rendering and sensitive proxy-header boundaries."""
 
+import re
+import shlex
+from typing import TYPE_CHECKING
+
 import pytest
 
 from linktools.cntr import ContainerError
 from linktools.cntr.ext import Nginx
+
+if TYPE_CHECKING:
+    from linktools.cntr import ContainerManager
 
 
 def _render_site(nginx, waf, patterns):
@@ -39,6 +46,47 @@ def test_disabled_waf_has_no_bypass_or_internal_origin(fresh_manager):
     rendered = _render_site(nginx, False, ())
     assert "$waf_skip_" not in rendered
     assert "@waf" not in rendered
+
+
+@pytest.mark.parametrize("waf_enabled", [True, False])
+def test_authelia_waf_bypass_preserves_auth_and_other_sites(
+        fresh_manager: "ContainerManager", waf_enabled: bool) -> None:
+    for key, value in (("NGINX_ROOT_DOMAIN", "example.test"), ("NGINX_WILDCARD_DOMAIN", True),
+                       ("NGINX_WAF_ENABLE", waf_enabled), ("NGINX_HTTPS_ENABLE", True),
+                       ("NGINX_AUTH_ENABLE", True), ("AUTHELIA_ADMIN_AUTH_ENABLE", True)):
+        fresh_manager.env_config.set(key, value)
+    nginx = fresh_manager.containers["nginx"]
+    site = nginx.sites[("authelia", "web")]
+    files, _ = nginx._rendered_site_files
+    rendered = files["sites/" + site.file_id + ".conf"]
+    assert site.waf is waf_enabled
+    assert site.auth is True
+    assert site.auth_bypass == (r"\.(css|js)$",)
+    assert site.auth_rule["subject"] == ["group:lldap_admin"]
+    assert "auth_request /_internal/auth;" in rendered
+    assert "location /auth-admin {" in rendered
+    if not waf_enabled:
+        assert "$waf_skip_" not in rendered
+        assert "@waf" not in rendered
+        return
+
+    waf_map = rendered.split("map $uri $waf_skip_" + site.var_name + " {", 1)[1].split("}", 1)[0]
+    assert "default 0;" in waf_map
+    patterns = [shlex.split(line)[0][2:] for line in waf_map.splitlines() if '"~*' in line]
+    assert patterns == [r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"]
+    for uri in ("/api/", "/api/foo", "/.well-known/", "/.well-known/openid-configuration",
+                "/jwks.json", "/jwks.json?x=1", "/API/foo"):
+        assert any(re.search(pattern, uri.partition("?")[0], re.IGNORECASE) for pattern in patterns), uri
+    for uri in ("/api", "/apix", "/other/.well-known/", "/.well-known", "/.well-knownx/",
+                "/jwks.json.evil", "/jwks.json/", "/jwksXjson", "/", "/auth-admin", "/app.js"):
+        assert not any(re.search(pattern, uri, re.IGNORECASE) for pattern in patterns), uri
+    assert "if ($waf_skip_" + site.var_name + " = 0) { return 418; }" in rendered
+    assert "location @waf" in rendered
+    for other in nginx.sites.values():
+        if other.enabled and other.identity != site.identity:
+            assert other.waf is True
+            assert other.waf_bypass == ()
+            assert '"~*^/api/" 1;' not in files["sites/" + other.file_id + ".conf"]
 
 
 def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
