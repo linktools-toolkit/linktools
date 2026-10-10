@@ -43,7 +43,12 @@ shown as empty/unavailable, without provisioning them through a history read.
 The default conversation view keeps messages and the session's current state
 in focus. Session occupancy comes from its active execution identity; inspecting
 an older turn does not substitute that turn's status for the session's owner.
-**View active execution** returns to the owner when a different turn is selected.
+**View active execution** opens its details when a different turn is selected.
+Inspecting an older turn or subagent leaves the active conversation observer and
+its Stop/End controls attached to the current owner. Metrics is a separate page
+and does not interrupt that observer. Executions has its own browser and detail
+page; selecting a run there deliberately observes that run. Browser Back/Forward
+restores the corresponding page.
 
 - **Details** opens session metadata and the selected execution's Overview,
   History, Transcript, Models & prompt, Trace, and Recovery panels. Usage,
@@ -56,7 +61,7 @@ an older turn does not substitute that turn's status for the session's owner.
   external-effect decisions remain in Recovery; read-only mode disables writes.
 - **Message options** contains planning, thinking, memory scope and attachments.
   The send shortcut and earlier-turn paging remain available in the main view.
-- **Execution filters** and **Open exact ID** expand in the sidebar; applied
+- **Execution filters** and **Open exact ID** expand in the execution browser; applied
   filters, explicit newest-20 scans and list paging retain their original scope.
   Metrics and Runtime settings keep their sidebar entries.
 - Tool/thinking content and ordinary live activity expand on demand. Failure,
@@ -206,7 +211,7 @@ Runtime responsibilities.
 - Credentials are represented only as configured/missing; exception messages
   are omitted from HTTP diagnostics because they can contain provider secrets;
   error code, safe details, exception type and cause digest remain available
-- Model/user/tool content is rendered as text, not executable HTML; static assets
+- Message Markdown is rendered with raw HTML disabled; tool content stays text. Static assets
   are bundled locally, and CSP disallows external scripts, frames and plugins
 
 An HTTP JSON request is bounded at 8 MiB, including envelope/escaping. Runtime
@@ -230,6 +235,15 @@ exposes history and execution, cancellation, and recovery controls.
 Cross-site fetch rejection, the mutation request header, and the absence of
 permissive CORS remain in force. The default mode retains local Host/Origin
 validation. Serve the UI and API at the same external origin.
+
+Keep proxy response buffering and caching disabled for the existing
+`/api/executions/{id}/events` SSE route, and allow long-lived responses. The
+server already sends `X-Accel-Buffering: no`; a proxy must not override it or
+cache the stream. See the [NGINX response buffering contract](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering).
+A dropped stream reattaches with the Runtime cursor using
+bounded backoff, even if an intervening canonical read also fails. A terminal
+read or explicit recovery boundary ends observation; neither transport failure
+nor proxy silence permits taking over the executor.
 
 ## Verification
 
@@ -268,3 +282,30 @@ HTML text; create/send/repeated submit; switching sessions/tabs during pending
 requests; reload/reconnect while running; Stop; model failures; child/tool/model
 detail navigation; cursor Load more; read-only empty stores; JSON export; and
 closing/reopening dialogs. Use fake models and an isolated fixture store.
+
+### Message formatting and drafts
+
+User and assistant message text supports Markdown headings, lists, tables, links
+and fenced code. The composer edits the original Markdown; **Copy Markdown** and
+**Markdown source** preserve its exact source. Incomplete streaming code fences
+are rendered safely as text/code until more content arrives. Tool structures and
+unknown input formats stay inspectable under their original details. Stored
+version-1 inputs display prompt text and attachment descriptions rather than a
+JSON chat bubble. No input or output storage contract is changed.
+
+Raw HTML is escaped. Unsafe link schemes are rejected by the bundled parser;
+links open with `noopener noreferrer`. Markdown images become click-only links,
+and attachment descriptions do not fetch external resources. Rendering uses the
+locally bundled [markdown-it 15.0.2](https://github.com/markdown-it/markdown-it)
+browser ESM distribution, with HTML disabled. The original distribution and
+bundled dependency license notices are retained beside the asset. Its npm tarball
+integrity is `sha512-q4IGxMv56jCqT4OCRCADBoDP3LO4MhmTXjFbphHPXs4g3j9Xg5RDnxqN8IF/3vIWEU+VCnUq+7JUg/cfy2E6Qw==`.
+No CDN request or browser package installation is needed. Live rendering batches
+received updates and leaves historical turns unchanged between canonical reads.
+
+Unsent prompts, file paths, planning/thinking options and memory scope are kept
+per conversation in this page's memory. Switching pages or conversations does
+not submit them. An admission conflict preserves the draft for an explicit next
+Send; an uncertain response reuses its request identity. A confirmed admission
+clears only the accepted prompt, preserving newer edits. Reloading or closing the
+page clears these drafts; they are not written to browser persistent storage.

@@ -428,7 +428,7 @@ async def _error(request: Request, error: Exception) -> Response:
 
 async def _asset(request: Request) -> Response:
     name = request.path_params.get("name", "index.html")
-    if name not in {"index.html", "app.js", "console.js", "style.css"}:
+    if name not in {"index.html", "app.js", "console.js", "message.js", "markdown-it.js", "style.css"}:
         return _json({"error_code": "NOT_FOUND"}, 404)
     return FileResponse(_ASSETS / name, headers=_HEADERS)
 

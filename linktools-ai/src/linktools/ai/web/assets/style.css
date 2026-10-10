@@ -89,7 +89,7 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;max-height:100dvh}
 .conversation>.turn{max-width:850px;margin-left:auto;margin-right:auto}
 .turn-heading{display:flex;gap:10px;align-items:center;color:#84978a;font-size:10px;margin-bottom:12px}
 .turn-heading button{margin-left:auto;font-size:10px}
-.message{line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;margin:8px 0 14px}
+.message{line-height:1.8;overflow-wrap:anywhere;font-size:13px;margin:8px 0 14px}
 .message.user{background:#edf3ee;border:1px solid #e4ece3;padding:13px 16px;border-radius:10px}
 .message-label{display:flex;align-items:center;gap:8px;font-size:10px;font-weight:650;color:#779282;letter-spacing:.7px;margin-bottom:8px}
 .message-label .avatar{display:grid;place-items:center;background:#e9f2eb;border-radius:6px;width:24px;height:24px;font-size:12px;color:#366b52}
@@ -212,3 +212,52 @@ dialog h2{margin:12px 0 24px}
 .metric-card .value{font-size:30px}
 .metric-grid{grid-template-columns:1fr}
 }
+
+.markdown{line-height:1.7;overflow-wrap:anywhere}
+.markdown>:first-child{margin-top:0}.markdown>:last-child{margin-bottom:0}
+.markdown h1,.markdown h2,.markdown h3{font-size:1.2em;letter-spacing:0;margin:1.2em 0 .5em}
+.markdown p,.markdown ul,.markdown ol,.markdown blockquote,.markdown pre{margin:.6em 0}
+.markdown a{text-decoration:underline;color:var(--accent)}
+.markdown code,.message-source pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
+.markdown :not(pre)>code{background:#e8eeeb;padding:.1em .3em;border-radius:3px}
+.markdown pre{white-space:pre;overflow:auto;background:#edf1ef;border-radius:6px;padding:12px}
+.markdown blockquote{border-left:3px solid var(--line);padding-left:14px;color:#637977}
+.markdown table{display:block;overflow:auto;border-collapse:collapse;max-width:100%;font-size:12px}
+.markdown th,.markdown td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+.copy-message{font-size:10px;margin-top:8px;padding:3px 6px}
+.message-source{display:inline-block;margin-left:10px;font-size:10px;color:var(--muted)}
+.message-source summary,.user-input>details summary{cursor:pointer}
+.message-source[open]{display:block;margin:8px 0}.message-source pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.user-input>details{font-size:10px;color:var(--muted);margin:6px 0 14px}
+.attachments{list-style:none;padding:0;font-size:11px;overflow-wrap:anywhere;color:#637977}
+.attachments li{border:1px solid var(--line);border-radius:5px;padding:7px 10px;margin:5px 0}
+.nav{flex-direction:column;gap:4px;margin:22px 0 18px}
+.nav button{text-align:left;font-size:13px;padding:9px 12px}
+#sidebar-browse{display:flex;flex:1;min-height:0;flex-direction:column}
+.browse-panel{display:flex;flex:1;min-height:0;flex-direction:column}
+.execution-list{display:flex;flex-direction:column;width:310px;flex-shrink:0;padding:25px 20px;overflow:auto;border-right:1px solid var(--line);background:#fcfdfb}
+.execution-list>h1{font-size:22px;margin-bottom:8px}
+.execution-list>p{font-size:12px;line-height:1.6}
+.execution-actions{display:flex;gap:6px;flex-wrap:wrap;padding:15px 0;border-bottom:1px solid var(--line)}
+.execution-actions button{font-size:11px}
+.inspector.execution-page{width:auto;flex:1;border-left:0;background:#fcfdfb;padding:25px 28px}
+.execution-page .inspector-content{max-width:1000px;width:100%}
+#execution-live{overflow:auto;max-height:35dvh}
+@media(max-width:1100px){
+  .inspector:not(.execution-page){position:fixed;right:0;top:73px;bottom:0;width:min(420px,85vw);z-index:15;box-shadow:-12px 0 35px #183c3126;border-left:1px solid var(--line);max-height:none}
+  .inspector:not(.execution-page) .inspector-content{max-height:none}
+  .workbench{display:flex}.execution-list{width:270px}
+}
+@media(max-width:960px){
+  main{max-height:100dvh}.conversation-column{min-height:0}.conversation{max-height:none;min-height:60px}
+  .inspector.execution-page{max-height:none;padding:20px}.execution-page .inspector-content{max-height:none}
+  .execution-list{width:240px;padding:20px 14px}
+}
+@media(max-width:680px){
+  .inspector:not(.execution-page){top:61px;width:100vw}
+  .workbench:has(.execution-page){overflow:auto;display:block}
+  .execution-list{width:100%;max-height:45dvh;border-right:0;border-bottom:1px solid var(--line)}
+  .inspector.execution-page{min-height:50dvh}.execution-page .inspector-content{overflow:visible}
+}
+.markdown .align-left{text-align:left}.markdown .align-center{text-align:center}.markdown .align-right{text-align:right}
+#connection{max-width:320px;white-space:normal;overflow-wrap:anywhere}

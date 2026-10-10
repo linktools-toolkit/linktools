@@ -15,9 +15,11 @@ class Element {
   set id(value){this._id=value;nodes.set(value,this);}
   get textContent(){return this._text+this.children.map(child=>child.textContent || '').join('');}
   set textContent(value){this.replaceChildren();this._text=String(value);}
+  set innerHTML(value){this.html=String(value);this.textContent=this.html.replace(/<[^>]*>/g,'').replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&amp;','&');}
+  get innerHTML(){return this.html || '';}
   get scrollHeight(){return this.children.length*80;}
   connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
-  append(...children){this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
+  append(...children){children.forEach(child=>{if(child.parentElement)child.parentElement.children=child.parentElement.children.filter(item=>item!==child);});this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
   focus(){document.activeElement=this;}
   scrollIntoView(){}
@@ -47,7 +49,7 @@ globalThis.document={getElementById:id=>nodes.get(id)?.isConnected?nodes.get(id)
 globalThis.window={addEventListener:(name,handler)=>{if(!handlers.has(name))handlers.set(name,[]);handlers.get(name).push(handler);}};
 let hash='';globalThis.location={get hash(){return hash;},set hash(value){hash=value;queueMicrotask(()=>handlers.get('hashchange')?.forEach(handler=>handler()));}};
 let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
-const calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map(),detailResponses=new Map(),unavailableTimelines=new Set();
+const networkFailures=new Set(),calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map(),detailResponses=new Map(),unavailableTimelines=new Set();
 const info=(id,session_id=id[0])=>({execution_id:id,agent_id:'default',session_id,status:'SUCCEEDED',binding_kind:'agent',lineage_kind:'ROOT',created_at:'2026-01-01T00:00:00Z',started_at:'2026-01-01T00:00:00Z',terminal_at:'2026-01-01T00:00:01Z'});
 const sessions=new Map(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:id==='a'?'Alpha':'Beta'}}]));
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
@@ -58,6 +60,7 @@ let forkAttempts=0,cancelAttempts=0,endMode=null;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
   calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
+  if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key))return delays.get(method+' '+key);
   if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
@@ -104,10 +107,13 @@ globalThis.fetch=async(path,options={})=>{
 };
 const core=readFileSync(resolve(root,'console.js'),'utf8');
 const coreURL='data:text/javascript;base64,'+Buffer.from(core).toString('base64');
-const source=readFileSync(resolve(root,'app.js'),'utf8').replace("'./console.js'",JSON.stringify(coreURL));
+const moduleURL=source=>'data:text/javascript;base64,'+Buffer.from(source).toString('base64');
+const markdownURL=moduleURL(readFileSync(resolve(root,'markdown-it.js'),'utf8'));
+const messageURL=moduleURL(readFileSync(resolve(root,'message.js'),'utf8').replace("'./markdown-it.js'",JSON.stringify(markdownURL)));
+const source=readFileSync(resolve(root,'app.js'),'utf8').replace("'./console.js'",JSON.stringify(coreURL)).replace("'./message.js'",JSON.stringify(messageURL));
 await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
-const settle=async()=>{for(let i=0;i<5;i++)await tick();};
+const settle=async()=>{for(let i=0;i<8;i++)await tick();};
 const node=id=>nodes.get(id),tab=name=>({click(){if(node('inspector').hidden)node('inspector-toggle').click();return all.find(element=>element.dataset.tab===name).click();}}),view=name=>all.find(element=>element.dataset.view===name);
 await settle();
 assert.equal(node('list').children.length,2);
@@ -128,7 +134,7 @@ assert.equal(node('action-menu').open,false);assert.equal(document.activeElement
 node('options-toggle').click();assert.equal(node('composer-options').hidden,false);
 assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('options-toggle').click();
 for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
-assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="fork-run"[\s\S]*?<\/details>/);
+assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="close-session"[\s\S]*?<\/details>/);
 assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
 assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','trace','recovery']);
 if(readOnly){
@@ -142,9 +148,128 @@ if(readOnly){
   assert.equal(calls.filter(call=>call.method==='POST').length,0);
   console.log('Read-only disclosure contracts passed');process.exit(0);
 }
+if(process.argv[3]==='races'){
+  location.hash='#execution=a-run';await settle();
+  const oldRefresh=deferred('GET /api/executions/a-run');node('refresh').click();await tick();
+  const loading=deferred('GET /api/executions/b-run');location.hash='#execution=b-run';await tick();
+  oldRefresh(info('a-run'));await settle();assert.doesNotMatch(node('notice').textContent,/null|execution_id/);
+  loading(info('b-run'));await settle();assert.match(node('execution-meta').textContent,/b-run/);assert.equal(node('notice').textContent,'');
+  const activate=async id=>{
+    sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
+    location.hash='#session=a';await settle();
+    node('conversation').children[0].children[0].children.find(item=>item.tagName==='BUTTON').click();await settle();
+    return streamBlocks.get(id).controller;
+  };
+  const snapshot=(controller,id)=>{controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get(id))+'\n\n'));controller.close();};
+  let controller=await activate('owner-one');
+  const staleInfo={...executions.get('owner-one')},late=deferred('GET /api/executions/owner-one');
+  node('refresh').click();await tick();delays.delete('GET /api/executions/owner-one');
+  executions.get('owner-one').status='CANCELLED';sessions.get('a').active_execution_id=null;snapshot(controller,'owner-one');await settle();
+  late(staleInfo);await settle();assert.equal(node('cancel').hidden,true);assert.equal(node('end-active').hidden,true);assert.equal(node('current-status').textContent,'Session available');
+
+  // Snapshot delivery and response EOF are distinct; an older Refresh cannot undo terminal truth.
+  controller=await activate('owner-held');node('show-active').click();await settle();
+  const started={...executions.get('owner-held')},refresh=deferred('GET /api/executions/owner-held');node('refresh').click();await tick();
+  executions.get('owner-held').status='CANCELLED';controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('owner-held'))+'\n\n'));await settle();
+  refresh(started);await settle();assert.equal(node('cancel').hidden,true);assert.match(node('execution-meta').textContent,/CANCELLED/);assert.doesNotMatch(node('current-status').textContent,/STARTED/);
+  sessions.get('a').active_execution_id=null;controller.close();await settle();
+
+  controller=await activate('owner-two');
+  executions.set('owner-three',{...info('owner-three','a'),status:'STARTED'});streamBlocks.set('owner-three',{});
+  executions.get('owner-two').status='SUCCEEDED';sessions.get('a').active_execution_id='owner-three';controller.error(new Error('closed without snapshot'));await settle();
+  controller=streamBlocks.get('owner-three').controller;assert.ok(controller);assert.equal(node('cancel').hidden,false);assert.match(node('cancel').getAttribute('aria-label'),/owner-three/);
+  assert.equal(node('end-active').hidden,false);assert.equal(calls.filter(item=>item.method==='POST').length,0);
+  for(const success of [false,true]){
+    const end=deferred('POST /api/executions/owner-three/cancel');node('end-active').click();await tick();
+    const detail=deferred('GET /api/executions/a-run/models');tab('models').click();await tick();detail.reject(new Error('new detail error'));await settle();
+    const latest=node('notice').textContent;assert.match(latest,/new detail error/);
+    if(success){executions.get('owner-three').status='CANCELLED';sessions.get('a').active_execution_id=null;end({execution_id:'owner-three',cancelled:true});}
+    else end.reject(new Error('old End response lost'));
+    await settle();assert.equal(node('notice').textContent,latest);tab('overview').click();await settle();
+  }
+  snapshot(controller,'owner-three');await settle();
+
+  controller=await activate('owner-four');
+  executions.get('owner-four').status='CANCELLED';networkFailures.add('GET /api/sessions/a');snapshot(controller,'owner-four');await settle();
+  assert.match(node('connection').textContent,/read unavailable/);assert.equal(node('connection').hidden,false);
+  networkFailures.clear();streamBlocks.delete('owner-four');executions.set('owner-five',{...info('owner-five','a'),status:'STARTED'});streamBlocks.set('owner-five',{});sessions.get('a').active_execution_id='owner-five';
+  await new Promise(resolve=>setTimeout(resolve,650));controller=streamBlocks.get('owner-five').controller;assert.ok(controller);assert.match(node('cancel').getAttribute('aria-label'),/owner-five/);
+  // A finite nonterminal watch is reattached, while a recovery boundary remains explicit.
+  snapshot(controller,'owner-five');streamBlocks.set('owner-five',{});await new Promise(resolve=>setTimeout(resolve,650));
+  assert.notEqual(streamBlocks.get('owner-five').controller,controller);controller=streamBlocks.get('owner-five').controller;assert.ok(controller);
+  executions.get('owner-five').status='RECOVERY_REQUIRED';snapshot(controller,'owner-five');await settle();
+  const watches=calls.filter(item=>item.key==='/api/executions/owner-five/events').length;await new Promise(resolve=>setTimeout(resolve,650));
+  assert.equal(calls.filter(item=>item.key==='/api/executions/owner-five/events').length,watches);assert.match(node('connection').textContent,/Recovery required/);
+  console.log('Observation and End notice race contracts passed');process.exit(0);
+}
+
+if(process.argv[3]==='workspace'){
+  const descendants=node=>[node,...node.children.flatMap(child=>child.children?descendants(child):[])];
+  const markdown='## Question\n\n- **bold**\n\n```js\nconst x = "<tag>";\n```';
+  const old=timeline('a').items[0];
+  timelineOverrides.set('a',{items:[{...old,user_input:{version:1,prompt:{kind:'text',text:markdown},files:[{path:'src/example.py',size:12,media_type:'text/plain'}],attachments:[]},items:[{item_kind:'assistant',content:'| A | B |\n| --- | --- |\n| 1 | 2 |'}]}],next_cursor:null});
+  location.hash='#session=a';await settle();
+  const rendered=descendants(node('conversation')).filter(item=>item.className==='markdown').map(item=>item.innerHTML).join('');
+  assert.match(rendered,/<h2>Question/);assert.match(rendered,/<table>/);
+  assert.match(node('conversation').textContent,/src\/example.py/);
+  let copied;globalThis.navigator.clipboard={writeText:async value=>{copied=value;}};
+  descendants(node('conversation')).find(item=>item.textContent==='Copy Markdown' && item.tagName==='BUTTON').click();await settle();assert.equal(copied,markdown);
+  node('prompt').value='Unsent **Alpha**';node('files').value='src/a.py';node('planning').checked=true;node('memory').value='alpha-memory';
+  location.hash='#session=b';await settle();assert.equal(node('prompt').value,'');node('prompt').value='Beta draft';
+  location.hash='#session=a';await settle();
+  assert.equal(node('prompt').value,'Unsent **Alpha**');assert.equal(node('files').value,'src/a.py');assert.equal(node('planning').checked,true);assert.equal(node('memory').value,'alpha-memory');
+  const rejected=deferred('POST /api/sessions/a/messages');node('composer').requestSubmit();await tick();
+  rejected({code:'SESSION_BUSY'},409);await settle();
+  assert.equal(node('prompt').value,'Unsent **Alpha**');assert.equal(node('files').value,'src/a.py');
+  const sends=calls.filter(item=>item.key==='/api/sessions/a/messages').length;
+  sessions.get('a').active_execution_id='a-live';executions.set('a-live',{...info('a-live','a'),status:'STARTED'});
+  timelineOverrides.set('a',{items:[old,{...old,execution_id:'a-live',status:'STARTED',conversation_committed:false,user_input:'Current question',items:[]}],next_cursor:null});
+  streamBlocks.set('a-live',{});location.hash='#session=a';await settle();
+  const observations=()=>calls.filter(item=>item.key==='/api/executions/a-live/events');
+  const oldTurn=node('conversation').children[0];oldTurn.children[0].children.find(item=>item.tagName==='BUTTON').click();await settle();
+  assert.match(node('execution-meta').textContent,/a-run/);assert.equal(node('cancel').hidden,false);assert.equal(node('end-active').hidden,false);
+  let controller=streamBlocks.get('a-live').controller;
+  const delta=(value,cursor='cursor-one')=>controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',cursor,item:{execution_id:'a-live',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:value}}}})+'\n\n'));
+  delta('**Live');await settle();assert.match(node('live').textContent,/Live/);
+  const observed=observations().length;
+  view('metrics').click();await settle();assert.equal(node('metrics-view').hidden,false);
+  delta(' response**');await settle();view('sessions').click();await settle();
+  assert.equal(node('metrics-view').hidden,true);assert.equal(observations().length,observed);
+  assert.match(node('live').textContent,/Live response/);assert.match(node('execution-meta').textContent,/a-run/);
+  assert.equal(node('prompt').value,'Unsent **Alpha**');assert.equal(calls.filter(item=>item.key==='/api/sessions/a/messages').length,sends);
+  assert.ok(descendants(node('live')).some(item=>item.className==='markdown' && item.innerHTML.includes('<strong>Live response</strong>')));
+  // A failed canonical read during disconnection cannot end the reconnect loop.
+  const failedRead=deferred('GET /api/executions/a-live');controller.error(new Error('transport interrupted'));await tick();
+  failedRead.reject(new Error('Runtime temporarily unavailable'));await settle();
+  streamBlocks.set('a-live',{});await new Promise(resolve=>setTimeout(resolve,600));
+  controller=streamBlocks.get('a-live').controller;assert.ok(controller);assert.equal(observations().at(-1).query.cursor,'cursor-one');
+  delta('Reattached **response**');await settle();assert.match(node('live').textContent,/Reattached response/);assert.doesNotMatch(node('live').textContent,/Live response/);
+  assert.equal(calls.filter(item=>item.method==='POST' && item.key.endsWith('/recover')).length,0);
+  // Owner actions stay on the current turn while the inspector shows an old one.
+  const stop=deferred('POST /api/executions/a-live/cancel');node('cancel').click();node('cancel').click();await tick();
+  assert.equal(calls.filter(item=>item.key==='/api/executions/a-live/cancel').length,1);
+  executions.get('a-live').status='CANCELLING';stop({execution_id:'a-live',cancelled:false});await settle();
+  assert.match(node('execution-meta').textContent,/a-run/);assert.match(node('notice').textContent,/terminal outcome is not yet confirmed/);
+  globalThis.confirm=()=>false;node('end-active').click();await settle();assert.equal(calls.filter(item=>item.key==='/api/executions/a-live/recover').length,0);
+  globalThis.confirm=()=>true;const recover=deferred('POST /api/executions/a-live/recover');node('end-active').click();await tick();
+  executions.get('a-live').status='CANCELLED';sessions.get('a').active_execution_id=null;recover({execution_id:'a-live'});await settle();
+  assert.match(node('notice').textContent,/ended and session released/);assert.match(node('execution-meta').textContent,/a-run/);
+  controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('a-live'))+'\n\n'));controller.close();streamBlocks.delete('a-live');await settle();
+  view('executions').click();await settle();assert.equal(node('conversation-column').hidden,true);assert.equal(node('execution-list').hidden,false);assert.equal(node('browse-panel').parentElement,node('execution-list'));assert.equal(node('execution-live').textContent,'');
+  assert.equal(node('composer').hidden,true);view('sessions').click();await settle();assert.equal(node('browse-panel').parentElement,node('sidebar-browse'));assert.equal(node('prompt').value,'Unsent **Alpha**');
+  // Successful admission while another page is open must not resurrect its prompt.
+  node('prompt').value='Accepted while browsing';const admitted=deferred('POST /api/sessions/a/messages');
+  node('composer').requestSubmit();await tick();view('metrics').click();await settle();
+  admitted({execution_id:'a-run'});await settle();view('sessions').click();await settle();assert.equal(node('prompt').value,'');
+  node('prompt').value='Accepted before next edit';const nextAdmission=deferred('POST /api/sessions/a/messages');
+  node('composer').requestSubmit();await tick();view('executions').click();await settle();node('prompt').value='Newer draft';
+  nextAdmission({execution_id:'a-run'});await settle();view('sessions').click();await settle();assert.equal(node('prompt').value,'Newer draft');
+  console.log('Workspace contracts passed: Markdown, copy source, drafts, inspection, Metrics, reattachment and active-owner controls');process.exit(0);
+}
+
 sessions.get('a').active_execution_id='active-other';executions.set('active-other',{...info('active-other','a'),status:'STARTED'});
 location.hash='#session=a&execution=a-run';await settle();
-assert.equal(node('current-status').textContent,'Session occupied');assert.equal(node('show-active').hidden,false);
+assert.match(node('current-status').textContent,/Session occupied/);assert.equal(node('show-active').hidden,false);
 assert.doesNotMatch(node('current-status').textContent,/SUCCEEDED/);
 node('show-active').click();await settle();assert.match(node('current-status').textContent,/Session occupied · STARTED/);
 assert.equal(node('inspector').hidden,false);assert.equal(node('cancel').hidden,false);
@@ -291,10 +416,10 @@ location.hash='#session=a';await settle();
 // Refreshing an old turn must not clear a new live turn selected in the same session.
 executions.set('a-new',{...info('a-new'),status:'RUNNING'});
 const older=timeline('a').items[0];
+streamBlocks.set('a-new',{});sessions.get('a').active_execution_id='a-new';
 timelineOverrides.set('a',{items:[older,{...older,execution_id:'a-new',user_input:'new question',conversation_committed:false,items:[]}],next_cursor:null});
 location.hash='#session=a&execution=a-run';await settle();
 const releaseRefresh=deferred('GET /api/sessions/a');node('refresh').click();await tick();
-streamBlocks.set('a-new',{});
 const newTurn=node('conversation').children.find(child=>child.textContent.includes('new question'));
 await newTurn.children[0].children.find(child=>child.tagName==='BUTTON').click();await settle();
 const stream=streamBlocks.get('a-new');
@@ -319,7 +444,7 @@ assert.match(node('live').textContent,/New execution text/);assert.equal(node('l
 const focusBeforeRefresh=document.activeElement.dataset.liveFocus;
 node('refresh').click();await settle();assert.equal(node('live-activity').open,true);
 assert.equal(document.activeElement.dataset.liveFocus,focusBeforeRefresh);
-stream.controller.close();streamBlocks.delete('a-new');timelineOverrides.delete('a');
+stream.controller.close();streamBlocks.delete('a-new');timelineOverrides.delete('a');sessions.get('a').active_execution_id=null;
 executions.set('a-new',{...info('a-new'),status:'SUCCEEDED'});
 await settle();
 
@@ -329,7 +454,7 @@ releaseAgain({session:sessions.get('a'),timeline:timeline('a')});await settle();
 assert.equal(node('metrics-view').hidden,false);assert.equal(node('conversation-view').hidden,true);
 assert.equal(node('metric-name').tagName,'INPUT');
 executions.set('orphan',{...info('orphan',null),status:'RECOVERY_REQUIRED'});location.hash='#execution=orphan';await settle();
-assert.equal(node('composer').hidden,true);assert.equal(node('inspector').hidden,false);assert.equal(document.activeElement,node('inspector-close'));node('inspector-close').click();assert.equal(node('stop-run').hidden,false);assert.ok(node('live'));
+assert.equal(node('composer').hidden,true);assert.equal(node('inspector').hidden,false);assert.equal(document.activeElement,node('execution-meta'));assert.equal(node('inspector-close').hidden,true);assert.equal(node('stop-run').hidden,false);assert.ok(node('execution-live'));
 
 // Status alone never initiates cleanup; one stopped-executor confirmation gates it.
 const recoveries=()=>calls.filter(call=>call.key==='/api/executions/orphan/recover');
@@ -564,7 +689,7 @@ node('open-kind').value='session';node('open-id').value=opaque;node('open-form')
 assert.equal(new URLSearchParams(location.hash.slice(1)).get('session'),opaque);
 assert.equal(node('conversation-title').textContent,'Opaque conversation');
 node('open-kind').value='execution';node('open-id').value='b-run';node('open-form').requestSubmit();await settle();
-assert.equal(location.hash,'#execution=b-run');assert.equal(node('composer').hidden,true);
+assert.equal(new URLSearchParams(location.hash.slice(1)).get('execution'),'b-run');assert.equal(node('page-title').textContent,'Executions');assert.equal(node('composer').hidden,true);
 
 // A committed RUNNING identity can have an intentionally empty prompt envelope.
 detailResponses.set('/api/executions/b-run/models',{items:[{execution_id:'b-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'RUNNING',model:{},request:{},response:null,content_included:true}],next_cursor:null});

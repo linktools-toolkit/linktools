@@ -88,6 +88,9 @@ async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding()
         assert (await http.options("/api/sessions", headers={"Origin": "https://evil.example", "Access-Control-Request-Headers": "x-linktools-console"})).status_code == 403
         assert (await http.post("/api/sessions", json={}, headers=_HEADERS)).status_code == 503
         assert (await http.get("/assets/missing.js")).status_code == 404
+        for asset in ("message.js", "markdown-it.js"):
+            resource = await http.get(f"/assets/{asset}")
+            assert resource.status_code == 200 and "javascript" in resource.headers["content-type"]
         assert (await http.get("/api/config", headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})).status_code == 200
 
 
