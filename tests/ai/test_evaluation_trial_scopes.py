@@ -33,7 +33,7 @@ from linktools.ai.evaluation import (
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
-    EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine,
+    EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine, TaskGraphRun,
 )
 from linktools.ai.storage import FilesystemObjectStore
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
@@ -1097,14 +1097,19 @@ async def test_cancellation_seals_pending_entry_before_awaiting_the_native_fence
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_boundary", ["native", "completed", "running", "read_error", "other_error"])
 async def test_interrupted_scope_entry_closes_local_resources_and_reconciles_the_same_intent(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_boundary: str,
 ) -> None:
     entered = asyncio.Event()
+    target_entered, release_target = asyncio.Event(), asyncio.Event()
     calls: list[Path] = []
 
     async def target(context: TaskNodeContext[Path]) -> JsonValue:
         calls.append(context.app)
+        target_entered.set()
+        if recovery_boundary == "running":
+            await release_target.wait()
         return dict(context.input)
 
     tasks = (Task("scopes.target", target, effect_policy="none"),
@@ -1147,8 +1152,45 @@ async def test_interrupted_scope_entry_closes_local_resources_and_reconciles_the
                 principal=PRINCIPAL, idempotency_key="missing-scope")
         assert missing_scope.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
         assert calls == []
+        recovered_terminal = []
+        rejected = AIError(ErrorCode.AUTHORIZATION_DENIED if recovery_boundary == "other_error"
+                           else ErrorCode.STORAGE_INTEGRITY_ERROR if recovery_boundary == "read_error"
+                           else ErrorCode.TASK_NOT_READY)
+        if recovery_boundary != "native":
+            recover = TaskGraphRun.recover
+
+            async def recover_after_completion(self, *, idempotency_key=None):
+                if recovery_boundary == "running":
+                    await asyncio.wait_for(target_entered.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+                    assert (await self.state()).status is TaskStatus.RUNNING
+                    raise rejected
+                result = await self.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+                assert result.result.status is TaskStatus.SUCCEEDED
+                recovered_terminal.append(self.graph_id)
+                if recovery_boundary == "other_error":
+                    raise rejected
+                if recovery_boundary == "read_error":
+                    async def failed_read(self, *, include_content=False):
+                        raise rejected
+                    monkeypatch.setattr(TaskGraphRun, "state", failed_read)
+                return await recover(self, idempotency_key=idempotency_key)
+
+            monkeypatch.setattr(TaskGraphRun, "recover", recover_after_completion)
+        if recovery_boundary in {"running", "read_error", "other_error"}:
+            try:
+                with pytest.raises(AIError) as failed:
+                    await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*tasks),
+                        principal=PRINCIPAL, idempotency_key="resume", trial_scope=resumed_scopes)
+                assert failed.value is rejected
+                assert resumed_scopes.closed == resumed_scopes.opened
+                assert len(calls) == 1
+            finally:
+                release_target.set()
+            return
         resumed = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*tasks),
             principal=PRINCIPAL, idempotency_key="resume", trial_scope=resumed_scopes)
+        if recovery_boundary == "completed":
+            assert recovered_terminal == [pending.submission.graph.graph_id]
         view = (await resumed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         await _until(lambda: len(resumed_scopes.closed) == 2)
