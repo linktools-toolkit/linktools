@@ -5,6 +5,7 @@
 from typing import TYPE_CHECKING
 
 import pytest
+from types import SimpleNamespace
 
 from linktools.cntr import ContainerError, Nginx
 from linktools.cntr.container import ContainerTemplateError
@@ -26,6 +27,15 @@ def make_site(**kwargs):
     site.local_id = "web"
     site.file_id = site.var_name = "s_test"
     return site
+
+
+def prepared_config(nginx):
+    """Render the immutable inputs consumed by the current Nginx lifecycle."""
+    files, waf = nginx._rendered_site_files
+    root = SimpleNamespace(vars={"waf": waf, "site_files": tuple(files)})
+    rendered = nginx._render_site_template(
+        nginx, nginx.get_source_path("templates", "nginx.conf"), root)
+    return dict(files, **{"nginx.conf": rendered})
 
 
 def test_header_macros_merge_case_insensitively_and_preserve_native_values(fresh_manager, tmp_path):
@@ -108,7 +118,7 @@ def test_template_errors_identify_owner_and_entrypoint(fresh_manager, tmp_path, 
     assert str(source) in str(error.value)
 
 
-def test_business_file_is_rendered_once_across_generation_markers(fresh_manager, tmp_path):
+def test_business_file_is_rendered_once_for_repeated_preparation(fresh_manager, tmp_path):
     nginx = fresh_manager.containers["nginx"]
     calls = []
     source = tmp_path / "business.conf"
@@ -120,14 +130,14 @@ def test_business_file_is_rendered_once_across_generation_markers(fresh_manager,
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
     owner = nginx
-    first = owner.render_config("first")
-    second = owner.render_config("second")
+    first = prepared_config(nginx)
+    second = prepared_config(nginx)
     assert calls == ["render"]
     assert set(first) == {"nginx.conf", "sites/s_test.conf"}
     assert "include sites/" not in first["sites/s_test.conf"]
     assert first["sites/s_test.conf"] == second["sites/s_test.conf"]
-    assert 'return 200 "first"' in first["nginx.conf"]
-    assert 'return 200 "second"' in second["nginx.conf"]
+    assert 'return 200 "ready"' in first["nginx.conf"]
+    assert first == second
     assert "/current/" not in "\n".join(first.values())
     assert "NGINX_ROOT_site" not in "\n".join(first.values())
     assert "default_server" in first["sites/s_test.conf"]
@@ -169,7 +179,7 @@ def test_fallback_depends_on_explicit_default_not_underscore(fresh_manager: "Con
     nginx = fresh_manager.containers["nginx"]
     site = generation_site(nginx, server_name="_", default=default)
     nginx.__dict__["sites"] = {site.identity: site}
-    files = nginx.render_config("test")
+    files = prepared_config(nginx)
     assert ("sites/default.conf" in files) is not default
     assert ("default_server" in files["sites/" + site.file_id + ".conf"]) is default
     if not default:
@@ -188,7 +198,7 @@ def test_disabled_default_keeps_fallback_without_resolving_other_fields(fresh_ma
     nginx = fresh_manager.containers["nginx"]
     site = generation_site(nginx, server_name="", default=lazy_load(fail), proxy=lazy_load(fail))
     nginx.__dict__["sites"] = {site.identity: site}
-    files = nginx.render_config("test")
+    files = prepared_config(nginx)
     assert "sites/default.conf" in files
     assert "sites/" + site.file_id + ".conf" not in files
 
@@ -202,9 +212,9 @@ def test_explicit_defaults_only_conflict_on_shared_listeners(fresh_manager: "Con
     owner = nginx
     if shared:
         with pytest.raises(ContainerError, match="[Dd]efault"):
-            owner.render_config("test")
+            prepared_config(nginx)
     else:
-        files = owner.render_config("test")
+        files = prepared_config(nginx)
         assert "listen 8080 default_server;" in files["sites/" + first.file_id + ".conf"]
         assert "listen 8081 default_server;" in files["sites/" + second.file_id + ".conf"]
         assert "sites/default.conf" not in files
@@ -220,7 +230,7 @@ def test_defaults_detect_collisions_on_optional_listeners(
                              default=True, **{capability: True})
     nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
     with pytest.raises(ContainerError, match="[Dd]efault"):
-        nginx.render_config("test")
+        prepared_config(nginx)
 
 
 def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, tmp_path):
@@ -234,7 +244,7 @@ def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, 
     web = generation_site(nginx, "web", template=web_template, https=True,
                           auth=True, auth_bypass=(r"^/public/",))
     nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
-    files = nginx.render_config("generation")
+    files = prepared_config(nginx)
     servers = [value for name, value in files.items() if name.startswith("sites/") and name != "sites/default.conf"]
     assert len(servers) == 1
     server = servers[0]
@@ -264,7 +274,7 @@ def test_shared_hostname_preserves_independent_auth_and_bypass(fresh_manager, tm
         nginx, "protected", template=protected_template, auth=True, https=True,
         auth_bypass=(r"^/admin/free",))
     nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
-    files = nginx.render_config("generation")
+    files = prepared_config(nginx)
     shared = files["sites/" + public.file_id + ".conf"]
     assert len([name for name in files if name.startswith("sites/") and name != "sites/default.conf"]) == 1
     assert "auth_request /_internal/auth-deny;" in shared
@@ -282,7 +292,7 @@ def test_shared_hostname_inherits_deny_for_custom_auth_without_override(fresh_ma
     public = generation_site(nginx, "public", https=True, auth=False)
     protected = generation_site(nginx, "admin", https=True, auth=True, template=source)
     nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
-    files = nginx.render_config("generation")
+    files = prepared_config(nginx)
     server = files["sites/" + public.file_id + ".conf"]
     assert "auth_request /_internal/auth-deny;" in server
     assert "location /admin { proxy_pass http://app; }" in server
@@ -296,7 +306,7 @@ def test_shared_hostname_accepts_equivalent_quoted_native_auth(fresh_manager, tm
     path = "/_internal/auth/" + protected.var_name
     source.write_text('location /admin { auth_request "' + path + '"; proxy_pass http://app; }')
     nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
-    files = nginx.render_config("generation")
+    files = prepared_config(nginx)
     server = files["sites/" + public.file_id + ".conf"]
     assert 'auth_request "' + path + '";' in server
     assert "location = " + path in server
@@ -308,7 +318,7 @@ def test_shared_hostname_rejects_incompatible_waf_policies(fresh_manager):
     web = generation_site(nginx, "web", waf=True, waf_bypass=(r"^/web/public/",))
     nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
     with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
-        nginx.render_config("generation")
+        prepared_config(nginx)
 
 
 def test_shared_hostname_normalizes_literal_case(fresh_manager, tmp_path):
@@ -320,7 +330,7 @@ def test_shared_hostname_normalizes_literal_case(fresh_manager, tmp_path):
     api = generation_site(nginx, "api", server_name="App.Example.Test", template=api_template)
     web = generation_site(nginx, "web", server_name="app.example.test", template=web_template)
     nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
-    files = nginx.render_config("generation")
+    files = prepared_config(nginx)
     shared = [contents for name, contents in files.items()
               if name.startswith("sites/") and name != "sites/default.conf"]
     assert len(shared) == 1
@@ -332,7 +342,7 @@ def test_duplicate_locations_remain_visible_to_native_validator(fresh_manager):
     first = generation_site(nginx, "first")
     second = generation_site(nginx, "second")
     nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
-    files = nginx.render_config("generation")
+    files = prepared_config(nginx)
     combined = files["sites/" + first.file_id + ".conf"]
     assert combined.count("location / {") == 2
 
@@ -357,13 +367,13 @@ def test_generated_sites_are_self_contained_and_internal_names_are_purpose_speci
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
-    files = nginx.render_config("example")
+    files = prepared_config(nginx)
     assert set(files) == {"nginx.conf", "sites/s_test.conf"}
     rendered = files["sites/s_test.conf"]
     assert "location = /_internal/auth" in rendered
     assert "location / {" in rendered
     assert "include sites/" not in rendered
-    assert "cntr" not in "\n".join(files.values()).lower()
+    assert "include /etc/nginx/cntr/sites/s_test.conf;" in files["nginx.conf"]
     assert "map $server_port $original_uri" in files["nginx.conf"]
     assert "map $server_port $request_uri" not in files["nginx.conf"]
 
@@ -378,5 +388,5 @@ def test_embedded_business_preserves_multiline_quoted_values(fresh_manager, tmp_
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
-    rendered = nginx.render_config("example")["sites/s_test.conf"]
+    rendered = prepared_config(nginx)["sites/s_test.conf"]
     assert content in rendered

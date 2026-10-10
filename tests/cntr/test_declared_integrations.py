@@ -85,7 +85,7 @@ def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manage
     synchronized = selection.project_containers
     flare = fresh_manager.containers["flare"]
     assert flare in synchronized
-    result = fresh_manager.generated_configs["flare"].render_config("candidate")
+    result = fresh_manager.containers["flare"]._navigation_files()
     links = yaml.safe_load(result["apps.yml"])["links"]
     portainer = next(link for link in links if link["name"] == "Portainer")
     assert ":9443" in portainer["link"]
@@ -150,7 +150,7 @@ def _render_navigation(manager):
     container = object.__new__(FlareContainer)
     container.manager = manager
     return {key: yaml.safe_load(value) for key, value in
-            container.render_config("candidate").items()}
+            container._navigation_files().items()}
 
 
 def test_site_navigation_inherits_only_omitted_url_lazily():
@@ -274,7 +274,7 @@ def test_absent_flare_does_not_resolve_attached_navigation(fresh_manager, monkey
     monkeypatch.setattr(fresh_manager.containers["portainer"], "integrations", [Nginx.site(
         "app.test", expose=Flare.category("public", "Public", apps=True)("App", "web", "", lazy_load(fail)),
     )])
-    assert "flare" not in fresh_manager.generated_configs
+    assert "flare" not in {c.name for c in fresh_manager.installed_state.get(resolve=True)}
     assert list(fresh_manager.iter_integrations("flare")) == []
 
 
@@ -484,19 +484,15 @@ def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
     assert declarations[0].local_id == "web"
 
 
-def test_generated_config_snapshot_reuses_actual_container_instances(fresh_manager):
-    import pytest
+def test_installed_container_metadata_reuses_actual_instances(fresh_manager):
     from linktools.cntr import BaseContainer
 
     assert not hasattr(BaseContainer, "integration_consumer")
     assert not hasattr(fresh_manager, "integration_consumers")
-    container = fresh_manager.containers["nginx"]
-    assert container.generates_config
-    assert fresh_manager.generated_configs["nginx"] is container
-    assert all(owner is fresh_manager.containers[name]
-               for name, owner in fresh_manager.generated_configs.items())
-    with pytest.raises(TypeError):
-        fresh_manager.generated_configs["nginx"] = container
+    installed = fresh_manager.load_installed_config_metadata()
+    nginx = fresh_manager.containers["nginx"]
+    assert nginx in installed
+    assert all(container is fresh_manager.containers[container.name] for container in installed)
 
 
 def test_integration_containers_preserve_dependencies(fresh_manager):

@@ -59,7 +59,14 @@ def lifecycle_case(fresh_manager, monkeypatch, tmp_path):
     monkeypatch.setattr(fresh_manager.running_state, "mark_started", fail)
     monkeypatch.setattr(fresh_manager.running_state, "mark_stopped", fail)
     monkeypatch.setattr(fresh_manager.artifact_index, "record", fail)
-    monkeypatch.setattr("linktools.cntr.execution.planner.collect_candidates", lambda *args: {})
+    monkeypatch.setattr("linktools.cntr.execution.planner.collect_candidates",
+                        lambda manager, containers: {
+                            str(tmp_path / (container.name + ".yml")): (
+                                "compose", container.name,
+                                "services:\\n  {}:\\n    image: {}:latest\\n".format(container.name, container.name),
+                            ) for container in containers})
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates",
+                        lambda values: "skipped")
     context = OperationContext()
     context.target_containers = [first, second]
     return fresh_manager, (first, second), context, events
@@ -77,6 +84,7 @@ def _execute(manager, context, action):
             pass
     else:
         with manager.lifecycle.notify_start(context):
+            manager.lifecycle.check(context)
             if action == "restart":
                 with manager.lifecycle.notify_stop(context):
                     pass
@@ -84,11 +92,11 @@ def _execute(manager, context, action):
 
 def _expected_hooks(action):
     start = [
-        ("check", "first", "a"), ("check", "first", "b"),
-        ("check", "second", "a"), ("check", "second", "b"),
         ("before-start", "first", "a"), ("before-start", "first", "b"),
         ("before-start", "second", "a"), ("before-start", "second", "b"),
         ("before-start", None, "a"), ("before-start", None, "b"),
+        ("check", "first", "a"), ("check", "first", "b"),
+        ("check", "second", "a"), ("check", "second", "b"),
         ("after-start", "second", "b"), ("after-start", "second", "a"),
         ("after-start", "first", "b"), ("after-start", "first", "a"),
     ]
@@ -181,54 +189,15 @@ def test_starting_callbacks_all_finish_before_start_registry_lookup(lifecycle_ca
 
     second.on_starting = on_starting
     with manager.lifecycle.notify_start(context):
+        manager.lifecycle.check(context)
         events.append(("runtime", None, "up"))
 
     assert events == [
-        ("callback", "first", "check"), ("callback", "second", "check"),
         ("callback", "first", "starting"), ("callback", "second", "starting"),
         ("before-start", "first", "a"), ("before-start", "first", "b"),
+        ("callback", "first", "check"), ("callback", "second", "check"),
         ("runtime", None, "up"),
         ("callback", "second", "started"), ("callback", "first", "started"),
-    ]
-
-
-@pytest.mark.parametrize("reassign_at", ["on_check", "check_hook", "on_starting"])
-def test_start_phases_reread_reassigned_targets(lifecycle_case, reassign_at):
-    manager, containers, context, events = lifecycle_case
-    first, second = containers
-
-    def reassign(context):
-        events.append(("reassign", "first", reassign_at))
-        context.target_containers = [second]
-
-    if reassign_at == "check_hook":
-        first.hooks.register(HookPhase.CHECK, reassign)
-    else:
-        setattr(first, reassign_at, reassign)
-
-    def removed_target_hook():
-        raise AssertionError("Removed target must not run before-start hooks")
-
-    first.hooks.register(HookPhase.BEFORE_START, removed_target_hook)
-    _register(second.hooks, HookPhase.BEFORE_START, events, "second", "remaining")
-    _register(manager.hooks, HookPhase.BEFORE_START, events, None, "manager")
-
-    with manager.lifecycle.notify_start(context):
-        events.append(("runtime", None, "up"))
-
-    check_events = [("callback", "first", "check"), ("callback", "second", "check")]
-    starting_events = [("callback", "second", "starting")]
-    if reassign_at == "on_check":
-        check_events[0] = ("reassign", "first", reassign_at)
-    elif reassign_at == "check_hook":
-        check_events.insert(1, ("reassign", "first", reassign_at))
-    else:
-        starting_events.insert(0, ("reassign", "first", reassign_at))
-    assert events == check_events + starting_events + [
-        ("before-start", "second", "remaining"),
-        ("before-start", None, "manager"),
-        ("runtime", None, "up"),
-        ("callback", "second", "started"),
     ]
 
 
