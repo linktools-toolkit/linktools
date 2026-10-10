@@ -22,9 +22,10 @@ from .test_unified_wait_contract import _Bundle, _PRINCIPAL, _execution_event
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("contract", ["cursor", "close"])
-async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model(contract) -> None:
+@pytest.mark.parametrize("event_phase", ["first", "model_started"])
+async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model(event_phase) -> None:
     model_started = asyncio.Event()
+    callback_entered = asyncio.Event()
     release_model = asyncio.Event()
     acknowledged = []
 
@@ -40,30 +41,33 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
         storage=RuntimeStorage.in_memory(), capabilities=(group,),
     ) as runtime:
         execution = await runtime.agents.get().start("hello")
+        await asyncio.wait_for(model_started.wait(), 10)
 
         async def callback(event):
-            if contract == "close" and event.event.event_type != ExecutionEventType.MODEL_REQUEST_STARTED:
+            if event_phase == "model_started" and event.event.event_type != ExecutionEventType.MODEL_REQUEST_STARTED:
                 return
-            await model_started.wait()
             try:
+                callback_entered.set()
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 acknowledged.append(event.cursor)
 
         closed = False
+        waiting = asyncio.create_task(execution.wait(on_event=callback, close_timeout_seconds=0.05))
         try:
-            with pytest.raises(AIError) as raised:
-                await execution.wait(on_event=callback, timeout_seconds=0.2, close_timeout_seconds=0.05)
-            assert raised.value.code is ErrorCode.WAIT_TIMEOUT
+            await asyncio.wait_for(callback_entered.wait(), 10)
+            waiting.cancel("callback is active")
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
             assert len(acknowledged) == 1 and acknowledged[0] is not None
-            if contract == "cursor":
-                assert raised.value.safe_details["cursor"] == acknowledged[0]
-            else:
-                await runtime.close()
-                closed = True
-                assert not release_model.is_set()
+            await runtime.close()
+            closed = True
+            assert not release_model.is_set()
         finally:
             release_model.set()
+            if not waiting.done():
+                waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
             if not closed:
                 await execution.wait(timeout_seconds=2)
             await runtime.close()

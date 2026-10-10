@@ -396,7 +396,13 @@ class RuntimeEvaluations:
                                                        confirmed=True, released=False)
                     if result.admitted and result.result.status not in _TERMINAL:
                         run = await selected.get(intent.submission.graph.graph_id, principal=principal)
-                        await run.recover(idempotency_key=f"{idempotency_key}:{intent.slot_id}")
+                        try:
+                            await run.recover(idempotency_key=f"{idempotency_key}:{intent.slot_id}")
+                        except AIError as error:
+                            if error.code is not ErrorCode.TASK_NOT_READY:
+                                raise
+                            if (await run.state()).status not in _TERMINAL:
+                                raise
                 if not result.admitted:
                     await self._close_trial_scope((experiment_id, intent.slot_id))
                     await self._state.settle_intent(experiment_id, intent.slot_id,
