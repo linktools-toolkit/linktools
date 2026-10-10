@@ -318,6 +318,12 @@ class ComposeRunner:
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(
                 *args, *self.apply_service_args(service, recreate, context.is_full_containers)).check_call()
+    def restart_service(self, context: "OperationContext", service: str) -> int:
+        """Restart the existing container without applying pending Compose changes."""
+        with self._model_args(context) as args:
+            return self.manager.runtime.create_docker_process(
+                *args, "restart", "--no-deps", service).check_call()
+
     def wait_service_running(self, context: "OperationContext", service: str, timeout: int = 30) -> None:
         import time
         from ..errors import ContainerError

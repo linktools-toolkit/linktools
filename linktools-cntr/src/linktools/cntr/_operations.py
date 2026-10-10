@@ -215,6 +215,8 @@ class ComposeOperations:
                                       logger=manager.logger):
                         runner.build(context, options)
                         manager.image_preparer.verify_builds(context.compose_model, services)
+            target_image_ids = {name: manager.image_preparer.image_id(
+                context.compose_model["services"][name]["image"]) for name in selection.services}
             with record_phase(context, "check", logger=manager.logger):
                 manager.lifecycle.check(context)
                 self._require_rollback_models(context, selection.services)
@@ -225,6 +227,7 @@ class ComposeOperations:
             running = set(initial)
             failed = None
             applied_services = []
+            updated, recreated = set(), set()
             stop_attempted = False
             stopped = False
             owners = {service: container for container in selection.project_containers for service in container.services}
@@ -241,9 +244,26 @@ class ComposeOperations:
                         self._update_running_state(context, running, explicit.target_containers)
                 for service in selection.services:
                     failed = service
+                    spec = context.compose_model["services"][service]
+                    before_image = context.native_running_images.get(service)
+                    image_changed = service in initial and before_image != target_image_ids[service]
+                    binds = {str(spec.get(key)).split(":", 1)[1] for key in
+                             ("network_mode", "ipc", "pid")
+                             if str(spec.get(key, "")).startswith("service:")}
+                    binds.update(str(value).split(":", 1)[0] for value in
+                                 spec.get("volumes_from", ())
+                                 if not str(value).startswith("container:"))
+                    recreate = (service in model_store.changed_services or image_changed or
+                                bool(binds & recreated))
+                    cascade = any(options.get("restart") and dependency in updated for
+                                  dependency, options in service_dependencies(spec).items())
                     with record_phase(context, "up", container=owners[service].name, logger=manager.logger):
-                        runner.apply_service(context, service,
-                                             recreate=service in model_store.changed_services)
+                        if cascade and service in initial and not recreate and service not in stop_set:
+                            runner.restart_service(context, service)
+                        else:
+                            if manager.image_preparer.image_id(spec["image"]) != target_image_ids[service]:
+                                raise ContainerError("Selected image changed during deployment: " + service)
+                            runner.apply_service(context, service, recreate=recreate)
                         active = runner.wait_service_ready(context, service)
                         model_store.record((service,))
                     if active:
@@ -253,6 +273,25 @@ class ComposeOperations:
                     pending_restart.discard(service)
                     self._update_running_state(context, running, (owners[service],))
                     applied_services.append(service)
+                    if recreate and service in initial:
+                        recreated.add(service)
+                    if recreate or cascade or service in stop_set or service not in initial:
+                        updated.add(service)
+                    failed = None
+                for service, recreate in self._dependent_actions(
+                        context, selection.services, initial, updated, recreated):
+                    failed = service
+                    with record_phase(context, "restart-dependent", container=owners[service].name,
+                                      logger=manager.logger):
+                        import yaml
+                        saved = runner.saved_service_models(context, (service,))
+                        previous_model = yaml.safe_load(saved[service])
+                        if recreate:
+                            runner.apply_saved_services(context, (service,),
+                                                        {"previous.yml": saved[service]})
+                        else:
+                            runner.restart_service(context, service)
+                        runner.wait_service_ready(context, service, model=previous_model)
                     failed = None
             except Exception as error:
                 try:
@@ -281,7 +320,7 @@ class ComposeOperations:
                             running.difference_update(cleanup)
                     if restore:
                         saved = runner.saved_service_models(context, tuple(
-                            service for service in selection.services if service in restore))
+                            service for service in context.compose_model["services"] if service in restore))
                         for service, text in saved.items():
                             runner.apply_saved_services(context, (service,), {"previous.yml": text})
                             import yaml
@@ -309,6 +348,36 @@ class ComposeOperations:
             manager.logger.warning("Prepared file cleanup failed: %s", error)
         if report:
             render_report(manager.logger, get_records(context))
+
+    def _dependent_actions(self, context, selected, running, updated, recreated):
+        """Propagate only declared Compose restart edges and stale namespace binds."""
+        import yaml
+        definitions = {}
+        for name in running:
+            saved = context.service_models.previous.get(name)
+            model = yaml.safe_load(saved) if saved else context.compose_model
+            definitions[name] = model["services"][name]
+        waiting = set(running) - set(selected)
+        while waiting:
+            ready = [name for name in waiting if not (
+                set(service_dependencies(definitions[name])) & waiting)]
+            if not ready:
+                raise ContainerError("Compose dependency cycle among running services")
+            for name in sorted(ready):
+                spec = definitions[name]
+                binds = {str(spec.get(key)).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
+                         if str(spec.get(key, "")).startswith("service:")}
+                binds.update(str(value).split(":", 1)[0] for value in spec.get("volumes_from", ())
+                             if not str(value).startswith("container:"))
+                rebuild = bool(binds & recreated)
+                restart = any(options.get("restart") and parent in updated
+                              for parent, options in service_dependencies(spec).items())
+                if rebuild or restart:
+                    yield name, rebuild
+                    updated.add(name)
+                    if rebuild:
+                        recreated.add(name)
+                waiting.remove(name)
 
     def _shared_input_consumers(self, context, failed, applied):
         """Restore applied peers only when they share a changed file input."""

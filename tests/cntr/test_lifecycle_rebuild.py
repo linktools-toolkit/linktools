@@ -103,6 +103,11 @@ class Runner:
         if self.fail == service:
             raise ContainerError("apply failed " + service)
 
+    def restart_service(self, context, service):
+        self.manager.events.append(("restart", service))
+        if self.fail == service:
+            raise ContainerError("restart failed " + service)
+
     def wait_service_ready(self, context, service, model=None):
         self.manager.events.append(("ready", service))
         return True
@@ -155,7 +160,8 @@ def setup_case(tmp_path, groups, running=()):
     manager.image_preparer = SimpleNamespace(
         with_build_revisions=lambda model, containers, services: model,
         plan=lambda model, services, **kwargs: SimpleNamespace(pull=tuple(services), build=()),
-        verify_builds=lambda model, services: None)
+        verify_builds=lambda model, services: None,
+        image_id=lambda image: "sha256:old-" + image.split(":")[0])
     manager.hooks = Hooks(manager.events, "manager")
     manager.lifecycle = LifecycleDispatcher(manager)
     manager.compose_runner = Runner(manager)
@@ -452,3 +458,61 @@ def test_stop_uses_prepared_model_without_serializing_live_template_files(tmp_pa
     runner.final_model = lambda context: pytest.fail("stop rendered a different model")
     runner.stop(ctx, ("app",))
     assert yaml.safe_load(documents[0][0]) == ctx.compose_model
+
+
+def test_restart_true_propagates_only_after_actual_provider_change(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:local"}}),
+        ("web", {"web": {"image": "web:local",
+                         "depends_on": {"db": {"restart": True}}}}),
+    ], running=("db", "web"))
+    manager.compose_operations.up(["db"])
+    assert not any(event[0] == "restart" for event in manager.events)
+    manager.events.clear()
+    manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
+    manager.compose_operations.up(["db"])
+    assert ("restart", "web") in manager.events
+
+
+def test_plain_dependency_does_not_restart_running_peer(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:local"}}),
+        ("web", {"web": {"image": "web:local", "depends_on": ["db"]}}),
+    ], running=("db", "web"))
+    manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
+    manager.compose_operations.up(["db"])
+    assert ("restart", "web") not in manager.events
+
+
+def test_restart_dependency_transitive_once(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("a", {"a": {"image": "a:local"}}),
+        ("b", {"b": {"image": "b:local", "depends_on": {"a": {"restart": True}}}}),
+        ("c", {"c": {"image": "c:local", "depends_on": {"a": {"restart": True},
+                                                     "b": {"restart": True}}}}),
+    ], running=("a", "b", "c"))
+    manager.model["services"]["a"]["environment"] = {"VERSION": "2"}
+    manager.compose_operations.up(["a"])
+    assert [event[1] for event in manager.events if event[0] == "restart"] == ["b", "c"]
+
+
+def test_recreated_namespace_provider_recreates_existing_dependent(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:local"}}),
+        ("net", {"net": {"image": "net:local", "network_mode": "service:db"}}),
+    ], running=("db", "net"))
+    manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
+    manager.compose_operations.up(["db"])
+    assert ("restore", ("net",)) in manager.events
+    assert ("restart", "net") not in manager.events
+
+
+def test_stopped_restart_only_dependent_not_started(tmp_path):
+    manager = setup_case(tmp_path, [
+        ("db", {"db": {"image": "db:local"}}),
+        ("web", {"web": {"image": "web:local",
+                         "depends_on": {"db": {"restart": True}}}}),
+    ], running=("db",))
+    manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
+    manager.compose_operations.up(["db"])
+    assert ("restart", "web") not in manager.events

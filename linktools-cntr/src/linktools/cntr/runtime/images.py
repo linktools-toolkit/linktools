@@ -88,6 +88,18 @@ class ImagePreparer:
             services[name] = dict(spec, build=build)
         return dict(model, services=services)
 
+    def image_id(self, image: str) -> str:
+        """Resolve a local image ID before application without querying registries."""
+        process = self.manager.runtime.create_docker_process(
+            "image", "inspect", "--format", "{{.Id}}", image, capture_output=True)
+        try:
+            result = self.manager.structured_runner.execute_text(process, check=False)
+        except (OSError, StructuredCommandError) as exc:
+            raise ImagePreparationError("Cannot inspect image {}: {}".format(image, exc)) from exc
+        if not result.succeeded or not result.stdout.strip():
+            raise ImagePreparationError("Cannot resolve local image ID for " + image)
+        return result.stdout.strip()
+
     def image_revision(self, image: str) -> "str | None":
         """Read a local image label; never resolve or pull from a registry."""
         command = self.manager.runtime.create_docker_process(
@@ -128,7 +140,7 @@ class ImagePreparer:
         if not force_pull:
             refreshing.clear()
         build, pull = [], []
-        image_state, pull_images, revisions = {}, set(), {}
+        image_state, pull_images, revisions, build_images = {}, set(), {}, set()
         for name in targets:
             service = all_services[name]
             image = service.get("image")
@@ -147,7 +159,9 @@ class ImagePreparer:
             refresh = name in refreshing
             if has_build and (refresh or not exists or
                               (expected is not None and self.image_revision(image) != expected)):
-                build.append(name)
+                if image not in build_images:
+                    build.append(name)
+                    build_images.add(image)
             elif not has_build and (refresh or not exists) and image not in pull_images:
                 pull.append(name)
                 pull_images.add(image)
