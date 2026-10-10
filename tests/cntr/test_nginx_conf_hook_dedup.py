@@ -13,7 +13,7 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
         name = "app"
         hooks = HookRegistry()
         manager = SimpleNamespace(nginx_sites={
-            ("app", "web"): SimpleNamespace(url="https://app.example.com"),
+            ("app", "web"): SimpleNamespace(get_url=lambda default="": "https://app.example.com"),
         })
     container = Links()
     first = load_nginx_url(container, "web")

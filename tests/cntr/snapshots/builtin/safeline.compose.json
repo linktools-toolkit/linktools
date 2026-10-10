@@ -93,10 +93,14 @@
     },
     "safeline-luigi": {
       "container_name": "aio-safeline-luigi",
-      "depends_on": [
-        "safeline-detector",
-        "safeline-mgt"
-      ],
+      "depends_on": {
+        "safeline-detector": {
+          "condition": "service_started"
+        },
+        "safeline-mgt": {
+          "condition": "service_healthy"
+        }
+      },
       "environment": [
         "MGT_IP=172.22.242.4",
         "LUIGI_PG=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable"
@@ -122,10 +126,14 @@
     },
     "safeline-mgt": {
       "container_name": "aio-safeline-mgt",
-      "depends_on": [
-        "safeline-pg",
-        "safeline-fvm"
-      ],
+      "depends_on": {
+        "safeline-fvm": {
+          "condition": "service_started"
+        },
+        "safeline-pg": {
+          "condition": "service_healthy"
+        }
+      },
       "environment": [
         "MGT_PG=postgres://safeline-ce:Pg-pAssw0rd@safeline-pg/safeline-ce?sslmode=disable",
         "MGT_PROXY=0"
@@ -196,6 +204,9 @@
       "container_name": "aio-safeline-tengine",
       "depends_on": {
         "nginx": {
+          "condition": "service_healthy"
+        },
+        "safeline-mgt": {
           "condition": "service_healthy"
         }
       },

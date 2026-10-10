@@ -157,7 +157,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         ))
         server_text = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
-        server_text = server_text.replace("/etc/certs/live/", str(tmp_path) + "/")
+        server_text = server_text.replace("/etc/certs/" + nginx.cert_image_revision + "/live/", str(tmp_path) + "/")
         server_text = server_text.replace("listen " + str(origin_port) + " ",
                                           "listen 127.0.0.253:" + str(origin_port) + " ")
         server_text = server_text.replace("http://authelia:9091", "http://127.0.0.1:" + str(auth_port))
@@ -374,7 +374,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         server = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), public,
             business="\n".join(business), sites=(public, admin), route_auth=True)
-        server = server.replace("/etc/certs/live/", str(tmp_path) + "/")
+        server = server.replace("/etc/certs/" + nginx.cert_image_revision + "/live/", str(tmp_path) + "/")
         server = server.replace("http://authelia:9091", "http://127.0.0.1:" + str(auth.server_port))
 
         root = nginx._render_site_template(

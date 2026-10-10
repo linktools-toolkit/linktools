@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""LifecycleDispatcher.notify_remove must register a removed-but-still-
+"""LifecycleDispatcher.reconcile_removed must register a removed-but-still-
 running container's `configs` defaults -- since it was no longer in the
 installed list, they were never registered when containers were loaded, so
 on_removed would otherwise fail to resolve them."""
@@ -71,8 +71,7 @@ def test_notify_remove_registers_configs_for_a_repo_container_removed_while_runn
     ctx.target_containers = ctx.containers
     ctx.is_full_containers = True
 
-    with manager.lifecycle.notify_remove(ctx):
-        pass
+    manager.lifecycle.reconcile_removed(ctx)
 
     # The field must resolve -- this raised ConfigNotFoundError before the
     # fix, since a removed-but-still-running container's `configs` defaults

@@ -14,15 +14,20 @@
     "authelia": {
       "command": [
         "authelia",
-        "--config=/generated/current/configuration.yml",
-        "--config=/generated/current/configuration.acl.yml",
-        "--config=/generated/current/configuration.2fa.yml",
-        "--config=/generated/current/configuration.oidc.yml"
+        "--config=/generated/configuration.yml",
+        "--config=/generated/configuration.acl.yml",
+        "--config=/generated/configuration.2fa.yml",
+        "--config=/generated/configuration.oidc.yml"
       ],
       "container_name": "aio-authelia",
-      "depends_on": [
-        "authelia-redis"
-      ],
+      "depends_on": {
+        "authelia-redis": {
+          "condition": "service_started"
+        },
+        "lldap": {
+          "condition": "service_healthy"
+        }
+      },
       "environment": [
         "AUTHELIA_LOG_LEVEL=debug",
         "AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret",
@@ -32,7 +37,7 @@
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS=ldap://lldap:3890",
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN=dc=_",
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,dc=_",
-        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/current/authentication_backend_ldap_password",
+        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/authentication_backend_ldap_password",
         "X_AUTHELIA_CONFIG_FILTERS=template"
       ],
       "hostname": "authelia",
@@ -52,17 +57,23 @@
       "volumes": [
         "<APP_DATA>/authelia/config:/config",
         "<APP_DATA>/authelia/secrets:/secrets:ro",
-        "<APP_DATA>/authelia/generated:/generated:ro"
+        "<APP_DATA>/authelia/generated/current/configuration.yml:/generated/configuration.yml:ro",
+        "<APP_DATA>/authelia/generated/current/configuration.acl.yml:/generated/configuration.acl.yml:ro",
+        "<APP_DATA>/authelia/generated/current/configuration.2fa.yml:/generated/configuration.2fa.yml:ro",
+        "<APP_DATA>/authelia/generated/current/configuration.oidc.yml:/generated/configuration.oidc.yml:ro",
+        "<APP_DATA>/authelia/generated/current/authentication_backend_ldap_password:/generated/authentication_backend_ldap_password:ro"
       ]
     },
     "authelia-admin": {
       "container_name": "aio-authelia-admin",
-      "depends_on": [
-        "authelia"
-      ],
+      "depends_on": {
+        "authelia": {
+          "condition": "service_healthy"
+        }
+      },
       "environment": [
         "AAD_LOGLEVEL=DEBUG",
-        "AAD_AUTHELIA_CONFIG_PATH=/generated/current/configuration.yml",
+        "AAD_AUTHELIA_CONFIG_PATH=/generated/configuration.yml",
         "AAD_AUTHELIA_DOMAIN=",
         "AAD_AUTHELIA_COOKIE_NAME=aio-auth-session",
         "AAD_AUTHELIA_MIN_AUTH_LEVEL=1",
@@ -94,7 +105,7 @@
       "volumes": [
         "<APP_DATA>/authelia/config:/config",
         "<APP_DATA>/authelia/secrets:/secrets:ro",
-        "<APP_DATA>/authelia/generated:/generated:ro"
+        "<APP_DATA>/authelia/generated/current/configuration.yml:/generated/configuration.yml:ro"
       ]
     },
     "authelia-redis": {

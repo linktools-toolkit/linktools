@@ -7,6 +7,9 @@
   "secrets": {
     "cntr_acme_account": {
       "file": "<APP_DATA>/nginx/acme-build-account.tar"
+    },
+    "cntr_acme_dns": {
+      "file": "<APP_DATA>/nginx/acme-secrets/dns.env"
     }
   },
   "services": {
@@ -15,7 +18,8 @@
         "context": "<ASSETS>/100-nginx",
         "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
         "secrets": [
-          "cntr_acme_account"
+          "cntr_acme_account",
+          "cntr_acme_dns"
         ]
       },
       "command": [
@@ -23,17 +27,12 @@
         "-p",
         "/etc/nginx/",
         "-c",
-        "/etc/nginx/generated/current/nginx.conf",
+        "/etc/nginx/cntr/nginx.conf",
         "-g",
         "daemon off;"
       ],
       "container_name": "aio-nginx",
       "environment": {
-        "CF_Account_ID": "",
-        "CF_Email": "",
-        "CF_Key": "",
-        "CF_Token": "",
-        "CF_Zone_ID": "",
         "NGINX_HTTPS_PORT": "443"
       },
       "healthcheck": {
@@ -51,7 +50,7 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx:914b7b1894f8c55a",
+      "image": "aio-nginx:5cc1b8c44f587744",
       "logging": {
         "driver": "json-file",
         "options": {
@@ -73,9 +72,10 @@
       ],
       "restart": "unless-stopped",
       "volumes": [
-        "<APP_DATA>/nginx/generated:/etc/nginx/generated:ro",
+        "<APP_DATA>/nginx/generated/current:/etc/nginx/cntr:ro",
         "<APP_DATA>/nginx/certs:/etc/certs",
-        "<APP_DATA>/nginx/acme:/root/.acme.sh"
+        "<APP_DATA>/nginx/acme:/root/.acme.sh",
+        "<APP_DATA>/nginx/acme-secrets:/run/acme-secrets:ro"
       ]
     }
   }

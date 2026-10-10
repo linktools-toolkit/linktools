@@ -466,6 +466,8 @@ def test_restart_true_propagates_only_after_actual_provider_change(tmp_path):
         ("web", {"web": {"image": "web:local",
                          "depends_on": {"db": {"restart": True}}}}),
     ], running=("db", "web"))
+    # A matching applied model and image must not trigger a dependent restart.
+    AppliedServiceModels(manager, manager.model).record(("db", "web"))
     manager.compose_operations.up(["db"])
     assert not any(event[0] == "restart" for event in manager.events)
     manager.events.clear()

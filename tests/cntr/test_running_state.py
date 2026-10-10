@@ -197,8 +197,7 @@ def test_dispatcher_reconciles_removed_container_out_of_running_state(fresh_mana
     ctx.target_containers = ctx.containers
     ctx.is_full_containers = True
 
-    with fresh_manager.lifecycle.notify_remove(ctx):
-        pass
+    fresh_manager.lifecycle.reconcile_removed(ctx)
 
     assert "flare" not in fresh_manager.running_state.get_persisted()
     assert "nginx" in fresh_manager.running_state.get_persisted()

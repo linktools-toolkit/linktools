@@ -29,8 +29,9 @@
       "restart": "unless-stopped",
       "user": "<DOCKER_UID>:<DOCKER_GID>",
       "volumes": [
-        "<APP_DATA>/flare/generated:/generated:ro",
-        "<APP_DATA>/flare/app:/app"
+        "<APP_DATA>/flare/runtime-app:/app",
+        "<APP_DATA>/flare/generated/current/apps.yml:/app/apps.yml:ro",
+        "<APP_DATA>/flare/generated/current/bookmarks.yml:/app/bookmarks.yml:ro"
       ]
     }
   }

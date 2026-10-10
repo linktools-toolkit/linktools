@@ -78,8 +78,8 @@ def test_nginx_tuple_lookup_is_deferred_and_uses_producer_identity():
         @property
         def nginx_sites(self):
             reads.append("sites")
-            return {("app", "web"): SimpleNamespace(url="https://app.test"),
-                    ("other", "web"): SimpleNamespace(url="https://other.test")}
+            return {("app", "web"): SimpleNamespace(get_url=lambda default="": "https://app.test"),
+                    ("other", "web"): SimpleNamespace(get_url=lambda default="": "https://other.test")}
 
     container = SimpleNamespace(name="app", manager=Manager())
     url = load_nginx_url(container, "web", "ui")

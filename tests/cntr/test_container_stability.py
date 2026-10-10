@@ -165,5 +165,4 @@ def test_source_container_context_path_uses_overridden_source_properties(fresh_m
             pass
 
     container = _Custom(fresh_manager, tmp_path, name="999-custom")
-    assert container.get_docker_context_path() == container._context_path
-    assert container._context_path.endswith("unpacked")
+    assert container.get_docker_context_path() == container._source_root / "current" / "unpacked"
