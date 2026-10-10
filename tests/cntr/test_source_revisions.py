@@ -47,7 +47,8 @@ def case(tmp_path):
 
     manager = SimpleNamespace(
         logger=SimpleNamespace(debug=lambda *args: None),
-        app_path=tmp_path, environ=SimpleNamespace(get_url_file=get_file))
+        app_path=tmp_path, environ=SimpleNamespace(get_url_file=get_file),
+        image_preparer=SimpleNamespace(image_exists=lambda image: False))
     container = Source(manager, tmp_path, name="source")
     container.__dict__["services"] = {"web": {"image": "web:local", "build": {}}}
     return container, source, requests
@@ -107,3 +108,12 @@ def test_download_failure_preserves_existing_snapshot(tmp_path):
         container._prepare_source(SimpleNamespace(refresh_services=frozenset(("web",))))
     assert container._source_digest() == digest
     assert (container.get_docker_context_path() / "version.txt").read_text() == "first"
+
+def test_existing_image_never_fetches_uncached_source_during_plain_up(tmp_path):
+    container, _, calls = case(tmp_path)
+    container.manager.image_preparer.image_exists = lambda image: True
+    container._prepare_source(SimpleNamespace(refresh_services=frozenset()))
+    assert calls == []
+    assert container._source_digest() is None
+    container._prepare_source(SimpleNamespace(refresh_services=frozenset(("web",))))
+    assert len(calls) == 1

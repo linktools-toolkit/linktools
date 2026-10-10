@@ -518,6 +518,13 @@ class SourceContainer(BaseContainer):
                 shutil.copy2(str(legacy_archive), str(archives / (digest + ".in")))
             self._publish_source(digest)
             return
+        if not refresh:
+            buildable = [spec for spec in self.services.values() if spec.get("build") is not None]
+            if buildable and all(spec.get("image") and
+                                 self.manager.image_preparer.image_exists(spec["image"])
+                                 for spec in buildable):
+                # Source bytes are only needed to build, never to reuse a local image.
+                return
         self._fetch_source()
 
     def _publish_source(self, digest: str) -> None:
