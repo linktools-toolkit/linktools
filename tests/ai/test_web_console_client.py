@@ -88,5 +88,6 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    result = subprocess.run([node, str(script), str(assets)], capture_output=True, text=True, timeout=20, check=False)
-    assert result.returncode == 0, result.stderr
+    for mode in ("writable", "readonly"):
+        result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode == 0, result.stderr
