@@ -20,7 +20,12 @@ AppT = TypeVar("AppT")
 
 @dataclass(frozen=True, slots=True)
 class EvaluationTrialScope:
-    """Stable logical identity passed to a trial resource context manager."""
+    """Stable trial identity and this entry's resource initialization permission.
+
+    ``newly_prepared`` is true only after this entry definitively creates the
+    native submission. Re-entry and uncertain commits never grant it again.
+    It is not a lease, a liveness check, or proof of physical isolation.
+    """
 
     experiment_id: str
     trial: TargetTrialRef
@@ -28,6 +33,7 @@ class EvaluationTrialScope:
     principal: Principal
     submission: TaskGraphSubmission
     scorer_slot_id: str | None = None
+    newly_prepared: bool = False
 
 
 class EvaluationTrialScopeCallback(Protocol[AppT]):

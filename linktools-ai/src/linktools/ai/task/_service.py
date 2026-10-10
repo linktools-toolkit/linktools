@@ -131,6 +131,12 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission: ...
 
+    async def prepare_described_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]:
+        """Prepare without dispatch; true proves this caller durably created the submission."""
+        ...
+
     async def prepare_submission(
         self, request: TaskGraphRequest
     ) -> TaskGraphSubmission: ...

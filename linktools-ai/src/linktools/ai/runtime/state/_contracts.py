@@ -2430,6 +2430,11 @@ class TaskAdmissionRepository(RuntimeRepository, Protocol):
     async def prepare(
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission: ...
+    async def prepare_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]:
+        """Return true only for this caller's confirmed absent-to-prepared commit."""
+        ...
     async def cancel_submission(
         self, submission: TaskSubmissionRef, operation: OperationLedgerInput
     ) -> bool: ...

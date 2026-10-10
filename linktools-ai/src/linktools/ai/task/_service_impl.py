@@ -306,6 +306,12 @@ class _TaskAdmissionPersistence(Protocol):
 
     async def prepare(self, submission: TaskGraphSubmission) -> TaskGraphSubmission: ...
 
+    async def prepare_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]: ...
+
+    async def submission_status(self, submission: TaskSubmissionRef) -> str | None: ...
+
     async def cancel_submission(
         self, submission: TaskSubmissionRef, operation: OperationLedgerInput
     ) -> bool: ...
@@ -423,6 +429,12 @@ class DefaultTaskGraphService(TaskGraphService):
     async def prepare_described(
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission:
+        prepared, _ = await self.prepare_described_with_disposition(submission)
+        return prepared
+
+    async def prepare_described_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]:
         self._require_budget_owner(submission.admission.budget)
         if submission.namespace != self._persistence.admissions.namespace:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -433,7 +445,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if status is None and self._preflight is not None:
             graph = await self._preflight.capture_admission(admission, submission.graph)
             submission = TaskGraphSubmission(submission.namespace, admission, graph)
-        return await self._persistence.admissions.prepare(submission)
+        return await self._persistence.admissions.prepare_with_disposition(submission)
 
     async def start_prepared(
         self, submission: TaskGraphSubmission

@@ -13,7 +13,7 @@ from pydantic_ai.messages import BinaryContent, ModelMessage, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from linktools.ai.capability import CapabilityGroup
-from linktools.ai.core import JsonValue, TaskStatus, idempotency_key_digest
+from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateSlotRef, CandidateSpec, CaseRef, CaseSpec, ComparisonSpec, DatasetRef,
@@ -38,19 +38,24 @@ def capabilities() -> CapabilityGroup[None]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("environment,live", (
-    ("isolated", True), ("app", True), ("workspace", True),
+    ("bare", True), ("app", True), ("workspace", True), ("both", True),
     ("app", False), ("workspace", False),
 ))
-async def test_rescore_validates_reopened_environment_before_reserving_or_scoring(
+async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     tmp_path: Path, environment: str, live: bool,
 ) -> None:
     received: list[ScoringInput] = []
+    target_calls: list[JsonValue] = []
+
+    async def answer(context: TaskNodeContext[None]) -> JsonValue:
+        target_calls.append(context.input["answer"])
+        return context.input["answer"]
 
     async def score(context: TaskNodeContext[None]) -> JsonValue:
         received.append(ScoringInput.from_mapping(context.input))
         return ScoreBundle(dimensions={"exact_match": 1.0}).to_mapping()
 
-    target = Task("semantics.environment-target", echo, effect_policy="none")
+    target = Task("semantics.environment-target", answer, effect_policy="none")
     scorer = Task("semantics.environment-score", score, effect_policy="none")
     state = tmp_path / "state"
     async with Runtime.open("rescore-environment", models=FixtureModels(),
@@ -68,30 +73,23 @@ async def test_rescore_validates_reopened_environment_before_reserving_or_scorin
     received.clear()
 
     groups = ()
-    if environment == "workspace":
+    if environment in {"workspace", "both"}:
         work = tmp_path / "workspace"
         work.mkdir()
         groups = (CapabilityGroup("workspace", workspace=Workspace.load(work)),)
     storage = RuntimeStorage.filesystem(state)
-    context = replace(CONTEXT, app=object()) if environment == "app" else CONTEXT
+    context = replace(CONTEXT, app=object()) if environment in {"app", "both"} else CONTEXT
     async with Runtime.open("rescore-environment", models=FixtureModels(), storage=storage,
                             context=context, capabilities=groups) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
         before = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         request = RescoreRequest((rule_scorer(scorer),), "rescore")
         engine = runtime.tasks.bind(scorer)
-        if live and environment != "isolated":
-            with pytest.raises(AIError) as raised:
-                await run.rescore(request, engine=engine)
-            assert raised.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
-            assert received == []
-            assert await storage.evaluation.idempotency.get("evaluation.run",
-                idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id) is None
-        else:
-            rescored = await run.rescore(request, engine=engine)
-            assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-            assert len(received) == 1
-            assert (await rescored.scores()).items[0].status == "valid"
+        rescored = await run.rescore(request, engine=engine)
+        assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+        assert len(received) == 1 and received[0].target_output == "yes"
+        assert (await rescored.scores()).items[0].status == "valid"
+        assert target_calls == ["yes"]
         assert await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id) == before
 
 
@@ -217,15 +215,20 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ("before_graph", "before_waiting"))
+@pytest.mark.parametrize("stage,live", (
+    ("before_graph", False), ("before_waiting", False),
+    ("before_graph", True), ("before_waiting", True),
+))
 async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_ready(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, live: bool,
 ) -> None:
     target = Task("semantics.human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     entered, release = asyncio.Event(), asyncio.Event()
+    context = replace(CONTEXT, app=object()) if live else CONTEXT
+    groups = (CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),) if live else ()
     async with Runtime.open("early-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT) as runtime:
+                            context=context, capabilities=groups) as runtime:
         if stage == "before_waiting":
             original = runtime._execution_service.defer_task_input
 
@@ -249,7 +252,8 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
             CaseSpec.task(CaseRef("human", "one", 1), input={"answer": "yes"}),
         )), principal=PRINCIPAL, idempotency_key="dataset")
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("candidate", task=target.ref),), (scorer,)), PRINCIPAL, "start"),
+            (CandidateSpec("candidate", task=target.ref),), (scorer,),
+            policy=EvaluationPolicy(external_effects="live" if live else "deny")), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target))
         await asyncio.wait_for(entered.wait(), 10)
         pending = (await run.scores()).items[0]
