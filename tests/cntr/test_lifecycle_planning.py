@@ -230,6 +230,7 @@ def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_c
     stop_context = OperationContext()
     stop_context.target_containers = selection.target_containers
     with manager.lifecycle.notify_start(start_context):
+        manager.lifecycle.check(start_context)
         with manager.lifecycle.notify_stop(stop_context):
             events.append(("runtime", None, "stop"))
         events.append(("runtime", None, "up"))
