@@ -4,7 +4,8 @@
 
 import pytest
 
-from linktools.cntr import ContainerError, Nginx
+from linktools.cntr import ContainerError
+from linktools.cntr.ext import Nginx
 
 
 def _render_site(nginx, waf, patterns):

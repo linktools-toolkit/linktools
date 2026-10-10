@@ -4,8 +4,7 @@
 
 import pytest
 
-from linktools.cntr import Nginx
-from linktools.cntr.ext import Authelia, ResolvedSite
+from linktools.cntr.ext import Nginx, Authelia, ResolvedSite
 
 
 @pytest.fixture(autouse=True)

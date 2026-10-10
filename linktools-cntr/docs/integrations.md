@@ -8,8 +8,8 @@ Unknown consumer names are errors. Known optional consumers that are not
 installed do not consume declarations.
 
 ```python
-from linktools.cntr import Flare, Integrations, Nginx
-from linktools.cntr.ext import load_port_url
+from linktools.cntr import Integrations
+from linktools.cntr.ext import Flare, Nginx, load_port_url
 
 
 @cached_property
@@ -33,8 +33,10 @@ def integrations(self) -> "Integrations":
 `Nginx` and `Flare` provide the declaration factories. `Nginx.site(...)` returns
 a `Nginx`; `Flare.public(...)`, `Flare.container(...)`, and `Flare.bookmark(...)`
 return a `Flare`.
-The `ext/` package owns these factories and public declaration types, also
-re-exported from `linktools.cntr`. `Integration` declares only the public
+Import consumer-specific declarations and URL factories only from
+`linktools.cntr.ext`; they are not re-exported from `linktools.cntr`.
+The generic `Integration` and `Integrations` contracts are also available from
+`linktools.cntr`. `Integration` declares only the public
 `consumer` name. `Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`.
 New consumer-specific subclasses set their own `consumer` name. `Integrations`
 is the Python 3.6-compatible alias
@@ -93,7 +95,7 @@ Explicit category metadata determines the output area and ordering.
 For example:
 
 ```python
-from linktools.cntr import Flare
+from linktools.cntr.ext import Flare
 
 tools = Flare.category("tool", "Tools", order=5)
 
@@ -357,5 +359,7 @@ or bootstrap interface on BaseContainer.
 Import extension declarations and URL factories from `linktools.cntr.ext`.
 Downstream code using the former `linktools.cntr.integration` package must update
 its imports; the former package is not retained as a compatibility alias.
-The `integrations` declaration property and existing root-level declaration exports
-keep their names and behavior.
+Root imports of `Nginx`, `Flare`, and `Authelia` must also move to
+`linktools.cntr.ext`; no compatibility aliases are provided. Generic container
+and orchestration types, including `Integration` and `Integrations`, remain in
+`linktools.cntr`. The `integrations` declaration property keeps its name and behavior.

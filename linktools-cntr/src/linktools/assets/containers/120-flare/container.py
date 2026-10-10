@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
-from linktools.cntr.ext import load_port_url
+from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.ext import Flare, Nginx, load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError

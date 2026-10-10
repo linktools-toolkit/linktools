@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.cli import CommandError
-from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
-from linktools.cntr.ext import load_port_url
+from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.ext import Flare, Nginx, load_port_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 

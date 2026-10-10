@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from linktools.cntr import ContainerError, Flare
+from linktools.cntr import ContainerError
+from linktools.cntr.ext import Flare
 from _harness import builtin_container_type
 from _harness import builtin_module as builtin
 

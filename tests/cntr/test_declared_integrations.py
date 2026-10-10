@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """Declarative integrations do not depend on navigation registration."""
 
-from linktools.cntr import Nginx
-from linktools.cntr.ext import load_nginx_url
+from linktools.cntr.ext import Nginx, load_nginx_url
 from linktools.cntr.lifecycle import HookPhase
 
 
@@ -62,7 +61,8 @@ def test_nginx_owns_one_site_snapshot_shared_by_all_consumers(fresh_manager, mon
 
 
 def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monkeypatch):
-    from linktools.cntr import BaseContainer, Flare
+    from linktools.cntr import BaseContainer
+    from linktools.cntr.ext import Flare
 
     def fail(*args, **kwargs):
         raise AssertionError("navigation URLs must stay lazy")
@@ -180,7 +180,7 @@ def _render_navigation(manager):
 
 
 def test_site_navigation_inherits_only_omitted_url_lazily():
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     public = Flare.category("public", "Public", apps=True)
     omitted = public("Inherited", "web", "")
@@ -205,7 +205,7 @@ def test_site_navigation_inherits_only_omitted_url_lazily():
 
 
 def test_disabled_or_uninstalled_sites_do_not_resolve_navigation_defaults():
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
     from linktools.runtime import lazy_load
 
     public = Flare.category("public", "Public", apps=True)
@@ -220,7 +220,7 @@ def test_disabled_or_uninstalled_sites_do_not_resolve_navigation_defaults():
 
 
 def test_site_navigation_category_does_not_change_auth_and_paths_are_independent():
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     category = Flare.category("team", "Team")
     declaration = Nginx.site("app.test", auth=True, link=category("Root", "web", ""))
@@ -238,7 +238,8 @@ def test_site_navigation_category_does_not_change_auth_and_paths_are_independent
 
 def test_attached_navigation_rejects_invalid_values_and_category_conflicts():
     import pytest
-    from linktools.cntr import ContainerError, Flare
+    from linktools.cntr import ContainerError
+    from linktools.cntr.ext import Flare
 
     manager, _ = _site_navigation_manager({"web": Nginx.site("app.test", link=True)})
     with pytest.raises(ContainerError, match="link must be a Flare"):
@@ -268,8 +269,7 @@ def test_builtin_navigation_matches_complete_output_baseline(fresh_manager):
 
 def test_navigation_merge_preserves_producer_ties_and_local_id_collisions():
     from types import SimpleNamespace
-    from linktools.cntr import Flare
-    from linktools.cntr.ext import ResolvedSite
+    from linktools.cntr.ext import Flare, ResolvedSite
 
     public = Flare.category("public", "Public", apps=True)
     manager, _ = _site_navigation_manager({
@@ -289,7 +289,7 @@ def test_navigation_merge_preserves_producer_ties_and_local_id_collisions():
 
 
 def test_absent_flare_does_not_resolve_attached_navigation(fresh_manager, monkeypatch):
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
     from linktools.runtime import lazy_load
 
     def fail():
@@ -309,10 +309,10 @@ def test_declarations_have_canonical_public_identity_and_nominal_marker():
     from linktools import cntr
     from linktools.cntr import container, ext
 
-    for name in ("Integration", "Integrations", "Nginx", "Flare", "Authelia"):
+    for name in ("Integration", "Integrations"):
         assert getattr(cntr, name) is getattr(ext, name)
-    assert issubclass(cntr.Nginx, cntr.Integration)
-    assert issubclass(cntr.Flare, cntr.Integration)
+    assert issubclass(ext.Nginx, cntr.Integration)
+    assert issubclass(ext.Flare, cntr.Integration)
     for name in ("ExposeCategory", "ExposeLink", "FlareCategory", "FlareLink", "NginxSite"):
         assert not hasattr(cntr, name)
         assert not hasattr(ext, name)
@@ -321,20 +321,20 @@ def test_declarations_have_canonical_public_identity_and_nominal_marker():
     assert importlib.util.find_spec("linktools.cntr._container.expose") is None
     for name, description in (("public", "Public"), ("private", "Private"),
                               ("container", "Internal"), ("other", "Tools")):
-        link = (cntr.Flare.public("App", "icon", "") if name == "public"
-                else cntr.Flare.bookmark("App", "icon", category=name))
+        link = (ext.Flare.public("App", "icon", "") if name == "public"
+                else ext.Flare.bookmark("App", "icon", category=name))
         category = link.display_category
         assert not isinstance(category, cntr.Integration)
         assert (category.name, category.desc) == (name, description)
         assert category.apps is (name == "public")
         assert category.order == {"public": 100, "private": 10, "container": 20, "other": 30}[name]
-        assert isinstance(link, cntr.Flare)
+        assert isinstance(link, ext.Flare)
         assert link.desc == "App"
         assert link.url is None
 
 
 def test_flare_iterable_preserves_attached_then_standalone_order():
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     manager, _ = _site_navigation_manager({
         "web": Nginx.site("app.test", link=Flare.public("Attached", "web", "")),
@@ -345,7 +345,7 @@ def test_flare_iterable_preserves_attached_then_standalone_order():
 
 
 def test_navigation_standard_categories_precede_first_seen_custom_categories():
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     team = Flare.category("team", "Team")
     tools = Flare.category("tools", "Custom tools")
@@ -369,7 +369,7 @@ def test_navigation_standard_categories_precede_first_seen_custom_categories():
 
 
 def test_flare_category_output_area_is_independent_of_name() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     dashboard = Flare.category("dashboard", "Dashboard", apps=True)
     favorites = Flare.category("favorites", "Favorites", apps=True)
@@ -391,7 +391,7 @@ def test_flare_category_output_area_is_independent_of_name() -> None:
 
 
 def test_flare_bookmark_order_is_explicit_and_ties_keep_first_seen_order() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     team = Flare.category("team", "Team", order=5)
     docs = Flare.category("docs", "Documentation", order=5)
@@ -408,7 +408,8 @@ def test_flare_bookmark_order_is_explicit_and_ties_keep_first_seen_order() -> No
 
 def test_flare_rejects_conflicting_category_output_areas_and_orders() -> None:
     import pytest
-    from linktools.cntr import ContainerError, Flare
+    from linktools.cntr import ContainerError
+    from linktools.cntr.ext import Flare
 
     for options, message in (({"apps": True}, "output area"), ({"order": 5}, "order")):
         manager, _ = _site_navigation_manager({}, [
@@ -420,7 +421,7 @@ def test_flare_rejects_conflicting_category_output_areas_and_orders() -> None:
 
 
 def test_flare_bookmarks_accept_custom_category_ids_and_inherit_site_urls() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     manager, reads = _site_navigation_manager({
         "web": Nginx.site("app.test", link=Flare.bookmark("Attached", "web", category="tool")),
@@ -444,7 +445,7 @@ def test_flare_bookmarks_accept_custom_category_ids_and_inherit_site_urls() -> N
 
 
 def test_flare_container_factory_preserves_lazy_urls() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
     from linktools.runtime import lazy_load
 
     reads = []
@@ -470,7 +471,7 @@ def test_flare_container_factory_preserves_lazy_urls() -> None:
 
 
 def test_flare_container_factory_inherits_only_omitted_site_urls() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     omitted = Flare.container("Inherited", "web")
     empty = Flare.container("Empty", "web", "")
@@ -493,7 +494,7 @@ def test_flare_container_factory_inherits_only_omitted_site_urls() -> None:
 
 
 def test_flare_bookmark_factories_preserve_category_description_and_url_contract() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
     from linktools.runtime import lazy_load
     from linktools.types import MISSING
 
@@ -516,7 +517,7 @@ def test_flare_bookmark_factories_preserve_category_description_and_url_contract
 
 
 def test_flare_bookmarks_accept_category_titles_and_orders() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     tools = Flare.category("tool", "Tools", order=5)
     manager, _ = _site_navigation_manager({}, [
@@ -537,7 +538,7 @@ def test_flare_bookmarks_accept_category_titles_and_orders() -> None:
 
 def test_flare_bookmarks_reject_application_categories() -> None:
     import pytest
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     with pytest.raises(ValueError, match="bookmarks output area"):
         Flare.bookmark("App", "web", category=Flare.category("public", "Public", apps=True))
@@ -570,7 +571,7 @@ def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
 
 def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
     import inspect
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     assert "server_name" in inspect.signature(Nginx.site).parameters
     declarations = [Nginx.site("app.example.com"),

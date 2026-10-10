@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr import Authelia, ContainerError, ContainerManager, Flare, Integration, Nginx
-from linktools.cntr.ext import load_nginx_url
+from linktools.cntr import ContainerError, ContainerManager, Integration
+from linktools.cntr.ext import Authelia, Flare, Nginx, load_nginx_url
 from linktools.cntr.ext import ResolvedSite
 from linktools.runtime import lazy_load
 
@@ -173,7 +173,7 @@ def test_explicit_false_does_not_read_unneeded_global_switches():
 
 
 def test_snapshot_freezes_mixed_declarations_once_without_url_resolution() -> None:
-    from linktools.cntr import Flare
+    from linktools.cntr.ext import Flare
 
     class CustomIntegration(Integration):
         consumer = "custom"

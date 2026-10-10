@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.runtime import lazy_load
-from linktools.cntr import BaseContainer, Flare, Nginx
-from linktools.cntr.ext import Authelia, load_nginx_url, load_port_url
+from linktools.cntr import BaseContainer
+from linktools.cntr.ext import Flare, Nginx, Authelia, load_nginx_url, load_port_url
 
 if TYPE_CHECKING:
     from linktools.cntr import Integrations

@@ -257,7 +257,7 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 `integrations` 返回扁平的 `Integration` 数组，通过 `Nginx` 和 `Flare` 工厂统一声明：
 
 ```python
-from linktools.cntr import Flare, Nginx
+from linktools.cntr.ext import Flare, Nginx
 
 return [
     Nginx.site("app.example.com", link=Flare.public("应用", "web", "应用描述")),

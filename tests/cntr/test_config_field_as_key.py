@@ -92,7 +92,7 @@ def test_get_config_still_accepts_plain_string_key(fresh_manager):
 
 
 def test_nginx_domain_provider_via_configfield_key(fresh_manager):
-    from linktools.cntr import Nginx
+    from linktools.cntr.ext import Nginx
 
     portainer = fresh_manager.containers["portainer"]
     field = ConfigField(name="SOME_DOMAIN", provider=Nginx.domain(portainer, "x"))
@@ -104,7 +104,8 @@ def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys,
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "container.py").write_text(
-        "from linktools.cntr import BaseContainer, Nginx\n"
+        "from linktools.cntr import BaseContainer\n"
+        "from linktools.cntr.ext import Nginx\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
         "    def configs(self):\n"

@@ -3,8 +3,8 @@
 """Navigation never owns proxy registration or mutates declaration identities."""
 from types import SimpleNamespace
 
-from linktools.cntr import BaseContainer, Nginx
-from linktools.cntr.ext import load_nginx_url
+from linktools.cntr import BaseContainer
+from linktools.cntr.ext import Nginx, load_nginx_url
 from linktools.cntr.lifecycle import HookRegistry
 
 

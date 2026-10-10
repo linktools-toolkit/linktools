@@ -4,8 +4,8 @@
 from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
-from linktools.cntr import BaseContainer, Flare, Nginx
-from linktools.cntr.ext import load_port_url
+from linktools.cntr import BaseContainer
+from linktools.cntr.ext import Flare, Nginx, load_port_url
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 

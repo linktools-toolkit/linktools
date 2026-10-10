@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 import pytest
 from types import SimpleNamespace
 
-from linktools.cntr import ContainerError, Nginx
+from linktools.cntr import ContainerError
+from linktools.cntr.ext import Nginx
 from linktools.cntr.container import ContainerTemplateError
 
 

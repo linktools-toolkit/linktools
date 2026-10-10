@@ -12,8 +12,8 @@ import yaml
 
 from linktools import utils
 from linktools.cli import CommandError, subcommand
-from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
-from linktools.cntr.ext import Authelia, load_nginx_url
+from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.ext import Flare, Nginx, Authelia, load_nginx_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
