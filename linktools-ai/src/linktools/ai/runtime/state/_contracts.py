@@ -806,7 +806,7 @@ class ExecutionRecord:
     requires_task_invocation_capture: bool = False
     retention_closed: bool = False
     started_at: datetime | None = None
-    budget_scope_id: str | None = None
+    budget_scope_id: str | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if self.budget_scope_id is not None and (

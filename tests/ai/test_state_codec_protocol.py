@@ -290,6 +290,9 @@ def test_constructor_defaults_do_not_replace_required_durable_facts(value: objec
     with pytest.raises(AIError) as raised:
         _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert raised.value.safe_details == {
+        "wire_type": wire_type_id(type(value)), "missing_fields": [field_name],
+    }
 
 
 @pytest.mark.parametrize("field_name", (
@@ -302,6 +305,17 @@ def test_transcript_head_still_requires_authoritative_fields(field_name: str) ->
     with pytest.raises(AIError) as raised:
         _decode_domain(payload, TranscriptHeadRecord, _CURRENT_CODEC, persisted=True)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_nullable_domain_preserves_missing_field_diagnostics() -> None:
+    payload = _encode_persisted_domain(ConversationCursor("private-run-id"))
+    del payload["fields"]["message_count"]
+    with pytest.raises(AIError) as raised:
+        _decode_domain(payload, ConversationCursor | None, _CURRENT_CODEC, persisted=True)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert raised.value.safe_details == {
+        "wire_type": wire_type_id(ConversationCursor), "missing_fields": ["message_count"],
+    }
 
 
 @pytest.mark.parametrize("field_name,value", (

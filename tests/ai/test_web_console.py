@@ -27,6 +27,51 @@ def client(app: object) -> httpx.AsyncClient:
 
 
 @pytest.mark.asyncio
+async def test_failed_history_debug_reports_stage_without_payload_or_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.web import _app
+
+    environment = SimpleNamespace(debug=False)
+    monkeypatch.setattr(_app, "environ", environment)
+    logged: list[str] = []
+    monkeypatch.setattr(_app._logger, "debug", lambda message, *args: logged.append(message % args))
+    details = {"wire_type": "execution", "missing_fields": ["budget_scope_id"]}
+
+    class History:
+        tenant_id = "default"
+
+        async def inspect_session(self, identity: str, *, principal: object) -> dict[str, object]:
+            return {"session_id": identity, "status": "OPEN"}
+
+        async def session_timeline(self, identity: str, **kwargs: object) -> None:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR, "private exception prompt",
+                operation_id="safe-operation", safe_details=details,
+                diagnostics=ErrorDiagnostics.from_exception(ValueError("api_key=private-credential")),
+            )
+
+    async with client(create_app(history=History())) as http:
+        quiet_failure = await http.get("/api/session?session_id=private-query&limit=50")
+        assert quiet_failure.status_code == 503 and not logged
+        environment.debug = True
+        metadata = await http.get("/api/session?session_id=private-query&include_timeline=false")
+        assert metadata.status_code == 200 and not logged
+        failure = await http.get("/api/session?session_id=private-query&limit=50")
+        assert failure.status_code == 503
+        assert failure.json()["safe_details"] == details
+        assert failure.json()["operation_id"] == "safe-operation"
+        assert len(logged) == 1
+        assert "path=/api/session phase=session.timeline code=STORAGE_INTEGRITY_ERROR" in logged[0]
+        assert "operation_id=safe-operation" in logged[0]
+        assert "wire_type=execution missing_fields=['budget_scope_id']" in logged[0]
+        assert "private-" not in logged[0] and "private-" not in failure.text
+
+
+@pytest.mark.asyncio
 async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding() -> None:
     app = create_app()
     async with client(app) as http:
@@ -107,6 +152,55 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
             assert fork.status_code == 201, fork.text
             closed = await http.post("/api/session/close?session_id=web-session", json={"request_id": "close"}, headers=_HEADERS)
             assert closed.status_code == 200 and closed.json()["status"] == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.models.function import AgentInfo
+
+    from . import _runtime_test_helpers as helpers
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+    original = helpers._runtime_usage_model
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return await original(messages, info)
+
+    monkeypatch.setattr(helpers, "_runtime_usage_model", model)
+    async with Runtime.open("web-busy", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+        async with client(create_app(runtime=runtime)) as http:
+            created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
+            assert created.status_code == 201
+            path = "/api/session/messages?session_id=session"
+            first = await http.post(path, json={"prompt": "first", "request_id": "first"}, headers=_HEADERS)
+            assert first.status_code == 202
+            try:
+                await asyncio.wait_for(entered.wait(), 10)
+                request = {"prompt": "next", "request_id": "rejected"}
+                busy = await http.post(path, json=request, headers=_HEADERS)
+                assert busy.status_code == 409 and busy.json()["code"] == "SESSION_BUSY"
+                current = await http.get("/api/session?session_id=session")
+                assert current.status_code == 200
+                assert current.json()["session"]["active_execution_id"] == first.json()["execution_id"]
+            finally:
+                release.set()
+            await (await runtime.executions.get(first.json()["execution_id"])).wait()
+            completed = await http.get("/api/session?session_id=session")
+            assert completed.status_code == 200 and completed.json()["session"]["active_execution_id"] is None
+            replay = await http.post(path, json=request, headers=_HEADERS)
+            assert replay.status_code == 409 and replay.json()["code"] == "SESSION_BUSY"
+            accepted = await http.post(path, json={**request, "request_id": "next-attempt"}, headers=_HEADERS)
+            assert accepted.status_code == 202
+            await (await runtime.executions.get(accepted.json()["execution_id"])).wait()
+            assert calls == 2
 
 
 @pytest.mark.asyncio

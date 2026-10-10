@@ -184,11 +184,14 @@ class _Console:
                       "capabilities": self.capabilities, "metric_names": _SUMMARY_METRICS})
 
     async def sessions(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "session.create" if request.method == "POST" else "session.list"
         if request.method == "POST":
             runtime = self.require_runtime()
             payload = await _body(request)
+            request.state.operation_id = _text(payload, "request_id")
             return _json(await runtime.sessions.create(_text(payload, "agent_id", "default"), CreateSessionRequest(
-                self.principal, _text(payload, "session_id"), _text(payload, "request_id"),
+                self.principal, _text(payload, "session_id"), request.state.operation_id,
                 cwd=payload.get("cwd"), metadata={"title": _text(payload, "title", "New conversation")},
             )), 201)
         if self.runtime is not None:
@@ -207,15 +210,27 @@ class _Console:
         include_timeline = request.query_params.get("include_timeline", "true")
         if include_timeline not in {"true", "false"}:
             raise ValueError("include_timeline must be true or false")
-        return _json({"session": await history.inspect_session(identity, principal=self.principal),
-                      "timeline": None if include_timeline == "false" else await history.session_timeline(identity, principal=self.principal, **_paging(request))})
+        if environ.debug:
+            request.state.phase = "session.metadata"
+        session = await history.inspect_session(identity, principal=self.principal)
+        timeline = None
+        if include_timeline == "true":
+            if environ.debug:
+                request.state.phase = "session.timeline"
+            timeline = await history.session_timeline(identity, principal=self.principal, **_paging(request))
+        return _json({"session": session, "timeline": timeline})
 
     async def session_action(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "session.get"
         runtime = self.require_runtime()
         session = await runtime.sessions.get(_text(request.query_params, "session_id"), principal=self.principal)
         payload = await _body(request)
         request_id = _text(payload, "request_id")
         action = request.path_params["action"]
+        request.state.operation_id = request_id
+        if environ.debug:
+            request.state.phase = f"session.{action}"
         if action == "messages":
             execution = await session.start(
                 _text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id,
@@ -236,6 +251,8 @@ class _Console:
         return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
 
     async def executions(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "execution.list"
         if request.query_params.get("recent", "false") not in {"true", "false"}:
             raise ValueError("recent must be true or false")
         if request.query_params.get("recent") == "true":
@@ -254,6 +271,8 @@ class _Console:
         )))
 
     async def execution(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "execution.metadata"
         return _json(await self.require_history().inspect_execution(
             request.path_params["execution_id"], principal=self.principal,
         ))
@@ -262,6 +281,8 @@ class _Console:
         history = self.require_history()
         identity = request.path_params["execution_id"]
         kind = request.path_params["kind"]
+        if environ.debug:
+            request.state.phase = f"execution.{kind}"
         paging = _paging(request)
         if kind == "trace":
             result = await history.trace(identity, principal=self.principal, **paging, **_selectors(request))
@@ -280,11 +301,16 @@ class _Console:
         return _json(result)
 
     async def execution_action(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "execution.get"
         runtime = self.require_runtime()
         execution = await runtime.executions.get(request.path_params["execution_id"], principal=self.principal)
         payload = await _body(request)
         request_id = _text(payload, "request_id")
         action = request.path_params["action"]
+        request.state.operation_id = request_id
+        if environ.debug:
+            request.state.phase = f"execution.{action}"
         if action == "cancel":
             return _json(await execution.cancel(idempotency_key=request_id))
         if action == "retry":
@@ -312,6 +338,8 @@ class _Console:
         return _json({"execution_id": result.execution_id}, 202)
 
     async def events(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "execution.watch"
         execution = await self.require_runtime().executions.get(
             request.path_params["execution_id"], principal=self.principal,
         )
@@ -327,9 +355,12 @@ class _Console:
                     prefix = "" if observation.cursor is None else f"id: {observation.cursor}\n"
                     yield prefix + "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
                 # Completion of an observer is not the execution's terminal verdict.
+                if environ.debug:
+                    request.state.phase = "execution.metadata"
                 info = await self.require_history().inspect_execution(execution.execution_id, principal=self.principal)
                 yield "event: snapshot\ndata: " + json.dumps(_wire(info), ensure_ascii=False) + "\n\n"
             except AIError as error:
+                _debug_error(request, error)
                 payload = {"error_code": error.code.value, "safe_details": error.safe_details}
                 if isinstance(error, ObservationError):
                     payload.update(cursor=error.cursor, origin=error.origin)
@@ -340,6 +371,8 @@ class _Console:
         return StreamingResponse(stream(), media_type="text/event-stream", headers={**_HEADERS, "X-Accel-Buffering": "no"})
 
     async def metric_query(self, request: Request) -> Response:
+        if environ.debug:
+            request.state.phase = "metrics.query"
         if self.metrics is None:
             return _json({"items": [], "unavailable": True})
         query = request.query_params
@@ -363,15 +396,30 @@ class _Console:
         return _json({"items": values})
 
 
+def _operation_id(request: Request, error: AIError) -> str:
+    return error.operation_id or request.scope.get("state", {}).get("operation_id") or request.path_params.get("execution_id", "web")
+
+
+def _debug_error(request: Request, error: AIError) -> None:
+    if environ.debug:
+        state = request.scope.get("state", {})
+        _logger.debug(
+            "Web request failed: path=%s phase=%s code=%s operation_id=%s wire_type=%s missing_fields=%s",
+            request.url.path, state.get("phase", "request"), error.code.value, _operation_id(request, error),
+            error.safe_details.get("wire_type"), error.safe_details.get("missing_fields"),
+        )
+
+
 async def _error(request: Request, error: Exception) -> Response:
     if isinstance(error, AIError):
+        _debug_error(request, error)
         code = error.code.value
         status = 404 if code in {"AUTHORIZATION_DENIED", "SESSION_NOT_FOUND", "EXECUTION_NOT_FOUND"} else (
             409 if any(part in code for part in ("CONFLICT", "BUSY", "CLOSED", "MISMATCH")) else (
                 400 if any(part in code for part in ("INVALID", "REQUIRED")) else 503
             )
         )
-        return _json(asdict(error.to_safe_error(operation_id=request.path_params.get("execution_id", "web"))), status)
+        return _json(asdict(error.to_safe_error(operation_id=_operation_id(request, error))), status)
     if isinstance(error, (TypeError, ValueError, KeyError)):
         return _json({"error_code": "REQUEST_FIELD_INVALID", "message": "Check the request fields and paging parameters"}, 400)
     _logger.error("Web request failed: path=%s error_type=%s", request.url.path, type(error).__name__)
