@@ -306,6 +306,12 @@ class _TaskAdmissionPersistence(Protocol):
 
     async def prepare(self, submission: TaskGraphSubmission) -> TaskGraphSubmission: ...
 
+    async def prepare_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]: ...
+
+    async def submission_status(self, submission: TaskSubmissionRef) -> str | None: ...
+
     async def cancel_submission(
         self, submission: TaskSubmissionRef, operation: OperationLedgerInput
     ) -> bool: ...
@@ -423,6 +429,12 @@ class DefaultTaskGraphService(TaskGraphService):
     async def prepare_described(
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission:
+        prepared, _ = await self.prepare_described_with_disposition(submission)
+        return prepared
+
+    async def prepare_described_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]:
         self._require_budget_owner(submission.admission.budget)
         if submission.namespace != self._persistence.admissions.namespace:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -433,7 +445,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if status is None and self._preflight is not None:
             graph = await self._preflight.capture_admission(admission, submission.graph)
             submission = TaskGraphSubmission(submission.namespace, admission, graph)
-        return await self._persistence.admissions.prepare(submission)
+        return await self._persistence.admissions.prepare_with_disposition(submission)
 
     async def start_prepared(
         self, submission: TaskGraphSubmission
@@ -605,13 +617,33 @@ class DefaultTaskGraphService(TaskGraphService):
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if state.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            if _terminal(state.status):
+                await self._observe_metric_history(state, tenant_id=tenant_id)
             return
-        admission = await self._validated_recovery_admission(
-            graph_id,
-            tenant_id,
-            state,
-        )
-        await self._arm_graph(admission.launch())
+        try:
+            admission = await self._validated_recovery_admission(
+                graph_id,
+                tenant_id,
+                state,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.BINDING_NOT_REGISTERED:
+                raise
+            current = await self._persistence.tasks.get_graph(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if current is None or current.graph_id != graph_id or not _terminal(current.status):
+                raise
+            await self._observe_metric_history(current, tenant_id=tenant_id)
+            return
+        current = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
+        if current is None or current.graph_id != graph_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            await self._arm_graph(admission.launch())
+        elif _terminal(current.status):
+            await self._observe_metric_history(current, tenant_id=tenant_id)
 
     async def recover_pending(self) -> None:
         if self._launcher is None:
@@ -865,34 +897,48 @@ class DefaultTaskGraphService(TaskGraphService):
                 if settled_cancel.status is not OperationStatus.SUCCEEDED:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-        admission = None
-        if (
-            view.status
-            in {
-                TaskStatus.RECOVERY_REQUIRED,
-                TaskStatus.PENDING,
-                TaskStatus.RUNNING,
-            }
-            and not (
-                view.status is TaskStatus.RECOVERY_REQUIRED
-                and cancel_requested
-            )
-        ):
-            state = await self._persistence.tasks.scheduler_state(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            admission = await self._validated_recovery_admission(
-                graph_id,
-                tenant_id,
-                state,
-            )
+        try:
+            admission = None
+            if (
+                view.status
+                in {
+                    TaskStatus.RECOVERY_REQUIRED,
+                    TaskStatus.PENDING,
+                    TaskStatus.RUNNING,
+                }
+                and not (
+                    view.status is TaskStatus.RECOVERY_REQUIRED
+                    and cancel_requested
+                )
+            ):
+                state = await self._persistence.tasks.scheduler_state(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                admission = await self._validated_recovery_admission(
+                    graph_id,
+                    tenant_id,
+                    state,
+                )
 
-        if admission is not None and self._bound_execution_recovery is not None:
-            await self._bound_execution_recovery.recover_bound_executions(
-                graph_id,
-                request,
-            )
+            if admission is not None and self._bound_execution_recovery is not None:
+                await self._bound_execution_recovery.recover_bound_executions(
+                    graph_id,
+                    request,
+                )
+        except AIError as error:
+            if error.code is not ErrorCode.BINDING_NOT_REGISTERED:
+                raise
+            # Terminal cleanup may retire bindings while recovery is awaiting IO.
+            current = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
+            if current is None or current.graph_id != graph_id or not _terminal(current.status):
+                raise
+            view = current
+        else:
+            current = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
+            if current is None or current.graph_id != graph_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            view = current
 
         if view.status is TaskStatus.RECOVERY_REQUIRED:
             view = await self._persistence.tasks.recover_graph(

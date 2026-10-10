@@ -213,9 +213,28 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
     async def prepare(
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission:
-        async def mutate(transaction: StateTransaction) -> TaskGraphSubmission:
+        prepared, _ = await self.prepare_with_disposition(submission)
+        return prepared
+
+    async def prepare_with_disposition(
+        self, submission: TaskGraphSubmission
+    ) -> tuple[TaskGraphSubmission, bool]:
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> tuple[TaskGraphSubmission, bool]:
             record = await self._submission_in_transaction(transaction, submission.ref)
             if record is None:
+                graph_id = submission.graph.graph_id
+                records = await transaction.get_records((
+                    self._graph_key(graph_id), self._admission_key(graph_id),
+                    self._prepared_key(graph_id),
+                ))
+                operation = await transaction.get_operation(operation_key(
+                    self._namespace, self._tenant_id, self._domain.value,
+                    submission.admission.operation_id,
+                ))
+                if records or operation is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await transaction.insert_records((
                     self._stored(
                         "task_submission", submission.graph.graph_id,
@@ -225,16 +244,19 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                         "task_submission_payload", submission.graph.graph_id, submission,
                     ),
                 ))
-                return submission
-            return await self._prepared_submission(transaction, record, submission)
+                return submission, True
+            return await self._prepared_submission(transaction, record, submission), False
 
-        async def readback() -> CommitObservation[TaskGraphSubmission]:
-            async def read(transaction: StateTransaction) -> CommitObservation[TaskGraphSubmission]:
+        async def readback() -> CommitObservation[tuple[TaskGraphSubmission, bool]]:
+            async def read(
+                transaction: StateTransaction,
+            ) -> CommitObservation[tuple[TaskGraphSubmission, bool]]:
                 record = await self._submission_in_transaction(transaction, submission.ref)
                 if record is None:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 stored = await self._prepared_submission(transaction, record, submission)
-                return CommitObservation(DurableCommitState.COMMITTED, stored)
+                # Readback establishes durable preparation, but not which caller created it.
+                return CommitObservation(DurableCommitState.COMMITTED, (stored, False))
             return await self._store.read(read)
 
         return await self._commit(lambda: self._store.mutate(mutate), readback)

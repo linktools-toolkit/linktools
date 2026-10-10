@@ -331,3 +331,62 @@ async def test_expired_running_binding_is_reconciled_before_graph_takeover(
         await service.recover("bound-graph", RecoverGraphRequest(_ACTOR, "recover-expired-binding"))
         assert observed_states and set(observed_states) == {TaskStatus.READY}
         assert len(backend.claims) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_binding", (False, True))
+async def test_bound_recovery_retains_validated_contracts_across_terminal_cleanup(
+    monkeypatch: pytest.MonkeyPatch, changed_binding: bool,
+) -> None:
+    async with _graph_recovery(("first", "second")) as (runtime, storage, service, backend, launcher, _authorization):
+        runner = runtime._task_node_runtime
+        get_execution = storage.execution.executions.get
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def gated_get(execution_id, *, tenant_id):
+            if not entered.is_set():
+                entered.set()
+                await asyncio.wait_for(release.wait(), 10)
+            return await get_execution(execution_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(storage.execution.executions, "get", gated_get)
+        pending = asyncio.create_task(service.recover(
+            "bound-graph", RecoverGraphRequest(_ACTOR, "finish-during-bound-recovery"),
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            state = await storage.task.tasks.graph_state("bound-graph", tenant_id="default")
+            for node in state.node_states:
+                execution = await get_execution(node.execution_id, tenant_id="default")
+                binding = execution.binding
+                if changed_binding and node.node_id == "second":
+                    binding = replace(binding, agent_spec=replace(
+                        binding.agent_spec, revision=binding.agent_spec.revision + 1,
+                    ))
+                await storage.execution.executions.compare_and_swap(
+                    node.execution_id, tenant_id="default", expected_revision=execution.revision,
+                    next_record=replace(execution, revision=execution.revision + 1,
+                                        status=ExecutionStatus.SUCCEEDED, error_code=None, binding=binding),
+                )
+                await storage.task.tasks.complete(
+                    None, tenant_id="default", graph_id="bound-graph", node_id=node.node_id,
+                    expected_fence=node.fence, execution_id=node.execution_id,
+                    result_digest=canonical_sha256({"node": node.node_id}),
+                )
+            completed = await storage.task.tasks.graph_state("bound-graph", tenant_id="default")
+            assert completed.status is TaskStatus.SUCCEEDED
+            await runner.release_graph_dependencies(completed, tenant_id="default")
+            release.set()
+            if changed_binding:
+                with pytest.raises(AIError) as raised:
+                    await asyncio.wait_for(pending, 10)
+                assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            else:
+                result = await asyncio.wait_for(pending, 10)
+                assert result.status is TaskStatus.SUCCEEDED
+                assert all(node.status is TaskStatus.SUCCEEDED for node in result.node_results)
+            assert backend.operations == []
+            assert launcher.started == []
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)

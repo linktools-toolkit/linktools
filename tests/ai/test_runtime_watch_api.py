@@ -4,6 +4,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,9 +18,10 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.runtime import _cursor
 from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
 from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from linktools.ai.runtime._watch_cursor import encode_graph_watch_cursor
+from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor, encode_graph_watch_cursor
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,
@@ -637,7 +639,9 @@ async def test_task_graph_watch_preserves_missing_dynamic_node_integrity_error()
 
 
 @pytest.mark.asyncio
-async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
+async def test_task_graph_run_watch_merges_task_and_execution_events(monkeypatch) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(_cursor, "time", SimpleNamespace(time=lambda: now))
     run = _task_graph_run(
         _Runtime(),
         "graph",
@@ -660,10 +664,17 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     assert all(item.cursor is not None for item in values)
     assert all(item.event.cursor is not None for item in execution)
     assert values[-1].cursor is not None
+    position = decode_graph_watch_cursor(
+        "watch-test", "tenant", "graph", values[-1].cursor, include_content=False,
+    )
+    assert position == (4, {"node": {"execution": 1}})
+    now += 1
     resumed = [item async for item in run.watch(cursor=values[-1].cursor)]
     assert resumed
     assert all(isinstance(item.event, (TaskGraphProjection, TaskModelProjection)) for item in resumed)
-    assert all(item.cursor == values[-1].cursor for item in resumed)
+    assert all(decode_graph_watch_cursor(
+        "watch-test", "tenant", "graph", item.cursor, include_content=False,
+    ) == position for item in resumed)
     with pytest.raises(AIError) as raised:
         run.watch(cursor=values[-1].cursor, include_content=True)
     assert raised.value.code is ErrorCode.CURSOR_INVALID

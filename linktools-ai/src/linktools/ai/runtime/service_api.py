@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Literal, Protocol, cast
 
 from ..agent import AgentBindingContract
+from ..asset import AssetVersionRef
 from ..core import (
     BudgetUsage,
     RunBudget,
@@ -88,8 +89,11 @@ class ExecutionRequest:
     files: tuple[str, ...] = ()
     input_context: ExecutionInputContext | None = None
     budget: RunBudget | None = None
+    tool_response_ref: AssetVersionRef | None = None
 
     def __post_init__(self) -> None:
+        if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.budget is not None and not isinstance(self.budget, RunBudget):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.input_context is not None and not isinstance(self.input_context, ExecutionInputContext):

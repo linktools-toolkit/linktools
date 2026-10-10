@@ -9,13 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TaskStatus, TenantAuthorizationPolicy
+from linktools.ai.core import (
+    AuthorizationAction, Principal, ResourceKind, ResourceRef, RunBudget, TaskStatus, TenantAuthorizationPolicy,
+)
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain, _encode_persisted_domain, encode_envelope,
 )
-from linktools.ai.runtime.state._store import RecordQuery, StateTransaction
+from linktools.ai.runtime.state._store import OperationQuery, RecordQuery, StateTransaction, stream_digest
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskGraph,
@@ -389,3 +391,202 @@ async def test_independent_task_owners_share_the_submission_fence(tmp_path: Path
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_disposition_has_one_creator_across_independent_sqlite_owners(
+    tmp_path: Path,
+) -> None:
+    first = _storage("sqlite", tmp_path)
+    second = _storage("sqlite", tmp_path)
+    await first.initialize(namespace="prepare-disposition", tenant_id="tenant")
+    await second.initialize(namespace="prepare-disposition", tenant_id="tenant")
+    try:
+        launchers = (_Launcher(), _Launcher())
+        services = (_service(first, launchers[0]), _service(second, launchers[1]))
+        submission = await services[0].describe_submission(_request())
+        results = await asyncio.gather(*(
+            service.prepare_described_with_disposition(submission) for service in services
+        ))
+        assert sorted(created for _, created in results) == [False, True]
+        assert all(prepared == submission for prepared, _ in results)
+        for state, service, launcher in zip((first, second), services, launchers):
+            assert await state.task.admissions.prepare_with_disposition(submission) == (submission, False)
+            assert await state.task.admissions.prepare(submission) == submission
+            assert await service.prepare_described(submission) == submission
+            assert await service.prepare_submission(_request()) == submission
+            assert await state.task.admissions.submission_status(submission.ref) == "prepared"
+            assert await state.task.tasks.get_graph("trial", tenant_id="tenant") is None
+            assert launcher.started == []
+    finally:
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled"))
+async def test_prepare_disposition_existing_submission_never_claims_creation(phase: str) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="existing-preparation", tenant_id="tenant")
+    try:
+        launcher = _Launcher()
+        service = _service(state, launcher)
+        submission = await service.describe_submission(_request())
+        assert await service.prepare_described_with_disposition(submission) == (submission, True)
+        if phase == "admitted":
+            await state.task.admissions.admit_prepared(submission)
+        elif phase == "cancelled":
+            await service.cancel_submission(
+                submission.ref, principal=submission.ref.principal, idempotency_key="cancel",
+            )
+        assert await state.task.admissions.submission_status(submission.ref) == phase
+        assert await service.prepare_described_with_disposition(submission) == (submission, False)
+        assert await state.task.admissions.submission_status(submission.ref) == phase
+        assert launcher.started == []
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_disposition_commit_readback_cannot_prove_creator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _storage("sqlite", tmp_path)
+    await state.initialize(namespace="unknown-preparation", tenant_id="tenant")
+    try:
+        launcher = _Launcher()
+        service = _service(state, launcher)
+        submission = await service.describe_submission(_request())
+        store = state.task.admissions.state_store
+        mutate = store.mutate
+
+        async def lose_response(
+            operation: Callable[[StateTransaction], Awaitable[object]],
+        ) -> object:
+            await mutate(operation)
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "mutate", lose_response)
+            assert await service.prepare_described_with_disposition(submission) == (submission, False)
+        assert await state.task.admissions.submission_status(submission.ref) == "prepared"
+        assert await service.prepare_described_with_disposition(submission) == (submission, False)
+        assert await state.task.tasks.get_graph("trial", tenant_id="tenant") is None
+        assert launcher.started == []
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_disposition_preserves_single_authorization_and_capture() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="captured-preparation", tenant_id="tenant")
+    events: list[str] = []
+
+    class Authorization(_Authorization):
+        async def authorize(
+            self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
+        ) -> None:
+            events.append("authorize")
+            await super().authorize(principal, action, resource)
+
+    class Preflight:
+        async def capture_admission(
+            self, admission: TaskGraphAdmission, graph: TaskGraph,
+        ) -> TaskGraph:
+            events.append("capture")
+            return graph
+
+    try:
+        launcher = _Launcher()
+        service = DefaultTaskGraphService(state.task, Authorization(), launcher, preflight=Preflight())
+        request = _request()
+        submission = TaskGraphSubmission(
+            "captured-preparation", TaskGraphAdmission.from_request(request), request.graph,
+        )
+        assert await service.prepare_described_with_disposition(submission) == (submission, True)
+        assert events == ["authorize", "capture"]
+        events.clear()
+        assert await service.prepare_described(submission) == submission
+        assert events == ["authorize"]
+        assert await state.task.tasks.get_graph("trial", tenant_id="tenant") is None
+        assert launcher.started == []
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard", ("namespace", "authorization", "budget"))
+async def test_prepare_disposition_preserves_guards_before_persistence(guard: str) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="guarded-preparation", tenant_id="tenant")
+
+    class Authorization(_Authorization):
+        async def authorize(
+            self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
+        ) -> None:
+            if guard == "authorization":
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await super().authorize(principal, action, resource)
+
+    try:
+        launcher = _Launcher()
+        service = DefaultTaskGraphService(state.task, Authorization(), launcher)
+        request = _request()
+        if guard == "budget":
+            request = replace(request, budget=RunBudget(model_requests=1))
+        submission = TaskGraphSubmission(
+            "foreign" if guard == "namespace" else "guarded-preparation",
+            TaskGraphAdmission.from_request(request), request.graph,
+        )
+        with pytest.raises(AIError) as caught:
+            await service.prepare_described_with_disposition(submission)
+        assert caught.value.code is {
+            "namespace": ErrorCode.STORAGE_OWNER_MISMATCH,
+            "authorization": ErrorCode.AUTHORIZATION_DENIED,
+            "budget": ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+        }[guard]
+        assert await state.task.admissions.state_store.read(
+            lambda transaction: transaction.list_records(RecordQuery(kind="task_submission"))
+        ) == ()
+        assert launcher.started == []
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining", (
+    "task_graph", "task_admission", "task_submission_payload", "admit_operation",
+))
+async def test_prepare_disposition_missing_head_never_recreates_existing_resources(remaining: str) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="broken-preparation", tenant_id="tenant")
+    try:
+        launcher = _Launcher()
+        service = _service(state, launcher)
+        submission = await service.prepare_submission(_request())
+        if remaining != "task_submission_payload":
+            await state.task.admissions.admit_prepared(submission)
+
+        async def remove_head(transaction: StateTransaction) -> None:
+            for kind in (
+                "task_submission", "task_graph", "task_admission", "task_submission_payload",
+                "task_node_definition", "task_node_state",
+            ):
+                if kind != remaining:
+                    records = await transaction.list_records(RecordQuery(kind=kind))
+                    await transaction.delete_records(tuple(record.key_digest for record in records))
+            if remaining != "admit_operation":
+                await transaction.delete_operations(OperationQuery(stream_digest=stream_digest(
+                    submission.namespace, submission.ref.tenant_id, RuntimeDomain.TASK.value,
+                    "operation", [ResourceKind.TASK_GRAPH.value, submission.graph.graph_id],
+                )))
+
+        await state.task.admissions.state_store.mutate(remove_head)
+        with pytest.raises(AIError) as caught:
+            await service.prepare_described_with_disposition(submission)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await state.task.admissions.submission_status(submission.ref) is None
+        assert launcher.started == []
+    finally:
+        await state.close()

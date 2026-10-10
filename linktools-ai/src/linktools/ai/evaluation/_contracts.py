@@ -744,9 +744,12 @@ class EvaluationManifest:
     policy: EvaluationPolicy
     input_mode: Literal["fixed_input", "reproject_input"]
     principal: Principal
+    trial_scope_required: bool = field(default=False, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         _name(self.experiment_id)
+        if not isinstance(self.trial_scope_required, bool):
+            raise TypeError("trial_scope_required must be a bool")
         if self.kind not in ("experiment", "score_only") or self.input_mode not in ("fixed_input", "reproject_input"):
             raise ValueError("unknown experiment contract kind")
         for name in ("candidates", "scorers", "trials", "source_trials"):
@@ -771,7 +774,7 @@ class EvaluationManifest:
             raise ValueError("trial plan refers to an unknown candidate or dataset")
 
     def to_mapping(self) -> dict[str, JsonValue]:
-        return {"experiment_id": self.experiment_id, "kind": self.kind,
+        result = {"experiment_id": self.experiment_id, "kind": self.kind,
                 "source_experiment_id": self.source_experiment_id, "dataset": self.dataset.to_mapping(),
                 "candidates": [item.to_mapping() for item in self.candidates],
                 "scorers": [item.to_mapping() for item in self.scorers],
@@ -779,6 +782,9 @@ class EvaluationManifest:
                 "source_trials": [item.to_mapping() for item in self.source_trials],
                 "policy": self.policy.to_mapping(), "input_mode": self.input_mode,
                 "principal": principal_identity_payload(self.principal)}
+        if self.trial_scope_required:
+            result["trial_scope_required"] = True
+        return result
 
     @property
     def digest(self) -> str:

@@ -50,18 +50,19 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered, release = asyncio.Event(), asyncio.Event()
-        prepare = storage.task.admissions.prepare
+        prepare = storage.task.admissions.prepare_with_disposition
         saved = []
 
-        async def pause(submission: TaskGraphSubmission) -> TaskGraphSubmission:
+        async def pause(submission: TaskGraphSubmission) -> tuple[TaskGraphSubmission, bool]:
             saved.append(submission)
+            prepared = None
             if boundary == "after":
-                submission = await prepare(submission)
+                prepared = await prepare(submission)
             entered.set()
             await release.wait()
-            return await prepare(submission) if boundary == "before" else submission
+            return await prepare(submission) if prepared is None else prepared
 
-        storage.task.admissions.prepare = pause
+        storage.task.admissions.prepare_with_disposition = pause
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), cases=(
             CaseSpec.task(CaseRef("dataset", "case", 1), input={"secret": "private target input"}),
         )), principal=owner, idempotency_key="publish")
@@ -172,18 +173,19 @@ async def test_interrupted_preparation_has_recoverable_owner(
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered = asyncio.Event()
-        prepare = storage.task.admissions.prepare
+        prepare = storage.task.admissions.prepare_with_disposition
         saved = []
 
-        async def interrupt(submission: TaskGraphSubmission) -> TaskGraphSubmission:
+        async def interrupt(submission: TaskGraphSubmission) -> tuple[TaskGraphSubmission, bool]:
             saved.append(submission)
+            prepared = (submission, False)
             if boundary == "after":
-                submission = await prepare(submission)
+                prepared = await prepare(submission)
             entered.set()
             await asyncio.Event().wait()
-            return submission
+            return prepared
 
-        storage.task.admissions.prepare = interrupt
+        storage.task.admissions.prepare_with_disposition = interrupt
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), cases=(
             CaseSpec.task(CaseRef("dataset", "case", 1), input={"secret": "recoverable private input"}),
         )), principal=owner, idempotency_key="publish")
