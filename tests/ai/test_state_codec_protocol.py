@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from linktools.ai.core import BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
@@ -201,6 +202,53 @@ def test_repeated_domain_decodes_validate_each_payload(
             decode_domain(malformed, type(value))
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert decode_domain(payload, type(value)) == value
+
+
+@pytest.mark.parametrize("target,value,wrong", (
+    (str, "value", 1),
+    (bool, True, 1),
+    (int, 1, True),
+    (float, 1.5, 1),
+))
+def test_scalar_domain_values_preserve_declared_types(
+    target: type, value: object, wrong: object,
+) -> None:
+    assert decode_domain(value, target) is value
+    with pytest.raises(TypeError, match="scalar value has the wrong type"):
+        decode_domain(wrong, target)
+    with pytest.raises(AIError) as raised:
+        decode_domain(None, target)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), -float("inf")))
+def test_float_domain_values_reject_nonfinite_wire_values(value: float) -> None:
+    with pytest.raises(AIError) as raised:
+        decode_domain(value, float)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_scalar_domain_values_preserve_subclass_instances() -> None:
+    class Text(str):
+        pass
+
+    class Integer(int):
+        pass
+
+    class Floating(float):
+        pass
+
+    for value, target in ((Text("value"), str), (Integer(1), int), (Floating(1.5), float)):
+        assert decode_domain(value, target) is value
+
+
+def test_scalar_domain_values_preserve_union_and_literal_types() -> None:
+    assert decode_domain(None, int | None) is None
+    assert decode_domain(True, int | bool) is True
+    assert type(decode_domain(1, Literal[True] | int)) is int
+    assert decode_domain(True, Literal[1] | bool) is True
+    with pytest.raises(ValueError, match="literal value is invalid"):
+        decode_domain(True, Literal[1])
 
 
 def test_record_reader_ignores_additive_fields() -> None:
