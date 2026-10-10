@@ -56,6 +56,7 @@ from ._tool_boundary import (
 )
 from ._tool_metrics import _ToolMetricContext
 from ._mcp_transport import _create_mcp_transport
+from ._tool_response_fixture import _FixtureToolset, _ToolResponseManifest
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
@@ -248,7 +249,7 @@ class _MCPCapability(AbstractCapability[AgentContext[object]]):
         self,
         capability_id: str,
         toolset: AbstractToolset[AgentContext[object]],
-        owned_toolset: _MCPDiscoveryToolset,
+        owned_toolset: _MCPDiscoveryToolset | None,
     ) -> None:
         self.id = capability_id
         self._toolset = toolset
@@ -448,9 +449,12 @@ async def materialize_mcp_capabilities(
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
     budget: "RunBudgetContext | None" = None,
+    response_fixture: "_ToolResponseManifest | None" = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize compiler-selected MCP servers."""
     policy, required = _selector_policy(selectors)
+    if response_fixture is not None:
+        response_fixture.validate_servers(servers, selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
     try:
@@ -459,36 +463,48 @@ async def materialize_mcp_capabilities(
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             binding = bindings.get(server.id)
             projection = projections.get(server.id)
-            if binding is None or (server.transport == "stdio" and projection is None):
+            if binding is None or (
+                response_fixture is None and server.transport == "stdio" and projection is None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current_policy = _mcp_execution_policy(server, sandbox)
-            if dict(binding.execution_policy) != dict(current_policy):
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            if response_fixture is None:
+                current_policy = _mcp_execution_policy(server, sandbox)
+                if dict(binding.execution_policy) != dict(current_policy):
+                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
 
-            transport = _create_mcp_transport(
-                server,
-                sandboxed=sandbox is not None,
-                sandbox_session=sandbox_session,
-                host_cwd=(
-                    host_cwd if projection is None or projection.resource_root is None
-                    else projection.resource_root
-                ),
-                args=() if projection is None else projection.args,
-                resources=() if projection is None else projection.resources,
-                cwd_resource_id=(
-                    server.id
-                    if projection is not None and projection.resource_root is not None
-                    else None
-                ),
-            )
-            toolset = _MCPDiscoveryToolset(transport, server=server)
-            mapped = _MCPModelToolset(
-                toolset,
-                server.id,
-                allowed,
-                required.get(server.id, frozenset()),
-            )
+            toolset: _MCPDiscoveryToolset | None = None
+            mapped: AbstractToolset[object]
+            if response_fixture is not None:
+                recorded = response_fixture.server(server.id)
+                for tool in recorded.tools:
+                    if tool.tool_definition().name != _model_tool_name(server.id, tool.name):
+                        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                mapped = _FixtureToolset(recorded, allowed)
+            else:
+                transport = _create_mcp_transport(
+                    server,
+                    sandboxed=sandbox is not None,
+                    sandbox_session=sandbox_session,
+                    host_cwd=(
+                        host_cwd if projection is None or projection.resource_root is None
+                        else projection.resource_root
+                    ),
+                    args=() if projection is None else projection.args,
+                    resources=() if projection is None else projection.resources,
+                    cwd_resource_id=(
+                        server.id
+                        if projection is not None and projection.resource_root is not None
+                        else None
+                    ),
+                )
+                toolset = _MCPDiscoveryToolset(transport, server=server)
+                mapped = _MCPModelToolset(
+                    toolset,
+                    server.id,
+                    allowed,
+                    required.get(server.id, frozenset()),
+                )
             boundary = BoundaryToolset(
                 (mapped,),
                 {},

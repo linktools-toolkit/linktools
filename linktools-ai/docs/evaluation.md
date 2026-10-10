@@ -243,6 +243,91 @@ captures, and object references under its existing offline-exclusivity contract;
 it exits any locally held scopes before purging those objects. Directory
 retention and deletion remain the application's separate responsibility.
 
+## Fixed MCP tool responses
+
+`Runtime.open(..., tool_responses=ToolResponseFixture(ref, reader))` binds one
+case's immutable Asset to a borrowed `AssetStoreReader`. The host owns the
+reader's initialization, authorization, and closing. An Asset version proves
+byte integrity, not permission to read it. Keep fixture Assets separate from
+the capability declaration store so publishing another case does not change a
+captured capability revision.
+
+For an evaluation, put the reference in the application's existing typed Case
+input. The trial context must obtain it from its original durable submission,
+not the latest service request or a mutable default. The callback remains
+trusted application composition; it does not prove case isolation. Do not
+provide target contexts with other cases, expected labels, or the fixture
+manifest as a model-visible file. Scorer contexts have their own bindings.
+
+The fixture is a JSON document with `version: 1`, `kind: "mcp-tool-responses"`,
+and a `servers` array. Each server has its original MCP
+`ref: {kind: "mcp", id: ..., revision: ...}` and a `tools` array. Each tool has:
+
+- `name`: the original MCP tool name
+- `definition`: its model-visible `ToolDefinition` JSON, including `name`,
+  `parameters_json_schema`, and the original description and applicable fields
+- `responses`: rows containing an `arguments` JSON object and an `outcome`
+
+An outcome is either `{kind: "success", value: ...}` with a JSON/text result,
+or `{kind: "failed", message: ...}` / `{kind: "retry", message: ...}` for the
+corresponding native `ToolCallFailed` / `ToolCallRetry` signal. Ordinary JSON
+objects remain data, even if they resemble media metadata. This format does
+not construct `BinaryContent`, multimodal URLs, MCP resources, or tool
+extensions. Do not wrap a raw MCP `isError` envelope or an unresolved effect as
+a successful result; raw protocol/history conversion is not provided.
+
+Authorized `model_interactions(include_content=True)` reads expose captured
+definitions in `request.parameters.function_tools`. Metadata-only or expired
+history does not provide a catalog. Preserve the actual model-visible name;
+do not rename tools, duplicate their MCP description prefix, or infer omitted
+wildcard tools. The host must supply a complete fixture catalog for selected
+MCP servers. Catalogs are trusted captured schemas, validated as native
+`ToolDefinition` values; this adds no separate JSON Schema validator. Missing
+versions, invalid catalogs, and missing selected tools
+fail without discovery or transport fallback.
+
+Matching uses the original tool and canonical JSON arguments. Repeated or
+concurrent calls with different call IDs return the same fixed response;
+there is no consumption cursor or sequence. Conflicting responses for the
+same arguments are rejected. Omitted arguments are not assumed equivalent to
+explicit defaults. A missing response raises `ToolCallFailed`, never a live
+tool call. Same-call-ID concurrency keeps the existing native conflict
+semantics; this is not an exactly-once or arbitrary-history replay contract.
+
+Fixture-backed executions pin their accepted reference in native execution
+input. Reopening uses that saved reference through the configured reader,
+even when the new Runtime default points elsewhere. Missing readers or Assets
+are explicit failures. A fixture-configured Runtime cannot reinterpret an
+already admitted live execution. Child executions inherit their parent's
+accepted reference. Recovery does not substitute a new fixture or start the
+original transport. A missing fixture is a repairable deployment error: restore
+the saved Asset or its authorized reader before retrying the original recovery.
+Explicit recovery validates this dependency before committing another attempt
+and reports `AGENT_BINDING_UNAVAILABLE` with its original `cause_code`. Automatic
+startup reconciliation may log and defer that unavailable binding. Neither path
+marks the original execution failed merely because its fixture is unavailable.
+
+The supported invocation paths are sessionless Agent runs, their retry/fork
+lineage, Subagents, and recovery of those original executions. Fixture-backed
+Session turns are rejected before admission or turn ownership is acquired;
+ordinary Sessions keep their existing behavior. A fixture does not change
+conversation-history or memory-import semantics.
+
+Agent input capture exposes the saved reference for inspection. Generic
+fixture-backed capture-to-Task/graph import is currently rejected before a new
+execution can start; it must not lose the reference and become live. Ordinary
+captures retain their existing behavior. This restriction is separate from
+recovery of the original execution.
+
+MCP names, declarations, and `non_replay_safe` effect semantics remain intact.
+The offline toolset enters the existing ToolOperation, budget, and history
+boundaries without constructing a transport. Cancellation or uncertain result
+settlement can still require native effect resolution; fixture availability
+does not prove terminal success. `external_effects="deny"` and `"read_only"`
+retain their existing admission rules, including the MCP restriction. Explicit
+`"live"` permission is still required. `model_fixtures` only permits declared
+model contracts and does not supply tool responses or replace a model.
+
 ## Cases and candidate inputs
 
 `DatasetSpec.cases` is the single ordered collection. Supply `CaseSpec` values or

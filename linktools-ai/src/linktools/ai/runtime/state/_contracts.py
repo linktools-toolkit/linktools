@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic_ai.messages import ModelMessage
 
 from ...agent import AgentBindingContract
+from ...asset import AssetVersionRef
 from ...evaluation import (
     CaseContract, CaseRef, ComparisonReport, DatasetContract, DatasetRef,
     EvaluationReport, EvaluationReadCutoff, EvidenceBundle, EvidenceRef,
@@ -807,8 +808,11 @@ class ExecutionRecord:
     retention_closed: bool = False
     started_at: datetime | None = None
     budget_scope_id: str | None = field(default=None, metadata={"wire_optional": True})
+    tool_response_ref: AssetVersionRef | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
+        if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
+            raise TypeError("execution tool response reference is invalid")
         if self.budget_scope_id is not None and (
             not isinstance(self.budget_scope_id, str) or not self.budget_scope_id.strip()
         ):
@@ -844,6 +848,7 @@ class ExecutionRecord:
                 or self.memory_scope is not None
                 or self.input_context is not None
                 or self.context_imported
+                or self.tool_response_ref is not None
                 or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None

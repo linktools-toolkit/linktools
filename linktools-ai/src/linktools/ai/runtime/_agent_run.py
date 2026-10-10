@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 
 from ..agent import AgentBinding
+from ..asset import AssetVersionRef
 from ..capability import AgentContext, SubagentDelegate
 from ..core import ExecutionMode, JsonValue, PromptLimits, ThinkingValue, UsageMetrics
 from ..errors import ErrorCode, ErrorDiagnostics
@@ -136,6 +137,7 @@ class _AgentRunInput:
     deferred_tool_results: DeferredToolResults | None
     budget: RunBudgetContext | None = None
     history_producer_generation: int | None = None
+    tool_response_ref: AssetVersionRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +199,7 @@ class _AgentRunRunner:
             event_sink=agent_run_input.event_sink,
             usage_sink=agent_run_input.usage_sink,
             tool_operations=agent_run_input.tool_operations,
+            tool_response_ref=agent_run_input.tool_response_ref,
             replace_history_system_prompt=agent_run_input.replace_history_system_prompt,
             repository_instructions=agent_run_input.repository_instructions,
             repository_instruction_boundary=agent_run_input.repository_instruction_boundary,

@@ -216,6 +216,8 @@ class _RecoveryCoordinatorPort(Protocol):
 
     def validate_binding(self, execution: ExecutionRecord) -> None: ...
 
+    async def validate_recovery_inputs(self, execution: ExecutionRecord) -> None: ...
+
     async def _commit_recovery_required(
         self,
         execution: ExecutionRecord,
@@ -852,6 +854,12 @@ class _RecoveryCoordinator:
             checkpoint, execution, recovery_operation=recovery_operation,
         ):
             return False
+        if (
+            producer_generation is None
+            and checkpoint.state in {RecoveryCheckpointState.ADMITTED, RecoveryCheckpointState.ACTIVE}
+            and execution.status in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED}
+        ):
+            await self._port.validate_recovery_inputs(execution)
         identity = await self._port._recovery_idempotency(execution)
         if (
             checkpoint.state is RecoveryCheckpointState.ADMITTED
@@ -913,6 +921,7 @@ class _RecoveryCoordinator:
             planning=execution.planning,
             thinking=execution.thinking,
             correlation=execution.correlation,
+            tool_response_ref=execution.tool_response_ref,
         )
         if not self._port._prepare_recovery_relaunch(execution.execution_id):
             if recovery_operation is not None:
@@ -1037,6 +1046,7 @@ class _RecoveryCoordinator:
             ):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             return latest, launched
+        await self._port.validate_recovery_inputs(current)
         resumed, _ = await self._port._commit_recovery_resume(
             current, recovery_operation=recovery_operation,
         )
@@ -1163,6 +1173,7 @@ class _RecoveryCoordinator:
         history = await self._port.load_interrupted_messages(
             recovery.pending_tools.source_agent_run_id
         )
+        await self._port.validate_recovery_inputs(current)
         try:
             resumed_execution, resumed_checkpoint = (
                 await self._port.claim_deferred_resume(checkpoint, current)

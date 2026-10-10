@@ -226,6 +226,7 @@ class EvaluationCompiler:
         }))
         if isinstance(value, AgentInputCaptureRef):
             agent = await self._captures.read_agent(value, principal=principal)
+            agent.require_importable()
             source_binding = agent.binding
             if agent_binding is not None and agent.input_context is not None and source_binding is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)

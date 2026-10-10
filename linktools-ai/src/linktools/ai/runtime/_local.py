@@ -382,6 +382,11 @@ class LocalExecutionBackend:
     def validate_binding(self, execution: ExecutionRecord) -> None:
         self._execution_binding(execution)
 
+    async def validate_recovery_inputs(self, execution: ExecutionRecord) -> None:
+        await self._executor.validate_recovery_inputs(
+            self._execution_binding(execution), execution.tool_response_ref,
+        )
+
     async def load_execution(
         self,
         execution_id: str,
@@ -542,6 +547,7 @@ class LocalExecutionBackend:
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
+            or request.tool_response_ref != execution.tool_response_ref
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -1005,6 +1011,7 @@ class LocalExecutionBackend:
             or current.thinking != execution.thinking
             or current.binding != execution.binding
             or current.correlation != execution.correlation
+            or current.tool_response_ref != execution.tool_response_ref
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.status in {
@@ -1464,6 +1471,7 @@ class LocalExecutionBackend:
             planning=current.planning,
             thinking=current.thinking,
             correlation=current.correlation,
+            tool_response_ref=current.tool_response_ref,
         )
         if not self._prepare_recovery_relaunch(current.execution_id):
             return
@@ -3256,6 +3264,7 @@ class LocalExecutionBackend:
                             execution_id, usage
                         ),
                         tool_operations=tool_operations,
+                        tool_response_ref=current.tool_response_ref,
                         budget=(None if current.budget_scope_id is None else RunBudgetContext(
                             self._execution.budgets, current.budget_scope_id,
                             current.execution_id, agent_run_id,

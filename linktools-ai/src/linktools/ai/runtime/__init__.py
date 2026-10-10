@@ -17,6 +17,7 @@ from ._input_capture import AgentInputCapture, CaptureInputRequest, CaptureGraph
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
+from ._tool_response_fixture import ToolResponseFixture
 from ._metrics import MetricFlushResult, MetricBufferStatus
 from ._runtime_history import ExecutionInfo, RuntimeHistory
 from ._snapshot import (
@@ -110,6 +111,7 @@ from .state import (
 )
 
 __all__ = [
+    "ToolResponseFixture",
     "ExecutionInputContext",
     "RuntimeEvaluations",
     "EvaluationTrialScope",

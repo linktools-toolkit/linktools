@@ -92,6 +92,7 @@ class RuntimeTasks(Generic[AppT]):
                                  revision: int = 1, principal: Principal) -> Task[AppT]:
         self._runtime._ensure_open()
         value = await self._runtime._input_captures.read_agent(capture, principal=principal)
+        value.require_importable()
         if value.binding is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return self._runtime._task_from_agent_capture(id, value.binding, revision=revision)
