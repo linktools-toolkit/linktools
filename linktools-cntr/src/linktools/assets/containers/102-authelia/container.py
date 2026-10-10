@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
+    _config_services = ("authelia", "authelia-admin")
 
     @property
     def dependencies(self) -> "Iterable[str]":
