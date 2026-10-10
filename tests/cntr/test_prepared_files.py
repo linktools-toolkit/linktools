@@ -51,6 +51,17 @@ def context(owner):
     return ctx
 
 
+def test_stage_records_sources_in_existing_artifact_index(owner):
+    owner.manager.integration_snapshot = {
+        "app": (SimpleNamespace(consumer="nginx", expose=SimpleNamespace(consumer="auth")),),
+        "other": (SimpleNamespace(consumer="auth", expose=None),),
+    }
+    stage_files(owner, {"configuration.yml": "content"})
+    entries = owner.manager.artifact_index.load()
+    assert len(entries) == 1
+    assert next(iter(entries.values()))["producers"] == ["app", "other"]
+
+
 def test_stage_is_immutable_private_and_does_not_publish(owner):
     first = stage_files(owner, {"nested/config.yml": "secret"})
     assert (first / "nested/config.yml").stat().st_mode & 0o777 == 0o600

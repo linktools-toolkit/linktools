@@ -7,7 +7,10 @@ configuration lifecycle.
 ## Ordering and responsibilities
 
 An `up` operation resolves the selected groups, required providers and declared
-running consumers. Container requirements select what participates; only Compose
+running consumers, including attached navigation links. The existing artifact
+index retains the source-container names of generated inputs so removing a
+producer's final declaration can still update its previously running consumer.
+Container requirements select what participates; only Compose
 service dependency edges determine startup order. A real Compose dependency cycle
 is an error. There is no implicit bootstrap configuration.
 

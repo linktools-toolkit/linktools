@@ -30,6 +30,12 @@ def test_removing_producers_last_site_refreshes_previous_running_consumer(tmp_pa
     old = manager.containers["nginx"].get_app_path("generated/old/sites/app.conf")
     old.parent.mkdir(parents=True)
     old.write_text("# Previously published app site\nserver { server_name app.example.test; }\n")
+    manager.artifact_index.record({
+        str(old.relative_to(tmp_path)): {
+            "kind": "generated-config", "container": "nginx",
+            "sha256": "prior", "producers": ["app"],
+        },
+    })
     manager.integration_snapshot["app"] = ()
     manager.compose_operations.up(["app"])
     assert ("prepare", "nginx") in manager.events

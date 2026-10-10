@@ -61,6 +61,16 @@ class ComposeOperations:
         services = set(selection.services) if selection.services else {
             service for container in groups for service in container.services}
         running = set(running_services or ())
+        previous_consumers = {}
+        if running:
+            for entry in self.manager.artifact_index.load().values():
+                if entry.get("kind") != "generated-config":
+                    continue
+                consumer = installed.get(entry.get("container"))
+                if consumer is None or not set(consumer.services).intersection(running):
+                    continue
+                for producer in entry.get("producers", ()):
+                    previous_consumers.setdefault(producer, set()).add(consumer)
         while True:
             before = set(groups), set(providers), set(targets), set(services)
             for container in tuple(groups):
@@ -82,8 +92,16 @@ class ComposeOperations:
                     services.update(selected)
             if running:
                 for producer in tuple(providers):
+                    exposed = {consumer.name for consumer in previous_consumers.get(producer.name, ())}
                     for declaration in self.manager.integration_snapshot.get(producer.name, ()):
-                        consumer = installed[declaration.consumer]
+                        exposed.add(declaration.consumer)
+                        attached = getattr(declaration, "expose", None)
+                        if attached is not None:
+                            exposed.add(attached.consumer)
+                    for name in exposed:
+                        consumer = installed.get(name)
+                        if consumer is None:
+                            continue
                         active = set(consumer.services) & running
                         if active:
                             providers.add(consumer)

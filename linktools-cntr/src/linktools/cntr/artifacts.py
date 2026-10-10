@@ -264,10 +264,16 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
     except BaseException:
         shutil.rmtree(str(temporary))
         raise
+    producers = sorted({
+        name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
+        for declaration in declarations
+        if declaration.consumer == container.name or
+        getattr(getattr(declaration, "expose", None), "consumer", None) == container.name
+    })
     container.manager.artifact_index.record({
         os.path.relpath(str(destination / name), str(container.manager.data_path)): {
             "kind": "generated-config", "container": container.name,
-            "sha256": sha256_of(content),
+            "sha256": sha256_of(content), "producers": producers,
         } for name, content in files.items()
     })
     return destination
