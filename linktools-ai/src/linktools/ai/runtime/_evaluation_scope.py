@@ -60,7 +60,9 @@ class _EnteredTrialScope:
 
     async def engine(self) -> "TaskEngine":
         try:
-            return await asyncio.shield(self._entered)
+            if not self._entered.done():
+                await asyncio.wait((self._entered,))
+            return self._entered.result()
         except Exception:
             if not self._exit_requested.is_set():
                 self._entry_error_observed = True
@@ -93,7 +95,9 @@ class _EnteredTrialScope:
     async def close(self) -> None:
         self.request_close()
         try:
-            await asyncio.shield(self._lifetime)
+            if not self._lifetime.done():
+                await asyncio.wait((self._lifetime,))
+            self._lifetime.result()
         except asyncio.CancelledError:
             if not self._lifetime.cancelled():
                 raise

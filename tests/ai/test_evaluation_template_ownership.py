@@ -198,7 +198,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
             CaseSpec.from_capture(CaseRef("data", "one", 1), capture=captured),
         )), principal=PRINCIPAL, idempotency_key="dataset")
         with monkeypatch.context() as patch:
-            patch.setattr(RuntimeEvaluations, "_watch", lambda *args: None)
+            patch.setattr(RuntimeEvaluations, "_watch", lambda *args, **kwargs: None)
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", task=task.ref),), (ScorerSpec("score", scorer.ref, (DIMENSION,)),)),
                 PRINCIPAL, "start"), engine=engine)
@@ -243,7 +243,7 @@ async def test_content_purge_redacts_inline_template_and_keeps_admission_identit
             CaseSpec.graph(CaseRef("data", "one", 1), inputs={}),
         )), principal=PRINCIPAL, idempotency_key="dataset")
         with monkeypatch.context() as patch:
-            patch.setattr(RuntimeEvaluations, "_watch", lambda *args: None)
+            patch.setattr(RuntimeEvaluations, "_watch", lambda *args, **kwargs: None)
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("candidate", graph_template=GraphTargetSpec(template=TaskGraphTemplate((
                     TaskNode("target", task=task, input={"private": "erase inline input"}),)), selector="terminal_sinks")),),

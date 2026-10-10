@@ -56,6 +56,43 @@ async def test_entry_waiter_does_not_hide_cleanup_failure(cancel_waiter: bool) -
 
 
 @pytest.mark.asyncio
+async def test_cancelled_close_waiter_preserves_cleanup_failure_for_next_close() -> None:
+    cleanup_started, finish_cleanup = asyncio.Event(), asyncio.Event()
+    errors = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+
+    @asynccontextmanager
+    async def context() -> AsyncIterator[object]:
+        try:
+            yield object()
+        finally:
+            cleanup_started.set()
+            await finish_cleanup.wait()
+            raise ValueError("resource cleanup failed")
+
+    try:
+        scope = _EnteredTrialScope(context())
+        await scope.engine()
+        closing = asyncio.create_task(scope.close())
+        await cleanup_started.wait()
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        finish_cleanup.set()
+        for _ in range(2):
+            with pytest.raises(ValueError, match="resource cleanup failed"):
+                await scope.close()
+        del scope, closing
+        gc.collect()
+        await asyncio.sleep(0)
+        assert errors == []
+    finally:
+        loop.set_exception_handler(previous)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_close_allows_cancelled_entry_to_finish_and_exit_once() -> None:
     entered, cancelled, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
     exits = []

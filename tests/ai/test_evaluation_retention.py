@@ -280,7 +280,7 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
 
     principal = service_principal("tenant", "owner")
     storage = RuntimeStorage.filesystem(tmp_path)
-    monkeypatch.setattr(RuntimeEvaluations, "_watch", lambda *args: None)
+    monkeypatch.setattr(RuntimeEvaluations, "_watch", lambda *args, **kwargs: None)
     async with Runtime.open("evaluation-retention", storage=storage,
                             models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         tasks = (Task("retention.prepared", target, effect_policy="none"), Task("retention.score", score, effect_policy="none"))
