@@ -321,7 +321,9 @@ def test_sql_startup_does_not_take_over_live_process(
             remote.close()
 
 
-@pytest.mark.parametrize("phase", ("active", "admitted", "pending"))
+@pytest.mark.parametrize("phase", (
+    "active", pytest.param("admitted", marks=pytest.mark.merge), "pending",
+))
 def test_sql_orphan_waits_for_explicit_recovery(tmp_path: Path, phase: str) -> None:
     owner = _RuntimeProcess(tmp_path / "runtime.db", phase=phase)
     remote = None
@@ -493,7 +495,9 @@ async def test_sql_runtime_session_admission_remains_independent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ("active", "admitted"))
+@pytest.mark.parametrize("phase", (
+    "active", pytest.param("admitted", marks=pytest.mark.merge),
+))
 async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
