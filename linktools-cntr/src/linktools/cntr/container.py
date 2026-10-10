@@ -219,6 +219,10 @@ class BaseContainer(metaclass=AbstractMetaClass):
         pass
 
 
+    def get_build_revision(self, service: str) -> "str | None":
+        """Optional local build identity; never refresh remote inputs."""
+        return None
+
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         """Declare native providers needed by the selected project services."""
         return {}

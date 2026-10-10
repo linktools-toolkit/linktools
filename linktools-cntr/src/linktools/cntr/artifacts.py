@@ -460,7 +460,7 @@ class AppliedServiceModels:
 
     @classmethod
     def _projection(cls, model: dict, service: str) -> str:
-        spec = model["services"][service]
+        spec = {key: value for key, value in model["services"][service].items() if key != "build"}
         shared = {key: value for key, value in model.items()
                   if key not in ("services", "networks", "volumes", "secrets", "configs")}
         for category in ("networks", "volumes", "secrets", "configs"):

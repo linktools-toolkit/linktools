@@ -158,7 +158,9 @@ class ComposeOperations:
         actual = manager.docker_inspector.get_project_state(explicit.project_containers)
         initial = {item.service for item in actual.services if item.state in ("running", "restarting")}
         selection = self.start_selection(explicit, running_services=initial)
+        refresh = frozenset(self.start_selection(explicit).services) if pull else frozenset()
         context = self._make_context(["restart" if restart else "up", pull and "pull"], selection)
+        context.refresh_services = refresh
         context.runtime_state = actual
         context.initial_services = frozenset(item.service for item in actual.services)
         context.native_running_images = {item.service: item.image_id for item in actual.services
@@ -190,19 +192,29 @@ class ComposeOperations:
                                          ordered, selection.full)
             context.target_services = selection.services
             model_store = AppliedServiceModels(manager, raw_model)
-            context.compose_model = bind_prepared_files(context, raw_model, model_store.previous)
+            model = bind_prepared_files(context, raw_model, model_store.previous)
+            context.compose_model = manager.image_preparer.with_build_revisions(
+                model, selection.project_containers, selection.services)
             model_store.set_model(context.compose_model)
             context.service_models = model_store
-            image_plan = manager.image_preparer.plan(context.compose_model, selection.services, force_pull=pull)
+            image_plan = manager.image_preparer.plan(
+                context.compose_model, selection.services, force_pull=pull,
+                refresh_services=context.refresh_services)
             if image_plan.pull:
                 with record_phase(context, "pull", command=tuple(runner.pull_args(image_plan.pull)),
                                   logger=manager.logger):
                     runner.pull(context, image_plan.pull)
             if image_plan.build:
-                options = runner.options_for_build(image_plan.build, pull=pull)
-                with record_phase(context, "build", command=tuple(runner.build_args(options)),
-                                  logger=manager.logger):
-                    runner.build(context, options)
+                refreshing = tuple(name for name in image_plan.build if name in context.refresh_services)
+                unchanged = tuple(name for name in image_plan.build if name not in context.refresh_services)
+                for services, update in ((unchanged, False), (refreshing, True)):
+                    if not services:
+                        continue
+                    options = runner.options_for_build(services, pull=update)
+                    with record_phase(context, "build", command=tuple(runner.build_args(options)),
+                                      logger=manager.logger):
+                        runner.build(context, options)
+                        manager.image_preparer.verify_builds(context.compose_model, services)
             with record_phase(context, "check", logger=manager.logger):
                 manager.lifecycle.check(context)
                 self._require_rollback_models(context, selection.services)

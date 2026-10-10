@@ -165,6 +165,9 @@ class Container(BaseContainer):
             parts.extend(self.get_source_path(name).read_text(encoding="utf-8")
                          for name in ("nginx-certificates", "nginx-acme", "dnsapi.json"))
         return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
+    def get_build_revision(self, service: str) -> "str | None":
+        return self.cert_image_revision if service == "nginx" else None
+
     @cached_property
     def acme_ssl_domains_args(self) -> str:
         return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)

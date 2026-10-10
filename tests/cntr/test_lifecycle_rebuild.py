@@ -152,8 +152,10 @@ def setup_case(tmp_path, groups, running=()):
         mark_started=lambda context: stored.update(owner.name for owner in context.target_containers),
         mark_stopped=lambda context: stored.difference_update(owner.name for owner in context.target_containers),
     )
-    manager.image_preparer = SimpleNamespace(plan=lambda model, services, force_pull=False:
-                                            SimpleNamespace(pull=tuple(services), build=()))
+    manager.image_preparer = SimpleNamespace(
+        with_build_revisions=lambda model, containers, services: model,
+        plan=lambda model, services, **kwargs: SimpleNamespace(pull=tuple(services), build=()),
+        verify_builds=lambda model, services: None)
     manager.hooks = Hooks(manager.events, "manager")
     manager.lifecycle = LifecycleDispatcher(manager)
     manager.compose_runner = Runner(manager)

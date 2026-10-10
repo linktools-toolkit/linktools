@@ -10,10 +10,11 @@ RUN printf '%s\n' {% for api in container.dnsapi.values() %}{% for key in api.ge
 RUN chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-acme && \
     ln -s /opt/acme/acme.sh /usr/bin/acme.sh
 
+ARG CNTR_BUILD_REVISION
 RUN --mount=type=secret,id=cntr_acme_account \
     --mount=type=secret,id=cntr_acme_dns,target=/run/acme-secrets/dns.env,required=true \
     --mount=type=tmpfs,target=/root/.acme.sh \
-    mkdir -p /root/.acme.sh /etc/certs && \
+    test -n "$CNTR_BUILD_REVISION" && mkdir -p /root/.acme.sh /etc/certs && \
     if [ -s /run/secrets/cntr_acme_account ]; then \
         tar -xf /run/secrets/cntr_acme_account -C /root/.acme.sh; \
     fi && \

@@ -24,6 +24,7 @@ class OperationContext:
     runtime_state: "ProjectRuntimeState | None" = None
     compose_model: "dict[str, Any] | None" = None
     prepared_files: "dict[str, Path]" = field(default_factory=dict)
+    refresh_services: "frozenset[str]" = frozenset()
 
     def write_files(self, container: "BaseContainer", files: "Mapping[str, str]", *,
                     mode: int = 0o600, group: "int | None" = None) -> "Path":
