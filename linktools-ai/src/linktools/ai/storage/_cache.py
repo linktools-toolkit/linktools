@@ -227,7 +227,7 @@ class FilesystemContentCache:
             try:
                 while not worker.done():
                     try:
-                        await asyncio.shield(worker)
+                        await asyncio.wait((worker,))
                     except asyncio.CancelledError:
                         cancelled = True
                 worker.result()
