@@ -4,7 +4,7 @@ import {renderMarkdown, inputPresentation} from './message.js';
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
   execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', details:[], detailCursor:null, models:new Map(), events:new Map(),
-  generation:0, refreshGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
+  generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
@@ -126,6 +126,7 @@ function setDisabled() {
   $('cancel').setAttribute('aria-label',`Stop current execution ${active?.execution_id || ''}`);
   $('stop-run').disabled=ending;$('cancel').disabled=Boolean(active && state.actionsPending.has(`${active.execution_id}:end-stopped`));
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
+  $('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);
 }
 function renderPage() {
   const sessions=state.view==='sessions', executions=state.view==='executions', metrics=state.view==='metrics';
@@ -191,10 +192,13 @@ function setListFilterAvailability() {
 }
 async function loadRecentExecutions() {
   if(state.actionsPending.has('recent-scan'))return;
-  state.actionsPending.add('recent-scan');const generation=++state.listGeneration;
+  state.actionsPending.add('recent-scan');const generation=++state.listGeneration,noticeRevision=state.noticeRevision;
   try {
-    const payload=await api('/api/executions?recent=true&limit=20');
-    if(generation!==state.listGeneration || state.view!=='executions')return;
+    const payload=await api('/api/executions?recent=true&limit=20').catch(error=>{
+      if(generation===state.listGeneration && state.view==='executions' && noticeRevision===state.noticeRevision)throw error;
+      return null;
+    });
+    if(!payload || generation!==state.listGeneration || state.view!=='executions')return;
     state.list=payload.items;state.listCursor=null;$('list-more').hidden=true;
     $('execution-filter-summary').textContent='Execution filters · Newest 20';
     $('list-scope').textContent='Newest 20 by creation time · scanned visible execution metadata';$('list-scope').hidden=false;
@@ -233,13 +237,18 @@ function openExact(event) {
   setView(session?'sessions':'executions',false);
   return navigate(session?id:null,session?null:id);
 }
-async function readSession(id) {
-  try {return await api(sessionURL(id,'',{limit:'50'}));}
+async function readSession(id, metadataOnly=false) {
+  const readGeneration=++state.sessionReadGeneration;
+  try {return {...await api(sessionURL(id,'',metadataOnly?{include_timeline:'false'}:{limit:'50'})),readGeneration};}
   catch(error) {
-    if(error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
+    if(metadataOnly || error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
     const payload=await api(sessionURL(id,'',{include_timeline:'false'}));
-    return {...payload,timeline_error:error.message};
+    return {...payload,timeline_error:error.message,readGeneration};
   }
+}
+function acceptSession(payload) {
+  if(payload.session.session_id!==state.selectedSession || payload.readGeneration<state.sessionAppliedGeneration)return false;
+  state.session=payload.session;state.sessionAppliedGeneration=payload.readGeneration;return true;
 }
 function renderSessionHeader() {
   if(!state.session)return;
@@ -274,7 +283,8 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
     if (sessionId) {
       const payload=await readSession(sessionId);
       if (generation!==state.generation) return;
-      state.session=payload.session;state.turns=payload.timeline?.items || [];state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';
+      if(acceptSession(payload)){state.turns=payload.timeline?.items || [];state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';}
+      else if(!state.session)return;
       renderSessionHeader();
       executionId=executionId || state.session.active_execution_id || state.turns.at(-1)?.execution_id;
       renderConversation();
@@ -286,12 +296,18 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   } catch(error) { if (generation===state.generation) showError(error); }
 }
 async function moreTurns() {
-  const generation=state.generation;
-  const payload=await api(sessionURL(state.selectedSession,"",{limit:"50",cursor:state.turnCursor}));
-  if (generation!==state.generation) return;
-  state.session=payload.session;renderSessionHeader();
-  state.turns=mergePage(payload.timeline.items,state.turns,item=>item.execution_id); state.turnCursor=payload.timeline.next_cursor; state.hasEarlierTurns=true;
-  renderConversation({prepend:true});
+  const generation=state.generation,id=state.selectedSession,cursor=state.turnCursor,noticeRevision=state.noticeRevision,key=`session:${id}:turns`;
+  if(!id || !cursor || state.actionsPending.has(key))return;
+  state.actionsPending.add(key);$('turns-more').disabled=true;
+  try {
+    const payload=await api(sessionURL(id,"",{limit:"50",cursor}));
+    if(generation!==state.generation || id!==state.selectedSession)return;
+    // Earlier pages supply history only; their session owner may predate live readback.
+    state.turns=mergePage(payload.timeline.items,state.turns,item=>item.execution_id);state.turnCursor=payload.timeline.next_cursor;state.hasEarlierTurns=true;
+    renderConversation({prepend:true});
+  } catch(error) {
+    if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
+  } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
 }
 function renderConversation({prepend=false}={}) {
   const liveFocus=document.activeElement?.dataset?.liveFocus;
@@ -449,9 +465,12 @@ function renderDetails() {
     } else if(state.tab==='recovery') {
       card.append(element('h3','',item.tool_name),element('p','',`Effect outcome unknown · ${item.tool_call_id}`),rawDetail(item));
       ['not_applied','applied','failed'].forEach(resolution=>card.append(button(resolution.replaceAll('_',' '),async()=>{
+        const id=state.selectedExecution,generation=state.generation,executionGeneration=state.executionGeneration,detailGeneration=state.detailGeneration,noticeRevision=state.noticeRevision;
+        const current=()=>generation===state.generation && executionGeneration===state.executionGeneration && detailGeneration===state.detailGeneration && id===state.selectedExecution && state.tab==='recovery';
         if(!confirm(`Confirm the external effect was ${resolution.replaceAll('_',' ')}? This controls recovery.`))return;
         let result=null; if(resolution==='applied'){const raw=prompt('Recorded tool result (JSON)','null');if(raw===null)return;result=JSON.parse(raw);}
-        await mutate(`/api/executions/${enc(state.selectedExecution)}/resolve`,{operation_id:item.operation_id,expected_fence:item.fence,resolution,result});await loadDetail();
+        try {await mutate(`/api/executions/${enc(id)}/resolve`,{operation_id:item.operation_id,expected_fence:item.fence,resolution,result});if(current())await loadDetail();}
+        catch(error){if(current() && noticeRevision===state.noticeRevision)throw error;}
       })));
     } else {
       card.append(element('h3','',`${item.item_kind || 'Text'} ${item.tool_name?'· '+item.tool_name:''}`),element('p','',`Message ${item.message_seq} · run ${item.agent_run_seq ?? '—'}${item.execution_id?' · '+short(item.execution_id):''}`),element('pre','json',text(item.content ?? item.text)),rawDetail(item));
@@ -466,12 +485,14 @@ async function refreshSelected() {
   if(sessionId) {
     const payload=await readSession(sessionId);
     if(refreshGeneration!==state.refreshGeneration || generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
-    state.session=payload.session;state.timelineError=payload.timeline_error || '';renderSessionHeader();
-    if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
-    else{state.turnCursor=null;state.hasEarlierTurns=false;}
-    const selected=state.turns.find(item=>item.execution_id===state.observedExecution);
-    if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
-    renderConversation();setDisabled();
+    if(acceptSession(payload)) {
+      state.timelineError=payload.timeline_error || '';renderSessionHeader();
+      if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
+      else{state.turnCursor=null;state.hasEarlierTurns=false;}
+      const selected=state.turns.find(item=>item.execution_id===state.observedExecution);
+      if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
+      renderConversation();setDisabled();
+    }
   }
   if(id) {
     const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
@@ -484,9 +505,9 @@ async function refreshSelected() {
     const info=noticeId===id?state.execution:await api(`/api/executions/${enc(noticeId)}`);
     if(refreshGeneration!==state.refreshGeneration || generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
     if(terminal(info.status)) {
-      const session=info.session_id ? (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session : null;
+      const payload=info.session_id ? await readSession(info.session_id,true) : null,session=payload?.session;
       if(refreshGeneration!==state.refreshGeneration || generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
-      if(session && sessionId===info.session_id){state.session=session;renderSessionHeader();}
+      if(payload && sessionId===info.session_id && acceptSession(payload))renderSessionHeader();
       reconcileCancellation(info,session,noticeRevision);setDisabled();
     }
   }
@@ -530,8 +551,8 @@ async function refreshObservation(id, generation) {
   if(!current())return;
   info=observedInfo(info,readGeneration);
   if(id===state.selectedExecution){state.execution=info;renderExecution();}
-  if(payload && sessionId===state.selectedSession) {
-    state.session=payload.session;state.timelineError=payload.timeline_error || '';renderSessionHeader();
+  if(payload && sessionId===state.selectedSession && acceptSession(payload)) {
+    state.timelineError=payload.timeline_error || '';renderSessionHeader();
     if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
     const turn=state.turns.find(item=>item.execution_id===id);
     if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
@@ -628,19 +649,20 @@ async function sendMessage(event) {
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
-  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('new-dialog').showModal();$('new-title').focus();
+  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-title').focus();
 }
 async function createSession(event) {
-  event.preventDefault();const button=event.submitter;button.disabled=true;
-  const sessionId=$('new-dialog').dataset.sessionId;
+  event.preventDefault();const button=$('create-session');button.disabled=true;
+  const sessionId=$('new-dialog').dataset.sessionId,generation=state.generation,noticeRevision=state.noticeRevision;
   try {
     const session=await mutate('/api/sessions',{session_id:sessionId,title:$('new-title').value,agent_id:$('new-agent').value,cwd:$('new-cwd').value || null});
-    if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId){$('new-dialog').close();setView('sessions',false);navigate(session.session_id,null);}
+    if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();setView('sessions',false);navigate(session.session_id,null);}
     await loadList();
-  } catch(error){showError(error);} finally {button.disabled=false;}
+  } catch(error){if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation && noticeRevision===state.noticeRevision)showError(error);}
+  finally {if($('new-dialog').dataset.sessionId===sessionId)button.disabled=false;}
 }
 async function sessionAction(action) {
-  const id=state.selectedSession,generation=state.generation;if(!id || !state.session)return;
+  const id=state.selectedSession,generation=state.generation,noticeRevision=state.noticeRevision;if(!id || !state.session)return;
   const key=`session:${id}:${action}`;
   if(state.actionsPending.has(key))return;
   let payload={};
@@ -655,7 +677,11 @@ async function sessionAction(action) {
   }
   state.actionsPending.add(key);setDisabled();
   try {
-    const result=await mutate(sessionURL(id,action),payload);
+    const result=await mutate(sessionURL(id,action),payload).catch(error=>{
+      if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
+      return null;
+    });
+    if(!result)return;
     if(action==='fork')state.pendingForks.delete(id);
     if(generation!==state.generation || id!==state.selectedSession){await loadList();return;}
     if(action==='fork')navigate(result.session_id,null);else await openSelection(id,state.selectedExecution,{preserveInspector:true});
@@ -733,11 +759,11 @@ async function endStoppedExecution({active=false}={}) {
       if(!selected())return;
     }
     if(!terminal(info.status))throw new Error(`Execution is still ${info.status}; ending is not confirmed. Check Recovery for unresolved external effects.`);
-    const session=info.session_id ? (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session : null;
+    const payload=info.session_id ? await readSession(info.session_id,true) : null,session=payload?.session;
     if(!selected())return;
     if(session?.active_execution_id===id)throw new Error('Execution is terminal, but its session release is not confirmed.');
     state.endReadbackId=null;if(id===state.selectedExecution){state.execution=info;renderExecution();}if(id===state.observedExecution)state.observedInfo=info;
-    if(session && state.selectedSession===info.session_id){state.session=session;renderSessionHeader();}
+    if(payload && state.selectedSession===info.session_id && acceptSession(payload))renderSessionHeader();
     const completed=session?.active_execution_id ? 'Execution ended; another execution now owns the session.' : session ? 'Execution ended and session released.' : 'Execution ended.';
     if(noticeRevision===state.noticeRevision)noticeRevision=notice(completed);
     try {await refreshSelected();}
@@ -750,12 +776,17 @@ async function endStoppedExecution({active=false}={}) {
 }
 
 async function loadMetrics(event) {
-  event?.preventDefault();const generation=++state.metricsGeneration;
+  event?.preventDefault();const generation=++state.metricsGeneration,selection=state.generation,noticeRevision=state.noticeRevision;
+  const current=()=>generation===state.metricsGeneration && selection===state.generation && state.view==='metrics';
   const params=new URLSearchParams();
   [['metric-name','metric'],['metric-groups','group_by'],['metric-bucket','bucket_seconds'],['metric-filters','filters'],['metric-correlations','correlation_filters'],['metric-aggregation','aggregation'],['metric-percentile','percentile']].forEach(([id,key])=>{if($(id).value)params.set(key,$(id).value);});
   if($('metric-start').value)params.set('start',new Date($('metric-start').value).toISOString());
   if($('metric-end').value)params.set('end',new Date($('metric-end').value).toISOString());
-  const payload=await api('/api/metrics?'+params);if(generation!==state.metricsGeneration)return;
+  const payload=await api('/api/metrics?'+params).catch(error=>{
+    if(current() && noticeRevision===state.noticeRevision)throw error;
+    return null;
+  });
+  if(!payload || !current())return;
   clear('metric-results');
   if(payload.unavailable)$('metric-results').append(element('p','empty','No metrics store exists yet.'));
   payload.items.forEach(result=>{

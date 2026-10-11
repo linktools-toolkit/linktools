@@ -148,6 +148,84 @@ if(readOnly){
   assert.equal(calls.filter(call=>call.method==='POST').length,0);
   console.log('Read-only disclosure contracts passed');process.exit(0);
 }
+if(process.argv[3]==='navigation'){
+  const oldMetrics=deferred('GET /api/metrics');view('metrics').click();await settle();
+  location.hash='#session=b';await settle();oldMetrics.reject(new Error('old metrics read failed'));await settle();
+  assert.equal(node('notice').textContent,'','A previous page cannot replace the current conversation notice');
+  const olderQuery=deferred('GET /api/metrics');view('metrics').click();await settle();
+  delays.delete('GET /api/metrics');node('metrics-form').requestSubmit();await settle();
+  olderQuery.reject(new Error('superseded metrics query failed'));await settle();assert.equal(node('notice').textContent,'');
+  const currentQuery=deferred('GET /api/metrics');node('metrics-form').requestSubmit();await tick();
+  currentQuery.reject(new Error('current metrics query failed'));await settle();assert.match(node('notice').textContent,/current metrics query failed/);
+  for(const [action,control] of [['update','rename-session'],['close','close-session'],['fork','fork-session']]){
+    location.hash='#session=a';await settle();const oldAction=deferred(`POST /api/sessions/a/${action}`);
+    node(control).click();await tick();location.hash='#session=b';await settle();
+    oldAction.reject(new Error(`old ${action} failed`));await settle();assert.equal(node('notice').textContent,'');
+  }
+  const oldRename=deferred('POST /api/sessions/b/update');node('rename-session').click();await tick();
+  const newDetail=deferred('GET /api/executions/b-run/models');tab('models').click();await tick();
+  newDetail.reject(new Error('new detail read failed'));await settle();const latestNotice=node('notice').textContent;
+  oldRename.reject(new Error('older rename failed'));await settle();assert.equal(node('notice').textContent,latestNotice);
+  const currentRename=deferred('POST /api/sessions/b/update');node('rename-session').click();await tick();
+  currentRename.reject(new Error('current rename failed'));await settle();assert.match(node('notice').textContent,/current rename failed/);
+  tab('overview').click();await settle();
+  sessions.get('a').active_execution_id='page-old';executions.set('page-old',{...info('page-old','a'),status:'STARTED'});streamBlocks.set('page-old',{});
+  timelineOverrides.set('a',{...timeline('a'),next_cursor:'older'});location.hash='#session=a';await settle();
+  const oldSession=structuredClone(sessions.get('a')),olderPage=deferred('GET /api/sessions/a');
+  const pageRequests=()=>calls.filter(item=>item.key==='/api/sessions/a' && item.query.cursor==='older').length;
+  node('turns-more').click();node('turns-more').click();await tick();assert.equal(pageRequests(),1);
+  delays.delete('GET /api/sessions/a');executions.get('page-old').status='SUCCEEDED';sessions.get('a').active_execution_id='page-new';
+  executions.set('page-new',{...info('page-new','a'),status:'STARTED'});streamBlocks.set('page-new',{});
+  const oldController=streamBlocks.get('page-old').controller;
+  oldController.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('page-old'))+'\n\n'));oldController.close();await settle();
+  assert.match(node('cancel').getAttribute('aria-label'),/page-new/);
+  olderPage({session:oldSession,timeline:{items:[{...timeline('a').items[0],execution_id:'earlier-run',user_input:'Earlier question'}],next_cursor:null}});await settle();
+  assert.match(node('conversation').textContent,/Earlier question/);assert.match(node('cancel').getAttribute('aria-label'),/page-new/);
+  const newCancel=deferred('POST /api/executions/page-new/cancel');node('cancel').click();await tick();
+  assert.equal(calls.filter(item=>item.method==='POST').at(-1).key,'/api/executions/page-new/cancel');
+  executions.get('page-new').status='CANCELLING';newCancel({execution_id:'page-new',cancelled:false});await settle();
+  const currentNotice=node('notice').textContent;assert.match(currentNotice,/Cancellation requested/);
+  location.hash='#session=a';await settle();const failedPage=deferred('GET /api/sessions/a');node('turns-more').click();await tick();
+  timelineOverrides.set('b',{...timeline('b'),next_cursor:'beta-older'});location.hash='#session=b';await settle();
+  assert.equal(node('turns-more').disabled,false,'Paging another conversation is independent');
+  failedPage.reject(new Error('older page failed'));await settle();assert.equal(node('notice').textContent,'');
+
+  sessions.get('a').active_execution_id='reopen-old';executions.set('reopen-old',{...info('reopen-old','a'),status:'STARTED'});streamBlocks.set('reopen-old',{});
+  location.hash='#session=a';await settle();const previousSession=structuredClone(sessions.get('a')),reopen=deferred('GET /api/sessions/a');
+  location.hash='#session=a&execution=a-run';await tick();delays.delete('GET /api/sessions/a');
+  executions.get('reopen-old').status='SUCCEEDED';sessions.get('a').active_execution_id='reopen-new';
+  executions.set('reopen-new',{...info('reopen-new','a'),status:'STARTED'});streamBlocks.set('reopen-new',{});
+  const reopeningController=streamBlocks.get('reopen-old').controller;
+  reopeningController.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get('reopen-old'))+'\n\n'));reopeningController.close();await settle();
+  assert.match(node('cancel').getAttribute('aria-label'),/reopen-new/);
+  reopen({session:previousSession,timeline:timeline('a')});await settle();
+  assert.match(node('cancel').getAttribute('aria-label'),/reopen-new/);assert.equal(node('cancel').hidden,false);
+  assert.match(node('execution-meta').textContent,/a-run/);assert.doesNotMatch(node('execution-meta').textContent,/Loading/);
+
+  location.hash='#execution=a-run';await settle();const recent=deferred('GET /api/executions');
+  node('list-action').value='recent';node('filter-form').requestSubmit();await tick();
+  location.hash='#session=b';await settle();recent.reject(new Error('old recent scan failed'));await settle();assert.equal(node('notice').textContent,'');
+  const creation=deferred('POST /api/sessions');node('new-session').click();node('new-form').requestSubmit();await tick();
+  node('new-dialog').close();location.hash='#session=a';await settle();creation.reject(new Error('dismissed creation failed'));await settle();assert.equal(node('notice').textContent,'');
+  const priorCreation=deferred('POST /api/sessions');node('new-session').click();const priorSession=node('new-dialog').dataset.sessionId;
+  node('new-form').requestSubmit();await tick();assert.equal(node('create-session').disabled,true);
+  node('new-dialog').close();node('new-session').click();assert.equal(node('create-session').disabled,false);
+  const activeCreation=deferred('POST /api/sessions');node('new-form').requestSubmit();await tick();assert.equal(node('create-session').disabled,true);
+  priorCreation({session_id:priorSession});await settle();assert.equal(node('create-session').disabled,true,'A prior creation cannot enable the pending dialog submit');
+  activeCreation.reject(new Error('current creation failed'));await settle();assert.equal(node('create-session').disabled,false);assert.match(node('notice').textContent,/current creation failed/);node('new-dialog').close();
+
+  detailResponses.set('/api/executions/effect-run/recovery',{items:[{tool_name:'write',operation_id:'effect-operation',fence:1,tool_call_id:'call'}],next_cursor:null});
+  for(const success of [false,true]){
+    location.hash='#execution=effect-run';await settle();tab('recovery').click();await settle();
+    const resolution=deferred('POST /api/executions/effect-run/resolve');
+    node('inspector-content').children.find(child=>child.className==='detail-card').children.find(child=>child.textContent==='not applied').click();await tick();
+    location.hash='#session=b';await settle();tab('history').click();await settle();
+    const historyReads=()=>calls.filter(item=>item.key==='/api/executions/b-run/history').length,beforeResolution=historyReads();
+    if(success)resolution({resolved:true});else resolution.reject(new Error('old resolution failed'));
+    await settle();assert.equal(node('notice').textContent,'');assert.equal(historyReads(),beforeResolution,'An old resolution cannot reload a newer panel');
+  }
+  console.log('Navigation contracts passed: stale responses, current owner during paging/reopen and independent repeated paging');process.exit(0);
+}
 if(process.argv[3]==='races'){
   location.hash='#execution=a-run';await settle();
   const oldRefresh=deferred('GET /api/executions/a-run');node('refresh').click();await tick();
