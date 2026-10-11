@@ -3840,6 +3840,8 @@ class DefaultExecutionService:
         cursor: "str | None" = None,
         include_content: bool = False,
         include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
@@ -3851,6 +3853,8 @@ class DefaultExecutionService:
             cursor=cursor,
             include_content=include_content,
             **({"include_client_requests": include_client_requests} if include_client_requests is not False else {}),
+            **({"agent_run_seq": agent_run_seq} if agent_run_seq is not None else {}),
+            **({"model_request_seq": model_request_seq} if model_request_seq is not None else {}),
             limit=limit,
             cutoffs=cutoffs,
         )

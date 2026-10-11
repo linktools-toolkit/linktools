@@ -57,6 +57,37 @@ include_content option; use those locators with history or model_interactions
 when the application needs a body. Keep watch as notification and request
 content explicitly from the owning Runtime read API.
 
+## Read one model request
+
+Use the exact identity returned by a model interaction or notification to read
+that request's original client bodies:
+
+```python
+page = await runtime.history.model_interactions(
+    item.execution_id,
+    principal=principal,
+    agent_run_seq=item.agent_run_seq,
+    model_request_seq=item.model_request_seq,
+    include_client_requests=True,
+)
+```
+
+`model_interactions(...)` accepts the optional positive integer selectors
+`agent_run_seq` and `model_request_seq`. They combine with AND. As with history and trace, `agent_run_seq` selects only that exact
+execution and run; with both sequences the result identifies at most one
+logical request. With only `model_request_seq`, the selector matches each run
+in the normal recursive scope. Without selectors, the existing scope is
+unchanged. Read child requests using the child's own `execution_id` so that
+its execution authorization applies.
+
+`include_client_requests=True` loads original client attempt bodies independently
+of `include_content=True`, which loads the SDK request/response projection.
+Both default to false on the public API. Selectors apply before either body
+projection is resolved. An unknown valid identity returns an empty page. Keep
+the same selectors and content flags when continuing a cursor; adding,
+changing, or removing them is rejected. `cutoffs` remain fixed upper bounds,
+not lower bounds or substitutes for exact request selectors.
+
 ## Read one tool call
 
 The default watch keeps safe locator and status metadata, including

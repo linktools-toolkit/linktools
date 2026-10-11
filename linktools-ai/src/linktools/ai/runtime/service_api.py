@@ -711,6 +711,8 @@ class ExecutionHistoryReader(Protocol):
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
         include_content: bool = True,
         include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
     ) -> Page[ModelInteractionItem]: ...
 
     async def attachment_facts(
@@ -1236,6 +1238,8 @@ class ExecutionHistoryService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...
@@ -1503,6 +1507,8 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...

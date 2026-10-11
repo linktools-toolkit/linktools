@@ -608,13 +608,25 @@ class StepExecutionHistoryReader:
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
         include_content: bool = True,
         include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
     ) -> Page[ModelInteractionItem]:
+        selectors = {
+            "agent_run_seq": agent_run_seq,
+            "model_request_seq": model_request_seq,
+        }
+        for name, value in selectors.items():
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
+        filters = {name: value for name, value in selectors.items() if value is not None}
         limit = validate_page_limit(limit)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        entries = await self._recursive_history_tree(record, tenant_id)
-        current_sources = await self._capture_sources(entries, tenant_id)
+        entries = await self._recursive_history_tree(
+            record, tenant_id, include_children=agent_run_seq is None,
+        )
+        current_sources = await self._capture_sources(entries, tenant_id, agent_run_seq)
         source_by_identity = {
             (source.record.execution_id, source.agent_run_seq): source
             for source in current_sources
@@ -625,6 +637,7 @@ class StepExecutionHistoryReader:
             tenant_id=tenant_id,
             execution_id=execution_id,
             signer=self._cursor_signer,
+            filters=filters or None,
         )
         explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
         if cursor_state is not None:
@@ -679,6 +692,9 @@ class StepExecutionHistoryReader:
                 if cursor_coordinate is not None and source is cursor_source
                 else 0
             )
+            if model_request_seq is not None:
+                high_water = min(high_water, model_request_seq)
+                after_model_request_seq = max(after_model_request_seq, model_request_seq - 1)
             available = high_water - after_model_request_seq
             if available <= 0:
                 continue
@@ -756,6 +772,7 @@ class StepExecutionHistoryReader:
                 selected_occurrences[-1],
                 fixed_cutoffs,
                 self._cursor_signer,
+                filters=filters or None,
             )
         _logger.debug(
             "model interactions projected page: execution=%s items=%s",
@@ -1636,7 +1653,7 @@ class StepExecutionHistoryReader:
 
 
     async def _recursive_history_tree(
-        self, selected: ExecutionRecord, tenant_id: str
+        self, selected: ExecutionRecord, tenant_id: str, *, include_children: bool,
     ) -> list[tuple[ExecutionRecord, int]]:
         if selected.lineage_kind.value == "SUBAGENT":
             if (
@@ -1653,6 +1670,8 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         result: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
+        if not include_children:
+            return result
         visited = {selected.execution_id}
         pending: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
         while pending:
@@ -2191,8 +2210,10 @@ def _project_attachment_fact(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _model_interaction_filter_digest(execution_id: str) -> str:
-    return _execution_filter_digest(execution_id, _MODEL_INTERACTION_PROJECTION_VERSION)
+def _model_interaction_filter_digest(
+    execution_id: str, filters: Mapping[str, JsonValue] | None = None,
+) -> str:
+    return _execution_filter_digest(execution_id, _MODEL_INTERACTION_PROJECTION_VERSION, filters)
 
 
 def _interaction_occurrence_groups(
@@ -2233,6 +2254,7 @@ def _decode_model_interaction_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
+    filters: Mapping[str, JsonValue] | None = None,
 ) -> "tuple[tuple[str, int, int], tuple[UsageReadCutoff, ...]] | None":
     if cursor is None:
         return None
@@ -2241,7 +2263,7 @@ def _decode_model_interaction_cursor(
         signer,
         tenant_id=tenant_id,
         resource_kind="model_interactions",
-        filter_digest=_model_interaction_filter_digest(execution_id),
+        filter_digest=_model_interaction_filter_digest(execution_id, filters),
     )
     try:
         value = json.loads(payload.position)
@@ -2297,6 +2319,7 @@ def _model_interaction_cursor(
     occurrence: _InteractionOccurrence,
     cutoffs: tuple[UsageReadCutoff, ...],
     signer: CursorSigner,
+    filters: Mapping[str, JsonValue] | None = None,
 ) -> str:
     normalized = _normalize_usage_cutoffs(cutoffs)
     if normalized is None:
@@ -2305,7 +2328,7 @@ def _model_interaction_cursor(
         signer,
         tenant_id=tenant_id,
         resource_kind="model_interactions",
-        filter_digest=_model_interaction_filter_digest(execution_id),
+        filter_digest=_model_interaction_filter_digest(execution_id, filters),
         position=json.dumps(
             {
                 "position": [
