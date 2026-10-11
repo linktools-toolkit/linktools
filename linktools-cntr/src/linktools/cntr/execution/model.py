@@ -6,7 +6,7 @@ up/restart/down run (opt-in via ``--report``).
 ``ExecutionPlan`` holds no BaseContainer/Process/callable -- only plain,
 JSON-friendly values -- so it can be serialized (``ct-cntr plan --json``)
 and unit-tested without any of that machinery. ``ExecutionRecord`` is
-stashed on the existing ``EventContext.metadata`` extension point rather
+stashed on ``OperationContext.metadata`` rather
 than a new context field, so reporting stays additive. Not printed by
 default -- only ``--report`` renders the full list via ``render_report``,
 but a failure's phase/container/command (redacted)/duration/error summary
@@ -21,7 +21,7 @@ from ..runtime.structured import redact_command as _redact_command
 if TYPE_CHECKING:
     import logging
     from collections.abc import Iterator
-    from ..context import EventContext
+    from ..context import OperationContext
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,7 @@ class ExecutionRecord:
     message: "str | None" = None
 
 
-def get_records(context: "EventContext") -> "list[ExecutionRecord]":
+def get_records(context: "OperationContext") -> "list[ExecutionRecord]":
     return context.metadata.setdefault(RECORDS_KEY, [])
 
 
@@ -106,7 +106,7 @@ def _format_failure(record: "ExecutionRecord") -> str:
 
 
 @contextmanager
-def record_phase(context: "EventContext", phase: str, command: "tuple[str, ...] | None" = None,
+def record_phase(context: "OperationContext", phase: str, command: "tuple[str, ...] | None" = None,
                  container: "str | None" = None, logger: "logging.Logger | None" = None) -> "Iterator[None]":
     """Time one phase of a real apply and append an ExecutionRecord,
     whether it succeeds or raises. Re-raises whatever the body raised.

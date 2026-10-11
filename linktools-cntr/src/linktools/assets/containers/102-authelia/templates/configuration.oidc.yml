@@ -5,22 +5,22 @@ identity_providers:
       - key: {{ secret "/secrets/identity_providers_oidc_jwks" | mindent 10 "|" | msquote }}
 #     {% endraw %}
     clients:
-#     {% for client in container.oidc_clients %}
-      - client_id: '{{ client['ClientID'] }}'
-        client_name: '{{ client['ClientName'] }}'
-        client_secret: '{{ client['ClientSecret'] }}'
+#     {% set client = container.oidc_client %}
+      - client_id: {{ client['client_id'] | tojson }}
+        client_name: {{ client['client_name'] | tojson }}
+        client_secret: {{ client['client_secret'] | tojson }}
         public: false
         authorization_policy: '{{ 'two_factor' if AUTHELIA_MIN_AUTH_LEVEL > 1 else 'one_factor' }}'
         consent_mode: 'implicit'
         require_pkce: false
         pkce_challenge_method: ''
         redirect_uris:
-#         {% for url in client['RedirectURLs'] %}
-          - '{{ url }}'
+#         {% for url in client['redirect_uris'] %}
+          - {{ url | tojson }}
 #         {% endfor %}
         scopes:
-#         {% for item in client['Scopes'].split() %}
-          - '{{ item }}'
+#         {% for item in client['scopes'] %}
+          - {{ item | tojson }}
 #         {% endfor %}
         response_types:
           - 'code'
@@ -29,4 +29,3 @@ identity_providers:
         access_token_signed_response_alg: 'none'
         userinfo_signed_response_alg: 'none'
         token_endpoint_auth_method: 'client_secret_basic'
-#       {% endfor %}

@@ -1,0 +1,702 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Declarative integrations do not depend on navigation registration."""
+
+from linktools.cntr.ext import Integration, Nginx, load_nginx_url
+from linktools.cntr.lifecycle import HookPhase
+
+
+def test_portainer_site_is_independent_of_navigation(fresh_manager):
+    portainer = fresh_manager.containers["portainer"]
+    baseline = len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START)))
+
+    first = portainer.integrations[0]
+    assert isinstance(first, Nginx)
+    assert first.proxy == "http://portainer:9000"
+    assert first.auth_bypass == (r"\.(css|js)$",)
+    assert first is portainer.integrations[0]
+    assert not hasattr(first, "local_id")
+
+    load_nginx_url(portainer)
+    load_nginx_url(portainer, None, "settings")
+    assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == baseline
+
+
+def test_nginx_consumes_sites_without_exposure_side_effects(fresh_manager):
+    portainer = fresh_manager.containers["portainer"]
+    original_hooks = len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START)))
+
+    entries = list(fresh_manager.iter_integrations("nginx"))
+    matches = [(producer, site) for producer, site in entries
+               if producer is portainer and site is portainer.integrations[0]]
+    assert len(matches) == 1
+    assert matches[0][1] is portainer.integrations[0]
+    assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == original_hooks
+
+
+def test_nginx_owns_one_site_snapshot_shared_by_all_consumers(fresh_manager, monkeypatch) -> None:
+    import pytest
+    from linktools.cntr import ContainerManager
+    from linktools.cntr.ext import ResolvedSite
+
+    calls = []
+    collect = ResolvedSite.collect
+
+    def counted(cls: "type[ResolvedSite]", manager: "ContainerManager") -> "object":
+        calls.append(manager)
+        return collect(manager)
+
+    monkeypatch.setattr(ResolvedSite, "collect", classmethod(counted))
+    nginx = fresh_manager.containers["nginx"]
+    sites = nginx.sites
+    authelia = fresh_manager.containers["authelia"]
+    assert str(load_nginx_url(authelia)) == authelia.public_url
+    fresh_manager.containers["flare"]._navigation_files()
+    assert nginx.sites is sites
+    assert calls == [fresh_manager]
+    assert not hasattr(ContainerManager, "nginx_sites")
+    assert not hasattr(fresh_manager, "nginx_sites")
+    with pytest.raises(TypeError):
+        sites[Nginx.site("other.test")] = None
+
+
+def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monkeypatch):
+    from linktools.cntr import BaseContainer
+    from linktools.cntr.ext import Flare
+
+    def fail(*args, **kwargs):
+        raise AssertionError("navigation URLs must stay lazy")
+
+    monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", {})
+    for name in ("lldap", "authelia", "safeline", "portainer", "flare"):
+        container = fresh_manager.containers[name]
+        original = container.get_config
+        monkeypatch.setattr(container, "get_config", lambda key, *args, _get=original, **kwargs:
+                            _get(key, *args, **kwargs) if key.endswith("AUTH_ENABLE") else fail())
+        links = [value for value in Integration.iter_declarations(container.integrations) if isinstance(value, Flare)]
+        assert links
+        assert all(isinstance(link, Flare) for link in links)
+    assert not hasattr(BaseContainer, "exposes")
+
+
+def test_preparation_does_not_access_navigation(fresh_manager, monkeypatch):
+    from linktools.cntr import BaseContainer
+
+    def fail(self):
+        raise AssertionError("prepare must not read navigation")
+
+    monkeypatch.setattr(BaseContainer, "exposes", property(fail), raising=False)
+    fresh_manager.prepare_installed_containers()
+
+
+def test_absent_flare_does_not_consume_navigation(fresh_manager, monkeypatch):
+    installed = [c for c in fresh_manager.installed_state.get(resolve=True) if c.name != "flare"]
+    monkeypatch.setattr(fresh_manager.installed_state, "get", lambda resolve=False: installed)
+    assert list(fresh_manager.iter_integrations("flare")) == []
+    assert any(value.consumer == "flare" for value in fresh_manager.integration_snapshot["portainer"])
+    selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
+    assert "flare" not in [c.name for c in fresh_manager.compose_operations.start_selection(selection).target_containers]
+
+
+def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manager):
+    import yaml
+
+    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    operations = fresh_manager.compose_operations
+    selection = operations.select(["nginx"], for_start=True)
+    synchronized = selection.project_containers
+    flare = fresh_manager.containers["flare"]
+    assert flare in synchronized
+    result = fresh_manager.containers["flare"]._navigation_files()
+    links = yaml.safe_load(result["apps.yml"])["links"]
+    portainer = next(link for link in links if link["name"] == "Portainer")
+    assert ":9443" in portainer["link"]
+    assert any(link["name"] == "Authelia" for link in links)
+
+
+def test_container_authoring_has_one_integration_entry():
+    from linktools.cntr import BaseContainer
+
+    assert hasattr(BaseContainer, "integrations")
+    for name in ("exposes", "config_sources", "integration_requires_start", "generated_config_path",
+                 "prepare_generated_config", "render_generated_config", "validate_generated_config",
+                 "apply_generated_config", "render_nginx_template", "expose_public",
+                 "expose_private", "expose_container", "expose_other", "load_config_url",
+                 "load_port_url", "load_nginx_url", "get_nginx_domain"):
+        assert not hasattr(BaseContainer, name)
+
+
+def test_proxy_runtime_dependency_does_not_select_authelia_admin(fresh_manager):
+    operations = fresh_manager.compose_operations
+    explicit = operations.select(["portainer"], for_start=True)
+    selected = operations.start_selection(explicit)
+    assert {"authelia", "authelia-redis", "lldap"} <= set(selected.services)
+    assert "authelia-admin" not in selected.services
+
+
+def test_integrations_public_type_accepts_leaves_and_ordered_compositions() -> None:
+    from typing import Iterable, List, Mapping, Tuple, Union
+    from linktools.cntr import Integration, Integrations
+
+    declaration = Union[Integration, List["Declaration"], Tuple["Declaration", ...]]
+    assert Integrations == Union[Integration, Iterable[declaration]]
+
+
+def _site_navigation_manager(declarations, links=None, nginx=True):
+    from collections.abc import Mapping
+    from types import SimpleNamespace
+    from linktools.cntr import ContainerManager
+    from linktools.cntr.ext import ResolvedSite
+
+    reads = []
+    def config(key, **kwargs):
+        reads.append(key)
+        return {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443}[key]
+    manager = object.__new__(ContainerManager)
+    producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config)
+    manager.containers = {"app": producer, "nginx": SimpleNamespace(sites={}),
+                          "flare": SimpleNamespace(name="flare", order=0)}
+    producer.test_sites = declarations
+    links = links(producer) if callable(links) else links
+    links = tuple(links.values()) if isinstance(links, Mapping) else tuple(links or ())
+    manager.integration_snapshot = {"flare": (), "app": tuple(declarations.values()) + links}
+    if nginx:
+        manager.integration_snapshot["nginx"] = ()
+    manager.containers["nginx"].sites = {value: ResolvedSite(producer, value, index)
+                           for index, value in enumerate(declarations.values())}
+    return manager, reads
+
+
+def _render_navigation(manager):
+    from _harness import builtin_container_type
+    FlareContainer = builtin_container_type("120-flare")
+    import yaml
+
+    container = object.__new__(FlareContainer)
+    container.manager = manager
+    return {key: yaml.safe_load(value) for key, value in
+            container._navigation_files().items()}
+
+
+def test_navigation_uses_explicit_site_reference_and_skips_omitted_urls_lazily():
+    from linktools.cntr.ext import Flare
+
+    public = Flare.category("public", "Public", apps=True)
+    omitted = public("Unbound", "web", "")
+    manager, reads = _site_navigation_manager({
+        "web": Nginx.site("app.test"),
+        "silent": Nginx.site("silent.test"),
+    }, lambda producer: [
+        public("Referenced", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        public("Empty", "web", "", ""),
+        public("None", "web", "", None),
+        public("Explicit", "web", "", "custom://{{port}}"),
+        omitted,
+    ])
+    assert reads == []
+    assert omitted.url is None
+    result = _render_navigation(manager)
+    assert result["apps.yml"]["links"] == [
+        {"name": "Referenced", "icon": "web", "desc": "Referenced", "link": "https://app.test:9443"},
+        {"name": "Explicit", "icon": "web", "desc": "Explicit", "link": "custom://{{port}}"},
+    ]
+    assert reads == ["NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
+    assert omitted.url is None
+
+
+def test_disabled_or_uninstalled_sites_do_not_resolve_navigation_defaults():
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+
+    public = Flare.category("public", "Public", apps=True)
+    def fail():
+        raise AssertionError("disabled URL must not resolve")
+    for server_name, nginx in (("", True), ("app.test", False)):
+        manager, reads = _site_navigation_manager({"web": Nginx.site(
+            server_name, public_url=lazy_load(fail),
+        )}, lambda producer: [public("App", "web", "", load_nginx_url(producer, producer.test_sites["web"]))], nginx=nginx)
+        assert _render_navigation(manager)["apps.yml"]["links"] == []
+        assert reads == []
+
+
+def test_site_navigation_category_does_not_change_auth_and_paths_are_independent():
+    from linktools.cntr.ext import Flare
+
+    category = Flare.category("team", "Team")
+    declaration = Nginx.site("app.test", auth=True)
+    manager, reads = _site_navigation_manager({"web": declaration}, lambda producer: {
+        "root": category("Root", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        "one": category("Path", "web", "", "https://app.test/one"),
+        "two": category("Path", "web", "", "https://app.test/two?q=1"),
+    })
+    result = _render_navigation(manager)
+    assert result["apps.yml"]["links"] == []
+    assert [link["link"] for link in result["bookmarks.yml"]["links"]] == [
+        "https://app.test:9443", "https://app.test/one", "https://app.test/two?q=1"]
+    assert declaration.auth is True
+    assert "NGINX_AUTH_ENABLE" not in reads
+
+
+def test_removed_attached_navigation_is_rejected_and_category_conflicts_remain():
+    import pytest
+    from linktools.cntr import ContainerError
+    from linktools.cntr.ext import Flare
+
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        Nginx.site("app.test", link=True)
+    manager, _ = _site_navigation_manager({"web": Nginx.site("app.test")}, lambda producer: [
+        Flare.category("team", "Team")("Root", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        Flare.category("team", "Different")("Other", "web", "", "https://other.test"),
+    ])
+    with pytest.raises(ContainerError, match="Conflicting description"):
+        _render_navigation(manager)
+
+
+def test_builtin_navigation_matches_complete_output_baseline(fresh_manager):
+    import json
+    from pathlib import Path
+
+    for key, value in {
+        "HOST": "host.example.test", "NGINX_ROOT_DOMAIN": "example.test",
+        "NGINX_WILDCARD_DOMAIN": True, "NGINX_HTTPS_ENABLE": True,
+        "NGINX_HTTPS_PORT": 9443, "LLDAP_WEB_PORT": 17170,
+        "SAFELINE_PORT": 9200, "PORTAINER_PORT": 9000, "FLARE_PORT": 5000,
+    }.items():
+        fresh_manager.env_config.set(key, value)
+    expected = json.loads((Path(__file__).parent / "snapshots/navigation.json").read_text(encoding="utf-8"))
+    assert _render_navigation(fresh_manager) == expected
+    assert sum(len(data["links"]) for data in expected.values()) == 7
+
+
+def test_navigation_merge_preserves_producer_ties_and_key_collisions():
+    from types import SimpleNamespace
+    from linktools.cntr.ext import Flare, ResolvedSite
+
+    public = Flare.category("public", "Public", apps=True)
+    manager, _ = _site_navigation_manager({
+        "web": Nginx.site("one.test"),
+        "two": Nginx.site("two.test"),
+    }, lambda producer: {
+        "web": public("One", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        "two": public("Two", "web", "", load_nginx_url(producer, producer.test_sites["two"])),
+        "path": public("Path", "web", "", "https://one.test/path"),
+    })
+    producer = SimpleNamespace(name="other", order=10, manager=manager)
+    manager.containers["other"] = producer
+    site = Nginx.site("other.test")
+    manager.integration_snapshot["other"] = (
+        site, public("Other", "web", "", "https://other.test"))
+    manager.containers["nginx"].sites[site] = ResolvedSite(producer, site, 0)
+    assert [entry["name"] for entry in _render_navigation(manager)["apps.yml"]["links"]] == [
+        "One", "Two", "Path", "Other"]
+
+
+def test_absent_flare_does_not_resolve_independent_navigation(fresh_manager, monkeypatch):
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+
+    def fail():
+        raise AssertionError("absent consumer must not resolve URL")
+
+    installed = [c for c in fresh_manager.installed_state.get(resolve=True) if c.name != "flare"]
+    monkeypatch.setattr(fresh_manager.installed_state, "get", lambda resolve=False: installed)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "integrations", [
+        Nginx.site("app.test"),
+        Flare.category("public", "Public", apps=True)("App", "web", "", lazy_load(fail)),
+    ])
+    assert "flare" not in {c.name for c in fresh_manager.installed_state.get(resolve=True)}
+    assert list(fresh_manager.iter_integrations("flare")) == []
+
+
+def test_declarations_have_canonical_public_identity_and_nominal_marker():
+    import importlib.util
+    from linktools import cntr
+    from linktools.cntr import container, ext
+
+    for name in ("Integration", "Integrations"):
+        assert getattr(cntr, name) is getattr(ext, name)
+    assert issubclass(ext.Nginx, cntr.Integration)
+    assert issubclass(ext.Flare, cntr.Integration)
+    for name in ("ExposeCategory", "ExposeLink", "FlareCategory", "FlareLink", "NginxSite"):
+        assert not hasattr(cntr, name)
+        assert not hasattr(ext, name)
+    for name in ("ExposeMixin", "NginxMixin", "FlareCategory", "FlareLink", "Integrations"):
+        assert not hasattr(container, name)
+    assert importlib.util.find_spec("linktools.cntr._container.expose") is None
+    for name, description in (("public", "Public"), ("private", "Private"),
+                              ("container", "Internal"), ("other", "Tools")):
+        link = (ext.Flare.public("App", "icon", "") if name == "public"
+                else ext.Flare.bookmark("App", "icon", category=name))
+        category = link.display_category
+        assert not isinstance(category, cntr.Integration)
+        assert (category.name, category.desc) == (name, description)
+        assert category.apps is (name == "public")
+        assert category.order == {"public": 100, "private": 10, "container": 20, "other": 30}[name]
+        assert isinstance(link, ext.Flare)
+        assert link.desc == "App"
+        assert link.url is None
+
+
+def test_flare_iterable_preserves_referenced_then_standalone_order():
+    from linktools.cntr.ext import Flare
+
+    manager, _ = _site_navigation_manager({
+        "web": Nginx.site("app.test"),
+    }, lambda producer: (Flare.public("Referenced", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        Flare.public("First", "web", "", "https://one.test"),
+        Flare.public("Second", "web", "", "https://two.test")))
+    assert [link["name"] for link in _render_navigation(manager)["apps.yml"]["links"]] == [
+        "Referenced", "First", "Second"]
+
+
+def test_navigation_standard_categories_precede_first_seen_custom_categories():
+    from linktools.cntr.ext import Flare
+
+    team = Flare.category("team", "Team")
+    tools = Flare.category("tools", "Custom tools")
+    manager, _ = _site_navigation_manager({}, [
+        Flare.container("Internal one", "web", "https://internal-one.test"),
+        team("Team one", "web", "", "https://team-one.test"),
+        Flare.bookmark("Other", "web", "https://other.test", category="other"),
+        Flare.public("App one", "web", "", "https://app-one.test"),
+        Flare.bookmark("Private", "web", "https://private.test", category="private"),
+        tools("Tool", "web", "", "https://tool.test"),
+        Flare.bookmark("Internal two", "web", "https://internal-two.test", category="container"),
+        Flare.public("App two", "web", "", "https://app-two.test"),
+        team("Team two", "web", "", "https://team-two.test"),
+    ])
+    result = _render_navigation(manager)
+    assert [category["id"] for category in result["bookmarks.yml"]["categories"]] == [
+        "private", "container", "other", "team", "tools"]
+    assert [link["name"] for link in result["bookmarks.yml"]["links"]] == [
+        "Private", "Internal one", "Internal two", "Other", "Team one", "Team two", "Tool"]
+    assert [link["name"] for link in result["apps.yml"]["links"]] == ["App one", "App two"]
+
+
+def test_flare_category_output_area_is_independent_of_name() -> None:
+    from linktools.cntr.ext import Flare
+
+    dashboard = Flare.category("dashboard", "Dashboard", apps=True)
+    favorites = Flare.category("favorites", "Favorites", apps=True)
+    public = Flare.category("public", "Public bookmarks")
+    manager, _ = _site_navigation_manager({
+        "web": Nginx.site("app.test"),
+    }, lambda producer: [
+        dashboard("Referenced", "web", "Application", load_nginx_url(producer, producer.test_sites["web"])),
+        public("Bookmark", "web", "", "https://bookmark.test"),
+        favorites("Favorite", "web", "", "https://favorite.test"),
+        dashboard("Custom app", "web", "Custom", "https://custom.test"),
+    ])
+    result = _render_navigation(manager)
+    assert [link["name"] for link in result["apps.yml"]["links"]] == ["Referenced", "Favorite", "Custom app"]
+    assert [link["desc"] for link in result["apps.yml"]["links"]] == ["Application", "Favorite", "Custom"]
+    assert result["bookmarks.yml"] == {
+        "categories": [{"id": "public", "title": "Public bookmarks"}],
+        "links": [{"category": "public", "name": "Bookmark", "icon": "web", "link": "https://bookmark.test"}],
+    }
+
+
+def test_flare_bookmark_order_is_explicit_and_ties_keep_first_seen_order() -> None:
+    from linktools.cntr.ext import Flare
+
+    team = Flare.category("team", "Team", order=5)
+    docs = Flare.category("docs", "Documentation", order=5)
+    manager, _ = _site_navigation_manager({}, [
+        Flare.bookmark("Internal", "web", "https://internal.test", category="container"),
+        docs("Docs one", "web", "", "https://docs.test/one"),
+        team("Team", "web", "", "https://team.test"),
+        Flare.category("docs", "Documentation", order=5)("Docs two", "web", "", "https://docs.test/two"),
+    ])
+    result = _render_navigation(manager)["bookmarks.yml"]
+    assert [category["id"] for category in result["categories"]] == ["docs", "team", "container"]
+    assert [link["name"] for link in result["links"]] == ["Docs one", "Docs two", "Team", "Internal"]
+
+
+def test_flare_rejects_conflicting_category_output_areas_and_orders() -> None:
+    import pytest
+    from linktools.cntr import ContainerError
+    from linktools.cntr.ext import Flare
+
+    for options, message in (({"apps": True}, "output area"), ({"order": 5}, "order")):
+        manager, _ = _site_navigation_manager({}, [
+            Flare.category("team", "Team")("One", "web", "", "https://one.test"),
+            Flare.category("team", "Team", **options)("Two", "web", "", "https://two.test"),
+        ])
+        with pytest.raises(ContainerError, match="Conflicting " + message):
+            _render_navigation(manager)
+
+
+def test_flare_bookmarks_accept_custom_category_ids_and_explicit_site_urls() -> None:
+    from linktools.cntr.ext import Flare
+
+    manager, reads = _site_navigation_manager({
+        "web": Nginx.site("app.test"),
+    }, lambda producer: [
+        Flare.bookmark("Referenced", "web", load_nginx_url(producer, producer.test_sites["web"]), category="tool"),
+        Flare.public("App", "apps", "Application description", "https://app.test"),
+        Flare.bookmark("Standalone", "book", "https://docs.test", category="tool"),
+        Flare.bookmark("Unbound", "off", category="empty"),
+        Flare.bookmark("Disabled", "off", None, category="empty"),
+    ])
+    assert reads == []
+    result = _render_navigation(manager)
+    assert result["apps.yml"]["links"] == [
+        {"name": "App", "icon": "apps", "desc": "Application description", "link": "https://app.test"}]
+    assert result["bookmarks.yml"] == {
+        "categories": [{"id": "tool", "title": "tool"}],
+        "links": [
+            {"category": "tool", "name": "Referenced", "icon": "web", "link": "https://app.test:9443"},
+            {"category": "tool", "name": "Standalone", "icon": "book", "link": "https://docs.test"},
+        ],
+    }
+
+
+def test_flare_container_factory_preserves_lazy_urls() -> None:
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+
+    reads = []
+    def load_url():
+        reads.append("url")
+        return "https://internal.test"
+
+    link = Flare.container("Internal", "web", lazy_load(load_url))
+    assert isinstance(link, Flare)
+    assert link.display_category is Flare.category("container")
+    assert link.desc == "Internal"
+    bound = link.with_base_url("https://app.test")
+    assert bound is not link
+    manager, _ = _site_navigation_manager({}, [link])
+    assert reads == []
+    result = _render_navigation(manager)
+    assert result["apps.yml"]["links"] == []
+    assert result["bookmarks.yml"] == {
+        "categories": [{"id": "container", "title": "Internal"}],
+        "links": [{"category": "container", "name": "Internal", "icon": "web",
+                   "link": "https://internal.test"}],
+    }
+    assert reads == ["url"]
+
+
+def test_flare_container_factory_requires_explicit_site_urls() -> None:
+    from linktools.cntr.ext import Flare
+
+    omitted = Flare.container("Omitted", "web")
+    empty = Flare.container("Empty", "web", "")
+    disabled = Flare.container("Disabled", "web", None)
+    manager, reads = _site_navigation_manager({"web": Nginx.site("app.test")}, lambda producer: [
+        Flare.container("Referenced", "web", load_nginx_url(producer, producer.test_sites["web"])),
+        omitted, empty, disabled, Flare.container("Unbound", "web"),
+    ])
+    assert reads == []
+    result = _render_navigation(manager)
+    assert result["bookmarks.yml"]["links"] == [
+        {"category": "container", "name": "Referenced", "icon": "web",
+         "link": "https://app.test:9443"},
+    ]
+    assert reads == ["NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
+    assert omitted.url is empty.url is disabled.url is None
+    assert omitted.with_base_url("https://app.test").url is None
+
+
+def test_flare_bookmark_factories_preserve_category_description_and_url_contract() -> None:
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+    from linktools.types import MISSING
+
+    def fail():
+        raise AssertionError("bookmark URL must stay lazy")
+
+    custom = Flare.category("team", "Team", order=5)
+    for category in ("container", "other", custom):
+        group = Flare.category(category) if isinstance(category, str) else category
+        for desc in (None, "", "Detailed description"):
+            for url in (MISSING, None, "", "https://app.test", lazy_load(fail)):
+                original = group("App", "web", desc, url)
+                links = [Flare.bookmark("App", "web", url, category=category, desc=desc)]
+                if category == "container":
+                    links.append(Flare.container("App", "web", url, desc=desc))
+                for link in links:
+                    assert link.display_category is original.display_category
+                    assert (link.name, link.icon, link.desc) == (original.name, original.icon, original.desc)
+                    assert link._url is original._url
+
+
+def test_flare_bookmarks_accept_category_titles_and_orders() -> None:
+    from linktools.cntr.ext import Flare
+
+    tools = Flare.category("tool", "Tools", order=5)
+    manager, _ = _site_navigation_manager({}, [
+        Flare.bookmark("Internal", "web", "https://internal.test", category="container"),
+        Flare.bookmark("Custom", "tool", "https://tool.test", category=tools),
+        Flare.bookmark("Other", "web", "https://other.test"),
+        Flare.bookmark("Private", "web", "https://private.test", category="private"),
+    ])
+    result = _render_navigation(manager)["bookmarks.yml"]
+    assert result["categories"] == [
+        {"id": "tool", "title": "Tools"},
+        {"id": "private", "title": "Private"},
+        {"id": "container", "title": "Internal"},
+        {"id": "other", "title": "Tools"},
+    ]
+    assert [link["name"] for link in result["links"]] == ["Custom", "Private", "Internal", "Other"]
+
+
+def test_flare_bookmarks_reject_application_categories() -> None:
+    import pytest
+    from linktools.cntr.ext import Flare
+
+    with pytest.raises(ValueError, match="bookmarks output area"):
+        Flare.bookmark("App", "web", category=Flare.category("public", "Public", apps=True))
+    with pytest.raises(TypeError, match="string or _FlareCategory"):
+        Flare.bookmark("Invalid", "web", category=None)
+
+
+def test_authelia_admin_link_does_not_change_oidc_issuer(fresh_manager):
+    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    authelia = fresh_manager.containers["authelia"]
+    from linktools.cntr.ext import Flare
+
+    link = next(value for value in authelia.integrations if isinstance(value, Flare))
+    assert link.url == "https://sso.example.test:9443/auth-admin"
+    assert authelia.oidc_client["issuer_url"] == "https://sso.example.test:9443"
+    assert authelia.oidc_client["authorization_url"] == "https://sso.example.test:9443/api/oidc/authorization"
+
+
+def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
+    container = fresh_manager.containers["portainer"]
+    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    template = tmp_path / "docker-compose.yml"
+    template.write_text('{{ urls.load_nginx_url(container, None, "settings", queries={"mode": "a b"}) }}')
+    assert container.render_template(template) == "https://portainer.example.test:9443/settings?mode=a+b"
+
+
+def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
+    import inspect
+    from linktools.cntr.ext import Flare
+
+    assert "server_name" in inspect.signature(Nginx.site).parameters
+    declarations = [Nginx.site("app.example.com"),
+                    Flare.bookmark("Tools", "web", "https://tools.example.com", category="tool")]
+    assert isinstance(declarations[0], Nginx)
+    assert isinstance(declarations[1], Flare)
+    assert declarations[0].server_name == "app.example.com"
+    assert not hasattr(declarations[0], "local_id")
+
+
+def test_installed_container_metadata_reuses_actual_instances(fresh_manager):
+    from linktools.cntr import BaseContainer
+
+    assert not hasattr(BaseContainer, "integration_consumer")
+    assert not hasattr(fresh_manager, "integration_consumers")
+    installed = fresh_manager.load_installed_config_metadata()
+    nginx = fresh_manager.containers["nginx"]
+    assert nginx in installed
+    assert all(container is fresh_manager.containers[container.name] for container in installed)
+
+
+def test_integration_containers_preserve_dependencies(fresh_manager):
+    assert tuple(fresh_manager.containers["authelia"].dependencies) == ("nginx", "lldap")
+    assert tuple(fresh_manager.containers["safeline"].dependencies) == ("nginx",)
+    installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])
+    assert {container.name for container in installed} == {"nginx", "lldap", "authelia"}
+    selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
+    started = fresh_manager.compose_operations.start_selection(selection)
+    assert "lldap" in started.services
+
+
+def test_flare_display_category_does_not_shadow_factory():
+    from linktools.cntr.ext import Flare
+
+    category = Flare.category("team", "Team")
+    link = category("Docs", "web", "Docs")
+    assert link.display_category is category
+    assert callable(link.category)
+    assert link.with_base_url("https://app.test")._url is link._url
+    assert category("Docs", "web", "Docs", "https://docs.test").display_category is category
+
+
+def test_standalone_flare_output_reports_missing_metadata_instead_of_serializing_sentinels() -> None:
+    import pytest
+    from linktools.cntr.ext import Flare
+
+    for link, field in ((Flare.public(icon="web", url="https://app.test"), "name"),
+                        (Flare.container(name="App", url="https://app.test"), "icon")):
+        manager, _ = _site_navigation_manager({}, [link])
+        with pytest.raises(ValueError, match="requires (a|an) " + field):
+            _render_navigation(manager)
+
+
+def test_unbound_partial_flare_metadata_is_not_consumed_without_a_url() -> None:
+    from linktools.cntr.ext import Flare
+
+    manager, reads = _site_navigation_manager({}, [Flare.public(), Flare.container()])
+    assert _render_navigation(manager) == {"apps.yml": {"links": []},
+                                           "bookmarks.yml": {"categories": [], "links": []}}
+    assert reads == []
+
+
+def test_flare_group_lazy_metadata_resolves_only_when_rendered() -> None:
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+    from linktools.types import MISSING
+
+    for name, icon, desc in (("App", "web", "Details"), (None, "", None)):
+        reads = []
+
+        def later(field, value):
+            def resolve():
+                reads.append(field)
+                return value
+            return lazy_load(resolve)
+
+        original = Flare.public(url="https://app.test")
+        links = Flare.links(original, Flare.container(url="http://app.test:8000"),
+                            name=later("name", name), icon=later("icon", icon),
+                            desc=later("desc", desc))
+        assert reads == []
+        manager, _ = _site_navigation_manager({}, links)
+        result = _render_navigation(manager)
+        assert result["apps.yml"]["links"] == [dict(
+            name=name, icon=icon, desc=desc or name, link="https://app.test")]
+        assert result["bookmarks.yml"]["links"] == [dict(
+            name=name, icon=icon, link="http://app.test:8000", category="container")]
+        assert sorted(reads) == ["desc", "icon", "name"]
+        assert _render_navigation(manager) == result
+        assert sorted(reads) == ["desc", "icon", "name"]
+        assert original._name is original._icon is original._desc is MISSING
+
+
+def test_disabled_flare_group_does_not_resolve_metadata() -> None:
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+
+    def fail():
+        raise AssertionError("Disabled links must not resolve display metadata")
+
+    links = Flare.links(Flare.public(url=None), Flare.container(url=""),
+                        name=lazy_load(fail), icon=lazy_load(fail), desc=lazy_load(fail))
+    manager, _ = _site_navigation_manager({}, links)
+    assert _render_navigation(manager) == {"apps.yml": {"links": []},
+                                          "bookmarks.yml": {"categories": [], "links": []}}
+
+
+def test_builtin_primary_sites_use_direct_endpoint_compositions(fresh_manager) -> None:
+    for name in ("authelia", "safeline", "portainer", "flare"):
+        producer = fresh_manager.containers[name]
+        declarations = producer.integrations
+        assert isinstance(declarations, tuple)
+        site = declarations[0]
+        assert isinstance(site, Nginx)
+        assert list(Integration.iter_declarations(declarations))[0] is site
+        assert fresh_manager.containers["nginx"].sites[site]._declaration is site
+    assert all(declaration.consumer == "flare" for declaration in fresh_manager.containers["lldap"].integrations)
+    assert all(site.producer.name != "lldap" for site in fresh_manager.containers["nginx"].sites.values())

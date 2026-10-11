@@ -55,10 +55,11 @@ def test_local_repo_describe_does_not_inspect_git(fresh_manager, monkeypatch, lo
     assert info["git"]["supported"] is True
 
 
-def test_local_repo_status_produces_no_git_warning(fresh_manager, local_repo):
+def test_local_repo_status_produces_no_git_warning(fresh_manager, local_repo, monkeypatch):
     fresh_manager.repos.add(local_repo, replace=True)
     warnings = []
-    fresh_manager.repos.git.logger.warning = lambda msg: warnings.append(msg)
+    monkeypatch.setattr(fresh_manager.repos.git.logger, "warning",
+                        lambda msg, *args: warnings.append(msg % args if args else msg))
 
     url, meta = next(iter(fresh_manager.repos.get_all().items()))
     fresh_manager.repos.describe(url, meta)
@@ -75,7 +76,7 @@ def test_git_repo_update_still_calls_git(fresh_manager, monkeypatch, local_repo)
     def fake_update(url, repo_path, branch=None, reset=False):
         calls.append(url)
         from linktools.cntr.repo.git import RepoGitResult
-        return RepoGitResult(success=True, revision="deadbeef", dirty=False, error=None)
+        return RepoGitResult(success=True, revision="deadbeef", error=None)
 
     monkeypatch.setattr(fresh_manager.repos.git, "update", fake_update)
     fresh_manager.repos._dump({

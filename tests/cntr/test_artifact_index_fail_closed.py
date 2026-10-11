@@ -52,6 +52,15 @@ def test_plan_fails_explicitly_on_corrupt_index(fresh_manager):
         planner.plan("up", names=["nginx"])
 
 
+def test_record_can_remove_only_explicitly_reverted_snapshot(fresh_manager):
+    index = fresh_manager.artifact_index
+    expected = {"kind": "compose-applied", "container": "a", "sha256": "hash"}
+    index.record({"compose/applied/a.yml": expected, "compose/applied/b.yml": expected})
+    index.record({}, remove=("compose/applied/a.yml",))
+    assert "compose/applied/a.yml" not in index.load()
+    assert index.load()["compose/applied/b.yml"] == expected
+
+
 def test_record_holds_a_lock_serializing_concurrent_writers(fresh_manager, monkeypatch):
     """Two threads recording different artifacts at the same time must not
     lose either entry -- record()'s read-merge-write used to run unlocked,

@@ -126,6 +126,9 @@ ct-cntr config list
 # 设置配置变量
 ct-cntr config set NGINX_ROOT_DOMAIN=example.com ACME_DNS_API=dns_ali Ali_Key=xxx Ali_Secret=yyy
 
+# 指定 ACME CA 与账户邮箱（默认 CA 为 Let's Encrypt，邮箱可选）
+ct-cntr config set ACME_SERVER=letsencrypt ACME_ACCOUNT_EMAIL=admin@example.com
+
 # 删除配置变量
 ct-cntr config unset NGINX_ROOT_DOMAIN ACME_DNS_API Ali_Key Ali_Secret
 
@@ -135,6 +138,8 @@ ct-cntr config edit --editor vim
 # 重新加载配置
 ct-cntr config reload
 ```
+
+nginx 的 ACME 证书在镜像**构建期**签发。证书域名或 CA 等构建输入变化时，会生成新的 nginx 镜像标签并在部署前构建；容器启动前只离线校验证书、导入镜像中已签发的证书与 ACME 状态，不进行网络签发。当前有效证书会继续复用，新增 SAN 则通过 `certs/versions` 与 `certs/live` 原子切换，原有证书和账号数据不会直接覆盖。自动续期仍在容器运行期间按照 cron 执行；证书域名或 CA 更新将触发新镜像构建。镜像构建会显式重新签发证书，因此反复强制重建可能触发 CA 频率限制。`--pull` 只请求更新基础镜像，不保证跳过 Docker 构建缓存或重新签发证书。
 
 ## 进阶功能
 
@@ -190,7 +195,7 @@ cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用�
 
 ### Compose 渲染后 Hook
 
-在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。模板解析及服务、网络默认值补全后，Hook 按 `order`、依赖关系和注册顺序执行；接收渲染后的 Compose 字典，可原地修改。每个容器实例首次渲染时执行一次；没有 Compose 模板时不执行。
+在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。模板解析及服务、网络默认值补全后，Hook 按 `order`、依赖关系和注册顺序执行；接收渲染后的 Compose 字典，可原地修改。同一准备阶段只在首次渲染时执行；进入新的执行准备阶段会重置框架生成的 Compose、Dockerfile 和服务缓存，保留显式赋值的覆盖。没有 Compose 模板时不执行。
 
 ```python
 from typing import TYPE_CHECKING
@@ -228,116 +233,98 @@ ct-cntr repo validate --json
 ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意仓库更新失败或不兼容都会让命令非零退出
 ```
 
-## 容器事件时序
+## 容器操作时序
 
-linktools-cntr 通过一套生命周期事件系统统一管理容器的启动、停止流程。Manager 按依赖顺序对目标容器依次触发各阶段事件，再驱动 Docker Compose 执行。
+共享上下文为 `OperationContext`。容器使用已有的准备与检查回调，不再实现一套生成配置生命周期。
 
-> **target_containers**：默认为全部已安装容器；指定容器名（如 `ct-cntr up nginx`）时仅为指定的子集。
+`up`：确定范围 → `on_starting / BEFORE_START` → 准备镜像 → `on_check / CHECK` → 框架应用服务并确认就绪 → `on_started / AFTER_START`。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant CLI
-    participant ContainerManager
-    participant Container
+`restart` 在准备和检查全部通过后才停止显式目标；依赖方不进入显式停止集合。`down` 不准备启动配置或密钥。状态查询不调用有副作用的准备回调。
 
-    %% ─── 初始化 & 准备 ───
-    rect rgb(240, 240, 220)
-        Note over CLI,Container: 初始化阶段（每次执行任意 ct-cntr 命令）
-        User->>CLI: ct-cntr <command>
-        CLI->>ContainerManager: 扫描 container.py / docker-compose.yml
-        loop 每个容器
-            ContainerManager->>Container: on_init()
-        end
-    end
+准备阶段通过 `context.write_files(self, files)` 写入不可变候选文件；检查阶段验证相同输入。框架依据实际文件挂载和 Compose 模型决定哪些服务需要重建，并统一记录应用结果与恢复旧模型。普通配置部署不再对 Nginx 执行热加载；ACME 续期仍由证书脚本负责 reload。
 
-    rect rgb(230, 235, 245)
-        Note over CLI,Container: 准备阶段（up / restart / down / config / exec 等）
-        CLI->>ContainerManager: prepare_installed_containers()
-        ContainerManager->>ContainerManager: resolve_depend_containers()（依赖解析 & 排序）
-        loop 每个容器（逆序，低优先级先写默认配置）
-            ContainerManager->>Container: configs（写入全局默认配置）
-        end
-        loop 每个容器
-            ContainerManager->>Container: on_prepare()
-        end
-        loop 每个容器（正序）
-            ContainerManager->>Container: docker_file（渲染 Dockerfile 模板）
-            ContainerManager->>Container: docker_compose（渲染 docker-compose.yml 模板）
-            ContainerManager->>Container: hooks.call(AFTER_COMPOSE_RENDER, compose)
-            ContainerManager->>Container: exposes（加载对外服务链接）
-        end
-    end
+同次操作的选中服务通过一次原生 Compose `up` 应用，保留选中服务之间的依赖、健康等待和一次性任务完成条件；未选中的可选依赖不会因此应用待部署配置。本地镜像按阶段批量检查：规划时读取一次，拉取/构建后重新读取，应用前再确认镜像未改变。运行状态在应用后按整批检查副本数、镜像与就绪状态，维护用 `compose run` 容器不计入副本。
 
-    %% ─── 启动流程 ───
-    rect rgb(220, 240, 220)
-        Note over CLI,Container: ct-cntr up
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_check(ctx)
-            ContainerManager->>Container: on_starting(ctx)
-            ContainerManager->>Container: start_hooks[i]()（mkdir / chown / 写 Nginx 配置…）
-        end
-        ContainerManager->>ContainerManager: manager.start_hooks[i]()
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose build / up --detach
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_started(ctx)
-        end
-        alt is_full_containers == True
-            ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
-        end
-    end
+运行状态发现直接使用 Docker 的 Compose 项目标签，不重复加载 Compose 文件；单服务在查询时过滤，多服务在批量检查后取并集，保留旧服务和一次性容器的观测。`--debug` 会记录结构化命令的阶段与耗时，阶段信息不包含命令参数或配置内容。
 
-    %% ─── 停止流程 ───
-    rect rgb(240, 220, 220)
-        Note over CLI,Container: ct-cntr down
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_stopping(ctx)
-        end
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose stop / down
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_stopped(ctx)
-            ContainerManager->>Container: stop_hooks[i]()
-        end
-        ContainerManager->>ContainerManager: manager.stop_hooks[i]()
-        alt is_full_containers == True
-            ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
-        end
-    end
+每服务的恢复快照保留完整项目依赖；同次操作按快照内容复用解析结果，读取工作副本时隔离修改，跨操作重新读取磁盘。准备前后模型仍分别比较，不复用过期配置。
 
-    %% ─── 重启流程 ───
-    rect rgb(235, 225, 245)
-        Note over CLI,Container: ct-cntr restart（= down 流程 + up 流程）
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_stopping(ctx)
-        end
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose stop
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_stopped(ctx)
-            ContainerManager->>Container: stop_hooks[i]()
-        end
-        ContainerManager->>ContainerManager: manager.stop_hooks[i]()
-        loop 每个容器（正序）
-            ContainerManager->>Container: on_check(ctx)
-            ContainerManager->>Container: on_starting(ctx)
-            ContainerManager->>Container: start_hooks[i]()
-        end
-        ContainerManager->>ContainerManager: manager.start_hooks[i]()
-        ContainerManager->>CLI: yield
-        CLI->>CLI: docker compose build / up --detach
-        loop 每个容器（逆序）
-            ContainerManager->>Container: on_started(ctx)
-        end
-        alt is_full_containers == True
-            ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
-        end
-    end
-```
+批量应用可能部分成功。失败或中断后，框架依据实际运行状态保留已确认的成功项，复用事先捕获的输入恢复受影响服务；未确认的新配置不会被记录为成功。未选中消费者的旧配置重启、namespace 重绑和失败恢复仍可能需要单独命令。恢复不撤销应用写入数据库或持久卷的外部副作用。
+
+
+容器组依赖用于选择参与服务，真正的启动先后由 Compose `depends_on` 等依赖决定。实际依赖环直接报错，不再自动使用 Bootstrap 配置。配置检查失败不停止旧服务；后置通知失败明确报告“已应用、后置处理失败”，不反向触发部署回滚。
+
+详见 [生命周期与文件准备](docs/lifecycle.md)。
 
 ## 相关链接
 
 - GitHub: <https://github.com/linktools-toolkit/linktools/tree/master/linktools-cntr>
 - homelab 容器仓库示例: <https://github.com/linktools-toolkit/linktools-homelab>
+
+## 声明式集成与配置发布
+
+`integrations` 返回声明或列表/元组组合，不再接受 key/value 字典。
+导航和 OIDC 回调独立声明，使用原站点对象引用；只有一个站点时可省略引用：
+
+```python
+from linktools.cntr.ext import Flare, Nginx, load_nginx_url
+
+return [
+    Nginx.site("app.example.com", proxy="http://app:8080"),
+    Flare.public("应用", "web", "应用描述", load_nginx_url(self)),
+    Flare.bookmark("工具", "web", "https://tool.example.com", category="tool"),
+]
+```
+
+常见服务使用平铺的 `endpoint` 声明主入口；首页导航按需添加：
+
+```python
+from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
+
+return endpoint(
+    self,
+    domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
+    extensions=[
+        Flare.links(
+            Flare.public(),
+            Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+            name="应用", icon="web", desc="应用描述",
+        ),
+        Authelia.access(policy="one_factor"),
+    ],
+)
+```
+
+`endpoint` 不需要站点标识，不接收导航信息，也不自动生成导航。
+只有首页应用省略 URL 时关联本站；扩展中的相对 URL 按标准规则绑定本站，
+`{url}` 前缀保留精确基准地址，绝对 URL、`None` 和空字符串不改写。
+`Flare.links` 仅共享省略的显示字段，直连地址仍自行指定。两者返回普通元组，
+可以直接作为数组元素；框架按声明顺序统一展开列表/元组，不需要 `*`。
+同一容器可以返回多个 endpoint。跨声明引用时保存原 endpoint 对象，
+例如 `load_nginx_url(self, self.proxy_endpoint)`；多站点省略引用会明确报错。
+`Nginx` 不含 `local_id` / `link` / `auth_rule`；授权规则归 `Authelia.access`，
+OIDC 回调仍由 `Authelia.oidc` 声明准确的绝对地址。
+
+`Flare.public` 创建带描述的应用；`Flare.container(name, icon, url)` 创建容器分区书签；
+`Flare.bookmark` 支持自定义分区。
+使用 `Flare.category("tool", "工具", order=5)` 可进一步设置分区标题和顺序。
+域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
+扩展声明与 URL 工厂位于 `ext/` 包中；容器在已有准备、检查回调中处理自己的输入，
+服务应用、文件变更判断和恢复统一由框架负责。
+导航 URL 不负责注册代理；仅 endpoint 内省略 URL 的首页应用关联该主入口。
+`auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
+外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
+详见 [集成协议与迁移说明](docs/integrations.md)。
+
+### Nginx 与 SafeLine 网络
+
+SafeLine 独立拥有 `safeline-ce` 网络，Tengine 和其他 SafeLine 服务只加入这个网络。
+启用 SafeLine 时，Nginx 额外加入该网络，固定为 `.253`；Tengine 固定为 `.254`。
+Nginx 保留自己的应用网络，但 Tengine 不加入它。网段沿用 `SAFELINE_SUBNET_PREFIX`，默认 `172.22.242`。
+
+回源契约仍是 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`，已有正确配置无需改名。
+固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。
+回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS。入口覆盖 `X-Forwarded-For` 为真实客户端地址；SafeLine 保留 Host 并按原生 `$proxy_add_x_forwarded_for` 追加代理地址。
+该端口不发布到宿主机，仍仅允许 Tengine 的精确 TCP 来源；realip 递归仅信任 `.253`、`.254` 两个代理，不信任整个网段。无需私有回源头，也不因缺少客户端身份直接返回 400；认证与业务按自身规则处理。
+不能把回源指向 Nginx 的公开入口，否则会形成循环。
+详见 [网络与回源契约](docs/integrations.md#nginx-and-safeline-networks)。
