@@ -130,9 +130,25 @@ def test_stored_payload_inline_json_detaches_source() -> None:
     assert payload == StoredPayload.inline_json({"items": [{"value": 1}]})
 
 
-def test_task_graph_rejects_cycles_and_agent_spec_is_stable() -> None:
-    with pytest.raises(ValueError):
-        TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
+@pytest.mark.parametrize(
+    ("nodes", "reason", "message"),
+    (
+        ((TaskNode("a"), TaskNode("a")), "duplicate_node_id", "duplicate node ids"),
+        ((TaskNode("a", ("missing",)),), "dependency_unknown", "unknown dependency"),
+        ((TaskNode("a", ("b",)), TaskNode("b", ("a",))), "cycle", "cycle"),
+    ),
+)
+def test_task_graph_reports_invalid_topology(
+    nodes: tuple[TaskNode, ...], reason: str, message: str,
+) -> None:
+    with pytest.raises(AIError, match=message) as caught:
+        TaskGraph("invalid", nodes)
+    assert isinstance(caught.value, ValueError)
+    assert caught.value.code is ErrorCode.TASK_DAG_INVALID
+    assert caught.value.safe_details["reason"] == reason
+
+
+def test_agent_spec_is_stable() -> None:
     spec = AgentSpec(
         "agent",
         model="route",

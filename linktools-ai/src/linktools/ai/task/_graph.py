@@ -145,6 +145,8 @@ class TaskNodeResultRef:
 
 @dataclass(frozen=True, slots=True, init=False)
 class TaskNode:
+    """One invocation with frozen input and explicit scheduling dependencies."""
+
     node_id: str
     dependencies: tuple[str, ...]
     task: "TaskRef | None"
@@ -601,6 +603,8 @@ class TaskNodeView:
 
 @dataclass(frozen=True, slots=True)
 class TaskGraph:
+    """An immutable DAG of task invocations, validated when constructed."""
+
     graph_id: str
     nodes: "tuple[TaskNode, ...]"
 
@@ -609,7 +613,13 @@ class TaskGraph:
             raise ValueError("task graph id is required")
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.node_id for node in self.nodes}
-        if len(ids) != len(self.nodes) or any(
+        if len(ids) != len(self.nodes):
+            raise TaskGraphValidationError(
+                ErrorCode.TASK_DAG_INVALID,
+                "task graph contains duplicate node ids",
+                safe_details={"reason": "duplicate_node_id"},
+            )
+        if any(
             dependency not in ids
             for node in self.nodes
             for dependency in node.dependencies
