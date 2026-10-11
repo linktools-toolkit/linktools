@@ -26,11 +26,9 @@ def test_oidc_factory_is_lazy_and_preserves_exact_callback_identity():
     assert calls == [True]
 
 
-def test_disabled_oidc_declaration_never_resolves_callbacks():
-    def fail():
-        raise AssertionError("disabled callback evaluated")
-    declaration = Authelia.oidc(lazy_load(fail), enabled=lazy_load(lambda: False))
-    assert declaration.redirect_uris == ()
+def test_oidc_has_no_enable_switch():
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        Authelia.oidc(("https://app.test/callback",), enabled=False)
 
 
 @pytest.mark.parametrize("value", ["//evil.test/path", "/callback", "/cb#", "https://a.test/#bad",

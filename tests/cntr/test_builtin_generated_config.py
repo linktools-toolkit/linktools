@@ -92,21 +92,32 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
         client["client_id"] = "bad"
 
 
-def test_portainer_callback_declaration_is_lazy_and_auth_conditioned(monkeypatch):
-    from linktools.cntr.ext import Authelia
+@pytest.mark.parametrize("portainer_auth", [True, False])
+@pytest.mark.parametrize("global_auth", [True, False])
+def test_portainer_callback_declaration_is_lazy_and_auth_independent(monkeypatch, portainer_auth, global_auth):
+    from linktools.cntr.ext import Authelia, ResolvedSite
 
     module = builtin("110-portainer")
     container = instance(module)
     calls = []
-    def config(key):
+    values = {"PORTAINER_AUTH_ENABLE": portainer_auth, "NGINX_AUTH_ENABLE": global_auth,
+              "NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}
+
+    def config(key, **kwargs):
         calls.append(key)
-        return key == "PORTAINER_AUTH_ENABLE"
+        return values[key]
+
     monkeypatch.setattr(container, "get_config", config)
     monkeypatch.setattr(container, "get_config_later", lambda key: "portainer.test")
-    declaration = next(value for value in container.integrations if isinstance(value, Authelia))
+    declarations = container.integrations
+    declaration = next(value for value in declarations if isinstance(value, Authelia))
     assert calls == ["PORTAINER_AUTH_ENABLE"]
-    assert declaration.redirect_uris == ()
-    assert calls == ["PORTAINER_AUTH_ENABLE", "PORTAINER_AUTH_ENABLE", "NGINX_AUTH_ENABLE"]
+    container.manager.integration_snapshot = {"nginx": ()}
+    container.manager.containers = {"nginx": SimpleNamespace(sites={
+        declarations[0]: ResolvedSite(container, declarations[0], 0),
+    })}
+    assert declaration.redirect_uris == ("https://portainer.test",)
+    assert calls == ["PORTAINER_AUTH_ENABLE", "NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
 
 
 def test_flare_navigation_orders_producers_and_preserves_link_values():

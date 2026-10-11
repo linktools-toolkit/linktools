@@ -23,7 +23,6 @@ class Authelia(Integration):
         self.site: "Nginx | tuple[Integration, ...] | None" = MISSING
         self._rule = MISSING
         self._redirect_uris = ()
-        self._enabled = True
 
     @classmethod
     def access(cls, rule: "Mapping[str, Any]" = MISSING, *,
@@ -43,17 +42,14 @@ class Authelia(Integration):
         return MappingProxyType(dict(self._rule))
 
     @classmethod
-    def oidc(cls, redirect_uris: "Sequence[str]", *, enabled: bool = True) -> "Authelia":
+    def oidc(cls, redirect_uris: "Sequence[str]") -> "Authelia":
         """Contribute exact callback URLs without creating clients or credentials."""
         self = cls()
         self._redirect_uris = tuple(redirect_uris) if type(redirect_uris) in (tuple, list) else redirect_uris
-        self._enabled = enabled
         return self
 
     @cached_property
     def redirect_uris(self) -> "tuple[str, ...]":
-        if not self._enabled:
-            return ()
         if isinstance(self._redirect_uris, (str, bytes)):
             raise ContainerError("Authelia redirect_uris must be a sequence of URLs")
         result = []

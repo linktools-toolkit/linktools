@@ -147,7 +147,6 @@ return endpoint(
         Authelia.access(policy="one_factor"),
         Authelia.oidc(
             redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
-            enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
         ),
     ],
 )
@@ -175,23 +174,22 @@ multiple uses copy declarations without modifying the original values.
 For custom URLs or OIDC callbacks, `extensions` can be a declaration factory:
 
 ```python
-extensions=lambda url, auth: [
+extensions=lambda url: [
     Flare.public("Mihomo", "server", "Dashboard", url=url(
         "ui", "metacubexd", "#", "setup",
         queries={"hostname": self.get_config_later("MIHOMO_DOMAIN")},
     )),
-    Authelia.oidc((url(), "http://portainer.local:9000"), enabled=auth),
+    Authelia.oidc((url(), "http://portainer.local:9000")),
 ]
 ```
 
 The factory runs once while building declarations. `url` is the existing lazy
 nginx URL builder bound to this site; its path and query arguments retain
-`load_nginx_url` semantics. `auth` is the site's lazy authentication flag.
-Store these lazy values in declarations; do not resolve them or branch on `auth`
-in the factory. An unavailable site returns an empty URL without reading query
+`load_nginx_url` semantics. Store its lazy URLs in declarations rather than
+resolving them in the factory. An unavailable site returns an empty URL without reading query
 values. The example's `#/setup?...` is a fragment route, not an HTTP query.
-OIDC receives only the explicitly listed callbacks; `enabled=auth` keeps them
-conditional without changing standalone OIDC defaults or `enabled=None` behavior.
+OIDC receives only the explicitly listed callbacks and does not follow nginx
+authentication switches. There is no OIDC enable parameter.
 Ordinary extension lists, tuples and generators remain supported.
 
 Multiple endpoints are ordinary array elements. Cache any endpoint referenced
@@ -312,22 +310,23 @@ from linktools.cntr.ext import Authelia, load_nginx_url
 
 Authelia.oidc(
     redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
-    enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
 )
 ```
 
 `Authelia.oidc` contributes URLs to the existing shared client; it never declares
 a second client or changes client IDs, credentials, scopes, or authorization policy.
-Use lazy URL/config references to defer evaluation. Disabled declarations do not
-resolve callbacks. Empty URLs are omitted, including disabled optional services;
-nonempty callbacks must be absolute and have no fragment or template placeholder.
+Use lazy URL/config references to defer evaluation. Empty URLs are omitted,
+including URLs derived from disabled optional sites; explicitly declared absolute
+callbacks remain even when another site URL is empty.
+Nonempty callbacks must be absolute and have no fragment or template placeholder.
 Provider-specific URI rules remain subject to [native Authelia validation](https://www.authelia.com/configuration/identity-providers/openid-connect/clients/#redirect_uris).
 Deduplication preserves exact strings and order,
 including path, query, and trailing slash differences.
 
 Move former `Nginx.site(..., oidc_redirects=...)` values to an `Authelia.oidc`
 declaration. Replace empty/root-relative site callbacks with explicit lazy public
-URLs, and keep existing enable conditions for optional services.
+URLs. Declaring OIDC is independent of reverse-proxy authentication; omit the
+declaration itself when an application should not have OIDC.
 
 The built-in Authelia exposes a read-only `oidc_client` mapping with `client_id`,
 `client_name`, `client_secret`, `issuer_url`, `authorization_url`, `token_url`,

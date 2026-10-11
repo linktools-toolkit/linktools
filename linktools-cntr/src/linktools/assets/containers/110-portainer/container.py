@@ -5,9 +5,8 @@ from typing import TYPE_CHECKING
 
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
-from linktools.runtime import lazy_load
 from linktools.cntr import BaseContainer
-from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_nginx_url, load_port_url
+from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_port_url
 
 if TYPE_CHECKING:
     from linktools.cntr import Integrations
@@ -33,7 +32,7 @@ class Container(BaseContainer):
             proxy="http://portainer:9000",
             auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
             auth_bypass=(r"\.(css|js)$",),
-            extensions=[
+            extensions=lambda url: [
                 Flare.links(
                     Flare.public(),
                     Flare.container(
@@ -43,12 +42,6 @@ class Container(BaseContainer):
                     icon="docker",
                     desc="Docker管理工具",
                 ),
-                Authelia.oidc(
-                    (load_nginx_url(self),),
-                    enabled=lazy_load(
-                        lambda: self.get_config("PORTAINER_AUTH_ENABLE")
-                        and self.get_config("NGINX_AUTH_ENABLE")
-                    ),
-                ),
+                Authelia.oidc((url(),)),
             ],
         )
