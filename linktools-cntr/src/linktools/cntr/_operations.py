@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .errors import ContainerError
 from .context import OperationContext
 from .execution.model import get_records, record_phase, render_report
-from .runtime.compose import namespace_dependencies, order_services, order_service_subset, service_dependencies
+from .runtime.compose import namespace_dependencies, order_services, order_service_subset, service_dependencies, service_owners
 
 if TYPE_CHECKING:
     from collections.abc import Sequence, Iterable
@@ -50,15 +50,27 @@ class ComposeOperations:
             raise ContainerError("No service found in selected containers")
         return ComposeSelection(project, targets, services, False)
 
+    def stop_selection(self, selection: ComposeSelection) -> ComposeSelection:
+        """Notify all authors of exactly the selected runtime services."""
+        if selection.full:
+            return selection
+        services = set(selection.services)
+        targets = tuple(container for container in selection.project_containers
+                        if services.intersection(container.services))
+        return ComposeSelection(selection.project_containers, targets, selection.services, False)
+
     def start_selection(self, selection: ComposeSelection, model: "dict | None" = None,
                         running_services: "Iterable[str] | None" = None,
                         privilege: "bool | None" = None) -> ComposeSelection:
         """Select container groups and providers, then order only real Compose edges."""
         installed = {container.name: container for container in selection.project_containers}
-        owners = {service: container for container in selection.project_containers for service in container.services}
+        owners = service_owners(selection.project_containers)
+        shared = any(len(authors) > 1 for authors in owners.values())
+        profiles = any(spec.get("profiles") for container in selection.project_containers
+                       for spec in container.services.values())
         definitions = model["services"] if model is not None else {
-            service: container.services[service] for service, container in owners.items()}
-        if model is None and selection.full and any(spec.get("profiles") for spec in definitions.values()):
+            service: authors[-1].services[service] for service, authors in owners.items()}
+        if model is None and selection.full and profiles:
             native_model = self.manager.compose_runner.final_model(self._make_context("up", selection), privilege=privilege)
             return self.start_selection(selection, native_model, running_services, privilege)
         groups = {container for container in selection.target_containers
@@ -81,7 +93,9 @@ class ComposeOperations:
                     previous_consumers.setdefault(producer, set()).add(consumer)
         while True:
             before = set(groups), set(providers), set(targets), set(services)
-            for container in tuple(groups):
+            requirements = groups | {owner for service in services if len(owners[service]) > 1
+                                     for owner in owners[service]}
+            for container in requirements:
                 for name in container.dependencies:
                     if name not in installed:
                         raise ContainerError("Required dependency {!r} for {} is not installed".format(
@@ -113,6 +127,12 @@ class ComposeOperations:
                             targets.add(consumer)
                             services.update(active)
             for service in tuple(services):
+                targets.update(owners[service])
+                if len(owners[service]) > 1:
+                    providers.update(owners[service])
+                if model is None and shared:
+                    # Only native Compose can merge dependency edges from multiple files.
+                    continue
                 for dependency, options in service_dependencies(definitions[service]).items():
                     if options.get("required", True) is False and dependency not in services:
                         continue
@@ -120,10 +140,10 @@ class ComposeOperations:
                         raise ContainerError("Compose dependency {!r} for {} is not installed".format(
                             dependency, service))
                     services.add(dependency)
-                    targets.add(owners[dependency])
+                    targets.update(owners[dependency])
             if before == (groups, providers, targets, services):
                 break
-        if model is None and any(spec.get("profiles") for spec in definitions.values()):
+        if model is None and (profiles or shared):
             expanded = ComposeSelection(selection.project_containers,
                                         tuple(container for container in selection.project_containers if container in targets),
                                         tuple(service for service in owners if service in services), selection.full)
@@ -133,7 +153,7 @@ class ComposeOperations:
                                  tuple(service for service in owners if service in services), model)
         if not ordered:
             raise ContainerError("No runnable service in the selected scope")
-        target_order = tuple(dict.fromkeys(owners[service] for service in ordered))
+        target_order = tuple(dict.fromkeys(owner for service in ordered for owner in owners[service]))
         target_order += tuple(container for container in selection.project_containers
                               if container in targets and container not in target_order
                               and not container.services)
@@ -174,9 +194,9 @@ class ComposeOperations:
             key = service, action
             if restart or explicit.full or service in requested_services or key in warned_actions:
                 return
-            owner = owners.get(service)
+            authors = owners.get(service, ())
             manager.logger.warning("Partial up will %s service %s (container %s) outside the requested containers: %s",
-                                   action, service, owner.name if owner else "unknown", reason)
+                                   action, service, ", ".join(owner.name for owner in authors) or "unknown", reason)
             warned_actions.add(key)
 
         saved_compose = {}
@@ -213,7 +233,7 @@ class ComposeOperations:
             selection = ComposeSelection(selection.project_containers, selection.target_containers,
                                          ordered, selection.full)
             context.target_services = selection.services
-            owners = {service: container for container in selection.project_containers for service in container.services}
+            owners = service_owners(selection.project_containers)
             model_store = AppliedServiceModels(manager, raw_model, retained_services=initial)
             context.service_models = model_store
             missing = set(initial).intersection(raw_model["services"]).difference(model_store.previous)
@@ -279,7 +299,7 @@ class ComposeOperations:
             stopped = False
             try:
                 if stop_set:
-                    stop_targets = tuple(container for container in explicit.target_containers
+                    stop_targets = tuple(container for container in selection.target_containers
                                          if set(container.services).intersection(stop_set))
                     stop_selection = ComposeSelection(explicit.project_containers, stop_targets,
                                                       tuple(service for service in selection.services if service in stop_set),
@@ -292,7 +312,7 @@ class ComposeOperations:
                             runner.stop(stop_context, stop_selection.services)
                         stopped = True
                         running.difference_update(stop_set)
-                        self._update_running_state(context, running, explicit.target_containers)
+                        self._update_running_state(context, running, stop_targets)
                 for service in selection.services:
                     spec = context.compose_model["services"][service]
                     existing = context.initial_runtime_state.existing_services
@@ -337,8 +357,8 @@ class ComposeOperations:
                 for service, recreate in self._dependent_actions(
                         context, selection.services, initial, updated, recreated):
                     failed = {service}
-                    owner = owners.get(service)
-                    with record_phase(context, "restart-dependent", container=owner.name if owner else None,
+                    authors = owners.get(service, ())
+                    with record_phase(context, "restart-dependent", container=", ".join(owner.name for owner in authors) or None,
                                       logger=manager.logger):
                         import yaml
                         saved = runner.saved_service_models(context, (service,))
@@ -411,7 +431,7 @@ class ComposeOperations:
                                 runner.stop(context, stopped_new)
                                 running.difference_update(cleanup)
                                 self._update_running_state(context, running, tuple(dict.fromkeys(
-                                    owners[service] for service in stopped_new if service in owners)))
+                                    owner for service in stopped_new for owner in owners.get(service, ()))))
                                 model_store.restore(stopped_new)
                         else:
                             temporary = set()
@@ -446,7 +466,7 @@ class ComposeOperations:
                                 runner.stop(context, targets)
                                 running.difference_update(targets)
                                 self._update_running_state(context, running, tuple(dict.fromkeys(
-                                    owners[service] for service in targets if service in owners)))
+                                    owner for service in targets for owner in owners.get(service, ()))))
 
                         try:
                             reuse = tuple(service for service in ordered_recovery if actions[service] and service in successful)
@@ -479,7 +499,7 @@ class ComposeOperations:
                                     running.discard(service)
                                 touched.add(service)
                                 if service in owners:
-                                    self._update_running_state(context, running, (owners[service],))
+                                    self._update_running_state(context, running, owners[service])
                                 if service in restore:
                                     model_store.restore((service,))
                         except Exception as recovery_error:
@@ -491,7 +511,7 @@ class ComposeOperations:
                             raise
                         stop_temporary()
                     self._update_running_state(context, running, tuple(dict.fromkeys(
-                        owners[service] for service in touched if service in owners)))
+                        owner for service in touched for owner in owners.get(service, ()))))
                 except Exception as recovery_error:
                     raise ContainerError("Operation failed: {}; recovery failed: {}".format(
                         str(error) or type(error).__name__, recovery_error)) from error
@@ -683,12 +703,21 @@ class ComposeOperations:
     def down(self, names: "Sequence[str] | None" = None, report: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
             manager = self.manager
-            selection = self.select(names, prepare=True)
+            selection = self.stop_selection(self.select(names, prepare=True))
+            remaining = None
+            if not selection.full:
+                services = set(selection.services)
+                if any(set(container.services) - services for container in selection.target_containers):
+                    actual = manager.docker_inspector.get_project_state(selection.project_containers)
+                    remaining = actual.running_services - services
             context = self._make_context("down", selection)
             with manager.lifecycle.notify_stop(context):
                 with record_phase(context, "down", command=("down", *selection.services), logger=manager.logger):
                     manager.compose_runner.down(context, selection.services)
-                manager.running_state.mark_stopped(context)
+                if remaining is None:
+                    manager.running_state.mark_stopped(context)
+                else:
+                    self._update_running_state(context, remaining, selection.target_containers)
             manager.lifecycle.reconcile_removed(context)
             if report:
                 render_report(manager.logger, get_records(context))

@@ -58,7 +58,8 @@ class ExecutionPlanner:
         selection = manager.compose_operations.select(names, for_start=action != "down")
         unresolved_selection = False
         try:
-            start_selection = manager.compose_operations.start_selection(selection, privilege=False) if action != "down" else selection
+            start_selection = (manager.compose_operations.start_selection(selection, privilege=False) if action != "down"
+                               else manager.compose_operations.stop_selection(selection))
         except (StructuredCommandError, OSError):
             unresolved_selection = True
             start_selection = selection
@@ -95,9 +96,9 @@ class ExecutionPlanner:
 
         hooks = []
         lifecycle_action = "up" if action == "restart" and not selection.full and not services else action
-        stop_containers = selection.target_containers
+        stop_containers = start_selection.target_containers
         if action == "restart":
-            stop_containers = tuple(container for container in selection.target_containers
+            stop_containers = tuple(container for container in start_selection.target_containers
                                     if set(container.services).intersection(stop_services))
         steps = () if unresolved_selection else manager.lifecycle.iter_steps(
             lifecycle_action, start_selection.target_containers, stop_containers=stop_containers)
@@ -121,7 +122,7 @@ class ExecutionPlanner:
         warnings = ["Read-only planning does not call on_prepare(); execution-time preparation "
                     "may change services, dependencies or registered hooks."]
         if unresolved_selection:
-            warnings.append("Compose profile selection could not be resolved; startup commands and hooks "
+            warnings.append("Native Compose selection could not be resolved; startup commands and hooks "
                             "are omitted until native Compose configuration is available.")
         if action in ("up", "restart"):
             warnings.append("Only selected services, their requirements and running declared consumers are applied. "

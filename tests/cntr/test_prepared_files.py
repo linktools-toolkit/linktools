@@ -12,7 +12,7 @@ from linktools.cntr.artifacts import (AppliedServiceModels, stage_files, bind_pr
                                      publish_prepared_files, prune_prepared_files)
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.ext import endpoint
-from linktools.cntr.runtime.inspect import ProjectRuntimeState
+from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
 
 class Index:
@@ -251,7 +251,8 @@ def test_unselected_legacy_consumer_keeps_current_pointer(owner):
     ctx.write_files(owner, {"base.yml": "new", "acl.yml": "new"})
     ctx.compose_model = bind_prepared_files(ctx, model(owner))
     ctx.initial_runtime_state = ProjectRuntimeState("test", tuple(
-        SimpleNamespace(service=name, state="running") for name in ("auth", "admin")), "docker")
+        ServiceRuntimeState(logical_containers=(owner.name,), service=name, runtime_name=name,
+                            state="running", health=None, image=None, exit_code=0, labels={}) for name in ("auth", "admin")), "docker")
     legacy = {"services": {"admin": {"volumes": [{"type": "bind", "target": "/generated",
                                                   "source": str(owner.get_app_path("generated"))}]}}}
     ctx.service_models = AppliedServiceModels(owner.manager, ctx.compose_model)
@@ -265,7 +266,8 @@ def _apply_prepared(owner, value, services, running=(), desired_services=(), ful
     ctx = context(owner, full=full)
     ctx.target_services = tuple(services)
     ctx.initial_runtime_state = ProjectRuntimeState("test", tuple(
-        SimpleNamespace(service=name, state="running") for name in running), "docker")
+        ServiceRuntimeState(logical_containers=(owner.name,), service=name, runtime_name=name,
+                            state="running", health=None, image=None, exit_code=0, labels={}) for name in running), "docker")
     ctx.write_files(owner, {"base.yml": value, "acl.yml": value})
     desired = model(owner)
     desired["services"] = {name: desired["services"][name] for name in desired_services or services}

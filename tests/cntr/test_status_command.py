@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from linktools.cntr.commands.status import ServiceStatus, collect_status, select_status_containers
+from linktools.cntr.commands.status import ServiceStatus, collect_status, render_status, select_status_containers
 from linktools.cntr.container import ContainerError
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
@@ -295,3 +295,42 @@ def test_service_status_is_a_plain_display_object():
     assert status.observed is False
     assert status.runtime_name is None
     assert status.health is None
+
+
+def test_status_aggregates_every_regular_replica_and_retains_maintenance(
+        fresh_manager, monkeypatch, with_nginx_services):
+    def item(name, health, oneoff=False):
+        return ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name=name,
+                                   state="running", health=health, image=None, exit_code=0,
+                                   labels={"com.docker.compose.oneoff": str(oneoff)})
+
+    state = _state([item("replica-1", "unhealthy"), item("replica-2", "healthy"),
+                    item("maintenance", "healthy", True)])
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: state)
+    entry = collect_status(fresh_manager, names=["nginx"])["containers"][0]
+    assert entry["status"] == "degraded"
+    assert {row["runtime_name"] for row in entry["services"]} == {"replica-1", "replica-2", "maintenance"}
+    assert next(row for row in entry["services"] if row["runtime_name"] == "maintenance")["oneoff"] is True
+
+
+def test_maintenance_only_does_not_claim_service_is_running(fresh_manager, monkeypatch, with_nginx_services):
+    state = _state([ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name="maintenance",
+                                       state="running", health=None, image=None, exit_code=0,
+                                       labels={"com.docker.compose.oneoff": "True"})])
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: state)
+    entry = collect_status(fresh_manager, names=["nginx"])["containers"][0]
+    assert entry["status"] == "missing"
+    assert any(row["runtime_name"] == "maintenance" and row["oneoff"] for row in entry["services"])
+
+
+def test_orphan_maintenance_is_marked_in_json_and_text(fresh_manager, monkeypatch):
+    state = _state([ServiceRuntimeState(logical_containers=(), service="old", runtime_name="maintenance",
+                                       state="running", health=None, image=None, exit_code=0,
+                                       labels={"com.docker.compose.oneoff": "True"})])
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: state)
+    payload = collect_status(fresh_manager, all_services=True)
+    assert payload["orphan_services"][0]["oneoff"] is True
+    lines = []
+    from types import SimpleNamespace
+    render_status(SimpleNamespace(info=lines.append), payload)
+    assert any("old (run)" in line for line in lines)

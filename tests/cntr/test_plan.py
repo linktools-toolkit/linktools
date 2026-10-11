@@ -457,7 +457,7 @@ def test_plan_reports_unresolved_native_profile_selection(fresh_manager, monkeyp
     plan = fresh_manager.planner.plan("restart")
     assert plan.commands == ()
     assert plan.hooks == ()
-    assert any("profile selection could not be resolved" in warning for warning in plan.warnings)
+    assert any("Native Compose selection could not be resolved" in warning for warning in plan.warnings)
 
 
 def test_plan_restart_stop_hooks_match_resolved_active_services(fresh_manager, monkeypatch):

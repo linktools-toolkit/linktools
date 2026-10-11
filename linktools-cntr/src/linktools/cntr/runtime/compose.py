@@ -28,6 +28,15 @@ if TYPE_CHECKING:
 _PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
 
 
+def service_owners(containers: "Iterable[BaseContainer]") -> "dict[str, tuple[BaseContainer, ...]]":
+    """Every ordered author contributing to each merged Compose service."""
+    result = {}
+    for container in containers:
+        for name in container.services:
+            result.setdefault(name, []).append(container)
+    return {name: tuple(owners) for name, owners in result.items()}
+
+
 def namespace_dependencies(spec: "Mapping[str, Any]") -> "tuple[str, ...]":
     """Project services whose container identities are bound into this service."""
     result = [str(value).split(":", 1)[0] for value in spec.get("volumes_from") or ()

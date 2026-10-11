@@ -53,6 +53,13 @@ Container requirements select what participates; only Compose
 service dependency edges determine startup order. A real Compose dependency cycle
 is an error. There is no implicit bootstrap configuration.
 
+When multiple containers contribute to the same service, native Compose resolves
+their merged dependencies. Each contributing container receives that service's
+lifecycle callbacks; unrelated sibling services remain outside a partial operation.
+Managed build revisions follow the contributing build owner, rather than whichever
+container appeared last. Conflicting managed owners that cannot be identified from
+the resolved build inputs fail before service application.
+
 Compose resolves profiles before startup hooks. Full-project operations apply only
 active services; explicit service selection enables its profiles through native
 Compose. Disabled definitions remain available for orphan detection, while their
