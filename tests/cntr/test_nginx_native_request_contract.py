@@ -160,6 +160,8 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             "location /fallback { error_page 403 = /off; " + header_text + proxy + " }",
             "location /reauth { error_page 403 = /capture/hello; " + header_text + proxy + " }",
             "location ~ ^/capture/(.+)$ { " + header_text + "proxy_set_header X-Capture $1; " + proxy + " }",
+            "location ~ ^/rewrite/(.+)$ { set $target http://127.0.0.1:" + str(app_port) +
+            "; rewrite ^/rewrite/(.+)$ /$1 break; " + header_text + "proxy_pass $target; }",
         ))
         server_text = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
@@ -283,30 +285,43 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         assert b"data: second" in response.read()
         connection.close()
         # Exercise an actual upgraded, bidirectional WebSocket binary frame.
-        tls = ssl._create_unverified_context().wrap_socket(
-            socket.create_connection(("127.0.0.1", https_port), timeout=2), server_hostname="app.test")
-        try:
-            tls.sendall(b"GET /auth-public/ws HTTP/1.1\r\nHost: app.test\r\nUpgrade: websocket\r\n"
-                        b"Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
-                        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
-            response = b""
-            while not response.endswith(b"\r\n\r\n"):
-                chunk = tls.recv(1)
-                assert chunk
-                response += chunk
-            assert response.startswith(b"HTTP/1.1 101")
-            assert b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" in response
-            mask, payload = b"mask", b"ping"
-            tls.sendall(bytes((130, 128 + len(payload))) + mask +
-                        bytes(value ^ mask[index % 4] for index, value in enumerate(payload)))
-            frame = b""
-            while len(frame) < 6:
-                chunk = tls.recv(6 - len(frame))
-                assert chunk
-                frame += chunk
-            assert frame == b"\x82\x04ping"
-        finally:
-            tls.close()
+        for path in ("/auth-public/ws", "/waf-public/ws"):
+            tls = ssl._create_unverified_context().wrap_socket(
+                socket.create_connection(("127.0.0.1", https_port), timeout=2), server_hostname="app.test")
+            try:
+                tls.sendall(("GET " + path + " HTTP/1.1\r\nHost: app.test\r\nUpgrade: websocket\r\n"
+                            "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
+                            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").encode())
+                response = b""
+                while not response.endswith(b"\r\n\r\n"):
+                    chunk = tls.recv(1)
+                    assert chunk
+                    response += chunk
+                assert response.startswith(b"HTTP/1.1 101")
+                assert b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" in response
+                mask, payload = b"mask", b"ping"
+                tls.sendall(bytes((130, 128 + len(payload))) + mask +
+                            bytes(value ^ mask[index % 4] for index, value in enumerate(payload)))
+                frame = b""
+                while len(frame) < 6:
+                    chunk = tls.recv(6 - len(frame))
+                    assert chunk
+                    frame += chunk
+                assert frame == b"\x82\x04ping"
+            finally:
+                tls.close()
+        events.clear()
+        status, data = request("/rewrite/rewritten?x=%2f")
+        assert status == 200
+        payload = json.loads(data)
+        assert payload["path"] == "/rewritten?x=%2f"
+        assert payload["method"] == "POST"
+        assert payload["headers"]["X-Original-Method"] == "POST"
+        assert payload["headers"]["X-Original-URL"] == "https://app.test:" + str(https_port) + "/rewrite/rewritten?x=%2f"
+        assert events[0][0] == "auth"
+        assert events[0][3]["X-Original-URL"] == payload["headers"]["X-Original-URL"]
+        assert events[0][3]["X-Original-Method"] == "POST"
+
         events.clear()
         connection = http.client.HTTPConnection("127.0.0.1", http_port, timeout=3)
         connection.request("GET", "/private", headers={"Host": "app.test"})
@@ -408,6 +423,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
 
         def do_GET(self):
             self.server.paths.append(self.path)
+            self.server.requests.append(dict(self.headers))
             if self.server.kind == "auth":
                 status = getattr(self.server, "auth_status", 204)
                 self.send_response(status)
@@ -430,6 +446,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
             server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
             server.kind = kind
             server.paths = []
+            server.requests = []
             stack.callback(server.server_close)
             stack.callback(server.shutdown)
             threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -514,7 +531,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
                 "127.0.0.1", https_port, timeout=3,
                 context=ssl._create_unverified_context())
             connection.request("GET", path, headers={
-                "Host": "app.test", "Authorization": "Bearer client"})
+                "Host": "app.test", "Authorization": "Bearer client", "X-Forwarded-For": "198.51.100.99"})
             response = connection.getresponse()
             result = response.status, json.loads(response.read())
             connection.close()
@@ -527,6 +544,8 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         assert request("/admin/free") == (200, {
             "path": "/admin/free", "user": None, "authorization": "Bearer client"})
         assert auth.paths == ["/api/authz/auth-request"]
+        assert all(headers["X-Forwarded-For"] == "127.0.0.1"
+                   for headers in app.requests + auth.requests)
         app_paths = list(app.paths)
         auth.auth_status = 401
         connection = http.client.HTTPSConnection(
