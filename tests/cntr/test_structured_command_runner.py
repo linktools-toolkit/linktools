@@ -188,3 +188,61 @@ def test_no_privilege_never_invokes_sudo(fresh_manager, monkeypatch):
     )
     fresh_manager.runtime.create_process("echo", "hi", privilege=False)
     assert recorded[0][0] == "echo"
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("failure", [None, RuntimeError("fixture failure"), KeyboardInterrupt()])
+def test_diagnostics_only_emit_phase_and_elapsed_without_captured_values(monkeypatch, debug, failure):
+    from types import SimpleNamespace
+    from linktools.cntr.runtime import structured
+    messages, closed = [], []
+    logger = SimpleNamespace(debug=lambda message, *args: messages.append(message % args))
+    monkeypatch.setattr(structured, "environ", SimpleNamespace(debug=debug, logger=logger))
+
+    class Process:
+        args = ("docker", "--private=fixture-secret")
+        returncode = 0
+        def fetch(self, timeout=None):
+            yield b'{"private": "fixture-secret"}', b"private stderr"
+            if failure is not None:
+                raise failure
+        def recursive_kill(self):
+            closed.append("reap")
+        def close(self):
+            closed.append("close")
+
+    runner = StructuredCommandRunner(None)
+    if failure is None:
+        assert runner.execute_json(Process(), phase="Compose configuration") == {"private": "fixture-secret"}
+    else:
+        with pytest.raises(type(failure)) as caught:
+            runner.execute_json(Process(), phase="Compose configuration")
+        assert caught.value is failure
+    assert closed == ["reap", "close"]
+    assert len(messages) == (2 if debug else 0)
+    if debug:
+        assert messages[0] == "Starting Compose configuration"
+        assert messages[1].startswith("Finished Compose configuration in ")
+        assert all("private" not in message and "fixture-secret" not in message for message in messages)
+
+
+def test_invalid_debug_config_still_reaps_and_closes_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock, call
+    from linktools.errors import ConfigCastError
+    from linktools.cntr.runtime import structured
+
+    error = ConfigCastError("Invalid DEBUG value")
+
+    class InvalidDebugEnvironment:
+        @property
+        def debug(self) -> bool:
+            raise error
+
+    monkeypatch.setattr(structured, "environ", InvalidDebugEnvironment())
+    process = Mock(args=("docker", "compose", "config"))
+
+    with pytest.raises(ConfigCastError) as caught:
+        StructuredCommandRunner(None).execute(process)
+
+    assert caught.value is error
+    assert process.method_calls == [call.recursive_kill(), call.close()]

@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Typed, ordered lifecycle hook registry.
-
-Replaces the bare ``list[Callable]`` that used to back
-``container.start_hooks``/``stop_hooks``/``manager.start_hooks``/``stop_hooks``
-with a registry that can validate identity, phase, ordering and before/after
-constraints, while keeping every existing ``.append()``/iteration/indexing
-usage working unchanged through ``HookListView``.
-"""
+"""Typed lifecycle hook registration, validation, ordering and invocation."""
 import inspect
 import itertools
-from collections.abc import MutableSequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -157,8 +149,7 @@ class HookRegistry:
         bucket = self._hooks.setdefault(phase, {})
 
         if key is None:
-            # Legacy/anonymous append: a local, non-persistable identity that
-            # never collides and is never deduplicated against.
+            # Anonymous registrations have distinct local identities.
             key = ("__sequence__", next(self._sequence))
         elif key in bucket:
             # Idempotent: the same phase+key registers once (template
@@ -300,9 +291,6 @@ class HookRegistry:
                 ))
         return result
 
-    def legacy_view(self, phase: "HookPhase | str") -> "HookListView":
-        return HookListView(self, HookPhase(phase))
-
     def call(self, phase: "HookPhase | str", context: "Any" = None, reverse: bool = False) -> None:
         """Invoke every hook registered for ``phase``, in registry order.
 
@@ -311,9 +299,7 @@ class HookRegistry:
         be silently skipped.
 
         A CONTEXT-invocation hook receives ``context`` (when one is given);
-        a NO_ARGS (or opaque/legacy) hook is always called with no
-        arguments, so every hook reachable through the legacy
-        start_hooks/stop_hooks view is invoked zero-arg.
+        a NO_ARGS (or opaque) hook is always called with no arguments.
         """
         self.validate(phase)
         hooks = list(self.iter_phase(phase))
@@ -326,105 +312,3 @@ class HookRegistry:
         if hook.invocation == HookInvocation.CONTEXT and context is not None:
             return hook.callback(context)
         return hook.callback()
-
-
-class HookListView(MutableSequence):
-    """``MutableSequence`` facade over one ``(registry, phase)`` bucket.
-
-    Preserves every existing ``start_hooks``/``stop_hooks`` usage
-    (``append``/``extend``/``insert``/``remove``/``pop``/``clear``/``len``/
-    ``bool``/indexing/iteration); reads and writes the raw callback, never a
-    ``Hook`` object.
-
-    Registry ordering is by (topology, order, registration position), not
-    raw list index -- a formal hook's dependency-driven position can never
-    be overridden by a legacy `insert()`. Every hook this view itself
-    creates (``append``/``insert``/index-assignment) shares one
-    ``source="legacy"`` segment, and only that segment's members are ever
-    repositioned to honor an explicit ``insert(index, ...)``.
-    """
-
-    def __init__(self, registry: "HookRegistry", phase: "HookPhase"):
-        self._registry = registry
-        self._phase = phase
-
-    def _hooks(self) -> "list[Hook]":
-        return self._registry._ordered(self._phase)
-
-    def __len__(self):
-        return len(self._hooks())
-
-    def __getitem__(self, index):
-        hooks = self._hooks()
-        if isinstance(index, slice):
-            return [hook.callback for hook in hooks[index]]
-        return hooks[index].callback
-
-    def __setitem__(self, index, value):
-        hooks = self._hooks()
-        if isinstance(index, slice):
-            start, _stop, step = index.indices(len(hooks))
-            targets = hooks[index]
-            if step != 1:
-                values = list(value)
-                if len(values) != len(targets):
-                    raise ValueError(
-                        f"attempt to assign sequence of size {len(values)} "
-                        f"to extended slice of size {len(targets)}"
-                    )
-                for hook, v in zip(targets, values):
-                    self._registry.unregister(self._phase, hook.key)
-                    self._registry.register(
-                        self._phase, v, key=hook.key, name=hook.name, order=hook.order,
-                        source=hook.source, opaque=True,
-                    )
-                return
-            # Contiguous slice: remove the old range, then insert the new
-            # values at its start position, preserving relative order.
-            del self[index]
-            for offset, v in enumerate(value):
-                self.insert(start + offset, v)
-            return
-
-        hook = hooks[index]
-        self._registry.unregister(self._phase, hook.key)
-        self._registry.register(
-            self._phase, value, key=hook.key, name=hook.name, order=hook.order,
-            source=hook.source, opaque=True,
-        )
-
-    def __delitem__(self, index):
-        hooks = self._hooks()
-        targets = hooks[index] if isinstance(index, slice) else [hooks[index]]
-        for hook in targets:
-            self._registry.unregister(self._phase, hook.key)
-
-    def __bool__(self):
-        return len(self) > 0
-
-    def __repr__(self):
-        return repr([hook.callback for hook in self._hooks()])
-
-    def insert(self, index: int, value: "Callable") -> None:
-        """Insert ``value`` so that, among this view's own (legacy) hooks,
-        it ends up exactly at ``index`` -- existing legacy hooks before
-        ``index`` in the current view stay before it, the rest stay after.
-        Formal (keyed) hooks are never reordered; their dict position (and
-        so their same-``order`` tie-break) is left untouched."""
-        bucket = self._registry._hooks.setdefault(self._phase, {})
-        current = self._hooks()
-        index = max(0, min(index, len(current)))
-        before_keys = [hook.key for hook in current[:index] if hook.source == "legacy"]
-        after_keys = [hook.key for hook in current[index:] if hook.source == "legacy"]
-
-        def _requeue(key):
-            bucket[key] = bucket.pop(key)
-
-        for key in before_keys:
-            _requeue(key)
-        self._registry.register(self._phase, value, source="legacy", opaque=True)
-        for key in after_keys:
-            _requeue(key)
-
-    def append(self, value: "Callable") -> None:
-        self._registry.register(self._phase, value, source="legacy", opaque=True)

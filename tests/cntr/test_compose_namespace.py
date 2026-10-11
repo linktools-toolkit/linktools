@@ -20,8 +20,10 @@ import linktools.cntr.commands._shared as cntr_shared
 def _record(manager, monkeypatch):
     recorded = []
 
-    def fake(containers, *args, privilege=None, **kwargs):
-        recorded.append((tuple(containers), args))
+    def fake(*args, privilege=None, **kwargs):
+        # ComposeRunner uses a resolved temporary file, not the container command adapter.
+        command = args[args.index("config"):]
+        recorded.append((tuple(manager.installed_state.get(resolve=True)), command))
 
         class _Proc:
             def check_call(self):
@@ -29,7 +31,7 @@ def _record(manager, monkeypatch):
 
         return _Proc()
 
-    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     return recorded
@@ -106,6 +108,51 @@ def test_compose_with_dependencies_expands_selection(monkeypatch, fresh_manager)
     assert "nginx" in args and "lldap" in args
 
 
+@pytest.mark.parametrize("installed,waf", [(True, True), (True, False), (False, False)])
+@pytest.mark.parametrize("prefix", ["172.22.242", "172.29.171"])
+def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, installed, waf, prefix):
+    if not installed:
+        fresh_manager.installed_state.remove("safeline")
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", waf)
+    fresh_manager.env_config.set("SAFELINE_SUBNET_PREFIX", prefix)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    recorded = _record(fresh_manager, monkeypatch)
+
+    ComposeCommand().run(_Args(names=["nginx"]))
+
+    containers, args = recorded[0]
+    assert args == ("config", "nginx")
+    models = {container.name: container.docker_compose for container in containers}
+    nginx = models["nginx"]
+    assert "safeline-ce" not in nginx["networks"]
+    networks = {}
+    for model in models.values():
+        networks.update((model or {}).get("networks", {}))
+    attachments = nginx["services"]["nginx"]["networks"]
+    assert "ipam" not in nginx["networks"]["nginx"]
+    if installed:
+        owners = [name for name, model in models.items()
+                  if "safeline-ce" in (model or {}).get("networks", {})]
+        assert owners == ["safeline"]
+        assert attachments["safeline-ce"] == {
+            "ipv4_address": prefix + ".253", "aliases": ["nginx-origin"],
+        }
+        assert networks["safeline-ce"]["ipam"]["config"] == [
+            {"gateway": prefix + ".1", "subnet": prefix + ".0/24"},
+        ]
+        safeline = models["safeline"]["services"]
+        assert "nginx" not in safeline
+        assert all(set(spec["networks"]) == {"safeline-ce"} for spec in safeline.values())
+        assert "nginx" not in models["safeline"]["networks"]
+        assert safeline["safeline-tengine"]["networks"]["safeline-ce"] == {"ipv4_address": prefix + ".254"}
+        assert "ports" not in safeline["safeline-tengine"]
+        assert all("network_mode" not in spec for spec in safeline.values())
+    else:
+        assert "safeline" not in models
+        assert set(attachments) == {"nginx"}
+        assert "safeline-ce" not in networks
+
+
 def test_compose_format_json_is_forwarded(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
@@ -114,6 +161,30 @@ def test_compose_format_json_is_forwarded(monkeypatch, fresh_manager):
 
     _, args = recorded[0]
     assert "--format" in args and "json" in args
+
+
+def test_nginx_joins_safeline_network_when_installed_as_dependency(monkeypatch, fresh_manager):
+    fresh_manager.installed_state.remove(*fresh_manager.containers)
+    fresh_manager.installed_state.add("portainer")
+    monkeypatch.setattr(type(fresh_manager.containers["portainer"]), "dependencies",
+                        property(lambda self: ["safeline"]))
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    recorded = _record(fresh_manager, monkeypatch)
+
+    ComposeCommand().run(_Args(names=["nginx"]))
+
+    containers, _ = recorded[0]
+    models = {container.name: container.docker_compose for container in containers}
+    assert fresh_manager.installed_state.load_names() == ["portainer"]
+    assert set(models) == {"nginx", "safeline", "portainer"}
+    assert "safeline-ce" not in models["nginx"]["networks"]
+    prefix = fresh_manager.env_config.get("SAFELINE_SUBNET_PREFIX")
+    assert models["nginx"]["services"]["nginx"]["networks"]["safeline-ce"] == {
+        "ipv4_address": prefix + ".253",
+        "aliases": ["nginx-origin"],
+    }
+    assert set(models["safeline"]["services"]["safeline-tengine"]["networks"]) == {"safeline-ce"}
+    assert "safeline-ce" in models["safeline"]["networks"]
 
 
 def test_compose_check_uses_quiet_flag(monkeypatch, fresh_manager):

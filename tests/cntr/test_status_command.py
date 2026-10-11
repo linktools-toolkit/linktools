@@ -3,12 +3,16 @@
 """``ct-cntr status``: read-only; blocks on a sudo password prompt like any
 other docker call if the configured docker type needs one."""
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 
-from linktools.cntr.commands.status import ServiceStatus, collect_status, select_status_containers
+from linktools.cntr.commands.status import ServiceStatus, collect_status, render_status, select_status_containers
 from linktools.cntr.container import ContainerError
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
+
+if TYPE_CHECKING:
+    from linktools.cntr import ContainerManager
 
 
 def _state(services):
@@ -122,6 +126,39 @@ def test_orphan_service_excluded_by_default_included_with_all_services(fresh_man
     full_payload = collect_status(fresh_manager, all_services=True)
     assert len(full_payload["orphan_services"]) == 1
     assert full_payload["orphan_services"][0]["service"] == "orphan"
+
+
+def test_status_all_services_finds_orphans_after_last_container_removed(
+        fresh_manager: "ContainerManager", monkeypatch: "pytest.MonkeyPatch",
+        capsys: "pytest.CaptureFixture[str]") -> None:
+    from types import SimpleNamespace
+    from linktools.cntr.commands import _shared
+    from linktools.cntr.commands.root import Command
+    from linktools.cntr.runtime.structured import CommandResult
+
+    fresh_manager.installed_state.remove(*fresh_manager.installed_state.load_names(), force=True)
+    calls = []
+    monkeypatch.setattr(_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process",
+                        lambda *args, **kwargs: calls.append(args) or SimpleNamespace(args=args))
+    monkeypatch.setattr(fresh_manager.structured_runner, "execute_text", lambda *args, **kwargs: CommandResult(
+        args=("docker", "container", "ls"), returncode=0, stdout="a" * 64, stderr="", duration=0))
+    monkeypatch.setattr(fresh_manager.structured_runner, "execute_json", lambda *args, **kwargs: [{
+        "Id": "a" * 64, "Name": "/aio-orphan", "State": {"Status": "running"},
+        "Config": {"Image": "orphan:1", "Labels": {
+            "com.docker.compose.project": "aio", "com.docker.compose.service": "orphan"}},
+    }])
+
+    assert Command()(["status", "--all-services", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queryable"] is True
+    assert payload["containers"] == []
+    assert payload["orphan_services"] == [{
+        "service": "orphan", "runtime_name": "aio-orphan", "state": "running",
+        "health": None, "observed": True,
+    }]
+    assert [args[:2] for args in calls] == [("container", "ls"), ("inspect", "--type")]
 
 
 def test_json_schema_version_is_stable(fresh_manager, monkeypatch, with_nginx_services):
@@ -258,3 +295,42 @@ def test_service_status_is_a_plain_display_object():
     assert status.observed is False
     assert status.runtime_name is None
     assert status.health is None
+
+
+def test_status_aggregates_every_regular_replica_and_retains_maintenance(
+        fresh_manager, monkeypatch, with_nginx_services):
+    def item(name, health, oneoff=False):
+        return ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name=name,
+                                   state="running", health=health, image=None, exit_code=0,
+                                   labels={"com.docker.compose.oneoff": str(oneoff)})
+
+    state = _state([item("replica-1", "unhealthy"), item("replica-2", "healthy"),
+                    item("maintenance", "healthy", True)])
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: state)
+    entry = collect_status(fresh_manager, names=["nginx"])["containers"][0]
+    assert entry["status"] == "degraded"
+    assert {row["runtime_name"] for row in entry["services"]} == {"replica-1", "replica-2", "maintenance"}
+    assert next(row for row in entry["services"] if row["runtime_name"] == "maintenance")["oneoff"] is True
+
+
+def test_maintenance_only_does_not_claim_service_is_running(fresh_manager, monkeypatch, with_nginx_services):
+    state = _state([ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name="maintenance",
+                                       state="running", health=None, image=None, exit_code=0,
+                                       labels={"com.docker.compose.oneoff": "True"})])
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: state)
+    entry = collect_status(fresh_manager, names=["nginx"])["containers"][0]
+    assert entry["status"] == "missing"
+    assert any(row["runtime_name"] == "maintenance" and row["oneoff"] for row in entry["services"])
+
+
+def test_orphan_maintenance_is_marked_in_json_and_text(fresh_manager, monkeypatch):
+    state = _state([ServiceRuntimeState(logical_containers=(), service="old", runtime_name="maintenance",
+                                       state="running", health=None, image=None, exit_code=0,
+                                       labels={"com.docker.compose.oneoff": "True"})])
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: state)
+    payload = collect_status(fresh_manager, all_services=True)
+    assert payload["orphan_services"][0]["oneoff"] is True
+    lines = []
+    from types import SimpleNamespace
+    render_status(SimpleNamespace(info=lines.append), payload)
+    assert any("old (run)" in line for line in lines)

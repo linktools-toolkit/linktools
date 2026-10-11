@@ -1,0 +1,58 @@
+{
+  "apps.yml": {
+    "links": [
+      {
+        "desc": "单点登录",
+        "icon": "account",
+        "link": "https://sso.example.test:9443/auth-admin",
+        "name": "Authelia"
+      },
+      {
+        "desc": "雷池WAF",
+        "icon": "alienOutline",
+        "link": "https://safeline.example.test:9443",
+        "name": "Safeline"
+      },
+      {
+        "desc": "Docker管理工具",
+        "icon": "docker",
+        "link": "https://portainer.example.test:9443",
+        "name": "Portainer"
+      }
+    ]
+  },
+  "bookmarks.yml": {
+    "categories": [
+      {
+        "id": "container",
+        "title": "Internal"
+      }
+    ],
+    "links": [
+      {
+        "category": "container",
+        "icon": "account",
+        "link": "http://host.example.test:17170",
+        "name": "LDAP"
+      },
+      {
+        "category": "container",
+        "icon": "alienOutline",
+        "link": "https://host.example.test:9200",
+        "name": "Safeline"
+      },
+      {
+        "category": "container",
+        "icon": "docker",
+        "link": "http://host.example.test:9000",
+        "name": "Portainer"
+      },
+      {
+        "category": "container",
+        "icon": "bookmark",
+        "link": "http://host.example.test:5000",
+        "name": "Flare"
+      }
+    ]
+  }
+}

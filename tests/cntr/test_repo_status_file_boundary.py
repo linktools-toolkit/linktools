@@ -120,3 +120,16 @@ def test_add_rejects_dangling_symlink_before_it_ever_reaches_status(fresh_manage
     with pytest.raises(ContainerError):
         fresh_manager.repos.add(str(repo_dir), replace=True)
     assert fresh_manager.repos.get_all() == {}
+
+
+def test_malformed_requirements_are_reported_before_display_conversion(fresh_manager, tmp_path):
+    repo_dir = _repo_dir(tmp_path)
+
+    def corrupt():
+        (repo_dir / ".linktools.json").write_text(
+            json.dumps({"requires": "not-an-object"}), encoding="utf-8")
+
+    info = _add_then_corrupt(fresh_manager, repo_dir, corrupt)
+    assert info["compatible"] is False
+    assert info["requires"] == {}
+    assert info["compatibility_issues"] == ["'requires' must be an object"]

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from typing import Any
     from ..container import BaseContainer
     from ..manager import ContainerManager
+    from ..runtime.inspect import ServiceRuntimeState
 
 STATUS_SCHEMA_VERSION = 1
 _RUNNING_STATES = ("running", "restarting")
@@ -141,75 +142,91 @@ def collect_status(
     a default-zero exit code. ``RuntimeInspectionOutputError`` (a
     structurally invalid response) is left to propagate -- a corrupted
     response must never masquerade as "every container is missing"."""
-    project_containers = tuple(manager.prepare_installed_containers())
-    target = select_status_containers(list(project_containers), names)
+    from linktools.core import Config
+    with Config.read_only_resolution():
+        project_containers = tuple(manager.load_installed_config_metadata())
+        target = select_status_containers(list(project_containers), names)
 
-    error = None
-    try:
-        state = manager.docker_inspector.get_project_state(project_containers)
-        queryable = True
-    except RuntimeInspectionUnavailable as exc:
-        state = None
-        queryable = False
-        error = str(exc)
+        error = None
+        try:
+            state = manager.docker_inspector.get_project_state(project_containers)
+            queryable = True
+        except RuntimeInspectionUnavailable as exc:
+            state = None
+            queryable = False
+            error = str(exc)
 
-    services_by_container: "dict[str, list[Any]]" = {}
-    if state is not None:
-        for svc in state.services:
-            for owner in svc.logical_containers:
-                services_by_container.setdefault(owner, []).append(svc)
+        services_by_container: "dict[str, list[ServiceRuntimeState]]" = {}
+        maintenance_by_container: "dict[str, list[ServiceRuntimeState]]" = {}
+        if state is not None:
+            regular = state.service_instances()
+            regular_names = {svc.runtime_name for svc in regular}
+            for svc in state.services:
+                destination = (services_by_container if svc.runtime_name in regular_names
+                               else maintenance_by_container)
+                for owner in svc.logical_containers:
+                    destination.setdefault(owner, []).append(svc)
 
-    containers_payload = []
-    for container in target:
-        expected = list(container.services.keys())
-        if not expected:
-            continue
-        observed_by_service = {svc.service: svc for svc in services_by_container.get(container.name, [])}
+        containers_payload = []
+        for container in target:
+            expected = list(container.services.keys())
+            if not expected:
+                continue
+            observed_by_service: "dict[str, list[ServiceRuntimeState]]" = {}
+            for svc in services_by_container.get(container.name, ()):
+                observed_by_service.setdefault(svc.service, []).append(svc)
 
-        service_statuses = []
-        for service_name in expected:
-            observed_svc = observed_by_service.get(service_name)
-            if observed_svc is not None:
-                service_statuses.append(ServiceStatus(
-                    logical_container=container.name, service=service_name,
-                    state=observed_svc.state, observed=True,
-                    runtime_name=observed_svc.runtime_name, health=observed_svc.health,
-                    image=observed_svc.image, exit_code=observed_svc.exit_code,
-                ))
-            else:
-                service_statuses.append(ServiceStatus(
-                    logical_container=container.name, service=service_name,
-                    state="missing", observed=False,
-                ))
+            service_statuses = []
+            for service_name in expected:
+                observed = observed_by_service.get(service_name, ())
+                for svc in observed:
+                    service_statuses.append(ServiceStatus(
+                        logical_container=container.name, service=service_name,
+                        state=svc.state, observed=True,
+                        runtime_name=svc.runtime_name, health=svc.health,
+                        image=svc.image, exit_code=svc.exit_code,
+                    ))
+                if not observed:
+                    service_statuses.append(ServiceStatus(
+                        logical_container=container.name, service=service_name,
+                        state="missing", observed=False,
+                    ))
 
-        status = "unknown" if not queryable else _aggregate_container_state(service_statuses)
-        containers_payload.append(dict(
-            container=container.name,
-            status=status,
-            services=[
-                dict(service=s.service, runtime_name=s.runtime_name, state=s.state,
-                     health=s.health, observed=s.observed)
-                for s in service_statuses
-            ],
-        ))
+            status = "unknown" if not queryable else _aggregate_container_state(service_statuses)
+            containers_payload.append(dict(
+                container=container.name,
+                status=status,
+                services=[
+                    dict(service=s.service, runtime_name=s.runtime_name, state=s.state,
+                         health=s.health, observed=s.observed)
+                    for s in service_statuses
+                ] + [
+                    dict(service=s.service, runtime_name=s.runtime_name, state=s.state,
+                         health=s.health, observed=True, oneoff=True)
+                    for s in maintenance_by_container.get(container.name, ())
+                ],
+            ))
 
-    orphans = []
-    if all_services and state is not None:
-        for svc in state.services:
-            if not svc.logical_containers:
-                orphans.append(dict(service=svc.service, runtime_name=svc.runtime_name,
-                                    state=svc.state, health=svc.health, observed=True))
+        orphans = []
+        if all_services and state is not None:
+            for svc in state.services:
+                if not svc.logical_containers:
+                    orphan = dict(service=svc.service, runtime_name=svc.runtime_name,
+                                  state=svc.state, health=svc.health, observed=True)
+                    if svc.runtime_name not in regular_names:
+                        orphan["oneoff"] = True
+                    orphans.append(orphan)
 
-    payload = dict(
-        schema_version=STATUS_SCHEMA_VERSION,
-        project=manager.project_name,
-        queryable=queryable,
-        containers=containers_payload,
-        orphan_services=orphans,
-    )
-    if error is not None:
-        payload["error"] = error
-    return payload
+        payload = dict(
+            schema_version=STATUS_SCHEMA_VERSION,
+            project=manager.project_name,
+            queryable=queryable,
+            containers=containers_payload,
+            orphan_services=orphans,
+        )
+        if error is not None:
+            payload["error"] = error
+        return payload
 
 
 def render_status(logger: "logging.Logger", payload: "dict[str, Any]") -> None:
@@ -223,12 +240,14 @@ def render_status(logger: "logging.Logger", payload: "dict[str, Any]") -> None:
             continue
         for svc in entry["services"]:
             rows.append((
-                entry["container"], entry["status"], svc["service"],
+                entry["container"], entry["status"],
+                "%s (run)" % svc["service"] if svc.get("oneoff") else svc["service"],
                 svc["runtime_name"] or "-", svc["state"] or "-", svc["health"] or "-",
             ))
     for svc in payload.get("orphan_services", ()):
-        rows.append(("(orphan)", "unknown", svc["service"], svc["runtime_name"] or "-",
-                     svc["state"] or "-", svc["health"] or "-"))
+        rows.append(("(orphan)", "unknown",
+                     "%s (run)" % svc["service"] if svc.get("oneoff") else svc["service"],
+                     svc["runtime_name"] or "-", svc["state"] or "-", svc["health"] or "-"))
 
     if not rows:
         logger.info("No container found")
