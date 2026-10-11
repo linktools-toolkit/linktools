@@ -69,31 +69,77 @@ class EvaluationRepositoryImpl(RepositoryBase):
         self, transaction: StateTransaction, kind: str, identity: object,
         value: ValueT,
     ) -> ValueT:
-        tombstone_kind = "evaluation_tombstone" if kind == "evaluation" else "evaluation_content_tombstone"
-        tombstone_id = identity if kind == "evaluation" else [kind, identity]
-        if kind in {"evaluation", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison"} and await transaction.get_record(self._key(tombstone_kind, tombstone_id)) is not None:
-            raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
-        current = await transaction.get_record(self._key(kind, identity))
-        if current is not None:
-            existing = await self._decode(current, type(value))
-            if isinstance(existing, (EvaluationDatasetRecord, EvaluationCaseRecord)) and existing.owner_principal_id != value.owner_principal_id:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            if isinstance(existing, (EvaluationDatasetRecord, EvaluationCaseRecord)):
-                if existing.contract != value.contract or (isinstance(existing, EvaluationDatasetRecord) and existing.content_expires_at != value.content_expires_at):
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                return existing
-            if existing != value:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return existing
-        await transaction.insert_record(self._stored(kind, identity, value, state=record_state(value)))
-        return value
+        return (await self._put_many(transaction, ((kind, identity, value),)))[0]
+
+    async def _put_many(
+        self, transaction: StateTransaction,
+        entries: tuple[tuple[str, object, ValueT], ...],
+    ) -> tuple[ValueT, ...]:
+        result = []
+        for offset in range(0, len(entries), 64):
+            batch = entries[offset:offset + 64]
+            keys = tuple(self._key(kind, identity) for kind, identity, _ in batch)
+            tombstones = tuple(
+                self._key("evaluation_tombstone", identity) if kind == "evaluation" else
+                self._key("evaluation_content_tombstone", [kind, identity])
+                if kind in {"evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison"}
+                else None
+                for kind, identity, _ in batch
+            )
+            current = dict(await transaction.get_records((
+                *keys, *(key for key in tombstones if key is not None),
+            )))
+            inserts = []
+            for key, tombstone, (kind, identity, value) in zip(keys, tombstones, batch):
+                if tombstone is not None and current.get(tombstone) is not None:
+                    raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
+                row = current.get(key)
+                if row is not None:
+                    existing = await self._decode(row, type(value))
+                    if isinstance(existing, (EvaluationDatasetRecord, EvaluationCaseRecord)):
+                        if existing.owner_principal_id != value.owner_principal_id:
+                            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                        if existing.contract != value.contract or (
+                            isinstance(existing, EvaluationDatasetRecord)
+                            and existing.content_expires_at != value.content_expires_at
+                        ):
+                            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    elif existing != value:
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    result.append(existing)
+                else:
+                    row = self._stored(kind, identity, value, state=record_state(value))
+                    current[key] = row
+                    inserts.append(row)
+                    result.append(value)
+            pending = []
+            pending_size = 0
+            for row in inserts:
+                size = len(canonical_json_bytes(row.data))
+                # Large inline cases keep scalar-sized writes instead of combining
+                # individually valid payloads into an oversized database packet.
+                if pending and pending_size + size > 64 * 1024:
+                    await transaction.insert_records(tuple(pending))
+                    pending.clear()
+                    pending_size = 0
+                pending.append(row)
+                pending_size += size
+            await transaction.insert_records(tuple(pending))
+        return tuple(result)
 
     async def _get(self, kind: str, identity: object, target: type[ValueT]) -> ValueT | None:
-        record = await self._record(self._key(kind, identity))
+        key = self._key(kind, identity)
+        tombstone_kind = "evaluation_tombstone" if kind == "evaluation" else "evaluation_content_tombstone"
+        tombstone_id = identity if kind == "evaluation" else [kind, identity]
+        tombstone = self._key(tombstone_kind, tombstone_id) if kind in {
+            "evaluation", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison",
+        } else None
+        records = await self._store.read(lambda transaction: transaction.get_records(
+            (key,) if tombstone is None else (key, tombstone)
+        ))
+        record = records.get(key)
         if record is None:
-            tombstone_kind = "evaluation_tombstone" if kind == "evaluation" else "evaluation_content_tombstone"
-            tombstone_id = identity if kind == "evaluation" else [kind, identity]
-            if kind in {"evaluation", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison"} and await self._record(self._key(tombstone_kind, tombstone_id)) is not None:
+            if tombstone is not None and records.get(tombstone) is not None:
                 raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
             return None
         return await self._decode(record, target)
@@ -112,13 +158,13 @@ class EvaluationRepositoryImpl(RepositoryBase):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             else:
                 await self._put(transaction, "idempotency", identity, idempotency)
-            for case in cases:
-                await self._put(transaction, "evaluation_case",
-                                [case.ref.dataset_id, case.ref.case_id, case.ref.revision],
-                                EvaluationCaseRecord(case, owner_principal_id, idempotency.created_at, content_expires_at))
-            await self._put(transaction, "evaluation_dataset",
-                            [dataset.ref.id, dataset.ref.revision],
-                            EvaluationDatasetRecord(dataset, owner_principal_id, idempotency.created_at, content_expires_at))
+            await self._put_many(transaction, (
+                *(("evaluation_case", [case.ref.dataset_id, case.ref.case_id, case.ref.revision],
+                   EvaluationCaseRecord(case, owner_principal_id, idempotency.created_at, content_expires_at))
+                  for case in cases),
+                ("evaluation_dataset", [dataset.ref.id, dataset.ref.revision],
+                 EvaluationDatasetRecord(dataset, owner_principal_id, idempotency.created_at, content_expires_at)),
+            ))
             return dataset.ref
         async def readback() -> DatasetRef | None:
             current = await self.get_dataset(dataset.ref)
@@ -135,11 +181,14 @@ class EvaluationRepositoryImpl(RepositoryBase):
         return None if record is None else record.contract
 
     async def _content_owner(self, kind: str, identity: object, target: type[ValueT]) -> str | None:
-        row = await self._record(self._key(kind, identity))
+        key = self._key(kind, identity)
+        tombstone_key = self._key("evaluation_content_tombstone", [kind, identity])
+        records = await self._store.read(lambda transaction: transaction.get_records((key, tombstone_key)))
+        row = records.get(key)
         if row is not None:
             return (await self._decode(row, target)).owner_principal_id
-        tombstone = await self._get("evaluation_content_tombstone", [kind, identity], EvaluationContentTombstone)
-        return None if tombstone is None else tombstone.owner_principal_id
+        tombstone = records.get(tombstone_key)
+        return None if tombstone is None else (await self._decode(tombstone, EvaluationContentTombstone)).owner_principal_id
 
     async def dataset_owner(self, ref: DatasetRef) -> str | None:
         return await self._content_owner("evaluation_dataset", [ref.id, ref.revision], EvaluationDatasetRecord)
