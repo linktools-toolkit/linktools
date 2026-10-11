@@ -575,123 +575,135 @@ class AgentExecutor:
         if await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = compiled_agent.model.materialize()
-        deferred_step_index: int | None = None
-
-        def record_deferred_step(step_index: int) -> None:
-            nonlocal deferred_step_index
-            if deferred_step_index is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            deferred_step_index = step_index
-
-        interaction_high_water = await scope.run_store.model_interaction_count(
-            agent_run_id=scope.agent_run_id
-        )
-        model_journal = ModelRequestJournal(
-            source_namespace=scope.context.namespace,
-            tenant_id=scope.context.principal.tenant_id,
-            execution_id=scope.context.execution_id,
-            agent_run_id=scope.agent_run_id,
-            next_model_request_seq=interaction_high_water + 1,
-        )
-        agent, capabilities = await _materialize_agent(
-            scope,
-            model=model,
-            skill_sources=skill_sources,
-            deferred_pause_sink=record_deferred_step,
-            metrics=self._metrics,
-            model_journal=model_journal,
-            sandbox=self._sandbox,
-        )
-        capabilities = (*capabilities, _thinking_capability(scope.thinking))
-        if scope.replace_history_system_prompt:
-            capabilities = (
-                *capabilities,
-                ReinjectSystemPrompt(
-                    replace_existing=True, id="linktools.ai.reinject-system-prompt"
-                ),
-            )
-        _logger.debug(
-            "agent execution started: agent=%s revision=%s step=%s "
-            "mode=%s planning=%s thinking=%s selected_tools=%s",
-            compiled_agent.spec.id,
-            compiled_agent.spec.revision,
-            scope.agent_run_id,
-            scope.mode,
-            scope.planning,
-            scope.thinking,
-            len(compiled_agent.selected_tools),
-        )
-        user_prompt = scope.user_prompt
-        deferred_kwargs: dict[str, object] = {}
-        if scope.deferred_tool_results is not None:
-            deferred_kwargs["deferred_tool_results"] = rehydrate_deferred_tool_results(
-                scope.deferred_tool_results
-            )
-        primary_error: BaseException | None = None
+        # Model cleanup must not replace cancellation or an established run failure.
+        execution_error: BaseException | None = None
         try:
-            final_result = await agent.run(
-                user_prompt,
-                deps=scope.context,
-                message_history=scope.history or None,
-                conversation_id=scope.agent_conversation_id,
-                usage_limits=usage_limits,
-                usage=run_usage,
-                capabilities=capabilities,
-                **deferred_kwargs,
-            )
-            output = final_result.output
-            if isinstance(output, DeferredToolRequests):
-                if deferred_step_index is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                _validate_deferred_requests(output)
-                return output
-            run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
-            checkpoint = await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id)
-            operations = (
-                ()
-                if scope.tool_operations is None
-                else await scope.tool_operations.list_operations()
-            )
-            unresolved = tuple(
-                operation
-                for operation in operations
-                if operation.status
-                not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
-            )
-            if (
-                run is None
-                or checkpoint is None
-                or unresolved
-                or run.agent_conversation_id != scope.agent_conversation_id
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if binding.output_binding.mode == "text":
-                if not isinstance(output, AssistantTextOutput):
-                    raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
-                output_payload: object = output.model_dump(mode="json")
-            elif isinstance(output, Mapping):
-                output_payload = dict(output)
-            else:
-                raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
-            try:
-                payload = normalize_json_value(output_payload)
-            except (TypeError, ValueError) as error:
-                raise AIError(
-                    ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
-                ) from error
-            binding.output_binding.validate_payload(payload)
-            usage = _usage_metrics(run_usage)
-            return AgentExecutionResult(
-                scope.agent_run_id, payload, final_result.all_messages(), usage
-            )
-        except BaseException as error:
-            primary_error = error
+            async with model:
+                try:
+                    deferred_step_index: int | None = None
+
+                    def record_deferred_step(step_index: int) -> None:
+                        nonlocal deferred_step_index
+                        if deferred_step_index is not None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        deferred_step_index = step_index
+
+                    interaction_high_water = await scope.run_store.model_interaction_count(
+                        agent_run_id=scope.agent_run_id
+                    )
+                    model_journal = ModelRequestJournal(
+                        source_namespace=scope.context.namespace,
+                        tenant_id=scope.context.principal.tenant_id,
+                        execution_id=scope.context.execution_id,
+                        agent_run_id=scope.agent_run_id,
+                        next_model_request_seq=interaction_high_water + 1,
+                    )
+                    agent, capabilities = await _materialize_agent(
+                        scope,
+                        model=model,
+                        skill_sources=skill_sources,
+                        deferred_pause_sink=record_deferred_step,
+                        metrics=self._metrics,
+                        model_journal=model_journal,
+                        sandbox=self._sandbox,
+                    )
+                    capabilities = (*capabilities, _thinking_capability(scope.thinking))
+                    if scope.replace_history_system_prompt:
+                        capabilities = (
+                            *capabilities,
+                            ReinjectSystemPrompt(
+                                replace_existing=True, id="linktools.ai.reinject-system-prompt"
+                            ),
+                        )
+                    _logger.debug(
+                        "agent execution started: agent=%s revision=%s step=%s "
+                        "mode=%s planning=%s thinking=%s selected_tools=%s",
+                        compiled_agent.spec.id,
+                        compiled_agent.spec.revision,
+                        scope.agent_run_id,
+                        scope.mode,
+                        scope.planning,
+                        scope.thinking,
+                        len(compiled_agent.selected_tools),
+                    )
+                    user_prompt = scope.user_prompt
+                    deferred_kwargs: dict[str, object] = {}
+                    if scope.deferred_tool_results is not None:
+                        deferred_kwargs["deferred_tool_results"] = rehydrate_deferred_tool_results(
+                            scope.deferred_tool_results
+                        )
+                    primary_error: BaseException | None = None
+                    try:
+                        final_result = await agent.run(
+                            user_prompt,
+                            deps=scope.context,
+                            message_history=scope.history or None,
+                            conversation_id=scope.agent_conversation_id,
+                            usage_limits=usage_limits,
+                            usage=run_usage,
+                            capabilities=capabilities,
+                            **deferred_kwargs,
+                        )
+                        output = final_result.output
+                        if isinstance(output, DeferredToolRequests):
+                            if deferred_step_index is None:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            _validate_deferred_requests(output)
+                            return output
+                        run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
+                        checkpoint = await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id)
+                        operations = (
+                            ()
+                            if scope.tool_operations is None
+                            else await scope.tool_operations.list_operations()
+                        )
+                        unresolved = tuple(
+                            operation
+                            for operation in operations
+                            if operation.status
+                            not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+                        )
+                        if (
+                            run is None
+                            or checkpoint is None
+                            or unresolved
+                            or run.agent_conversation_id != scope.agent_conversation_id
+                        ):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if binding.output_binding.mode == "text":
+                            if not isinstance(output, AssistantTextOutput):
+                                raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
+                            output_payload: object = output.model_dump(mode="json")
+                        elif isinstance(output, Mapping):
+                            output_payload = dict(output)
+                        else:
+                            raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
+                        try:
+                            payload = normalize_json_value(output_payload)
+                        except (TypeError, ValueError) as error:
+                            raise AIError(
+                                ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
+                            ) from error
+                        binding.output_binding.validate_payload(payload)
+                        usage = _usage_metrics(run_usage)
+                        return AgentExecutionResult(
+                            scope.agent_run_id, payload, final_result.all_messages(), usage
+                        )
+                    except BaseException as error:
+                        primary_error = error
+                        raise
+                    finally:
+                        await _close_mcp_resources(
+                            capabilities,
+                            primary_error,
+                        )
+                except BaseException as error:
+                    execution_error = error
+                    raise
+        except BaseException as cleanup_error:
+            if execution_error is not None and cleanup_error is not execution_error:
+                raise execution_error from cleanup_error
             raise
-        finally:
-            await _close_mcp_resources(
-                capabilities,
-                primary_error,
-            )
 
 
 async def _close_mcp_resources(

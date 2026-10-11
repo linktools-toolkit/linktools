@@ -27,7 +27,11 @@ class ModelBinding(Protocol):
     def contract(self) -> Mapping[str, JsonValue]: ...
 
     def materialize(self) -> Model:
-        """Build the provider model; expected configuration failures raise AIError."""
+        """Build a model whose async context must be owned by the caller.
+
+        Expected configuration failures raise AIError. SDK providers retain
+        ownership rules for any externally supplied clients.
+        """
         ...
 
 

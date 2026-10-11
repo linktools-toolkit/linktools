@@ -7,9 +7,12 @@ import math
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from types import TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
+from httpx2 import Limits, Request, RequestNotRead
 from linktools.core import environ
+from openai import DefaultAsyncHttpxClient
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
 from pydantic_ai.messages import BinaryContent, ImageUrl, ModelRequest, UploadedFile
 from pydantic_ai.models import (
@@ -27,8 +30,62 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
+from ._client_request import _record_client_request
 
 _logger = environ.get_logger("ai.model.openai")
+
+
+async def _capture_chat_request(request: Request) -> None:
+    if request.method != "POST" or not request.url.path.endswith("/chat/completions"):
+        return
+    try:
+        body = request.content
+    except RequestNotRead:
+        _record_client_request("openai-chat", None, capture_error="body_unavailable")
+    else:
+        _record_client_request("openai-chat", body)
+
+
+class _CapturedOpenAIProvider(OpenAIProvider):
+    """Own the injected HTTP client across nested and repeated model contexts."""
+
+    def __init__(self, *, base_url: str | None, api_key: str | None) -> None:
+        self._capture_client_lock = asyncio.Lock()
+        self._capture_client_entries = 0
+        self._capture_http_client = self._new_client()
+        super().__init__(base_url=base_url, api_key=api_key, http_client=self._capture_http_client)
+        self.client.max_retries = 0
+
+    @staticmethod
+    def _new_client() -> DefaultAsyncHttpxClient:
+        # Match the provider's existing HTTP pool and no-redirect policy while
+        # retaining the SDK's timeout defaults.
+        return DefaultAsyncHttpxClient(
+            limits=Limits(), follow_redirects=False,
+            event_hooks={"request": [_capture_chat_request]},
+        )
+
+    async def __aenter__(self) -> "_CapturedOpenAIProvider":
+        async with self._capture_client_lock:
+            if self._capture_http_client.is_closed:
+                client = self._new_client()
+                super().__init__(openai_client=self.client.with_options(http_client=client))
+                self._capture_http_client = client
+            self._capture_client_entries += 1
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        async with self._capture_client_lock:
+            if self._capture_client_entries == 0:
+                return
+            self._capture_client_entries -= 1
+            if self._capture_client_entries == 0:
+                await self._capture_http_client.aclose()
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +147,10 @@ class _OpenAIModelBinding:
     def materialize(self) -> Model:
         connection = _resolved_connection(self)
         try:
-            provider = OpenAIProvider(
+            provider = _CapturedOpenAIProvider(
                 base_url=connection["base_url"],
                 api_key=connection["api_key"],
             )
-            provider.client.max_retries = 0
 
             settings: ModelSettings = {}
             if connection["timeout"] is not None:
