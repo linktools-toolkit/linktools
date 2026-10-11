@@ -975,7 +975,7 @@ class RuntimeEvaluations:
         trials, _ = await self._trials(record, principal)
         dispositions = {item.slot_id: item.disposition for item in record.dispositions}
         intents = {item.slot_id: item for item in record.intents}
-        cases = {trial.case_ref: await self._case(trial.case_ref) for trial in trials}
+        cases = {ref: await self._case(ref) for ref in dict.fromkeys(trial.case_ref for trial in trials)}
         candidates = {candidate.slot_id: candidate for candidate in record.manifest.candidates}
         for trial in trials:
             slot = _target_slot(trial.trial)
