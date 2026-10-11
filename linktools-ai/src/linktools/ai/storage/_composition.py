@@ -171,7 +171,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         )
         if writer is not None and self._writer_index is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._preloaded: dict[KeyT, str] = {}
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
         self._close_started = False
@@ -392,10 +391,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         return tuple(result)
 
     def invalidate(self) -> None:
-        """Discard materialized metadata and preload markers after an external mutation."""
+        """Discard materialized metadata after an external mutation."""
         for view in self._views:
             view.invalidate()
-        self._preloaded.clear()
 
     async def _get(self, key: KeyT, *, retried: bool) -> 'ValueT | None':
         state = await self._state()
@@ -715,55 +713,33 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             for key in selected
             if key in state.entries and not _is_deleted(state.entries[key])
         }
-        marked = {
-            key
-            for key, identity in identities.items()
-            if self._preloaded.get(key) == identity
-        }
-        pending_identities = tuple(
-            identity
-            for key, identity in identities.items()
-            if key not in marked
-        )
-        present = await contains_many(self.cache, pending_identities)
-        already_cached = len(marked) + sum(1 for identity in pending_identities if identity in present)
-        for key, identity in identities.items():
-            if key in marked or identity in present:
-                self._preloaded[key] = identity
+        present = await contains_many(self.cache, tuple(identities.values()))
+        already_cached = sum(1 for identity in identities.values() if identity in present)
         missing = tuple(
             key
             for key, identity in identities.items()
-            if key not in marked and identity not in present
+            if identity not in present
         )
         loaded_count = 0
-        failed = sum(1 for key in selected if key not in state.entries)
+        failed = len(selected) - len(identities)
         for offset in range(0, len(missing), self.preload_batch_size):
             batch = missing[offset : offset + self.preload_batch_size]
-            raw_values, errors = await self._load_origins(batch, state)
-            if errors:
-                raise next(iter(errors.values()))
-            writes: list[KeyT] = []
+            raw_values = await self._read_cached_or_origins(batch, state)
+            loaded_keys: list[KeyT] = []
             for key in batch:
                 raw = raw_values.get(key)
                 if raw is None:
                     failed += 1
                     continue
-                value = raw
-                self._validate_value(key, value, state.entries[key])
-                await write_cache(
-                    self.cache,
-                    identities[key],
-                    self.cache_adapter.to_cache(value),
-                )
-                writes.append(key)
-            if writes:
+                self._validate_value(key, raw, state.entries[key])
+                loaded_keys.append(key)
+            if loaded_keys:
                 present_after = await contains_many(
                     self.cache,
-                    tuple(identities[key] for key in writes),
+                    tuple(identities[key] for key in loaded_keys),
                 )
-                for key in writes:
+                for key in loaded_keys:
                     if identities[key] in present_after:
-                        self._preloaded[key] = identities[key]
                         loaded_count += 1
                     else:
                         failed += 1
@@ -814,7 +790,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             expected_revision=expected_revision,
             metadata=metadata,
         )
-        self._preloaded.pop(key, None)
         if result.deleted:
             self._invalidate_writer_view()
             await self._notify_revision(result.store_revision)
@@ -833,7 +808,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             expected_revision=expected_revision,
             metadata=metadata,
         )
-        self._preloaded.pop(key, None)
         if result.reset:
             self._invalidate_writer_view()
             await self._notify_revision(result.store_revision)
@@ -875,8 +849,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 request_digest=request_digest,
             )
             self._validate_writer_batch_result(changes, result)
-            for change in changes:
-                self._preloaded.pop(change.key, None)
             invalidate = False
             for change, item in zip(changes, result.results):
                 if isinstance(item, StoragePutResult):
@@ -997,7 +969,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         info: InfoT,
         revision: StorageRevision,
     ) -> None:
-        self._preloaded.pop(key, None)
         if self.writer is None:
             return
         for view in self._views:

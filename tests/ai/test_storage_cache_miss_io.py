@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.asset import AssetCacheAdapter, AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend, SqlAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import InMemoryContentCache, StorageOverlay
+from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache, StorageOverlay
 
 
 class _PausedBackend(InMemoryAssetBackend):
@@ -97,6 +97,115 @@ async def test_overlapping_batches_share_each_immutable_origin_and_keep_bulk() -
         assert Counter(key for batch in backend.loads for key in batch) == Counter((b,))
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filesystem", (False, True))
+async def test_preload_rechecks_eviction_without_reading_warm_content(tmp_path: Path, filesystem: bool) -> None:
+    class ObservedCache(FilesystemContentCache if filesystem else InMemoryContentCache):
+        reads = 0
+        async def get(self, key):
+            self.reads += 1
+            return await super().get(key)
+    backend = _PausedBackend()
+    backend.release.set()
+    cache = ObservedCache(max_bytes=len(AssetCacheAdapter().to_cache(b"a")), **({"root": tmp_path} if filesystem else {}))
+    overlay = StorageOverlay(backend, writer=backend, cache=cache, cache_adapter=AssetCacheAdapter())
+    await overlay.initialize()
+    a, b, absent = (AssetKey("test", name) for name in ("a", "b", "absent"))
+    await overlay.put(a, b"a")
+    await overlay.put(b, b"b")
+    try:
+        assert (await overlay.preload((a,))).loaded == 1
+        cache.reads = 0
+        warm = await overlay.preload((a,))
+        assert (warm.requested, warm.loaded, warm.already_cached, warm.failed) == (1, 0, 1, 0)
+        assert cache.reads == 0
+        assert (await overlay.preload((b,))).loaded == 1
+        evicted = await overlay.preload((a, a, absent))
+        assert (evicted.requested, evicted.loaded, evicted.already_cached, evicted.failed) == (2, 1, 0, 1)
+        cached = await cache.get(overlay.cache_adapter.cache_key(a, await backend.stat(a)))
+        assert overlay.cache_adapter.from_cache(cached) == b"a"
+        await overlay.put(a, b"z")
+        changed = await overlay.preload((a,))
+        assert changed.loaded == 1 and changed.already_cached == 0
+        assert await overlay.get(a) == b"z"
+        await overlay.delete(a)
+        deleted = await overlay.preload((a, absent))
+        assert deleted.failed == deleted.requested == 2
+    finally:
+        await overlay.close()
+
+
+@pytest.mark.asyncio
+async def test_preload_and_online_batches_share_origins_and_close_ownership() -> None:
+    backend, overlay, store, (a, b, c) = await _fixture()
+    preload = asyncio.create_task(overlay.preload((a, b)))
+    await backend.started.get()
+    online = asyncio.create_task(store.get_many((b, c)))
+    await backend.started.get()
+    joined = asyncio.create_task(overlay.preload((b,)))
+    for _ in range(3):
+        await overlay.entered.get()
+    preload.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await preload
+    closing = asyncio.create_task(store.close())
+    await asyncio.sleep(0)
+    assert not closing.done() and not backend.closed
+    backend.release.set()
+    try:
+        assert await online == (b"b", b"c")
+        result = await joined
+        assert (result.loaded, result.already_cached, result.failed) == (1, 0, 0)
+        assert Counter(key for batch in backend.loads for key in batch) == Counter((a, b, c))
+        assert any(len(batch) > 1 for batch in backend.loads)
+        await closing
+        assert backend.closed
+    finally:
+        backend.release.set()
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("capacity", "missing", "no-cache"))
+async def test_preload_reports_uncached_values_as_failed(failure: str) -> None:
+    class MissingBackend(_PausedBackend):
+        async def get_many(self, keys):
+            await super().get_many(keys)
+            return {}
+    backend = MissingBackend() if failure == "missing" else _PausedBackend()
+    backend.release.set()
+    cache = None if failure == "no-cache" else InMemoryContentCache(max_bytes=0 if failure == "capacity" else 1024)
+    overlay = StorageOverlay(backend, writer=backend, cache=cache,
+                             cache_adapter=AssetCacheAdapter() if cache is not None else None)
+    await overlay.initialize()
+    key = AssetKey("test", "uncached")
+    await overlay.put(key, b"value")
+    try:
+        result = await overlay.preload((key,))
+        assert (result.requested, result.loaded, result.already_cached, result.failed) == (1, 0, 0, 1)
+    finally:
+        await overlay.close()
+
+
+@pytest.mark.asyncio
+async def test_preload_retains_bounded_bulk_loading() -> None:
+    backend = _PausedBackend()
+    backend.release.set()
+    overlay = StorageOverlay(backend, writer=backend, cache=InMemoryContentCache(max_bytes=4096),
+                             cache_adapter=AssetCacheAdapter(), preload_batch_size=2)
+    await overlay.initialize()
+    keys = tuple(AssetKey("test", str(index)) for index in range(5))
+    for key in keys:
+        await overlay.put(key, b"value")
+    try:
+        result = await overlay.preload(keys)
+        assert result.loaded == len(keys) and result.failed == 0
+        assert max(len(batch) for batch in backend.loads) <= 2
+        assert len(backend.loads) < len(keys)
+    finally:
+        await overlay.close()
 
 
 @pytest.mark.asyncio
@@ -242,7 +351,8 @@ async def test_shared_origin_does_not_share_mutable_decoded_values() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("active_waiter", (False, True))
-async def test_cancelled_waiter_does_not_leave_unobserved_origin_error(active_waiter: bool) -> None:
+@pytest.mark.parametrize("preload", (False, True))
+async def test_cancelled_waiter_does_not_leave_unobserved_origin_error(active_waiter: bool, preload: bool) -> None:
     backend, overlay, store, (key, _, _) = await _fixture()
     failure = AIError(ErrorCode.STORAGE_UNAVAILABLE)
     backend.failure = failure
@@ -250,7 +360,7 @@ async def test_cancelled_waiter_does_not_leave_unobserved_origin_error(active_wa
     errors = []
     previous = loop.get_exception_handler()
     loop.set_exception_handler(lambda loop, context: errors.append(context))
-    reader = asyncio.create_task(store.get(key))
+    reader = asyncio.create_task(overlay.preload((key,)) if preload else store.get(key))
     try:
         await backend.started.get()
         remaining = asyncio.create_task(store.get(key)) if active_waiter else None
