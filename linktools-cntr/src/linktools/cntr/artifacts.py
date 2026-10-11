@@ -266,7 +266,7 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
             raise
     producers = sorted({
         name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
-        for _, declaration in declarations
+        for declaration in declarations
         if declaration.consumer == container.name
     })
     container.manager.artifact_index.record({

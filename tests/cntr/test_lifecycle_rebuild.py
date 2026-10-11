@@ -361,7 +361,7 @@ def test_implicit_sidecar_does_not_promote_its_owners_group_dependencies(tmp_pat
 def test_declared_running_consumer_prepares_before_checks(tmp_path):
     manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}}),
                                     ("nav", {"nav": {"image": "nav:new"}})], running=("nav",))
-    manager.integration_snapshot["app"] = (("navigation", SimpleNamespace(consumer="nav")),)
+    manager.integration_snapshot["app"] = (SimpleNamespace(consumer="nav"),)
     manager.compose_operations.up(["app"])
     assert ("prepare", "nav") in manager.events
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["app", "nav"]

@@ -74,12 +74,12 @@ def set_sources(owner: SimpleNamespace, sources: dict) -> None:
 @pytest.mark.parametrize("nested_endpoint", [False, True])
 def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(owner, nested_endpoint):
     auth = declaration("auth")
-    sources = ([endpoint(object(), domain="app.test", extensions=[({"auth": auth},)])]
-               if nested_endpoint else [{"web": declaration("nginx")}, {"auth": auth}])
+    sources = ([endpoint(object(), domain="app.test", extensions=[(auth,)])]
+               if nested_endpoint else [declaration("nginx"), auth])
     set_sources(owner, {
         "app": sources,
         "other": [declaration("auth")],
-        "unrelated": {"web": declaration("nginx")},
+        "unrelated": [declaration("nginx")],
     })
     stage_files(owner, {"configuration.yml": "content"})
     entries = owner.manager.artifact_index.load()
@@ -88,14 +88,14 @@ def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(ow
 
 
 def test_reusing_prepared_tree_refreshes_source_provenance(owner):
-    set_sources(owner, {"first": {"auth": declaration("auth")}})
+    set_sources(owner, {"first": [declaration("auth")]})
     first = stage_files(owner, {"configuration.yml": "unchanged"})
     assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["first"]
-    set_sources(owner, {"second": {"auth": declaration("auth")}})
+    set_sources(owner, {"second": [declaration("auth")]})
     reused = stage_files(owner, {"configuration.yml": "unchanged"})
     assert reused == first
     assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["second"]
-    set_sources(owner, {"second": {}})
+    set_sources(owner, {"second": []})
     assert stage_files(owner, {"configuration.yml": "unchanged"}) == first
     assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == []
 
@@ -209,6 +209,39 @@ def test_confirmed_model_and_previous_snapshot_are_retained(owner):
     assert later.prepared_dirs["auth"].exists()
     assert not abandoned.exists()
     assert owner.get_app_path("generated/current").resolve() == later.prepared_dirs["auth"]
+
+
+def test_combined_site_file_switch_preserves_previous_generation(owner):
+    native_model = {"services": {"auth": {"image": "nginx:test", "volumes": [{
+        "type": "bind", "source": str(owner.get_app_path("generated/current")),
+        "target": "/etc/nginx/managed", "read_only": True,
+    }]}}}
+    old = context(owner)
+    original = old.write_files(owner, {"nginx.conf": "include sites/web.conf;",
+                                      "sites/web.conf": "server { server_name old.test; }"})
+    old.compose_model = bind_prepared_files(old, native_model, {})
+    AppliedServiceModels(owner.manager, old.compose_model).record(("auth",))
+    owner.get_app_path("generated/current").symlink_to(original.name)
+    custom = owner.get_app_path("custom.conf")
+    custom.write_text("user owned")
+
+    current = context(owner)
+    candidate = current.write_files(owner, {"nginx.conf": "include sites/generated.conf;",
+                                           "sites/generated.conf": "server { server_name new.test; }"})
+    store = AppliedServiceModels(owner.manager, native_model)
+    current.service_models = store
+    current.compose_model = bind_prepared_files(current, native_model, store.previous)
+    store.set_model(current.compose_model)
+    assert store.changed_services == {"auth"}
+    assert owner.get_app_path("generated/current").resolve() == original
+    store.record(("auth",))
+    publish_prepared_files(current, ("auth",))
+    prune_prepared_files(current, store)
+    assert owner.get_app_path("generated/current").resolve() == candidate
+    assert not (candidate / "sites/web.conf").exists()
+    assert (original / "sites/web.conf").read_text() == "server { server_name old.test; }"
+    assert store.previous_model("auth")["services"]["auth"]["volumes"][0]["source"] == str(original)
+    assert custom.read_text() == "user owned"
 
 
 def test_unselected_legacy_consumer_keeps_current_pointer(owner):

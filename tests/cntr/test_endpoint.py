@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from linktools.cntr import ContainerError
 from linktools.cntr.ext import Authelia, Flare, Integration, Nginx, ResolvedSite, endpoint
 from linktools.cntr.ext import load_nginx_url, load_port_url
 from linktools.runtime import Proxy, lazy_load
@@ -36,7 +37,7 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
         Flare.public(), Flare.container(url=load_port_url(producer, "APP_PORT", https=False)),
         name="App", icon="web", desc="Application",
     )
-    oidc = Authelia.oidc((load_nginx_url(producer, "web", "callback"),), enabled=lazy_load(fail))
+    oidc = Authelia.oidc((load_nginx_url(producer, None, "callback"),), enabled=lazy_load(fail))
     access = Authelia.access(lazy_load(fail))
     declarations = endpoint(
         producer, domain=domain, proxy=proxy, auth=auth, auth_bypass=bypass,
@@ -45,9 +46,7 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     )
     assert type(declarations) is tuple
     assert len(declarations) == 5
-    named, public_copy, direct_copy, access_copy, oidc_copy = declarations
-    assert isinstance(named, dict) and tuple(named) == ("web",)
-    site = named["web"]
+    site, public_copy, direct_copy, access_copy, oidc_copy = declarations
     assert isinstance(site, Nginx)
     assert site.server_name is domain and site.proxy is proxy and site.auth is auth
     assert site.auth_bypass is bypass and site.waf_bypass is bypass
@@ -60,19 +59,20 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     assert (direct_copy.name, direct_copy.icon, direct_copy.desc) == ("App", "web", "Application")
     assert isinstance(public_copy._url, Proxy) and isinstance(direct_copy._url, Proxy)
     assert public._url is MISSING and direct_copy._url is direct._url
-    assert access_copy is access and oidc_copy is oidc
+    assert access_copy is not access and access_copy.site is site
+    assert access.site is None
+    assert oidc_copy is oidc and oidc.site is MISSING
     assert all(isinstance(value, Proxy) for value in oidc._redirect_uris)
 
 
-@pytest.mark.parametrize("extensions", [(), [], {}])
+@pytest.mark.parametrize("extensions", [(), []])
 def test_endpoint_has_no_implicit_navigation_or_authelia_declarations(extensions: object) -> None:
     declarations = endpoint(object(), domain="mcp.test", proxy="http://mcp", extensions=extensions)
     assert len(declarations) == 1
-    assert tuple(declarations[0]) == ("web",)
-    assert isinstance(declarations[0]["web"], Nginx)
-    assert declarations[0]["web"].auth is None
-    assert declarations[0]["web"].https is None
-    assert declarations[0]["web"].waf is None
+    assert isinstance(declarations[0], Nginx)
+    assert declarations[0].auth is None
+    assert declarations[0].https is None
+    assert declarations[0].waf is None
 
 
 @pytest.mark.parametrize("direct,callbacks,count", [
@@ -100,21 +100,21 @@ def test_endpoint_resolves_public_direct_and_oidc_paths_independently() -> None:
 
     producer = SimpleNamespace(name="app", get_config=config, host="host.test")
     declarations = endpoint(producer, domain="app.test", proxy="http://app:8080", extensions=[
-        Flare.public("App", "web", "Application", load_nginx_url(producer, "web", "ui")),
+        Flare.public("App", "web", "Application", load_nginx_url(producer, None, "ui")),
         Flare.container("App", "web", load_port_url(producer, "APP_PORT", "ui", https=False)),
-        Authelia.oidc(tuple(load_nginx_url(producer, "web", path)
+        Authelia.oidc(tuple(load_nginx_url(producer, None, path)
                             for path in ("callback", "callback", "return"))),
     ])
-    site = ResolvedSite(producer, "web", declarations[0]["web"])
+    site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
-                                      containers={"nginx": SimpleNamespace(sites={("app", "web"): site})})
+                                      containers={"nginx": SimpleNamespace(sites={declarations[0]: site})})
     assert reads == []
     assert declarations[2].url == "http://host.test:8080/ui"
     assert reads == ["APP_PORT"]
     assert declarations[1].url == "https://app.test:9443/ui"
     assert declarations[3].redirect_uris == ("https://app.test:9443/callback", "https://app.test:9443/return")
     assert reads == ["APP_PORT", "NGINX_HTTPS_ENABLE"] + ["NGINX_HTTPS_PORT"] * 4
-    assert declarations[0]["web"] is site._declaration
+    assert declarations[0] is site._declaration
 
 
 def test_endpoint_disabled_oidc_does_not_resolve_site_or_public_navigation() -> None:
@@ -137,33 +137,32 @@ def test_endpoint_has_no_display_callback_or_acl_shortcuts(field: str) -> None:
         endpoint(object(), domain=lazy_load(fail), **{field: lazy_load(fail)})
 
 
-def test_endpoint_producers_keep_their_own_named_entries() -> None:
+def test_endpoint_producers_keep_their_own_declaration_objects() -> None:
     public = Flare.public("App", "web")
     first = endpoint(object(), domain="one.test", proxy="http://one", extensions=[public])
     second = endpoint(object(), domain="two.test", proxy="http://two", extensions=[public])
     assert first is not second and first[0] is not second[0]
-    assert first[0]["web"] is not second[0]["web"]
-    assert first[0]["web"].server_name == "one.test"
-    assert second[0]["web"].server_name == "two.test"
+    assert first[0].server_name == "one.test"
+    assert second[0].server_name == "two.test"
     assert first[1] is not second[1] and public._url is MISSING
 
 
-def test_endpoint_nested_extensions_keep_keys_generic_leaves_and_order() -> None:
+def test_endpoint_nested_extensions_keep_generic_leaves_and_order() -> None:
     custom = Integration()
     custom.consumer = "custom"
     access = Authelia.access(policy="one_factor")
     api = Nginx.site(lazy_load(fail))
     application = Flare.public("App", "web")
     declarations = endpoint(object(), domain=lazy_load(fail), extensions=[
-        (custom, [{"api": api}, (access,)]), {"navigation": application},
+        (custom, [api, (access,)]), application,
     ])
-    assert tuple(declarations[0]) == ("web",)
+    assert isinstance(declarations[0], Nginx)
     assert declarations[1] is custom
-    assert declarations[2] == {"api": api}
-    assert declarations[3] is access
-    assert tuple(declarations[4]) == ("navigation",)
-    assert declarations[4]["navigation"] is not application
-    assert isinstance(declarations[4]["navigation"]._url, Proxy)
+    assert declarations[2] is api
+    assert declarations[3] is not access and declarations[3].site is declarations[0]
+    assert access.site is None
+    assert declarations[4] is not application
+    assert isinstance(declarations[4]._url, Proxy)
     assert application._url is MISSING
 
 
@@ -177,11 +176,13 @@ def test_endpoint_extension_generator_is_consumed_once_at_the_outer_boundary() -
         seen.append("end")
 
     declarations = endpoint(object(), domain=lazy_load(fail), extensions=extensions())
-    assert declarations[1] is access
+    assert declarations[1] is not access and declarations[1].site is declarations[0]
+    assert access.site is None
     assert seen == ["start", "end"]
 
 
-@pytest.mark.parametrize("extensions", ["text", b"text", None, [object()], {"web": []},
+@pytest.mark.parametrize("extensions", ["text", b"text", None, [object()], {}, {"web": Nginx.site(lazy_load(fail))},
+                                        [{"navigation": Flare.public("App", "web")}], {"web": []},
                                         [iter(())], [("web", Nginx.site("app.test"))]])
 def test_endpoint_extensions_use_the_common_declaration_shape_validation(extensions: object) -> None:
     with pytest.raises(ValueError, match="Invalid integration"):
@@ -199,9 +200,9 @@ def test_endpoint_inherits_only_omitted_application_urls_and_preserves_site_fiel
                             proxy="http://app", https=False, auth=False, waf=False,
                             cert_domains=("app.test",), default_server=True,
                             extensions=originals)
-    site = ResolvedSite(producer, "web", declarations[0]["web"])
+    site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
-                                      containers={"nginx": SimpleNamespace(sites={("app", "web"): site})})
+                                      containers={"nginx": SimpleNamespace(sites={declarations[0]: site})})
     assert site.public_url == "https://public.test/base"
     assert site.cert_domains == ("app.test",) and site.default_server is True
     assert site.https is site.auth is site.waf is False
@@ -209,3 +210,35 @@ def test_endpoint_inherits_only_omitted_application_urls_and_preserves_site_fiel
     assert declarations[5]._url is explicit
     assert declarations[6]._url is MISSING
     assert originals[0]._url is originals[1]._url is MISSING
+
+
+def test_endpoint_preserves_explicit_access_references_without_mutating_them() -> None:
+    site = Nginx.site(lazy_load(fail))
+    access = Authelia.access(site=site, policy="deny")
+    declarations = endpoint(object(), domain=lazy_load(fail), extensions=[access])
+    assert declarations[1] is access
+    assert access.site is site
+
+
+def test_endpoint_binds_reused_access_and_public_links_to_each_actual_site() -> None:
+    values = {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}
+    producer = SimpleNamespace(name="app", get_config=lambda key, **kwargs: values[key])
+    access = Authelia.access(policy="one_factor")
+    link = Flare.public("App", "web")
+    first = endpoint(producer, domain="one.test", extensions=[access, link])
+    second = endpoint(producer, domain="two.test", extensions=[access, link])
+    producer.manager = SimpleNamespace(
+        integration_snapshot={"nginx": ()},
+        containers={"nginx": SimpleNamespace(sites={
+            first[0]: ResolvedSite(producer, first[0], 0),
+            second[0]: ResolvedSite(producer, second[0], 1),
+        })},
+    )
+    assert first[1].site is first[0] and second[1].site is second[0]
+    assert access.site is None and link._url is MISSING
+    assert first[2].url == "https://one.test"
+    assert second[2].url == "https://two.test"
+    assert str(load_nginx_url(producer, first)) == "https://one.test"
+    assert str(load_nginx_url(producer, second)) == "https://two.test"
+    with pytest.raises(ContainerError, match="Expected one declared nginx site"):
+        str(load_nginx_url(producer))

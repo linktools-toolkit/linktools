@@ -254,15 +254,15 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 
 ## 声明式集成与配置发布
 
-`integrations` 返回命名映射与匿名声明混合的序列。字典 key 是站点唯一标识，
-导航和 OIDC 回调独立声明，通过 key 引用站点：
+`integrations` 返回声明或列表/元组组合，不再接受 key/value 字典。
+导航和 OIDC 回调独立声明，使用原站点对象引用；只有一个站点时可省略引用：
 
 ```python
 from linktools.cntr.ext import Flare, Nginx, load_nginx_url
 
 return [
-    {"web": Nginx.site("app.example.com", proxy="http://app:8080")},
-    Flare.public("应用", "web", "应用描述", load_nginx_url(self, "web")),
+    Nginx.site("app.example.com", proxy="http://app:8080"),
+    Flare.public("应用", "web", "应用描述", load_nginx_url(self)),
     Flare.bookmark("工具", "web", "https://tool.example.com", category="tool"),
 ]
 ```
@@ -286,11 +286,12 @@ return endpoint(
 )
 ```
 
-`endpoint` 内部使用稳定的 `web` 站点名，不接收导航信息，也不自动生成导航。
+`endpoint` 不需要站点标识，不接收导航信息，也不自动生成导航。
 只有首页应用省略 URL 时关联本站；显式 URL、`None` 和空字符串不覆盖。
 `Flare.links` 仅共享省略的显示字段，直连地址仍自行指定。两者返回普通元组，
 可以直接作为数组元素；框架按声明顺序统一展开列表/元组，不需要 `*`。
-同一容器的多个独立站点继续使用显式命名字典；重复 `web` 会报错，不自动编号。
+同一容器可以返回多个 endpoint。跨声明引用时保存原 endpoint 对象，
+例如 `load_nginx_url(self, self.proxy_endpoint)`；多站点省略引用会明确报错。
 `Nginx` 不含 `local_id` / `link` / `auth_rule`；授权规则归 `Authelia.access`，
 OIDC 回调仍由 `Authelia.oidc` 声明准确的绝对地址。
 

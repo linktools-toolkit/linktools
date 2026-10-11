@@ -44,7 +44,7 @@ class Container(BaseContainer):
                     desc="Docker管理工具",
                 ),
                 Authelia.oidc(
-                    (load_nginx_url(self, "web"),),
+                    (load_nginx_url(self),),
                     enabled=lazy_load(
                         lambda: self.get_config("PORTAINER_AUTH_ENABLE")
                         and self.get_config("NGINX_AUTH_ENABLE")

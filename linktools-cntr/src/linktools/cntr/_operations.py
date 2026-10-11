@@ -99,7 +99,7 @@ class ComposeOperations:
             if running:
                 for producer in tuple(providers):
                     exposed = {consumer.name for consumer in previous_consumers.get(producer.name, ())}
-                    for _, declaration in self.manager.integration_snapshot.get(producer.name, ()):
+                    for declaration in self.manager.integration_snapshot.get(producer.name, ()):
                         exposed.add(declaration.consumer)
                     for name in exposed:
                         consumer = installed.get(name)

@@ -30,10 +30,10 @@ def set_declarations(manager: SimpleNamespace, producer: str, declarations: obje
     manager.integration_snapshot = normalized.integration_snapshot
 
 
-@pytest.mark.parametrize("named_navigation", [False, True])
+@pytest.mark.parametrize("nested_navigation", [False, True])
 @pytest.mark.parametrize("nested_endpoint", [False, True])
 def test_independent_navigation_and_named_site_refresh_running_consumers(
-        tmp_path: Path, named_navigation: bool, nested_endpoint: bool) -> None:
+        tmp_path: Path, nested_navigation: bool, nested_endpoint: bool) -> None:
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new"}}),
         ("nginx", {"nginx": {"image": "nginx:new"}}),
@@ -41,12 +41,12 @@ def test_independent_navigation_and_named_site_refresh_running_consumers(
         ("other", {"other": {"image": "other:new"}}),
     ], running=("nginx", "flare", "other"))
     app = manager.containers["app"]
-    navigation = Flare.public("App", "web", "Application", load_nginx_url(app, "web"))
-    navigation = {"web": navigation} if named_navigation else navigation
+    navigation = Flare.public("App", "web", "Application", load_nginx_url(app))
+    navigation = (navigation,) if nested_navigation else navigation
     declarations = ([endpoint(app, domain=lazy_load(fail), extensions=[(navigation,)])]
-                    if nested_endpoint else [{"web": Nginx.site(lazy_load(fail))}, navigation])
+                    if nested_endpoint else [Nginx.site(lazy_load(fail)), navigation])
     set_declarations(manager, "app", declarations)
-    assert manager.integration_snapshot["app"][0][0] == "web"
+    assert isinstance(manager.integration_snapshot["app"][0], Nginx)
     manager.compose_operations.up(["app"])
     assert ("prepare", "nginx") in manager.events
     assert ("prepare", "flare") in manager.events
@@ -59,14 +59,14 @@ def test_removing_producers_last_site_refreshes_previous_running_consumer(tmp_pa
         ("app", {"app": {"image": "app:new"}}),
         ("nginx", {"nginx": {"image": "nginx:new"}}),
     ], running=("nginx",))
-    set_declarations(manager, "app", {"web": Nginx.site(lazy_load(fail))})
+    set_declarations(manager, "app", [Nginx.site(lazy_load(fail))])
     nginx = manager.containers["nginx"]
     nginx.runtime = SimpleNamespace(chmod=lambda path, mode: os.chmod(path, mode))
     old = stage_files(nginx, {"sites/app.conf": "server { server_name app.example.test; }\n"})
     assert (old / "sites/app.conf").is_file()
     entry = manager.artifact_index.load()[str((old / "sites/app.conf").relative_to(tmp_path))]
     assert entry["producers"] == ["app"]
-    set_declarations(manager, "app", {})
+    set_declarations(manager, "app", [])
     assert manager.integration_snapshot["app"] == ()
     manager.compose_operations.up(["app"])
     assert ("prepare", "nginx") in manager.events

@@ -76,7 +76,7 @@ class Container(BaseContainer):
                     "Authelia",
                     "account",
                     "单点登录",
-                    load_nginx_url(self, "web", "auth-admin"),
+                    load_nginx_url(self, None, "auth-admin"),
                 ),
             ],
         )
@@ -86,7 +86,8 @@ class Container(BaseContainer):
         """Use the declared site URL for every externally visible endpoint."""
         # Metadata may describe an unconfigured public identity; native OIDC
         # generation below still requires a concrete HTTPS endpoint.
-        return self.manager.containers["nginx"].sites[(self.name, "web")].get_url(default="")
+        from linktools.cntr.ext import ResolvedSite
+        return ResolvedSite.find(self).get_url(default="")
 
     @cached_property
     def public_authority(self) -> str:
@@ -124,23 +125,20 @@ class Container(BaseContainer):
     @cached_property
     def acl_rules(self) -> "list[dict[str, Any]]":
         rules = []
-        sites = self.containers["nginx"].sites
+        from linktools.cntr.ext import ResolvedSite
+        from linktools.types import MISSING
         for producer, declaration in self.manager.iter_integrations("authelia"):
             if not isinstance(declaration, Authelia):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)
-            if declaration.site is None:
+            if declaration.site is MISSING:
                 continue
-            site = sites.get((producer.name, declaration.site))
-            if site is None:
-                raise ContainerError("Unknown nginx site %s/%s for Authelia access" % (
-                    producer.name, declaration.site))
+            site = ResolvedSite.find(producer, declaration.site)
             if not site.enabled or not site.auth:
                 continue
             rule = dict(declaration.rule)
             if "domain" not in rule and "domain_regex" not in rule:
                 if site.literal_domain is None:
-                    raise ContainerError("Authelia access for %s/%s requires domain or domain_regex" % (
-                        producer.name, declaration.site))
+                    raise ContainerError("Authelia access for %s requires domain or domain_regex" % producer.name)
                 rule["domain"] = site.literal_domain
             if "policy" not in rule:
                 rule["policy"] = "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor"

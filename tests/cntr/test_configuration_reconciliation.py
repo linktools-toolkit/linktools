@@ -33,7 +33,7 @@ def test_running_declared_consumer_does_not_activate_stopped_sibling(tmp_path):
         ("app", {"app": {"image": "app:new"}}),
         ("consumer", {"running": {"image": "running:new"}, "stopped": {"image": "stopped:new"}}),
     ], running=("running",))
-    manager.integration_snapshot["app"] = (("navigation", SimpleNamespace(consumer="consumer")),)
+    manager.integration_snapshot["app"] = (SimpleNamespace(consumer="consumer"),)
     manager.compose_operations.up(["app"])
     assert _applied(manager) == ["app", "running"]
     assert not any("stopped" in entry[1] for entry in manager.events if entry[0] == "images")

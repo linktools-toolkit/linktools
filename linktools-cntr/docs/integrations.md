@@ -1,12 +1,10 @@
 # Container integrations
 
-`integrations` returns a finite, ordered composition of named mappings and anonymous
-`Integration` declarations. A named mapping binds a nonempty string key to a
-declaration, for example `{"web": Nginx.site(...)}`. The mapping key is the only
-site identifier: nginx looks up `(producer.name, key)`. Each declaration
-identifies its own consumer. Consumers read the complete installed declaration
-snapshot, even for partial operations. Unknown consumer names are errors. Known
-optional consumers that are not installed do not consume declarations.
+`integrations` returns declarations or a finite, ordered composition of declarations.
+Lists and tuples may be nested; declaration dictionaries and string identifiers
+are not accepted. Each declaration identifies its consumer. Consumers read the
+complete installed snapshot, even for partial operations. Unknown consumer names
+are errors; known optional consumers that are absent do not consume declarations.
 
 ```python
 from linktools.cntr import Integrations
@@ -17,14 +15,14 @@ from linktools.decorator import cached_property
 @cached_property
 def integrations(self) -> "Integrations":
     return [
-        {"web": Nginx.site(
+        Nginx.site(
             self.get_config_later("APP_DOMAIN"),
             proxy="http://app:8080",
             auth=None,
             auth_bypass=(r"^/public/",),
             waf_bypass=(),
-        )},
-        Flare.public("App", "apps", "Application", load_nginx_url(self, "web")),
+        ),
+        Flare.public("App", "apps", "Application", load_nginx_url(self)),
         Flare.container(
             "App direct", "apps",
             load_port_url(self, "APP_PORT", https=False),
@@ -42,38 +40,23 @@ The generic `Integration` and `Integrations` contracts are available from
 `Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`.
 New consumer-specific subclasses set their own `consumer` name.
 
-`Integrations` accepts a named mapping directly or a finite iterable mixing
-named mappings with anonymous declarations and nested lists/tuples. Return a list, tuple, or fresh
-iterator; mapping values must be declarations, not lists or nested mappings.
-Consumer-keyed groups such as `{"nginx": [...]}` are not accepted: the consumer
-comes from the declaration, never its mapping key.
+`Integrations` accepts a declaration, list/tuple composition, or finite top-level
+iterator. The manager freezes each producer's leaves once per command without
+resolving lazy fields. Return reusable lists/tuples when a cached declaration may
+be read again; do not reuse an exhausted generator.
 
-Every nginx site has a mapping key; `endpoint` supplies `"web"` for its
-primary site. Raw declarations provide the key explicitly. Add another site as `{"api": Nginx.site("api.example.com")}`.
-Nginx keys must be nonempty strings and unique within their producer. Different
-producers can reuse a key. `Flare` and `Authelia.oidc` can remain anonymous and
-do not need invented names. `Nginx` has no `local_id` or `link` field; a resolved
-site exposes its mapping key as `site.key`.
-
-The manager freezes each installed producer's declaration structure once per
-command into a read-only producer mapping of `(key, declaration)` tuples,
-using `None` as the key for anonymous declarations. It consumes a generator
-once, preserves mixed declaration order, and does not resolve lazy fields or
-URLs. Iterables must be finite. If `integrations` is cached and its snapshot can
-be rebuilt, return a reusable list/tuple or provide a fresh iterator for the
-rebuild; do not reuse an exhausted generator.
-It checks mapping keys, consumer names, and the `Integration` type. Consumers
-validate their own declaration content. The nginx container owns the
-command-local site snapshot in its public `sites` property.
-`ResolvedSite.collect(manager)` in `ext` checks site types and required, unique
-keys before resolving any site fields. URL helpers, navigation and
-authentication share `containers["nginx"].sites`; the manager has no nginx index.
-The generic `iter_integrations` filters by the declaration's consumer and yields
-`(producer, declaration)`. It returns only explicit declarations for an
-installed consumer.
+The nginx container owns one command-local `sites` mapping from original Nginx
+objects to `ResolvedSite` views. `ResolvedSite.collect(manager)` rejects repeated
+site objects. `ResolvedSite.find(producer, reference=None)` resolves an original
+Nginx declaration or an endpoint tuple containing exactly one such declaration.
+A reference belongs to one producer; reconstructing an equivalent endpoint is not
+a reference. Omission is allowed only when the producer has exactly one declared
+site, including disabled sites. The manager has no nginx-specific index.
+The generic `iter_integrations` yields `(producer, declaration)` for installed
+consumers. No dictionary key, generated filename or render ordinal is an author identity.
 
 Navigation is an independent `Flare` declaration. Pass
-`load_nginx_url(self, "web")` explicitly to use a named site's lazy URL.
+`load_nginx_url(self)` to use the unique site's lazy URL.
 An explicit URL stays unchanged; `None`, `""`, or an omitted standalone URL skips the
 navigation entry. Within endpoint extensions, an omitted application URL inherits that site URL. No URL is inherited from a neighboring nginx declaration.
 The link's category is presentation metadata, not an authentication policy;
@@ -143,7 +126,7 @@ Migrate callers and templates together; there is no compatibility wrapper.
 ## Primary endpoints and explicit extensions
 
 `endpoint` is a pure function returning ordinary declarations for the producer's
-primary `web` site. Its flat parameters configure the site; it has no identity,
+site. Its flat parameters configure the site; it has no identity,
 display metadata, default navigation, or OIDC callback parameters. Native nginx
 options, including templates, headers and capability inheritance, are forwarded
 without changing their semantics.
@@ -163,7 +146,7 @@ return endpoint(
         ),
         Authelia.access(policy="one_factor"),
         Authelia.oidc(
-            redirect_uris=(load_nginx_url(self, "web", "sso/callback"),),
+            redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
             enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
         ),
     ],
@@ -190,15 +173,30 @@ and other bookmarks always own their URLs. Without a Flare extension an endpoint
 does not appear in navigation. Display metadata remains entirely within Flare;
 multiple uses copy declarations without modifying the original values.
 
-Each producer can have one primary `web` endpoint. Multiple independently named
-sites use existing explicit mappings, preserving stable filenames and references;
-repeated `web` declarations fail instead of being numbered or silently replaced.
-Raw ext declarations can be mixed with endpoint results and grouped links.
+Multiple endpoints are ordinary array elements. Cache any endpoint referenced
+outside its own extensions, then pass that original object to URL/ACL helpers:
+
+```python
+@cached_property
+def proxy_endpoint(self):
+    return endpoint(self, domain=self.proxy_domain, template=self.get_source_path("proxy.conf"))
+
+@cached_property
+def integrations(self):
+    return [self.web_endpoint, self.proxy_endpoint]
+
+@cached_property
+def proxy_url(self):
+    return load_nginx_url(self, self.proxy_endpoint)
+```
+
+Raw ext declarations can still be mixed with endpoint results and grouped links.
 
 ## Authelia access rules
 
 `Authelia.access(policy="one_factor")` declares native ACL fields for the current
-producer's `web` site; `site="other"` references another explicitly named site.
+producer's unique site. Inside an endpoint, it binds to that endpoint automatically.
+For an external ACL on a multi-site producer, use `site=self.proxy_endpoint`.
 Move `Nginx.site(auth_rule=...)` values here. `domain` and `domain_regex` retain
 native Authelia meanings, not declaration identities. A missing matcher uses the
 site's literal hostname; nonliteral sites require an explicit native matcher.
@@ -212,19 +210,19 @@ consumer path. Rules never create clients, secrets, or access outside their nati
 explicit configuration. OIDC declarations continue to contribute exact absolute
 callback URIs independently of navigation and access rules.
 
-## Migrating named sites and navigation
+## Migrating keyed declarations
 
-Move each former nginx local ID into its enclosing mapping key; use `"web"`
-where the ID was previously omitted. Remove the site's `local_id` and `link`
-arguments. Move each attached Flare link into the declaration sequence. Only
-replace an omitted attached URL with `load_nginx_url(self, key)`; keep explicit
-URLs, `None`, and `""` unchanged. Put the former attached links in their original
-nginx declaration order before the producer's former standalone links to retain
-the previous navigation order. Update resolved-site reads to `site.key`.
+Remove dictionary wrappers and `local_id`/`link`/`auth_rule` fields. Use endpoint
+extensions for navigation and native Authelia ACLs. Keep explicit URLs, `None`,
+and empty strings unchanged. Multi-site references use the original cached
+endpoint or Nginx object; single-site references omit the former `"web"` key.
+No string-key compatibility lookup or automatic identity migration remains.
 
-The consumer-keyed mapping form and implicit URL inheritance are not retained
-as compatibility paths. Moving a site to a mapping key leaves its domain,
-proxy, template, authentication, and WAF settings unchanged.
+The generated site files now form one managed `sites/generated.conf`. Existing
+immutable-generation publication switches the complete include set atomically;
+old generations remain available to existing rollback models. This does not scan
+or delete user files. Internal map names are local symbols for that complete
+render, not stable references to use in downstream templates.
 
 ## Lazy URL references
 
@@ -245,21 +243,21 @@ from linktools.cntr.ext import load_config_url, load_nginx_url, load_port_url
 
 load_config_url(self, "APP_URL", "ui", queries={"mode": "compact"})
 load_port_url(self, "APP_PORT", "ui", https=False)
-load_nginx_url(self, "web", "ui")
+load_nginx_url(self, None, "ui")
 ```
 
 Each returns the existing lazy URL proxy. Config URLs and port URLs stay empty
 when disabled. Ports must satisfy `0 < port < 65535`; the host is not read until
-the port is valid. nginx keys are checked immediately, while the
-`(container.name, key)` lookup waits until the proxy is read. Unknown site
-keys fail, and declared disabled sites or absent nginx resolve to an empty URL.
+the port is valid. Original site/endpoint lookup waits until the proxy is read.
+Missing, foreign or ambiguous references fail; declared disabled sites or absent
+nginx resolve to an empty URL.
 Path joining, query encoding and literal template placeholders remain unchanged.
 These factories never register hooks or write configuration.
 
 `BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
 exposure mixin are removed; no URL mixin or resolver wrapper replaces them.
 General Compose/Dockerfile templates expose the public URL factories as `urls`,
-alongside `utils`, so they can use `urls.load_nginx_url(container, "web")`. Native nginx
+alongside `utils`, so they can use `urls.load_nginx_url(container)`. Native nginx
 templates retain only the explicit context described below.
 
 ## Site values
@@ -292,7 +290,7 @@ Declare callbacks independently of nginx sites:
 from linktools.cntr.ext import Authelia, load_nginx_url
 
 Authelia.oidc(
-    redirect_uris=(load_nginx_url(self, "web", "sso/callback"),),
+    redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
     enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
 )
 ```
@@ -363,14 +361,13 @@ The WAF forwarding location sets the latter; application and auth locations stri
 them. Original request values are `$original_scheme`, `$original_host`,
 `$original_uri`, `$original_method`, `$original_client_ip`, and `$original_port`.
 
-Generated output consists of `nginx.conf` and one self-contained
-`sites/<site-id>.conf` per effective hostname and listener group (including
-`sites/default.conf` when needed). Multiple declarations with the same
+Generated output consists of `nginx.conf` and `sites/generated.conf`, containing
+all effective hostname/listener groups and the fallback server when needed. Multiple declarations with the same
 hostname, HTTP port and compatible HTTPS/WAF listener and WAF policy share one
 server and contribute their distinct, once-rendered business locations. Literal
 and wildcard hostnames are compared without case. Per-route authentication and
 bypass settings may differ, using the explicit location authorization macro
-above. Their producer/key identities and per-declaration template variables remain
+above. Their declaration objects and per-declaration template variables remain
 independent. Incompatible server policies are rejected; duplicate native
 locations are rejected by `nginx -t`, never silently overwritten.
 Read the root for shared request maps and the health listener; read a site file
@@ -454,4 +451,4 @@ Root imports of `Nginx`, `Flare`, and `Authelia` must also move to
 `linktools.cntr.ext`; no compatibility aliases are provided. Generic container
 and orchestration types, including `Integration` and `Integrations`, remain in
 `linktools.cntr`. The `integrations` declaration property keeps its name;
-its named-site and anonymous-declaration shape is specified above.
+its ordered declaration-composition shape is specified above.

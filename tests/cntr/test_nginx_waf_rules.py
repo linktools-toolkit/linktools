@@ -20,7 +20,6 @@ def _render_site(nginx, waf, patterns):
         server_name="app.example.test", https=False, waf=waf, auth=False,
         waf_bypass=patterns,
     )
-    site.file_id = "site_123"
     site.var_name = "123"
     return nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "server.conf"), site, business="location / { return 204; }",
@@ -56,9 +55,9 @@ def test_authelia_waf_bypass_preserves_auth_and_other_sites(
                        ("NGINX_AUTH_ENABLE", True), ("AUTHELIA_ADMIN_AUTH_ENABLE", True)):
         fresh_manager.env_config.set(key, value)
     nginx = fresh_manager.containers["nginx"]
-    site = nginx.sites[("authelia", "web")]
+    site = next(site for site in nginx.sites.values() if site.producer.name == "authelia")
     files, _ = nginx._rendered_site_files
-    rendered = files["sites/" + site.file_id + ".conf"]
+    rendered = files["sites/generated.conf"]
     assert site.waf is waf_enabled
     assert site.auth is True
     assert site.auth_bypass == (r"\.(css|js)$",)
@@ -85,10 +84,11 @@ def test_authelia_waf_bypass_preserves_auth_and_other_sites(
     assert "if ($waf_skip_" + site.var_name + " = 0) { return 418; }" in rendered
     assert "location @waf" in rendered
     for other in nginx.sites.values():
-        if other.enabled and other.identity != site.identity:
+        if other.enabled and other is not site:
             assert other.waf is True
             assert other.waf_bypass == ()
-            assert '"~*^/api/" 1;' not in files["sites/" + other.file_id + ".conf"]
+            other_map = rendered.split("map $uri $waf_skip_" + other.var_name + " {", 1)[1].split("}", 1)[0]
+            assert '"~*^/api/" 1;' not in other_map
 
 
 def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):

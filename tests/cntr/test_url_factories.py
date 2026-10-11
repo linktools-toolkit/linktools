@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import load_config_url, load_nginx_url, load_port_url
+from linktools.cntr.ext import Nginx, load_config_url, load_nginx_url, load_port_url
 from linktools.runtime import Proxy
 
 
@@ -65,31 +65,40 @@ def test_http_port_factory_retains_literal_template_path():
     assert str(load_port_url(container, "PORT", "{{path}}", https=False)) == "http://host.test/{{path}}"
 
 
-@pytest.mark.parametrize("key", [None, "", 0, False, ("web",)])
-def test_nginx_key_is_validated_before_manager_access(key):
-    with pytest.raises(ContainerError, match="nonempty string"):
-        load_nginx_url(object(), key)
+@pytest.mark.parametrize("reference", ["", 0, False, ("web",), {}])
+def test_invalid_nginx_reference_is_rejected_when_consumed(reference):
+    container = SimpleNamespace(name="app", manager=SimpleNamespace(
+        containers={"nginx": SimpleNamespace(sites={})}))
+    url = load_nginx_url(container, reference)
+    with pytest.raises(ContainerError, match="reference|declaration"):
+        str(url)
 
 
-def test_nginx_tuple_lookup_is_deferred_and_uses_producer_identity():
+def test_nginx_object_lookup_is_deferred_and_uses_producer_identity():
     reads = []
+    declaration = Nginx.site("app.test")
+    foreign = Nginx.site("other.test")
+    container = SimpleNamespace(name="app")
+    other = SimpleNamespace(name="other")
 
-    class Nginx:
+    class Consumer:
         @property
         def sites(self):
             reads.append("sites")
-            return {("app", "web"): SimpleNamespace(get_url=lambda default="": "https://app.test"),
-                    ("other", "web"): SimpleNamespace(get_url=lambda default="": "https://other.test")}
+            return {declaration: SimpleNamespace(producer=container, get_url=lambda default="": "https://app.test"),
+                    foreign: SimpleNamespace(producer=other, get_url=lambda default="": "https://other.test")}
 
-    container = SimpleNamespace(name="app", manager=SimpleNamespace(containers={"nginx": Nginx()}))
-    url = load_nginx_url(container, "web", "ui")
+    container.manager = SimpleNamespace(containers={"nginx": Consumer()})
+    url = load_nginx_url(container, declaration, "ui")
     assert reads == []
     assert str(url) == "https://app.test/ui"
     assert reads == ["sites"]
-    missing = load_nginx_url(container, "missing")
-    assert reads == ["sites"]
-    with pytest.raises(ContainerError, match="Unknown nginx site app/missing"):
-        str(missing)
+    for reference in (foreign, Nginx.site("app.test")):
+        missing = load_nginx_url(container, reference)
+        before = len(reads)
+        with pytest.raises(ContainerError, match="reference the original endpoint"):
+            str(missing)
+        assert len(reads) == before + 1
 
 
 def test_url_factories_do_not_extend_base_container():

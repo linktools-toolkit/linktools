@@ -47,7 +47,7 @@ def test_acl_supports_native_optional_fields(fresh_manager, monkeypatch):
         proxy="http://app:8080",
     )
     monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", {
-        (producer.name, "web"): ResolvedSite(producer, "web", site),
+        site: ResolvedSite(producer, site, 0),
     })
     declaration = Authelia.access(policy="one_factor", networks=["10.0.0.0/8"])
     monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, declaration),)))
@@ -82,11 +82,12 @@ def test_session_oidc_and_admin_reuse_declared_public_url(fresh_manager, port, a
 def test_explicit_public_base_path_keeps_origin_and_cookie_domain_separate(fresh_manager, monkeypatch):
     import yaml
     authelia = fresh_manager.containers["authelia"]
-    site = ResolvedSite(authelia, "web", Nginx.site(
+    site = ResolvedSite(authelia, Nginx.site(
         server_name="sso.example.com", public_url="https://login.example.com:8443/auth",
-        proxy="http://authelia:9091", auth=False, waf=False))
+        proxy="http://authelia:9091", auth=False, waf=False), 0)
     sites = dict(fresh_manager.containers["nginx"].sites)
-    sites[("authelia", "web")] = site
+    sites = {declaration: value for declaration, value in sites.items() if value.producer is not authelia}
+    sites[site._declaration] = site
     monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", sites)
     assert authelia.oidc_client["issuer_url"] == "https://login.example.com:8443/auth"
     config = yaml.safe_load(authelia.render_template(authelia.get_source_path("templates", "configuration.yml")))
@@ -113,14 +114,14 @@ def test_unconfigured_public_identity_remains_metadata_only(fresh_manager):
 def test_optional_site_url_only_defaults_for_absent_concrete_identity(fresh_manager, server_name):
     from linktools.cntr import ContainerError
     authelia = fresh_manager.containers["authelia"]
-    site = ResolvedSite(authelia, "web", Nginx.site(server_name=server_name, proxy="http://app"))
+    site = ResolvedSite(authelia, Nginx.site(server_name=server_name, proxy="http://app"), 0)
     assert site.get_url(default="") == ""
     with pytest.raises(ContainerError, match="explicit public URL"):
         _ = site.public_url
-    explicit = ResolvedSite(authelia, "web", Nginx.site(
-        server_name=server_name, public_url="https://login.example.com/auth", proxy="http://app"))
+    explicit = ResolvedSite(authelia, Nginx.site(
+        server_name=server_name, public_url="https://login.example.com/auth", proxy="http://app"), 0)
     assert explicit.get_url(default="") == explicit.public_url == "https://login.example.com/auth"
-    invalid = ResolvedSite(authelia, "web", Nginx.site(server_name=server_name, public_url=123, proxy="http://app"))
+    invalid = ResolvedSite(authelia, Nginx.site(server_name=server_name, public_url=123, proxy="http://app"), 0)
     with pytest.raises(ContainerError, match="public_url must be a string"):
         invalid.get_url(default="")
 
@@ -129,7 +130,7 @@ def test_optional_site_url_does_not_swallow_provider_configuration_errors(fresh_
     from linktools.cntr import ContainerError
     authelia = fresh_manager.containers["authelia"]
     fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", False)
-    site = ResolvedSite(authelia, "web", Nginx.site(
-        server_name="sso.example.com", https=True, proxy="http://app"))
+    site = ResolvedSite(authelia, Nginx.site(
+        server_name="sso.example.com", https=True, proxy="http://app"), 0)
     with pytest.raises(ContainerError, match="disabled global capability"):
         site.get_url(default="")

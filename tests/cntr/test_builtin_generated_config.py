@@ -29,7 +29,7 @@ def flare_instance(module, entries):
     containers = {}
     for producer, key, link in entries:
         containers[producer.name] = producer
-        snapshot.setdefault(producer.name, []).append((key, link))
+        snapshot.setdefault(producer.name, []).append(link)
     manager = object.__new__(ContainerManager)
     manager.containers = dict(containers, flare=SimpleNamespace(name="flare", order=0))
     manager.integration_snapshot = {name: tuple(values) for name, values in snapshot.items()}

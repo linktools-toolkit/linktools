@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from linktools.runtime import Proxy
     from linktools.types import ConfigKeyType, QueryType
     from ..container import BaseContainer
+    from ._base import Integration
+    from ._nginx import Nginx
 
 
 def load_config_url(container: "BaseContainer", key: "ConfigKeyType",
@@ -40,16 +42,13 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
     return lazy_load(make_url)
 
 
-def load_nginx_url(container: "BaseContainer", key: str, *path: str,
+def load_nginx_url(container: "BaseContainer",
+                   reference: "Nginx | tuple[Integration, ...] | None" = None, *path: str,
                    queries: "QueryType | None" = None) -> "Proxy":
-    from ..errors import ContainerError
-    if not isinstance(key, str) or not key:
-        raise ContainerError("Nginx site key must be a nonempty string")
+    from ._nginx_site import ResolvedSite
 
     def make_url() -> str:
-        site = container.manager.containers["nginx"].sites.get((container.name, key))
-        if site is None:
-            raise ContainerError("Unknown nginx site %s/%s" % (container.name, key))
+        site = ResolvedSite.find(container, reference)
         url = site.get_url(default="")
         return utils.join_url(url, *path, queries=queries) if url else ""
 

@@ -307,7 +307,7 @@ class ContainerManager:
         return RepoService(self)
 
     @cached_property
-    def integration_snapshot(self) -> "Mapping[str, Tuple[Tuple[Optional[str], Integration], ...]]":
+    def integration_snapshot(self) -> "Mapping[str, Tuple[Integration, ...]]":
         """Freeze declaration structure once without resolving its lazy values."""
         from collections import OrderedDict
         from types import MappingProxyType
@@ -318,7 +318,7 @@ class ContainerManager:
                 declarations = tuple(Integration.iter_declarations(producer.integrations))
             except ValueError as error:
                 raise ContainerError("%s in %s" % (error, producer.name)) from error
-            for key, declaration in declarations:
+            for declaration in declarations:
                 name = declaration.consumer
                 if not isinstance(name, str) or name not in self.containers:
                     raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
@@ -333,7 +333,7 @@ class ContainerManager:
         if consumer_name not in snapshot:
             return
         for producer_name, declarations in snapshot.items():
-            for _, declaration in declarations:
+            for declaration in declarations:
                 if declaration.consumer == consumer_name:
                     yield self.containers[producer_name], declaration
 

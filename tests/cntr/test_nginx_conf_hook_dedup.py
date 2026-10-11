@@ -12,12 +12,13 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
     class Links:
         name = "app"
         hooks = HookRegistry()
-        manager = SimpleNamespace(containers={"nginx": SimpleNamespace(sites={
-            ("app", "web"): SimpleNamespace(get_url=lambda default="": "https://app.example.com"),
-        })})
     container = Links()
-    first = load_nginx_url(container, "web")
-    second = load_nginx_url(container, "web", "admin")
+    declaration = Nginx.site("app.example.com")
+    container.manager = SimpleNamespace(containers={"nginx": SimpleNamespace(sites={
+        declaration: SimpleNamespace(producer=container, get_url=lambda default="": "https://app.example.com"),
+    })})
+    first = load_nginx_url(container)
+    second = load_nginx_url(container, None, "admin")
     assert str(first) == "https://app.example.com"
     assert str(second) == "https://app.example.com/admin"
     assert container.hooks.describe() == []

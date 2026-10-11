@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class Nginx(Integration):
-    """One nginx site; its declaration mapping supplies the reference key."""
+    """One nginx site, referenced by its original declaration object."""
 
     consumer = "nginx"
 

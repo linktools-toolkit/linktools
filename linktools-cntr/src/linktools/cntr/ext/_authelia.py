@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Lazy callbacks for the existing Authelia OIDC client."""
+"""Lazy native access rules and callbacks for the existing Authelia client."""
 from typing import TYPE_CHECKING
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -12,24 +12,23 @@ from ._base import Integration
 from ..errors import ContainerError
 
 if TYPE_CHECKING:
-    from typing import Any, Sequence, Optional
+    from typing import Any, Sequence
+    from ._nginx import Nginx
 
 
 class Authelia(Integration):
     consumer = "authelia"
 
     def __init__(self) -> None:
-        self.site: "Optional[str]" = None
+        self.site: "Nginx | tuple[Integration, ...] | None" = MISSING
         self._rule = MISSING
         self._redirect_uris = ()
         self._enabled = True
 
     @classmethod
     def access(cls, rule: "Mapping[str, Any]" = MISSING, *,
-               site: str = "web", **fields: "Any") -> "Authelia":
-        """Declare native access-control fields for a producer's named site."""
-        if not isinstance(site, str) or not site:
-            raise ContainerError("Authelia access site must be a nonempty string")
+               site: "Nginx | tuple[Integration, ...] | None" = None, **fields: "Any") -> "Authelia":
+        """Declare native access-control fields for a producer's site."""
         if rule is not MISSING and fields:
             raise TypeError("Authelia.access accepts a rule mapping or keyword fields, not both")
         self = cls()

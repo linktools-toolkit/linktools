@@ -22,7 +22,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from types import SimpleNamespace
-    from linktools.cntr.ext import ResolvedSite
+    from linktools.cntr.ext import ResolvedSite, Nginx
     from collections.abc import Iterable, Sequence
     from typing import AbstractSet, Any, Mapping
     from linktools.cntr import OperationContext
@@ -227,7 +227,7 @@ class Container(BaseContainer):
             raise ContainerError("Native validation failed for nginx{} (exit {})".format(
                 location, result.returncode))
     @cached_property
-    def sites(self) -> "Mapping[tuple[str, str], ResolvedSite]":
+    def sites(self) -> "Mapping[Nginx, ResolvedSite]":
         from linktools.cntr.ext import ResolvedSite
         return ResolvedSite.collect(self.manager)
 
@@ -284,7 +284,7 @@ class Container(BaseContainer):
         manager = self.manager
         sites = self.sites
         needs_nginx = self.name in required or any(
-            producer in required and site.enabled for (producer, _), site in sites.items())
+            site.producer.name in required and site.enabled for site in sites.values())
         if not needs_nginx:
             return {}
         result = {self.name: tuple(self.services)}
@@ -336,14 +336,14 @@ class Container(BaseContainer):
             )
         except TemplateError as exc:
             raise ContainerTemplateError(
-                f"Invalid nginx template {source} for {container.name}/{getattr(site, 'key', '?')}: {exc}"
+                f"Invalid nginx template {source} for {container.name}: {exc}"
             ) from exc
 
     @cached_property
     def _rendered_site_files(self) -> "tuple[dict[str, str], bool]":
         """Evaluate business templates once for this declaration snapshot."""
         from types import SimpleNamespace
-        result = {}
+        rendered = []
         active = []
         for site in self.sites.values():
             if site.enabled:
@@ -359,13 +359,12 @@ class Container(BaseContainer):
                 ports.append(site.producer.get_config("NGINX_WAF_PORT"))
             for port in ports:
                 if port in defaults:
-                    raise ContainerError("Multiple default nginx sites on port {}: {}/{} and {}/{}".format(
-                        port, defaults[port].producer.name, defaults[port].key,
-                        site.producer.name, site.key))
+                    raise ContainerError("Multiple default nginx sites on port {}: {} and {}".format(
+                        port, defaults[port].producer.name, site.producer.name))
                 defaults[port] = site
         if not any(site.default_server for site in active):
             active.append(SimpleNamespace(
-                producer=self, key="default", file_id="default", var_name="default",
+                producer=self, var_name="default",
                 server_name='""', default_server=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
                 waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, template_vars={},
                 template=self.get_source_path("templates", "index.conf"), proxy=None,
@@ -391,9 +390,8 @@ class Container(BaseContainer):
             for site in sites[1:]:
                 if routing_policy(site) != policy:
                     raise ContainerError(
-                        "Incompatible nginx routing policies on {}:{} for {}/{} and {}/{}".format(
-                            domain, port, leader.producer.name, leader.key,
-                            site.producer.name, site.key))
+                        "Incompatible nginx routing policies on {}:{} for {} and {}".format(
+                            domain, port, leader.producer.name, site.producer.name))
             route_auth = len(sites) > 1 and any(
                 (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
                 for member in sites[1:])
@@ -404,12 +402,12 @@ class Container(BaseContainer):
                 business = self._render_site_template(
                     site.producer, source, site, route_auth=route_auth)
                 if len(sites) > 1:
-                    business = "# site {}/{}\n{}".format(site.producer.name, site.key, business)
+                    business = "# site {}\n{}".format(site.producer.name, business)
                 routes.append(business)
-            result["sites/" + leader.file_id + ".conf"] = self._render_site_template(
+            rendered.append(self._render_site_template(
                 leader.producer, self.get_source_path("templates", "server.conf"),
-                leader, business="\n".join(routes), sites=sites, route_auth=route_auth)
-        return result, any(site.waf for site in active)
+                leader, business="\n".join(routes), sites=sites, route_auth=route_auth))
+        return {"sites/generated.conf": "\n".join(rendered)}, any(site.waf for site in active)
 
     def on_starting(self, context: "OperationContext") -> None:
         import tarfile

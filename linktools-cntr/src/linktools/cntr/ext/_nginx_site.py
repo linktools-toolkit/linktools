@@ -16,46 +16,64 @@ if TYPE_CHECKING:
     from ..container import BaseContainer
     from ..manager import ContainerManager
     from ._nginx import Nginx
+    from ._base import Integration
 
 
 class ResolvedSite:
     """A command-local lazy view shared by navigation and configuration consumers."""
 
     @classmethod
-    def collect(cls, manager: "ContainerManager") -> "Mapping[tuple[str, str], ResolvedSite]":
-        """Collect and validate site identities without resolving lazy fields."""
+    def collect(cls, manager: "ContainerManager") -> "Mapping[Nginx, ResolvedSite]":
+        """Resolve original declaration objects without evaluating lazy fields."""
         from collections import OrderedDict
         from ._nginx import Nginx
         from ..errors import ContainerError
 
         result = OrderedDict()
-        # Preserve declared identities even when the optional nginx consumer is absent.
         for producer_name, declarations in manager.integration_snapshot.items():
             producer = manager.containers[producer_name]
-            for key, declaration in declarations:
+            for declaration in declarations:
                 if declaration.consumer != "nginx":
                     continue
                 if not isinstance(declaration, Nginx):
                     raise ContainerError("Invalid nginx site in %s: expected Nginx" % producer_name)
-                if not isinstance(key, str) or not key:
-                    raise ContainerError("Invalid nginx site key in %s" % producer_name)
-                identity = (producer_name, key)
-                if identity in result:
-                    raise ContainerError("Duplicate nginx site key %r in %s" % (key, producer_name))
-                result[identity] = cls(producer, key, declaration)
+                if declaration in result:
+                    raise ContainerError("Repeated nginx declaration in " + producer_name)
+                result[declaration] = cls(producer, declaration, len(result))
         return MappingProxyType(result)
 
-    def __init__(self, producer: "BaseContainer", key: str, declaration: "Nginx") -> None:
+    @classmethod
+    def find(cls, producer: "BaseContainer",
+             reference: "Nginx | tuple[Integration, ...] | None" = None) -> "ResolvedSite":
+        """Resolve one original site or endpoint; omission requires one declared site."""
+        from ._nginx import Nginx
+        from ..errors import ContainerError
+
+        sites = producer.manager.containers["nginx"].sites
+        if reference is None:
+            matches = [site for site in sites.values() if site.producer is producer]
+        else:
+            if isinstance(reference, tuple):
+                declarations = [item for item in reference if isinstance(item, Nginx)]
+                if len(declarations) != 1:
+                    raise ContainerError("Endpoint reference must contain exactly one nginx site")
+                reference = declarations[0]
+            if not isinstance(reference, Nginx):
+                raise ContainerError("Expected an original nginx site or endpoint declaration")
+            site = sites.get(reference)
+            matches = [site] if site is not None and site.producer is producer else []
+        if len(matches) != 1:
+            raise ContainerError("Expected one declared nginx site in %s; reference the original endpoint" % producer.name)
+        return matches[0]
+
+    def __init__(self, producer: "BaseContainer", declaration: "Nginx", position: int) -> None:
         self.producer = producer
-        self.key = key
-        self.identity = (producer.name, key)
-        self.file_id = "s_" + producer.name.encode("utf-8").hex() + "_" + key.encode("utf-8").hex()
-        self.var_name = self.file_id
+        self.var_name = "s_" + str(position)
         self._declaration = declaration
 
     def _error(self, message: str) -> None:
         from ..errors import ContainerError
-        raise ContainerError("Nginx site %s/%s: %s" % (self.producer.name, self.key, message))
+        raise ContainerError("Nginx site in %s: %s" % (self.producer.name, message))
 
     def _text(self, value: "Any", field: str, optional: bool = False) -> "Optional[str]":
         if value is None and optional:
