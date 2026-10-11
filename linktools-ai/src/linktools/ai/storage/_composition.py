@@ -3,7 +3,7 @@
 """Ordered, revision-aware storage overlay."""
 
 import asyncio
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar, cast
 
@@ -150,7 +150,8 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self.cache_concurrency = cache_concurrency
         self.preload_batch_size = preload_batch_size
         self.preload_concurrency = preload_concurrency
-        self._cache_tasks: dict[str, asyncio.Task[ValueT | None]] = {}
+        self._cache_tasks: dict[tuple[int, str], asyncio.Future[tuple[ValueT | None, bytes | None]]] = {}
+        self._cache_loaders: set[asyncio.Task[None]] = set()
         self._cache_task_lock = asyncio.Lock()
         self._views = (
             LayerMetadataView(
@@ -256,7 +257,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         first_error: BaseException | None = None
         cancelled = False
         async with self._cache_task_lock:
-            tasks = tuple(self._cache_tasks.values())
+            tasks = tuple(self._cache_loaders)
         tasks += tuple(
             task
             for view in self._views
@@ -419,13 +420,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if info is None or _is_deleted(info):
             return None
         layer_index = state.layer_indexes[key]
-        cache_key = self.cache_adapter.cache_key(key, info) if self.cache_adapter is not None else None
-        if self.cache is not None and cache_key is not None:
-            cached_value = await self._read_cache_value(key, info, cache_key)
-            if cached_value is not None:
-                return cached_value
-        backend = self._views[layer_index].backend
-        value = await backend.get(key)
+        if self.cache is not None and self.cache_adapter is not None:
+            value = (await self._read_cached_or_origins((key,), state))[key]
+        else:
+            value = await self._views[layer_index].backend.get(key)
         if value is None:
             self._views[layer_index].invalidate()
             if retried:
@@ -437,15 +435,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata points to a missing origin",
-                    safe_details={
-                        "storage_key_digest": canonical_sha256(str(key)),
-                    },
+                    safe_details={"storage_key_digest": canonical_sha256(str(key))},
                 )
-            refreshed = await self._state()
-            return await self._get_from_state(key, refreshed, retried=True)
+            return await self._get_from_state(key, await self._state(), retried=True)
         self._validate_value(key, value, info)
-        if self.cache is not None and cache_key is not None:
-            await write_cache(self.cache, cache_key, self.cache_adapter.to_cache(value))
         return value
 
     async def _get_many_from_state(
@@ -455,46 +448,19 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         *,
         retried: bool,
     ) -> 'dict[KeyT, ValueT | None]':
+        visible = tuple(key for key in keys if key in state.entries and not _is_deleted(state.entries[key]))
+        loaded = await self._read_cached_or_origins(visible, state)
         values: dict[KeyT, ValueT | None] = {key: None for key in keys}
-        misses: list[KeyT] = []
-        semaphore = asyncio.Semaphore(self.cache_concurrency)
-
-        async def _cache_read(key: KeyT) -> None:
-            info = state.entries.get(key)
-            if info is None or _is_deleted(info):
-                return
-            if self.cache is None or self.cache_adapter is None:
-                misses.append(key)
-                return
-            cache_key = self.cache_adapter.cache_key(key, info)
-            async with semaphore:
-                value = await self._read_cache_value(key, info, cache_key)
-            if value is None:
-                misses.append(key)
-            else:
-                values[key] = value
-
-        await asyncio.gather(*(_cache_read(key) for key in keys))
-        misses = [key for key in misses if key in state.entries and not _is_deleted(state.entries[key])]
-        loaded = await self._load_origins(misses, state)
         raced: set[int] = set()
         missing_origins: list[KeyT] = []
-        for key in misses:
-            raw = loaded.get(key)
-            if raw is None:
+        for key in visible:
+            value = loaded.get(key)
+            if value is None:
                 raced.add(state.layer_indexes[key])
                 missing_origins.append(key)
                 continue
-            info = state.entries[key]
-            value = raw
-            self._validate_value(key, value, info)
+            self._validate_value(key, value, state.entries[key])
             values[key] = value
-            if self.cache is not None and self.cache_adapter is not None:
-                await write_cache(
-                    self.cache,
-                    self.cache_adapter.cache_key(key, info),
-                    self.cache_adapter.to_cache(value),
-                )
         if raced:
             for layer_index in raced:
                 self._views[layer_index].invalidate()
@@ -516,40 +482,104 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 )
         return values
 
-    async def _read_cache_value(
+    async def _read_cached_or_origins(
         self,
-        key: KeyT,
-        info: InfoT,
-        cache_key: str,
-    ) -> 'ValueT | None':
+        keys: 'Sequence[KeyT]',
+        state: 'EffectiveMetadataState[KeyT, InfoT]',
+    ) -> 'dict[KeyT, ValueT | None]':
         if self.cache is None or self.cache_adapter is None:
-            return None
+            loaded, errors = await self._load_origins(keys, state)
+            if errors:
+                raise next(iter(errors.values()))
+            return loaded
+        tasks: dict[KeyT, asyncio.Future[tuple[ValueT | None, bytes | None]]] = {}
+        owned: dict[KeyT, asyncio.Future[tuple[ValueT | None, bytes | None]]] = {}
         async with self._cache_task_lock:
-            task = self._cache_tasks.get(cache_key)
-            if task is None:
-                task = asyncio.create_task(self._load_cache_value(key, info, cache_key))
-                self._cache_tasks[cache_key] = task
+            if self._close_started:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
+            for key in keys:
+                identity = (state.layer_indexes[key], self.cache_adapter.cache_key(key, state.entries[key]))
+                future = self._cache_tasks.get(identity)
+                if future is None:
+                    future = asyncio.get_running_loop().create_future()
+                    self._cache_tasks[identity] = future
+                    owned[key] = future
 
-                def discard(done: "asyncio.Task[ValueT | None]") -> None:
-                    if self._cache_tasks.get(cache_key) is done:
-                        self._cache_tasks.pop(cache_key, None)
+                    def discard(done: "asyncio.Future[tuple[ValueT | None, bytes | None]]", identity=identity) -> None:
+                        # A cancelled waiter must not leave an unobserved origin failure.
+                        if not done.cancelled():
+                            done.exception()
+                        if self._cache_tasks.get(identity) is done:
+                            self._cache_tasks.pop(identity, None)
 
-                task.add_done_callback(discard)
-        return await asyncio.shield(task)
+                    future.add_done_callback(discard)
+                tasks[key] = future
+            if owned:
+                loader = asyncio.create_task(self._load_cache_batch(owned, state))
+                self._cache_loaders.add(loader)
 
-    async def _load_cache_value(
+                def finished(done: "asyncio.Task[None]") -> None:
+                    self._cache_loaders.discard(done)
+                    error = asyncio.CancelledError() if done.cancelled() else done.exception()
+                    if error is not None:
+                        for future in owned.values():
+                            if not future.done():
+                                future.set_exception(error)
+
+                loader.add_done_callback(finished)
+        loaded = await asyncio.gather(*(asyncio.shield(task) for task in tasks.values()))
+        return {key: value if type(value) is bytes or content is None else self.cache_adapter.from_cache(content)
+                for key, (value, content) in zip(tasks, loaded)}
+
+    async def _load_cache_batch(
+        self,
+        pending: 'Mapping[KeyT, asyncio.Future[tuple[ValueT | None, bytes | None]]]',
+        state: 'EffectiveMetadataState[KeyT, InfoT]',
+    ) -> None:
+        semaphore = asyncio.Semaphore(self.cache_concurrency)
+
+        async def read(key: KeyT) -> None:
+            try:
+                info = state.entries[key]
+                async with semaphore:
+                    value, content = await self._load_cache_content(key, info, self.cache_adapter.cache_key(key, info))
+                if content is not None:
+                    pending[key].set_result((value, content))
+            except (Exception, asyncio.CancelledError) as error:
+                pending[key].set_exception(error)
+
+        await asyncio.gather(*(read(key) for key in pending))
+        misses = tuple(key for key, future in pending.items() if not future.done())
+        async def publish(key: KeyT, value: ValueT | None, error: BaseException | None) -> None:
+            if error is not None:
+                pending[key].set_exception(error)
+                return
+            try:
+                content = None
+                if value is not None:
+                    info = state.entries[key]
+                    self._validate_value(key, value, info)
+                    content = self.cache_adapter.to_cache(value)
+                    await write_cache(self.cache, self.cache_adapter.cache_key(key, info), content)
+                pending[key].set_result((value, content))
+            except (Exception, asyncio.CancelledError) as error:
+                pending[key].set_exception(error)
+
+        await self._load_origins(misses, state, on_read=publish)
+
+    async def _load_cache_content(
         self,
         key: KeyT,
         info: InfoT,
         cache_key: str,
-    ) -> 'ValueT | None':
+    ) -> 'tuple[ValueT | None, bytes | None]':
         cached = await read_cache(self.cache, cache_key)
         if cached is None:
-            return None
+            return None, None
         try:
             value = self.cache_adapter.from_cache(cached)
             self._validate_value(key, value, info)
-            return value
+            return value, cached
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -559,14 +589,16 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 extra={"error_code": ErrorCode.STORAGE_CACHE_CORRUPT.value},
             )
             await self._delete_cache(cache_key)
-            return None
+            return None, None
 
     async def _load_origins(
         self,
         keys: 'Sequence[KeyT]',
         state: 'EffectiveMetadataState[KeyT, InfoT]',
-    ) -> 'dict[KeyT, ValueT]':
+        *, on_read: 'Callable[[KeyT, ValueT | None, BaseException | None], Awaitable[None]] | None' = None,
+    ) -> 'tuple[dict[KeyT, ValueT], dict[KeyT, BaseException]]':
         loaded: dict[KeyT, ValueT] = {}
+        errors: dict[KeyT, BaseException] = {}
         grouped: dict[int, list[KeyT]] = {}
         for key in keys:
             if key in state.entries:
@@ -576,26 +608,42 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         async def _load_group(layer_index: int, group: 'Sequence[KeyT]') -> None:
             backend = self._views[layer_index].backend
             if isinstance(backend, BatchStorageReader):
-                async with semaphore:
-                    raw_values = await backend.get_many(group)
+                try:
+                    async with semaphore:
+                        raw_values = await backend.get_many(group)
+                except (Exception, asyncio.CancelledError) as error:
+                    errors.update((key, error) for key in group)
+                    if on_read is not None:
+                        await asyncio.gather(*(on_read(key, None, error) for key in group))
+                    return
                 for key in group:
                     raw = raw_values.get(key)
                     if raw is not None:
                         loaded[key] = raw
+                if on_read is not None:
+                    await asyncio.gather(*(on_read(key, raw_values.get(key), None) for key in group))
                 return
 
             async def _load_one(key: KeyT) -> None:
-                async with semaphore:
-                    raw = await backend.get(key)
+                try:
+                    async with semaphore:
+                        raw = await backend.get(key)
+                except (Exception, asyncio.CancelledError) as error:
+                    errors[key] = error
+                    if on_read is not None:
+                        await on_read(key, None, error)
+                    return
                 if raw is not None:
                     loaded[key] = raw
+                if on_read is not None:
+                    await on_read(key, raw, None)
 
             await asyncio.gather(*(_load_one(key) for key in group))
 
         await asyncio.gather(
             *(_load_group(layer_index, group) for layer_index, group in grouped.items())
         )
-        return loaded
+        return loaded, errors
 
     async def _delete_cache(self, cache_key: str) -> None:
         if self.cache is None:
@@ -685,7 +733,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         failed = sum(1 for key in selected if key not in state.entries)
         for offset in range(0, len(missing), self.preload_batch_size):
             batch = missing[offset : offset + self.preload_batch_size]
-            raw_values = await self._load_origins(batch, state)
+            raw_values, errors = await self._load_origins(batch, state)
+            if errors:
+                raise next(iter(errors.values()))
             writes: list[KeyT] = []
             for key in batch:
                 raw = raw_values.get(key)
