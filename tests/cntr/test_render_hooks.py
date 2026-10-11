@@ -60,3 +60,36 @@ def test_helpers_available_as_filters(fresh_manager, tmp_path):
     container = fresh_manager.containers["portainer"]
     # `| mkdir | chmod` mirrors the builtin compose idiom (e.g. lldap, safeline).
     assert _added(container, tmp_path, "{{ ('/f') | mkdir | chmod }}") == 2
+
+
+def test_shared_paths_prepare_on_selected_consumer_only(fresh_manager, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from linktools.cntr import BaseContainer, OperationContext
+    from linktools.cntr.lifecycle import LifecycleDispatcher
+    from linktools.cntr._container import template as template_module
+
+    container = BaseContainer(fresh_manager, tmp_path, "consumer")
+    shared = tmp_path / "shared-home"
+    provider = SimpleNamespace(home_files={".client": shared})
+    source = tmp_path / "shared.yml"
+    source.write_text(
+        "{% for name, path in provider.home_files.items() %}"
+        "{{ path | mkdir | chown('1000:1000') }}:/workspace/{{ name }}"
+        "{% endfor %}", encoding="utf-8",
+    )
+    events = []
+    monkeypatch.setattr(template_module.os, "makedirs",
+                        lambda path, **kwargs: events.append(("mkdir", str(path))))
+    monkeypatch.setattr(fresh_manager.runtime, "chown",
+                        lambda path, user, recursive=False: events.append(("chown", str(path), user, recursive)))
+    first = container.render_template(source, provider=provider)
+    assert first == str(shared) + ":/workspace/.client"
+    assert container.render_template(source, provider=provider) == first
+    assert events == []
+    assert not shared.exists()
+    assert len(list(container.hooks.iter_phase(HookPhase.BEFORE_START))) == 2
+    context = OperationContext()
+    context.target_containers = (container,)
+    with LifecycleDispatcher(fresh_manager).notify_start(context):
+        assert events == [("mkdir", str(shared)), ("chown", str(shared), "1000:1000", False)]
