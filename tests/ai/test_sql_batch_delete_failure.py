@@ -81,7 +81,13 @@ async def _assert_caught_failure(
                 if failure == "database":
                     assert raised.value.__cause__ is caught[0]
                 else:
-                    assert raised.value is caught[0]
+                    original: BaseException | None = raised.value
+                    seen: set[int] = set()
+                    while (original is not caught[0] and isinstance(original, asyncio.CancelledError)
+                           and id(original) not in seen):
+                        seen.add(id(original))
+                        original = original.__cause__ or original.__context__
+                    assert original is caught[0]
             finally:
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
