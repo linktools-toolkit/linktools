@@ -660,7 +660,8 @@ class RuntimeEvaluations:
         return tuple(result), revisions
 
     async def _scores(self, record: EvaluationRecord, trials: tuple[TrialView, ...],
-                      revisions: dict[str, int] | None = None) -> tuple[ScoreAttemptView, ...]:
+                      revisions: dict[str, int] | None = None, *,
+                      include_execution: bool = True) -> tuple[ScoreAttemptView, ...]:
         saved = {(item.trial, item.scorer_slot_id): item for item in record.scores}
         intents = {item.slot_id: item for item in record.intents}
         dispositions = {item.slot_id: item.disposition for item in record.dispositions}
@@ -678,7 +679,8 @@ class RuntimeEvaluations:
                 node = None
                 evidence_ref = trial.evidence_ref
                 if intent is not None:
-                    state = await self._graph_state(intent, record.manifest.principal)
+                    state = (await self._graph_state(intent, record.manifest.principal)
+                             if include_execution or intent.released else None)
                     if state is not None:
                         if revisions is not None:
                             revisions[f"graph:{state.graph_id}"] = state.event_seq
@@ -699,7 +701,11 @@ class RuntimeEvaluations:
     async def _inspect(self, experiment_id: str, principal: Principal) -> EvaluationView:
         record = await self._record(experiment_id, principal)
         trials, _ = await self._trials(record, principal)
-        scores = await self._scores(record, trials)
+        include_execution = principal != record.manifest.principal
+        scores = await self._scores(record, trials, include_execution=include_execution)
+        saved_scores = {(item.trial, item.scorer_slot_id) for item in record.scores}
+        unhydrated_scores = ({(item.trial, item.scorer_slot_id) for item in scores} - saved_scores
+                             if not include_execution else set())
         issues = [EvaluationIssue(item.disposition.reason_code, item.disposition.reason_code,
                                  retryable=item.disposition.retryable)
                   for item in record.dispositions if not item.disposition.terminal]
@@ -710,6 +716,8 @@ class RuntimeEvaluations:
         for intent in record.intents:
             if intent.scorer_slot_id is not None and not intent.released:
                 state = await self._graph_state(intent, principal)
+                if state is not None and (intent.trial, intent.scorer_slot_id) in unhydrated_scores:
+                    next(item for item in state.node_states if item.node_id == "score")
                 if state is not None and state.status is TaskStatus.RECOVERY_REQUIRED:
                     issues.append(EvaluationIssue("recovery_required", "scorer graph requires recovery",
                                                  intent.trial, intent.scorer_slot_id, True))
