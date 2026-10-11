@@ -55,7 +55,8 @@ restores the corresponding page.
   full JSON, result export, parent/subagent links, and detail paging stay here.
   Inspecting a turn or opening an exact execution reveals the panel. Closing it
   returns focus to Details without stopping observation or changing selection.
-- **Actions** groups conversation rename/fork/close and execution retry/fork.
+- **Actions** groups conversation rename/fork/close; execution retry/fork remain
+  beside the selected execution in Details.
   Stop and **End previous execution and free session** remain directly available
   outside the collapsed panel. Resume and
   external-effect decisions remain in Recovery; read-only mode disables writes.
@@ -188,7 +189,11 @@ rather than appended twice. A finished stream is followed by an authoritative
 execution read. Cursor/authorization/integrity failures do not silently become
 success or restart an execution.
 
-History, trace and model requests load only for the selected execution/tab.
+History, trace and model requests load only for the selected execution/tab while
+Details is visible. Closing Details invalidates its pending display updates;
+opening it again reads the selected tab. The HTTP `include_content` flag controls
+response bodies; it does not guarantee that the raw-history storage reader avoids
+reading content internally.
 Tool arguments/results and model prompt/response bodies are not stored in a
 second Web cache or sent through Redis. Retained live progress can precede
 committed history; the UI explicitly shows incomplete or pending content. Independently opened readers see the committed
@@ -198,6 +203,12 @@ abnormal ends publish their available content. Refresh the same exact identity
 to see newer facts. A live notification or empty page is not evidence of a
 provider outcome. Publication, cross-process visibility, and recovery remain
 Runtime responsibilities.
+
+Observation follows a known execution, not the session as a whole. After that
+execution finishes, an idle page needs **Refresh** to discover a new turn started
+in another page. Admission still rejects concurrent work in the same session,
+and cancellation targets an exact execution ID. No session-level broadcast or
+automatic recovery is implied by keeping a page open.
 
 ## Local trust boundary
 

@@ -149,6 +149,15 @@ if(readOnly){
   console.log('Read-only disclosure contracts passed');process.exit(0);
 }
 if(process.argv[3]==='navigation'){
+  tab('models').click();await settle();node('inspector-close').click();const hiddenReads=calls.length;
+  location.hash='#session=b';await settle();assert.equal(node('inspector').hidden,true);
+  assert.ok(!calls.slice(hiddenReads).some(item=>item.key.endsWith('/models')),'A hidden inspector cannot request another execution body');
+  node('inspector-toggle').click();await settle();assert.ok(calls.slice(hiddenReads).some(item=>item.key==='/api/executions/b-run/models' && item.query.include_content==='true'));
+  node('inspector-close').click();const hiddenRefresh=calls.length;node('refresh').click();await settle();
+  assert.ok(!calls.slice(hiddenRefresh).some(item=>item.key.endsWith('/models')),'Refreshing a conversation does not refresh hidden detail bodies');
+  const closedDetail=deferred('GET /api/executions/b-run/models');node('inspector-toggle').click();await tick();node('inspector-close').click();
+  closedDetail.reject(new Error('closed detail failed'));await settle();assert.equal(node('notice').textContent,'');
+  tab('overview').click();await settle();node('inspector-close').click();
   const oldMetrics=deferred('GET /api/metrics');view('metrics').click();await settle();
   location.hash='#session=b';await settle();oldMetrics.reject(new Error('old metrics read failed'));await settle();
   assert.equal(node('notice').textContent,'','A previous page cannot replace the current conversation notice');

@@ -59,6 +59,7 @@ function connection(label, failed=false) { $('connection').textContent=label==='
 function showInspector(open, focus=false) {
   if(state.view==='sessions')state.conversationInspectorOpen=open;
   if(state.view==='executions')open=true;
+  if(!open)++state.detailGeneration;
   $('inspector').hidden=!open;$('inspector-toggle').setAttribute('aria-expanded',String(open));
   if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$('inspector-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
@@ -405,7 +406,7 @@ function rawDetail(value, title='Full details') {
   const detail=element('details'); detail.append(element('summary','',title),element('pre','json',json(value))); return detail;
 }
 async function loadDetail(more=false, selectors={}) {
-  if (!state.selectedExecution) return;
+  if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
   if (!more) { state.details=[]; state.detailCursor=null; clear('inspector-content'); }
   $('detail-more').hidden=true;
@@ -831,7 +832,7 @@ $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
 $('menu').onclick=()=>$('sidebar').classList.toggle('open');
 $('options-toggle').onclick=()=>{const open=$('composer-options').hidden;$('composer-options').hidden=!open;$('options-toggle').setAttribute('aria-expanded',String(open));};
-$('inspector-toggle').onclick=()=>showInspector($('inspector').hidden,true);
+$('inspector-toggle').onclick=()=>{const open=$('inspector').hidden;showInspector(open,true);if(open)loadDetail().catch(showError);};
 $('inspector-close').onclick=()=>showInspector(false,true);
 $('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
 $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
