@@ -2200,6 +2200,8 @@ class LocalTaskGraphLauncher:
             except asyncio.TimeoutError:
                 pass
             async with lease_state.lock:
+                if stop.is_set():
+                    return
                 lease_state.lease = await self._repository.renew(
                     lease_state.lease,
                     tenant_id=tenant_id,

@@ -202,6 +202,72 @@ class _FenceRaceRunner:
 
 
 @pytest.mark.asyncio
+async def test_queued_heartbeat_does_not_renew_after_execution_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-handoff-heartbeat", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    heartbeat_queued = asyncio.Event()
+    handoff_entered = asyncio.Event()
+    original_lease_state = task_local._LeaseState
+
+    class _ObservedLock(asyncio.Lock):
+        async def __aenter__(self):
+            if handoff_entered.is_set() and self.locked():
+                heartbeat_queued.set()
+            return await super().__aenter__()
+
+    class _HandoffRunner(_BlockingRunner):
+        async def run(
+            self,
+            invocation: TaskNodeInvocation,
+            *,
+            control: TaskNodeRunControl,
+        ) -> TaskNodeRunResult:
+            del invocation
+            await control.bind_execution("execution-handoff-heartbeat")
+            await control.handoff_execution("execution-handoff-heartbeat")
+            return TaskNodeRunResult(
+                "a" * 64, execution_id="execution-handoff-heartbeat",
+            )
+
+    def lease_state(lease):
+        return original_lease_state(lease, lock=_ObservedLock())
+
+    try:
+        repository = state.task.tasks
+        original_handoff = repository.handoff_execution
+
+        async def handoff_with_queued_heartbeat(lease, **kwargs):
+            # Handoff owns the lock until the heartbeat is waiting behind it.
+            handoff_entered.set()
+            await asyncio.wait_for(heartbeat_queued.wait(), 2)
+            return await original_handoff(lease, **kwargs)
+
+        monkeypatch.setattr(task_local, "_LeaseState", lease_state)
+        monkeypatch.setattr(task_local, "_HEARTBEAT_SECONDS", 0.01)
+        monkeypatch.setattr(repository, "handoff_execution", handoff_with_queued_heartbeat)
+        graph = TaskGraph("handoff-heartbeat", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
+        launcher = LocalTaskGraphLauncher(repository, _HandoffRunner(), owner="local-worker")
+        service = DefaultTaskGraphService(state.task, _AllowAuthorization(), launcher)
+        await launcher.start(TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits()))
+        completed = await service.wait(
+            graph.graph_id, principal=principal, timeout_seconds=3,
+        )
+        assert heartbeat_queued.is_set()
+        assert completed.status is TaskStatus.SUCCEEDED
+        assert completed.node_states[0].result_digest == "a" * 64
+        assert completed.node_states[0].execution_id == "execution-handoff-heartbeat"
+    finally:
+        if launcher is not None:
+            await launcher.shutdown()
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_handoff_conflict_preserves_recovery_without_false_waiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

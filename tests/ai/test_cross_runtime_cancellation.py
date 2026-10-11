@@ -212,6 +212,9 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
         execution = await owner.agents.get("default").start("run both")
         try:
             await asyncio.wait_for(asyncio.gather(fast_entered.wait(), slow_entered.wait()), 10)
+            await owner_storage.run_store.flush_dirty_execution_projections(
+                execution_id=execution.execution_id,
+            )
             outcome = await remote.executions.cancel(
                 execution.execution_id,
                 CancelExecutionRequest(owner.default_principal, "stop-at-completion"),
@@ -242,3 +245,105 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             assert history[-1].content == "completed effect"
         finally:
             finish_fast.set()
+
+
+@pytest.mark.asyncio
+async def test_history_projection_cancel_conflict_preserves_explicit_retry_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.runtime.state._sql import _SqlTransaction
+    from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+
+    from ._runtime_test_helpers import _UsageFunctionModel
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancel_read = asyncio.Event()
+    projection: asyncio.Task[None] | None = None
+
+    async def tool(_ctx: AgentContext[None]) -> str:
+        entered.set()
+        await release.wait()
+        return "completed effect"
+
+    async def model(messages, info):
+        del messages, info
+        return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
+
+    group = CapabilityGroup("projection-cancel-conflict")
+    group.tool(tool, effect_policy="replay_safe")
+    group.agent("default", model="default", allow_tools=("tool",))
+    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    original_replace = _SqlTransaction.replace_record
+
+    async def project_before_cancel_replace(transaction, record, *, expected_storage_version):
+        if record.kind == "execution" and record.state == "CANCELLING" and not cancel_read.is_set():
+            cancel_read.set()
+            assert projection is not None
+            await asyncio.wait_for(asyncio.shield(projection), 10)
+        return await original_replace(
+            transaction, record, expected_storage_version=expected_storage_version,
+        )
+
+    # Keep the batch pending until the cancel CAS, rather than race a timer.
+    monkeypatch.setattr(RuntimeAgentRunStore, "_schedule_observation_flush", lambda self: None)
+    monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
+    async with Runtime.open(
+        "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
+        storage=owner_storage, capabilities=(group,),
+    ) as owner, Runtime.open(
+        "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), capabilities=(group,),
+    ) as remote:
+        execution = await owner.agents.get("default").start("run tool")
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            tenant = owner.default_principal.tenant_id
+            repository = owner_storage.execution.executions
+            before = await repository.get(execution.execution_id, tenant_id=tenant)
+            key = repository._key("execution", execution.execution_id)
+            before_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
+            request = CancelExecutionRequest(owner.default_principal, "stop-projection-race")
+
+            async def project_after_cancel_read() -> None:
+                await cancel_read.wait()
+                await owner_storage.run_store.flush_dirty_execution_projections(
+                    execution_id=execution.execution_id,
+                )
+
+            projection = asyncio.create_task(project_after_cancel_read())
+            with pytest.raises(AIError) as conflict:
+                await remote.executions.cancel(execution.execution_id, request)
+            assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+            assert cancel_read.is_set()
+            after = await repository.get(execution.execution_id, tenant_id=tenant)
+            after_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
+            assert before_stored is not None and after_stored is not None
+            assert after_stored.storage_version > before_stored.storage_version
+            assert after_stored.data == before_stored.data
+            assert before is not None and after is not None
+            assert after.status is before.status is ExecutionStatus.STARTED
+            assert (after.revision, after.event_seq) == (before.revision, before.event_seq)
+            events = await owner_storage.execution.events.list(
+                execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
+            )
+            assert not any(item.event_type == "CANCEL_REQUESTED" for item in events.items)
+
+            outcome = await remote.executions.cancel(execution.execution_id, request)
+            assert not outcome.cancelled
+            release.set()
+            result = (await execution.wait(timeout_seconds=10)).result
+            assert result.status is ExecutionStatus.CANCELLED
+            events = await owner_storage.execution.events.list(
+                execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
+            )
+            assert sum(item.event_type == "CANCEL_REQUESTED" for item in events.items) == 1
+        finally:
+            release.set()
+            if projection is not None:
+                projection.cancel()
+                await asyncio.gather(projection, return_exceptions=True)
