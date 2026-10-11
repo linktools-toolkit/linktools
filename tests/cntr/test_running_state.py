@@ -57,7 +57,14 @@ def _partial_ctx(manager, name):
     return ctx
 
 
-def test_get_actual_with_no_containers_returns_empty(fresh_manager):
+def test_get_actual_with_no_containers_returns_empty(fresh_manager, monkeypatch):
+    from linktools.cntr.runtime.inspect import ProjectRuntimeState
+
+    def inspect(containers):
+        assert list(containers) == []
+        return ProjectRuntimeState(project=fresh_manager.project_name, services=(), backend="docker")
+
+    monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", inspect)
     assert fresh_manager.running_state.get_actual([]) == []
 
 
@@ -205,3 +212,111 @@ def test_dispatcher_reconciles_removed_container_out_of_running_state(fresh_mana
 
     assert "flare" not in fresh_manager.running_state.get_persisted()
     assert "nginx" in fresh_manager.running_state.get_persisted()
+
+
+@pytest.mark.parametrize("action", ["up", "restart"])
+def test_successful_start_records_config_only_target(monkeypatch, fresh_manager, action):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    _record(fresh_manager, monkeypatch)
+
+    getattr(cntr_main.command, "on_command_" + action)(names=["portainer"], pull=False)
+
+    assert {"portainer", "nginx"} <= set(fresh_manager.running_state.get_persisted())
+
+
+@pytest.mark.parametrize("previous", [False, True])
+def test_failed_start_preserves_config_only_state(monkeypatch, fresh_manager, previous):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    fresh_manager.running_state._set(["portainer"] if previous else [])
+    _record(fresh_manager, monkeypatch)
+
+    def failed(context, services):
+        raise RuntimeError("file publication failed")
+
+    monkeypatch.setattr("linktools.cntr.artifacts.publish_prepared_files", failed)
+    with pytest.raises(ContainerError, match="publishing file references failed"):
+        cntr_main.command.on_command_up(names=["portainer"], pull=False)
+
+    assert ("portainer" in fresh_manager.running_state.get_persisted()) == previous
+
+
+def test_partial_start_records_config_dependency_but_not_unselected_config(monkeypatch, fresh_manager, tmp_path):
+    from linktools.cntr.container import BaseContainer
+    unused = BaseContainer(fresh_manager, tmp_path, name="unused")
+    monkeypatch.setitem(fresh_manager.containers, "unused", unused)
+    fresh_manager.installed_state.add("unused")
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["flare"], "services", {})
+    monkeypatch.setattr(type(fresh_manager.containers["portainer"]), "dependencies", property(lambda self: ["flare"]))
+    _record(fresh_manager, monkeypatch)
+
+    cntr_main.command.on_command_up(names=["portainer"], pull=False)
+
+    running = fresh_manager.running_state.get_persisted()
+    assert "flare" in running
+    assert "portainer" in running
+    assert "unused" not in running
+
+
+def test_unrunnable_config_only_selection_stays_pending(monkeypatch, fresh_manager):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    target = fresh_manager.containers["portainer"]
+    monkeypatch.setattr(target, "services", {})
+    monkeypatch.setattr(type(target), "dependencies", property(lambda self: []))
+    for container in fresh_manager.containers.values():
+        monkeypatch.setattr(container, "services", {})
+    _record(fresh_manager, monkeypatch)
+
+    with pytest.raises(ContainerError, match="No runnable service"):
+        cntr_main.command.on_command_up(names=["portainer"], pull=False)
+
+    assert "portainer" not in fresh_manager.running_state.get_persisted()
+
+
+@pytest.mark.parametrize("previous", [False, True])
+@pytest.mark.parametrize("failure", ["compose", "after-start"])
+def test_failed_lifecycle_preserves_config_only_state(monkeypatch, fresh_manager, previous, failure):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    fresh_manager.running_state._set(["portainer"] if previous else [])
+    _record(fresh_manager, monkeypatch, fail=failure == "compose")
+    if failure == "after-start":
+        def failed(self, func, context=None):
+            if func.__name__ == "on_started":
+                raise RuntimeError("after-start failed")
+        monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", failed)
+
+    with pytest.raises(ContainerError):
+        cntr_main.command.on_command_up(names=["portainer"], pull=False)
+
+    assert ("portainer" in fresh_manager.running_state.get_persisted()) == previous
+
+
+def test_full_start_and_down_record_config_only_state(monkeypatch, fresh_manager, caplog):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    _record(fresh_manager, monkeypatch)
+    cntr_main.command.on_command_up(names=None, pull=False)
+    assert "portainer" in fresh_manager.running_state.get_persisted()
+
+    with caplog.at_level("INFO"):
+        cntr_main.command.on_command_list(names=["portainer"])
+    assert "pending install" not in caplog.text
+    assert "[*] portainer" in caplog.text
+
+    cntr_main.command.on_command_down(names=None)
+    assert fresh_manager.running_state.get_persisted() == []
+
+
+def test_partial_down_preserves_applied_config_only_target(monkeypatch, fresh_manager):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    fresh_manager.running_state._set(["portainer", "nginx"])
+    _record(fresh_manager, monkeypatch)
+
+    cntr_main.command.on_command_down(names=["portainer", "nginx"])
+
+    assert "portainer" in fresh_manager.running_state.get_persisted()
+    assert "nginx" not in fresh_manager.running_state.get_persisted()

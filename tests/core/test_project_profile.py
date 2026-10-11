@@ -10,6 +10,8 @@ actually needs to interpret that section.
 """
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -294,3 +296,58 @@ def test_merged_view_does_not_expose_the_other_paths_requirement(tmp_path):
 
     assert local_only.get("requires")["linktools-cntr"] == ">=0.1,<1.0"
     assert global_only.get("requires")["linktools-cntr"] == ">=99.0"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot remove an active working directory")
+@pytest.mark.parametrize("global_", [False, True])
+def test_for_root_from_deleted_working_directory(tmp_path, global_):
+    home = tmp_path / "home"
+    _write(home / ".linktools" / "linktools.json", {"config": {"ORIGIN": "global"}})
+    removed = tmp_path / "removed"
+    removed.mkdir()
+    environment = dict(os.environ, HOME=str(home))
+    code = """
+import os
+import sys
+from linktools.core import ProjectProfile
+os.chdir(sys.argv[1])
+os.rmdir(sys.argv[1])
+try:
+    os.getcwd()
+except FileNotFoundError:
+    pass
+else:
+    raise AssertionError("working directory must really be deleted")
+profile = ProjectProfile.for_root(global_=sys.argv[2] == "True")
+assert profile.get("config", {}) == ({"ORIGIN": "global"} if sys.argv[2] == "True" else {})
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(removed), str(global_)],
+        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("root", [None, "."])
+def test_for_root_keeps_local_precedence_without_getcwd(tmp_path, monkeypatch, root):
+    _write(tmp_path / ".linktools.json", {"config": {"ORIGIN": "local"}})
+    _write(tmp_path / ".linktools" / "linktools.json", {"config": {"ORIGIN": "global", "OTHER": "kept"}})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    def unavailable():
+        raise FileNotFoundError("cwd has no absolute path")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "getcwd", unavailable)
+        profile = ProjectProfile.for_root(root, global_=True)
+    assert profile.get("config") == {"ORIGIN": "local", "OTHER": "kept"}
+
+
+def test_for_root_does_not_hide_invalid_local_profile(tmp_path, monkeypatch):
+    _write(tmp_path / ".linktools.json", "invalid json")
+    _write(tmp_path / ".linktools" / "linktools.json", {"config": {"ORIGIN": "global"}})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    with pytest.raises(ConfigError, match="not valid JSON"):
+        ProjectProfile.for_root(global_=True)
