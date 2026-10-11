@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from time import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.runtime import Execution, RuntimeExecutions, RuntimeHistory
+from linktools.ai.runtime import _cursor
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._model_interaction import build_context_projection
@@ -252,12 +254,22 @@ async def test_model_client_selectors_paging_and_cursor_binding(
             assert envelope.filter_digest == canonical_sha256({
                 "execution_id": "execution", "projection_version": 1,
             })
-            omitted = await read("execution", cursor=unfiltered.next_cursor, limit=1, **options)
-            defaults = await read(
-                "execution", cursor=unfiltered.next_cursor, limit=1,
-                agent_run_seq=None, model_request_seq=None, **options,
-            )
-            assert omitted == defaults
+            cursor_second = [int(time())]
+            with monkeypatch.context() as cursor_clock:
+                cursor_clock.setattr(_cursor, "time", SimpleNamespace(time=lambda: cursor_second[0]))
+                omitted = await read("execution", cursor=unfiltered.next_cursor, limit=1, **options)
+                cursor_second[0] += 1
+                defaults = await read(
+                    "execution", cursor=unfiltered.next_cursor, limit=1,
+                    agent_run_seq=None, model_request_seq=None, **options,
+                )
+                assert omitted.items == defaults.items
+                signer = data.signer if public else HmacCursorSigner("history", b"history-key")
+                assert signer.decode(defaults.next_cursor).expires_at == signer.decode(omitted.next_cursor).expires_at + 1
+                after_omitted = await read("execution", cursor=omitted.next_cursor, limit=1, **options)
+                after_defaults = await read("execution", cursor=defaults.next_cursor, limit=1, **options)
+                assert after_omitted.items == after_defaults.items
+                assert [_identity(item) for item in after_omitted.items] == [("execution", 1, 3)]
             with pytest.raises(AIError) as caught:
                 await read("execution", cursor=unfiltered.next_cursor, limit=1, agent_run_seq=1, **options)
             assert caught.value.code is ErrorCode.CURSOR_INVALID
