@@ -2,14 +2,17 @@
 # -*- coding: utf-8 -*-
 """Same-origin HTTP delivery; Runtime owns execution and durable state."""
 
+import base64
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx2
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -18,6 +21,7 @@ from starlette.routing import Route
 from linktools.core import environ
 from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
+from ..model import ModelClientRequest, ModelClientResponse
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow
 from ..runtime import (
     CreateSessionRequest, ExecutionStreamEvent,
@@ -49,6 +53,13 @@ def _wire(value: object) -> object:
     if isinstance(value, ErrorDiagnostics):
         # Exception messages can contain provider credentials; safe details remain available.
         return {"exception_type": value.exception_type, "cause_digest": value.cause_digest}
+    if isinstance(value, (ModelClientRequest, ModelClientResponse)):
+        result = {field.name: _wire(getattr(value, field.name)) for field in fields(value) if field.name != "body"}
+        result["body"] = None if value.body is None else base64.b64encode(value.body).decode("ascii")
+        result["body_encoding"] = "base64"
+        if isinstance(value, ModelClientResponse) and value.body is not None and value.content_encoding:
+            result["decoded_text"], result["decode_error"] = _response_display(value)
+        return result
     if is_dataclass(value) and not isinstance(value, type):
         # Recurse before asdict so diagnostic messages never enter an HTTP response.
         result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
@@ -69,6 +80,20 @@ def _wire(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [_wire(item) for item in value]
     return value
+
+
+def _response_display(response: ModelClientResponse) -> tuple[str | None, str | None]:
+    supported = {"identity", "gzip", "deflate"}
+    if find_spec("brotli") is not None or find_spec("brotlicffi") is not None:
+        supported.add("br")
+    encodings = {value.strip().lower() for value in response.content_encoding.split(",")}
+    if not encodings <= supported:
+        return None, "content_encoding_unavailable"
+    try:
+        decoded = httpx2.Response(200, headers={"content-encoding": response.content_encoding}, content=response.body).content
+        return decoded.decode("utf-8"), None
+    except (httpx2.DecodingError, UnicodeDecodeError):
+        return None, "response_decode_failed"
 
 
 def _json(value: object, status: int = 200) -> JSONResponse:
@@ -102,10 +127,10 @@ def _selectors(request: Request, *, history: bool = False) -> dict[str, object]:
     return selected
 
 
-def _content(request: Request) -> bool:
-    value = request.query_params.get("include_content", "false")
+def _content(request: Request, field: str = "include_content") -> bool:
+    value = request.query_params.get(field, "false")
     if value not in {"true", "false"}:
-        raise ValueError("include_content must be true or false")
+        raise ValueError(f"{field} must be true or false")
     return value == "true"
 
 
@@ -291,7 +316,13 @@ class _Console:
         elif kind == "transcript":
             result = await history.transcript(identity, principal=self.principal, **paging, include_content=_content(request))
         elif kind == "models":
-            result = await history.model_interactions(identity, principal=self.principal, **paging, include_content=_content(request))
+            raw = _content(request, "include_client_requests")
+            result = await history.model_interactions(
+                identity, principal=self.principal, **paging, include_content=_content(request),
+                **({"include_client_requests": True} if raw else {}),
+                **{key: int(request.query_params[key]) for key in ("agent_run_seq", "model_request_seq")
+                   if key in request.query_params},
+            )
         elif kind == "result":
             result = await history.result(identity, principal=self.principal)
         elif kind == "recovery":

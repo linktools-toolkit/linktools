@@ -40,8 +40,10 @@ shown as empty/unavailable, without provisioning them through a history read.
 
 ### Finding details and controls
 
-The default conversation view keeps messages and the session's current state
-in focus. Session occupancy comes from its active execution identity; inspecting
+The default **Original request timeline** groups the selected execution's original
+client exchanges by logical request and actual HTTP attempt. Submitted user input
+and live Markdown responses remain visible. **Conversation responses** opens the
+SDK response display. Session state stays visible in both views. Session occupancy comes from its active execution identity; inspecting
 an older turn does not substitute that turn's status for the session's owner.
 **View active execution** opens its details when a different turn is selected.
 Inspecting an older turn or subagent leaves the active conversation observer and
@@ -51,7 +53,8 @@ page; selecting a run there deliberately observes that run. Browser Back/Forward
 restores the corresponding page.
 
 - **Details** opens session metadata and the selected execution's Overview,
-  History, Transcript, Models & prompt, Trace, and Recovery panels. Usage,
+  SDK history, SDK transcript, Original model requests, SDK prompts, Trace, and
+  Recovery panels. Usage,
   full JSON, result export, parent/subagent links, and detail paging stay here.
   Inspecting a turn or opening an exact execution reveals the panel. Closing it
   returns focus to Details without stopping observation or changing selection.
@@ -115,7 +118,7 @@ their `lt ai` / `python -m linktools ai` forms, are intentionally removed. There
 are no compatibility aliases. Start `ai-web --read-only` to inspect an existing
 workspace, then choose Session or Execution in **Open exact ID** to open a known
 identity. `ai-run` and `ai-acp` remain available for terminal execution and ACP
-stdio clients. Runtime library APIs are unchanged.
+stdio clients. The console uses the same public Runtime domains.
 
 The former viewers had no filter or export flags. Their optional session or
 execution IDs, required trace execution ID, and optional metric name map to the
@@ -127,7 +130,7 @@ place; diagnostic exception messages remain redacted to protect credentials.
 | --- | --- | --- |
 | `ai-run` | New conversation, composer, planning/thinking/memory/files, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, RuntimeHistory `result` |
 | Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and RuntimeHistory session APIs |
-| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, complete paged history/transcript, seven-layer prompt architecture, model request/response/duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
+| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | RuntimeHistory `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
 | Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, vision, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
@@ -140,10 +143,52 @@ was applied. Selecting a child execution preserves its identity rather than
 treating its events as a root model call. Full JSON details preserve public
 fields that do not fit the compact presentation.
 
-The **Models & prompt** tab summarizes system/fixed/dynamic instructions,
+The secondary **SDK prompts** tab summarizes system/fixed/dynamic instructions,
 conversation context, attachment media types, tools and output contracts from
-the selected recorded request. It does not duplicate the instruction mirror or
-fetch trace content in the background. Full prompts/responses remain expandable.
+the framework request snapshot. These are SDK projections, not final native
+client messages. The console never turns these instructions into a purported
+original system/developer message.
+
+### Original client sources
+
+**Original request timeline** and **Original model requests** share the selected
+execution's paged original records. A repeated full input array belongs to its
+request; it is not presented as additional user turns. Each logical request
+retains its execution/run/request identity, purpose, step, output-retry index,
+usage and recorded timing. Actual HTTP attempts are ordered within that request;
+no individual attempt timestamps are invented. Compaction and child executions
+keep their original identities.
+
+The current built-in capture supports OpenAI Chat completions. It records the
+SDK client's final outbound body after adapter conversion and extra-body merging,
+not proof of provider-server receipt. The request view shows the original UTF-8
+source without JSON parsing or reserialization, retaining native roles, order,
+empty content, tool calls/results, unknown fields, large numbers and duplicate
+keys. It does not reconstruct a provider array from SDK snapshots. The OpenAI
+Responses API and other provider APIs are not claimed as captured by this binding.
+
+The separately labeled response is the original body observed as the SDK consumed
+it, with HTTP status, format/encoding hints and completeness. Received SSE data is
+not reassembled into purported final assistant text. For Chat SSE, complete means
+an observed complete `[DONE]` event; other bodies require observed EOF. Bytes
+received in a chunk can include data the SDK did not process, while later unread
+chunks are absent. Failures and cancellation can retain explicitly incomplete
+output. The format is only an encoding hint, not evidence of valid JSON or success.
+
+HTTP carries original bodies reversibly as base64. **Download original bytes**
+returns those same bytes, including compressed response bytes. Supported HTTP
+content encodings may also have a clearly labeled decoded-text display. That
+view is derived for reading; it does not replace the original download or change
+completeness. Unsupported encodings or invalid UTF-8 keep the byte download and
+report that text display is unavailable. Original content is escaped text, never
+HTML or parsed Markdown. **LIVE RESPONSE** remains a separate, visibly incomplete
+SDK display with safe Markdown rendering.
+
+Historical missing capture is shown as **not recorded** and is never backfilled.
+An observed empty request scope, unavailable body and actual zero-byte body remain
+distinct. Body content is unredacted and may include application data or secrets,
+including values in `extra_body`. Capture does not read connection headers, URLs
+or credential settings; this is not a guarantee that bodies contain no secrets.
 
 List filters follow public API semantics. Execution queries support session,
 agent and parent identity filters. The text search filters only loaded rows;
@@ -189,13 +234,24 @@ rather than appended twice. A finished stream is followed by an authoritative
 execution read. Cursor/authorization/integrity failures do not silently become
 success or restart an execution.
 
-History, trace and model requests load only for the selected execution/tab while
-Details is visible. Closing Details invalidates its pending display updates;
-opening it again reads the selected tab. The HTTP `include_content` flag controls
-response bodies; it does not guarantee that the raw-history storage reader avoids
-reading content internally.
-Tool arguments/results and model prompt/response bodies are not stored in a
-second Web cache or sent through Redis. Retained live progress can precede
+SDK history/trace/prompt bodies load only for the visible selected Details tab.
+Original client bodies load when the main original timeline or its inspector tab
+is visible; those views share one page cache. Closing or switching views fences
+pending display work. `include_client_requests=true` selects original client
+bodies independently of SDK `include_content=true`, with existing execution
+permissions checked before body reads. Metadata-only model reads load neither.
+
+A completed model projection triggers an exact read using its real execution ID,
+`agent_run_seq` and `model_request_seq`. Replayed completed records reuse loaded
+originals; token deltas never poll or reload request bodies. Completion reads merge
+without clearing earlier pages, and stale RUNNING rows cannot replace an already
+loaded terminal request. Load-more and refresh failures preserve loaded content
+and their retry cursor. Explicit refresh updates the loaded depth through normal
+cursor pages. The durable completion notification follows the existing Runtime
+commit boundary, so no extra persistence or flush timer is introduced.
+
+Tool arguments/results and model bodies are not copied into another persistent
+Web store or sent through Redis. Retained live progress can precede
 committed history; the UI explicitly shows incomplete or pending content. Independently opened readers see the committed
 prefix after Runtime publishes its observation batch, including RUNNING model
 identities without request/response bodies. Completed requests and controlled

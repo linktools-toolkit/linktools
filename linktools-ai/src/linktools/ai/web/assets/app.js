@@ -1,9 +1,9 @@
-import {terminal, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers} from './console.js';
+import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText} from './console.js';
 import {renderMarkdown, inputPresentation} from './message.js';
 
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
-  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', details:[], detailCursor:null, models:new Map(), events:new Map(),
+  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', conversationMode:'original', nativeTimeline:null, details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
@@ -147,7 +147,7 @@ function renderPage() {
   if($('live'))clear('live');clear('execution-live');renderLive();
 }
 function setView(view, refreshSelection=true) {
-  if(view!==state.view){saveDraft();++state.generation;state.filters.set(state.view,$('filter').value);$('filter').value=state.filters.get(view) || '';state.list=[];clear('list');}
+  if(view!==state.view){saveDraft();++state.generation;state.nativeTimeline=null;state.filters.set(state.view,$('filter').value);$('filter').value=state.filters.get(view) || '';state.list=[];clear('list');}
   state.view=view;
   document.querySelectorAll('[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view===view));
   $('page-title').textContent={sessions:'Conversations',executions:'Executions',metrics:'Metrics'}[view];
@@ -272,6 +272,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
   restoreDraft(state.selectedSession);
+  state.nativeTimeline=null;
   state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
   const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;
   $('sidebar').classList.remove('open');renderPage();
@@ -315,6 +316,8 @@ function renderConversation({prepend=false}={}) {
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
   const follows=previousTop+container.clientHeight>=previousHeight-40;
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
+  $('native-mode').classList.toggle('active',state.conversationMode==='original');
+  $('chat-mode').classList.toggle('active',state.conversationMode==='chat');
   if(state.timelineError)$('conversation').append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
   state.turns.forEach(turn => {
     const section=element('article','turn');
@@ -322,6 +325,11 @@ function renderConversation({prepend=false}={}) {
     heading.append(button('Details',async()=>{showInspector(true,true);await selectExecution(turn.execution_id,state.generation);}));
     section.append(heading);
     section.append(userMessage(turn.user_input));
+    if(state.conversationMode==='original') {
+      if(turn.execution_id===state.selectedExecution)renderNativeTimeline(section);
+      else section.append(button('View original model requests',async()=>selectExecution(turn.execution_id)));
+    } else {
+    section.append(element('p','muted','Response display · SDK records. Original client arrays are in Original request timeline.'));
     const replies=turn.items.filter(item=>item.item_kind!=='user');
     replies.forEach(item => {
       if (item.item_kind==='assistant') {
@@ -331,10 +339,12 @@ function renderConversation({prepend=false}={}) {
         const detail=element('details','tool-message'); detail.append(element('summary','',`${item.item_kind.replaceAll('_',' ')} · ${item.tool_name || ''}`),element('pre','',text(item.content))); section.append(detail);
       }
     });
+    }
     if (!turn.conversation_committed) section.append(element('p','muted','History is incomplete; the Runtime has not committed this turn.'));
     if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
     $('conversation').append(section);
   });
+  if(state.conversationMode==='original' && state.selectedExecution && !state.turns.some(turn=>turn.execution_id===state.selectedExecution)){const section=element('article','turn');renderNativeTimeline(section);$('conversation').append(section);}
   if (!state.turns.length && !state.timelineError) $('conversation').append(element('p','empty',state.selectedSession ? 'Ready when you are. Send a message to start this conversation.':'Inspect this execution using the panels on the right.'));
   const live=element('section','turn'); live.id='live'; $('conversation').append(live); renderLive(liveFocus);
   container.scrollTop=prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
@@ -349,10 +359,10 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   if (!live) return;
   const container=$('conversation'), follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
   live.replaceChildren();
-  if (state.liveThinking) { const detail=element('details','tool-message'); detail.append(element('summary','','Thinking'),element('pre','',state.liveThinking)); live.append(detail); }
+  if (state.liveThinking) { const detail=element('details','tool-message'); detail.append(element('summary','','Live thinking · incomplete SDK response'),element('pre','',state.liveThinking)); live.append(detail); }
   if (state.liveText) {
     if(live.markdownSource!==state.liveText){live.markdownSource=state.liveText;live.markdownMessage=markdownMessage(state.liveText);}
-    live.append(element('div','message-label',`LIVE · ${state.observedInfo?.agent_id || 'AGENT'} · ${short(state.observedExecution)}`),live.markdownMessage);
+    live.append(element('div','message-label',`LIVE RESPONSE · incomplete SDK display · ${state.observedInfo?.agent_id || 'AGENT'} · ${short(state.observedExecution)}`),live.markdownMessage);
   }
   const events=[...state.events.values()].slice(-12),activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
   activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
@@ -380,13 +390,19 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
 async function selectExecution(id, generation=state.generation) {
   const executionGeneration=++state.executionGeneration;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
+  if(state.nativeTimeline?.id!==id)state.nativeTimeline=null;
   state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;setDisabled();clear('inspector-content');renderLive();
   $('execution-meta').textContent=`Loading ${id}…`;
   try {
   let info=await api(`/api/executions/${enc(id)}`);
   if (generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution) return;
   info=observedInfo(info,readGeneration);
-  state.execution=info; renderExecution(); await loadDetail(false); setDisabled();
+  state.execution=info; renderExecution();
+  if(state.view==='sessions' && state.conversationMode==='original')await loadNativeTimeline();
+  if(generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
+  if(state.tab==='models' && state.view==='sessions' && state.conversationMode==='original')renderNativeViews();
+  else await loadDetail(false);
+  setDisabled();
   if (generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution) await syncObservation();
   } catch(error){if(generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution && (id!==state.observedExecution || readGeneration===state.observationReadGeneration))throw error;}
 }
@@ -405,6 +421,141 @@ function properties(values) {
 function rawDetail(value, title='Full details') {
   const detail=element('details'); detail.append(element('summary','',title),element('pre','json',json(value))); return detail;
 }
+function downloadClientBody(value,name) {
+  const bytes=clientBodyBytes(value);if(bytes===null)return;
+  const url=URL.createObjectURL(new Blob([bytes],{type:'application/octet-stream'})),anchor=document.createElement('a');
+  anchor.href=url;anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function nativeBody(value,name,{request=false}={}) {
+  const container=element('div');
+  if(value.body==null){container.append(element('p','muted',`Original body unavailable · ${value.capture_error || 'not observed'}`));return container;}
+  container.append(button('Download original bytes',async()=>downloadClientBody(value,name)));
+  let source;
+  try {source=clientBodyText(value);}
+  catch(error){container.append(element('p','muted',`Text display unavailable · ${error.message}. Original bytes remain downloadable.`));return container;}
+  const full=element('details');full.open=true;
+  full.append(element('summary','',request?'Original outbound request body · native messages array and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text'),element('pre','json',source));
+  container.append(full);return container;
+}
+function nativeInteraction(item) {
+  const card=element('section','detail-card');
+  card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose} · ${modelLabel(item.model)}`));
+  if(item.usage)card.append(element('p','',usageLabel(item.usage)));
+  card.append(rawDetail({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code},'Logical request timing and identity'));
+  if(!item.client_requests_included)card.append(element('p','muted','Original client content was not requested.'));
+  else if(item.client_requests===null)card.append(element('p','muted',item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':'Original client messages were not recorded. SDK snapshots are not used to backfill them.'));
+  else if(!item.client_requests.length)card.append(element('p','muted','No supported client dispatch was observed in this request scope.'));
+  else item.client_requests.forEach((attempt,index)=>{
+    const row=element('section','detail-card'),key=clientAttemptKey(item,index);row.dataset.clientAttempt=key;
+    row.append(element('h4','',`Client attempt ${index+1} · ${attempt.api}`),element('p','muted','SDK client outbound request. Provider-server receipt is not observable here.'),nativeBody(attempt,`${key}-request.bin`,{request:true}));
+    if(attempt.response){
+      const response=attempt.response;
+      row.append(element('h4','',`Observed response · HTTP ${response.status_code} · ${response.complete?'complete':'incomplete'}`),element('p','muted',`${response.format} · ${response.content_encoding || 'identity'} · Only bytes pulled by the SDK were captured; received SSE data is not reconstructed assistant text.`),nativeBody(response,`${key}-response.bin`));
+    } else row.append(element('p','muted','No response was observed for this attempt.'));
+    card.append(row);
+  });
+  if(item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
+  return card;
+}
+function renderNativeTimeline(container) {
+  const view=state.nativeTimeline;
+  container.append(element('h3','','Original request timeline'),element('p','muted','Grouped by logical request and actual client attempt. Each input array is a complete request, not a new conversation turn.'));
+  if(!view || view.id!==state.selectedExecution){container.append(element('p','muted','Loading original client records…'));return;}
+  view.items.forEach(item=>container.append(nativeInteraction(item)));
+  if(view.error)container.append(element('p','muted',view.error));
+  else if(!view.items.length)container.append(element('p','muted',view.loading?'Loading original client records…':'No model request records are available.'));
+  const refresh=button('Refresh original requests',async()=>loadNativeTimeline(false,true));refresh.disabled=view.loading;container.append(refresh);
+  if(view.cursor){const more=button('Load more model requests',async()=>loadNativeTimeline(true));more.disabled=view.loading;container.append(more);}
+}
+function renderNativeViews() {
+  if(state.view==='sessions')renderConversation();
+  if(state.tab==='models' && !$('inspector').hidden && state.nativeTimeline?.id===state.selectedExecution){
+    state.details=state.nativeTimeline.items;state.detailCursor=state.nativeTimeline.cursor;renderDetails();$('detail-more').hidden=!state.detailCursor;
+  }
+}
+function mergeNativeItems(previous,incoming) {
+  const executions=new Map(),merged=new Map(previous.map(item=>[modelKey(item),item]));
+  incoming.forEach(item=>upsertModel(merged,item));
+  for(const item of merged.values()) {
+    if(!executions.has(item.execution_id))executions.set(item.execution_id,[]);
+    executions.get(item.execution_id).push(item);
+  }
+  return [...executions.values()].flatMap(items=>items.sort((a,b)=>a.agent_run_seq-b.agent_run_seq || a.model_request_seq-b.model_request_seq));
+}
+async function loadNativeTimeline(more=false,refresh=false) {
+  const id=state.selectedExecution,generation=state.generation;
+  if(!id || state.view==='metrics')return;
+  let view=state.nativeTimeline;
+  if(view?.id===id){
+    if(view.loading)return;
+    if(!more && !refresh){if(view.pending.size)scheduleNativeRefresh();return;}
+  } else view={id,items:[],cursor:null,loading:false,error:null,pending:new Map()};
+  if(more && !view.cursor)return;
+  if(refresh)view.pending.forEach(request=>{request.error=null;});
+  state.nativeTimeline=view;view.loading=true;view.error=null;renderNativeViews();
+  const current=()=>state.nativeTimeline===view && generation===state.generation && id===state.selectedExecution;
+  const incoming=[],target=refresh?Math.max(10,view.items.length):10;
+  let cursor=more?view.cursor:null;
+  try {
+    do {
+      const params=new URLSearchParams({limit:'10',include_client_requests:'true'});
+      if(cursor)params.set('cursor',cursor);
+      const page=await api(`/api/executions/${enc(id)}/models?${params}`);
+      if(!current())return;
+      incoming.push(...page.items);cursor=page.next_cursor || null;
+    } while(refresh && cursor && incoming.length<target);
+    view.items=mergeNativeItems(view.items,incoming);view.cursor=cursor;
+    incoming.filter(item=>item.status!=='RUNNING').forEach(item=>view.pending.delete(modelKey(item)));
+  } catch(error) {if(current())view.error=error.message;}
+  finally {if(current()){view.loading=false;view.error ||= [...view.pending.values()].map(request=>request.error).filter(Boolean).join('\n');renderNativeViews();if(view.pending.size)scheduleNativeRefresh();}}
+}
+let nativeRefresh=null;
+function scheduleNativeRefresh(item) {
+  const view=state.nativeTimeline;
+  if(!view || view.id!==state.selectedExecution)return;
+  if(item){
+    const key=modelKey(item);
+    if(view.items.some(value=>modelKey(value)===key && value.status!=='RUNNING' && value.client_requests_included))return;
+    view.pending.set(key,{item,error:null});
+  }
+  if(![...view.pending.values()].some(request=>!request.error) || view.loading || !(state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden))return;
+  const id=state.selectedExecution,generation=state.generation;
+  if(nativeRefresh?.id===id && nativeRefresh.generation===generation)return;
+  if(nativeRefresh)clearTimeout(nativeRefresh.timer);
+  const refresh={id,generation,timer:null};nativeRefresh=refresh;
+  refresh.timer=setTimeout(()=>{
+    if(nativeRefresh!==refresh)return;nativeRefresh=null;
+    if(id===state.selectedExecution && generation===state.generation && (state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden))refreshNativeRequests(view,generation).catch(showError);
+  },60);
+}
+async function refreshNativeRequests(view,generation) {
+  if(view.loading)return;
+  const current=()=>state.nativeTimeline===view && generation===state.generation && view.id===state.selectedExecution;
+  view.loading=true;renderNativeViews();
+  try {
+    for(const [key,request] of [...view.pending]) {
+      if(request.error)continue;
+      if(!(state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden))break;
+      const item=request.item;
+      try {
+        const params=new URLSearchParams({limit:'1',include_client_requests:'true',agent_run_seq:String(item.agent_run_seq),model_request_seq:String(item.model_request_seq)});
+        const page=await api(`/api/executions/${enc(item.execution_id)}/models?${params}`);
+        if(!current())return;
+        if(!page.items.some(value=>modelKey(value)===key))throw new Error('Original request record is no longer available');
+        view.items=mergeNativeItems(view.items,page.items);
+        if(view.pending.get(key)===request)view.pending.delete(key);
+      } catch(error){
+        if(!current())return;
+        request.error=`${item.execution_id} · request ${item.model_request_seq}: ${error.message}`;
+      }
+    }
+  } finally {
+    if(current()){
+      view.loading=false;view.error=[...view.pending.values()].map(request=>request.error).filter(Boolean).join('\n') || view.error;
+      renderNativeViews();scheduleNativeRefresh();
+    }
+  }
+}
 async function loadDetail(more=false, selectors={}) {
   if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
@@ -412,12 +563,19 @@ async function loadDetail(more=false, selectors={}) {
   $('detail-more').hidden=true;
   document.querySelectorAll('[data-tab]').forEach(node=>node.classList.toggle('active',node.dataset.tab===tab));
   if (tab==='overview') { renderOverview(); return; }
+  if (tab==='models') {
+    await loadNativeTimeline(more,!more && !(state.view==='sessions' && state.conversationMode==='original'));
+    if(generation!==state.detailGeneration || selection!==state.generation || id!==state.selectedExecution || tab!==state.tab)return;
+    renderNativeViews();
+    if(state.nativeTimeline?.error)showError(new Error(state.nativeTimeline.error));
+    return;
+  }
   if (tab==='recovery' && state.config.read_only) { $('inspector-content').append(element('p','empty','Recovery controls require an execution Runtime.')); return; }
   const params=new URLSearchParams({limit:'50',...selectors});
-  if (['history','transcript','models'].includes(tab)) params.set('include_content','true');
+  if (['history','transcript','sdkmodels'].includes(tab)) params.set('include_content','true');
   if (more && state.detailCursor) params.set('cursor',state.detailCursor);
   try {
-    const payload=await api(`/api/executions/${enc(id)}/${tab}?${params}`);
+    const payload=await api(`/api/executions/${enc(id)}/${tab==='sdkmodels'?'models':tab}?${params}`);
     if (generation!==state.detailGeneration || selection!==state.generation || id!==state.selectedExecution || tab!==state.tab) return;
     const items=Array.isArray(payload)?payload:payload.items;
     state.details.push(...items); state.detailCursor=payload.next_cursor || null; state.detailSelectors=selectors;
@@ -440,16 +598,18 @@ function renderDetails() {
     const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
   }
+  if(state.tab==='models' && state.nativeTimeline?.error)$('inspector-content').append(element('p','muted',state.nativeTimeline.error));
   if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No durable detail is available yet. Live progress can precede committed history; refresh to check again.'));
   state.details.forEach(item=>{
     const card=element('div','detail-card');
     if(state.tab==='models') {
-      card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`Run ${item.agent_run_seq} · depth ${item.depth} · ${item.purpose}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`));
+      card.append(nativeInteraction(item));
+    } else if(state.tab==='sdkmodels') {
+      card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`),element('p','muted','Framework preparation snapshot. This is not the final client message array.'));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
-      if(item.request && Object.keys(item.request).length && item.content_included!==false){const layers=element('details');layers.append(element('summary','','Prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
-      else card.append(element('p','muted','Prompt content is not available yet.'));
-      card.append(rawDetail(item,'Prompt, response & metadata'));
-      if(item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
+      if(item.request && Object.keys(item.request).length && item.content_included!==false){const layers=element('details');layers.append(element('summary','','SDK prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
+      else card.append(element('p','muted','SDK Prompt content is not available yet.'));
+      card.append(rawDetail(item,'SDK prompt, response projection & metadata'));
     } else if(state.tab==='trace') {
       const row=item.payload || {}; card.append(element('h3','',`#${item.step_event_seq} · ${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request #'+(row.model_request_seq ?? '—')}`),element('p','',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`),rawDetail(item));
       const selectors={}; ['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
@@ -500,7 +660,11 @@ async function refreshSelected() {
     let info=await api(`/api/executions/${enc(id)}`);
     if(refreshGeneration!==state.refreshGeneration || generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
     info=observedInfo(info,readGeneration);state.execution=info;if(state.recoveryReadbackId===id)state.recoveryReadbackId=null;renderExecution();
-    await loadDetail();setDisabled();
+    const nativeVisible=state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden;
+    if(nativeVisible)await loadNativeTimeline(false,true);
+    if(refreshGeneration!==state.refreshGeneration || generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
+    if(state.tab==='models' && nativeVisible)renderNativeViews();else await loadDetail();
+    setDisabled();
   }
   if(noticeId) {
     const info=noticeId===id?state.execution:await api(`/api/executions/${enc(noticeId)}`);
@@ -564,6 +728,7 @@ async function refreshObservation(id, generation) {
     if(!current())return;
     reconcileCancellation(info,session,noticeRevision);
   }
+  if(id===state.selectedExecution && terminal(info.status) && (state.view==='sessions' && state.conversationMode==='original' || state.tab==='models' && !$('inspector').hidden))await loadNativeTimeline(false,true);
   setDisabled();return true;
 }
 async function watchExecution(id,generation) {
@@ -593,7 +758,11 @@ async function watchExecution(id,generation) {
         if(frame.event==='observation_error') {const error=new Error(`${frame.data.error_code}: observation interrupted; checking Runtime state`);error.reconnect=frame.data.origin==='stream' && !frame.data.safe_details?.cleanup_pending;throw error;}
         const envelope=frame.data,item=envelope.item;
         if(envelope.cursor)state.cursor=envelope.cursor;
-        if(envelope.type==='model') {upsertModel(state.models,item.item);if(state.tab==='overview' && id===state.selectedExecution)renderOverview();}
+        if(envelope.type==='model') {
+          const previous=state.models.get(modelKey(item.item));upsertModel(state.models,item.item);
+          if(item.item.status!=='RUNNING' && (!previous || previous.status==='RUNNING') && (id===state.selectedExecution || item.item.execution_id===state.selectedExecution))scheduleNativeRefresh(item.item);
+          if(state.tab==='overview' && id===state.selectedExecution)renderOverview();
+        }
         else {
           const event=item.event,payload=event.payload || {};
           if(item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
@@ -839,6 +1008,8 @@ $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').ope
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
+$('native-mode').onclick=()=>{state.conversationMode='original';renderConversation();loadNativeTimeline().catch(showError);};
+$('chat-mode').onclick=()=>{state.conversationMode='chat';renderConversation();};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};

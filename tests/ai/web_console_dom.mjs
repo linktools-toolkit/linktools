@@ -66,7 +66,7 @@ globalThis.fetch=async(path,options={})=>{
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
   if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
-  if(detailResponses.has(key))return response(detailResponses.get(key));
+  if(detailResponses.has(key)){const value=detailResponses.get(key),result=typeof value==='function'?value(url):value;return result instanceof Response?result:response(result);}
   if(key==='/api/metrics')return response({items:[]});
   if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id)});}
   const execution=key.match(/^\/api\/executions\/([^/]+)$/);
@@ -119,6 +119,129 @@ await settle();
 assert.equal(node('list').children.length,2);
 location.hash='#session=a';await settle();
 assert.equal(node('conversation-title').textContent,'Alpha');
+assert.match(node('conversation').textContent,/Original request timeline/);
+assert.doesNotMatch(node('conversation').textContent,/a answer/);
+if(process.argv[3]==='native') {
+  const descendants=node=>[node,...node.children.flatMap(descendants)];
+  const clickText=label=>descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent===label).click();
+  const bytes=value=>({body:Buffer.from(value).toString('base64'),body_encoding:'base64'});
+  const messages=[{role:'developer',content:'<script>native only</script>',unknown:{preserve:null}},{role:'assistant',content:'',tool_calls:[{id:'call',function:{name:'read',arguments:'{"x":1}'}}]},{role:'tool',tool_call_id:'call',content:[{type:'text',text:'result'}]}];
+  const source=JSON.stringify({messages,extra_body_field:{arbitrary:true}}).slice(0,-1)+',"large_integer":9007199254740993,"duplicate":1,"duplicate":2}';
+  const responseText='data: {"choices":[{"delta":{"role":"assistant","content":"<img src=x onerror=alert(1)>"}}]}\n\n';
+  const item={execution_id:'a-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'CANCELLED',step_index:4,output_retry_index:2,started_at:'2026-01-01T00:00:00Z',finished_at:'2026-01-01T00:00:01Z',duration_ns:1000000000,model:{},content_included:false,request:{instructions:['DO NOT SYNTHESIZE SYSTEM']},client_requests_included:true,client_requests:[
+    {api:'openai.chat.completions',...bytes(source),response:{...bytes('{"error":"retry"}'),status_code:429,format:'json',content_encoding:null,complete:true}},
+    {api:'openai.chat.completions',...bytes(source),response:{...bytes(responseText),status_code:200,format:'sse',content_encoding:null,complete:false}},
+  ]};
+  detailResponses.set('/api/executions/a-run/models',{items:[item],next_cursor:'raw-next'});
+  clickText('Refresh original requests');await settle();
+  assert.match(node('conversation').textContent,/Original outbound request body/);
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===source),'Exact source retains large integers, duplicate keys, empty content, roles and all native fields');
+  assert.match(node('conversation').textContent,/"large_integer":9007199254740993,"duplicate":1,"duplicate":2/);
+  assert.match(node('conversation').textContent,/Logical request timing and identity/);
+  assert.match(node('conversation').textContent,/"step_index": 4/);
+  assert.match(node('conversation').textContent,/"output_retry_index": 2/);
+  assert.match(node('conversation').textContent,/"duration_ns": 1000000000/);
+  assert.match(node('conversation').textContent,/HTTP 429 · complete/);
+  assert.match(node('conversation').textContent,/HTTP 200 · incomplete/);
+  assert.match(node('conversation').textContent,/<img src=x onerror=alert\(1\)>/);
+  assert.doesNotMatch(node('conversation').textContent,/DO NOT SYNTHESIZE SYSTEM/);
+  const attempts=descendants(node('conversation')).filter(item=>item.dataset.clientAttempt);
+  assert.deepEqual(attempts.map(item=>item.dataset.clientAttempt),['a-run:1:1:0','a-run:1:1:1']);
+  assert.ok(descendants(node('conversation')).filter(item=>item.tagName==='PRE').every(item=>!item.innerHTML),'Original body uses text nodes, never HTML rendering');
+  let download;
+  URL.createObjectURL=blob=>{download=blob;return 'blob:test';};URL.revokeObjectURL=()=>{};
+  clickText('Download original bytes');await settle();
+  assert.equal(await download.text(),source);
+  const beforeInspector=calls.filter(call=>call.key==='/api/executions/a-run/models').length;tab('models').click();await settle();
+  assert.equal(calls.filter(call=>call.key==='/api/executions/a-run/models').length,beforeInspector,'Opening the original inspector reuses the visible timeline body page');node('inspector-close').click();
+  networkFailures.add('GET /api/executions/a-run/models');
+  clickText('Load more model requests');await settle();
+  assert.match(node('conversation').textContent,/Runtime read unavailable/);
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===source),'Failed paging preserves loaded content');
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Load more model requests'),'Failed paging retains its retry cursor');
+  networkFailures.clear();
+  const next=deferred('GET /api/executions/a-run/models'),before=calls.length;
+  const moreButton=descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Load more model requests');
+  moreButton.click();moreButton.click();await tick();
+  assert.equal(calls.slice(before).filter(call=>call.query.cursor==='raw-next').length,1);
+  next({items:[{...item,model_request_seq:2,client_requests:null},{...item,model_request_seq:3,client_requests:[]}],next_cursor:null});
+  await settle();
+  assert.match(node('conversation').textContent,/were not recorded/);
+  assert.match(node('conversation').textContent,/No supported client dispatch/);
+  const stale=deferred('GET /api/executions/a-run/models');clickText('Refresh original requests');await tick();
+  location.hash='#session=b';await settle();
+  stale({items:[item],next_cursor:null});await settle();
+  assert.doesNotMatch(node('conversation').textContent,/native only/);
+  assert.ok(calls.filter(call=>call.key.endsWith('/models')).every(call=>call.query.include_client_requests==='true' && !call.query.include_content));
+  const id='native-live',path=`/api/executions/${id}/models`;
+  sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
+  const completed=seq=>({...item,execution_id:id,model_request_seq:seq,purpose:seq===22?'compaction':'agent',status:'SUCCEEDED'});
+  detailResponses.set(path,url=>url.searchParams.has('model_request_seq')?{items:[completed(Number(url.searchParams.get('model_request_seq')))],next_cursor:null}:url.searchParams.has('cursor')?{items:Array.from({length:10},(_,i)=>completed(i+11)),next_cursor:null}:{items:Array.from({length:10},(_,i)=>completed(i+1)),next_cursor:'live-next'});
+  location.hash='#session=a';await settle();
+  const controller=streamBlocks.get(id).controller;assert.ok(controller);
+  const emit=value=>controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify(value)+'\n\n'));
+  const projection=(seq,status)=>({type:'model',item:{item:{...completed(seq),status,client_requests:null},visibility:'durable_history'}});
+  const bodyCalls=()=>calls.filter(call=>call.key===path),bodyReads=()=>bodyCalls().length;
+  emit(projection(20,'SUCCEEDED'));await settle();
+  const oldPage=deferred(`GET ${path}`);clickText('Load more model requests');await tick();
+  oldPage({items:[...Array.from({length:9},(_,i)=>completed(i+11)),{...completed(20),status:'RUNNING',client_requests:null}],next_cursor:null});await settle();
+  assert.deepEqual(descendants(node('conversation')).filter(value=>value.tagName==='H3' && value.textContent.startsWith('Request ')).map(value=>Number(value.textContent.split(' ')[1])),Array.from({length:20},(_,i)=>i+1),'Later paging retains logical request order after a newer point read');
+  assert.match(node('conversation').textContent,/Request 20 · SUCCEEDED/);assert.doesNotMatch(node('conversation').textContent,/Request 20 · RUNNING/);
+  const beforeReplay=bodyReads();emit(projection(1,'SUCCEEDED'));await settle();assert.equal(bodyReads(),beforeReplay,'Initial observation replay reuses already-loaded terminal originals');
+  const beforeDeltas=bodyReads();emit(projection(21,'RUNNING'));
+  for(let i=0;i<4;i++)emit({type:'event',item:{execution_id:id,depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:i?'!':'**live**'}}}});
+  await settle();assert.equal(bodyReads(),beforeDeltas,'Tokens and RUNNING metadata never read original bodies');
+  assert.match(node('live').textContent,/LIVE RESPONSE · incomplete SDK display/);assert.match(node('live').textContent,/live!!!/);
+  assert.ok(descendants(node('live')).some(value=>value.innerHTML.includes('<strong>live</strong>')),'Live Markdown remains visible in original mode');
+  emit(projection(21,'SUCCEEDED'));emit(projection(22,'SUCCEEDED'));emit(projection(21,'SUCCEEDED'));await settle();
+  assert.equal(bodyReads(),beforeDeltas+2,'Distinct completions read exactly their own requests and coalesce replays');
+  assert.ok(bodyCalls().slice(beforeDeltas).every(call=>call.query.agent_run_seq==='1' && ['21','22'].includes(call.query.model_request_seq)),'Completion never rereads previous history pages');
+  assert.match(node('conversation').textContent,/Request 19 · SUCCEEDED/);assert.match(node('conversation').textContent,/Request 22 · SUCCEEDED/);assert.match(node('conversation').textContent,/compaction/);assert.match(node('execution-meta').textContent,/STARTED/);
+  emit(projection(21,'SUCCEEDED'));await settle();assert.equal(bodyReads(),beforeDeltas+2,'Replayed completion does not reread bodies');
+  networkFailures.add(`GET ${path}`);clickText('Refresh original requests');await settle();
+  assert.match(node('conversation').textContent,/Request 19 · SUCCEEDED/);assert.match(node('conversation').textContent,/Request 22 · SUCCEEDED/);assert.match(node('conversation').textContent,/Runtime read unavailable/);
+  networkFailures.clear();
+  const loading=deferred(`GET ${path}`);clickText('Refresh original requests');await tick();emit(projection(23,'SUCCEEDED'));await tick();
+  loading({items:Array.from({length:10},(_,i)=>completed(i+1)),next_cursor:'live-next'});await settle();
+  assert.match(node('conversation').textContent,/Request 19 · SUCCEEDED/);assert.match(node('conversation').textContent,/Request 23 · SUCCEEDED/);
+  assert.equal(bodyCalls().filter(call=>call.query.model_request_seq==='23').length,1,'Completion during a body read refreshes its request once after paging finishes');
+  const beforeHidden=bodyReads();emit(projection(24,'SUCCEEDED'));await tick();node('chat-mode').click();await settle();
+  assert.equal(bodyReads(),beforeHidden,'A queued refresh cannot read bodies after the original view is hidden');
+  node('native-mode').click();await settle();assert.equal(bodyReads(),beforeHidden+1);assert.match(node('conversation').textContent,/Request 24 · SUCCEEDED/);
+  networkFailures.add(`GET ${path}`);emit(projection(25,'SUCCEEDED'));await settle();
+  assert.match(node('conversation').textContent,/Request 24 · SUCCEEDED/);const failedReads=bodyReads();await settle();assert.equal(bodyReads(),failedReads,'Failed point reads do not retry in a loop');
+  networkFailures.clear();clickText('Refresh original requests');await settle();assert.match(node('conversation').textContent,/Request 25 · SUCCEEDED/);
+  const child={...completed(1),execution_id:'native-child'};
+  detailResponses.set('/api/executions/native-child/models',{items:[child],next_cursor:null});
+  emit({type:'model',item:{item:{...child,client_requests:null},visibility:'durable_history'}});await settle();
+  assert.ok(calls.some(call=>call.key==='/api/executions/native-child/models' && call.query.agent_run_seq==='1' && call.query.model_request_seq==='1'),'Child completion reads its actual execution identity');
+  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-live:1:1:0'));
+  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-child:1:1:0'));
+  const deniedChild={...completed(1),execution_id:'denied-child'},deniedPath='/api/executions/denied-child/models';
+  detailResponses.set(deniedPath,()=>response({error_code:'AUTHORIZATION_DENIED'},403));
+  const corruptChild={...completed(1),execution_id:'corrupt-child'},corruptPath='/api/executions/corrupt-child/models';
+  detailResponses.set(corruptPath,()=>response({error_code:'STORAGE_INTEGRITY_ERROR'},500));
+  const readyChild={...child,model_request_seq:2};detailResponses.set('/api/executions/native-child/models',{items:[readyChild],next_cursor:null});
+  emit({type:'model',item:{item:{...deniedChild,client_requests:null},visibility:'durable_history'}});
+  emit({type:'model',item:{item:{...corruptChild,client_requests:null},visibility:'durable_history'}});
+  emit({type:'model',item:{item:{...readyChild,client_requests:null},visibility:'durable_history'}});
+  emit(projection(26,'SUCCEEDED'));await settle();
+  assert.match(node('conversation').textContent,/Request 26 · SUCCEEDED/,'One failed child body read cannot block another completed root request');
+  assert.match(node('conversation').textContent,/denied-child · request 1: AUTHORIZATION_DENIED/);
+  assert.match(node('conversation').textContent,/corrupt-child · request 1: STORAGE_INTEGRITY_ERROR/);
+  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-child:1:2:0'));
+  const deniedReads=()=>calls.filter(call=>call.key===deniedPath).length;
+  assert.equal(deniedReads(),1);emit(projection(27,'SUCCEEDED'));await settle();
+  assert.match(node('conversation').textContent,/Request 27 · SUCCEEDED/);assert.equal(deniedReads(),1,'Unrelated completions do not automatically retry a failed body read');
+  assert.match(node('conversation').textContent,/denied-child · request 1: AUTHORIZATION_DENIED/);
+  detailResponses.set(deniedPath,{items:[deniedChild],next_cursor:null});detailResponses.set(corruptPath,{items:[corruptChild],next_cursor:null});
+  clickText('Refresh original requests');await settle();assert.equal(deniedReads(),2,'Explicit refresh retries the failed identity');
+  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='denied-child:1:1:0'));
+  assert.doesNotMatch(node('conversation').textContent,/AUTHORIZATION_DENIED|STORAGE_INTEGRITY_ERROR/);
+  console.log('Original timeline contracts passed: native arrays, attempts, response provenance, safe text, byte download, paging and navigation');
+  process.exit(0);
+}
+node('chat-mode').click();await settle();
 assert.match(node('conversation').textContent,/a answer/);
 
 // Progressive disclosure keeps explicit controls, focus, and authoritative ownership.
@@ -136,7 +259,7 @@ assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('
 for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
 assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="close-session"[\s\S]*?<\/details>/);
 assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
-assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','trace','recovery']);
+assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','sdkmodels','trace','recovery']);
 if(readOnly){
   for(const id of ['send','prompt','planning','thinking','memory','files','new-session','retry','fork-run','end-stopped','rename-session','fork-session','close-session'])assert.equal(node(id).disabled,true,id);
   assert.equal(node('connection').hidden,false);assert.equal(node('connection').textContent,'Read-only');
@@ -152,7 +275,7 @@ if(process.argv[3]==='navigation'){
   tab('models').click();await settle();node('inspector-close').click();const hiddenReads=calls.length;
   location.hash='#session=b';await settle();assert.equal(node('inspector').hidden,true);
   assert.ok(!calls.slice(hiddenReads).some(item=>item.key.endsWith('/models')),'A hidden inspector cannot request another execution body');
-  node('inspector-toggle').click();await settle();assert.ok(calls.slice(hiddenReads).some(item=>item.key==='/api/executions/b-run/models' && item.query.include_content==='true'));
+  node('inspector-toggle').click();await settle();assert.ok(calls.slice(hiddenReads).some(item=>item.key==='/api/executions/b-run/models' && item.query.include_client_requests==='true'));
   node('inspector-close').click();const hiddenRefresh=calls.length;node('refresh').click();await settle();
   assert.ok(!calls.slice(hiddenRefresh).some(item=>item.key.endsWith('/models')),'Refreshing a conversation does not refresh hidden detail bodies');
   const closedDetail=deferred('GET /api/executions/b-run/models');node('inspector-toggle').click();await tick();node('inspector-close').click();
@@ -780,17 +903,17 @@ assert.equal(new URLSearchParams(location.hash.slice(1)).get('execution'),'b-run
 
 // A committed RUNNING identity can have an intentionally empty prompt envelope.
 detailResponses.set('/api/executions/b-run/models',{items:[{execution_id:'b-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'RUNNING',model:{},request:{},response:null,content_included:true}],next_cursor:null});
-tab('models').click();await settle();
+tab('sdkmodels').click();await settle();
 assert.match(node('inspector-content').textContent,/Prompt content is not available yet/);
-assert.doesNotMatch(node('inspector-content').textContent,/Prompt architecture/);
+assert.doesNotMatch(node('inspector-content').textContent,/SDK prompt architecture/);
 
 // Former history/trace summaries remain human-readable without an eager trace fetch.
 const beforeTrace=calls.filter(call=>call.key.endsWith('/trace')).length;
 detailResponses.set('/api/executions/b-run/models',{items:[{execution_id:'b-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{model_name:'Recorded model'},duration_ns:1000,usage:{input_tokens:10,output_tokens:4,cache_read_tokens:3,cache_write_tokens:2},request:{messages:[{parts:[{part_kind:'system-prompt',content:'real system prompt'}]}],parameters:{instruction_parts:[{name:'workspace',content:'fixed',dynamic:false}],output_mode:'text'}},content_included:true}],next_cursor:null});
-tab('models').click();await settle();
+tab('sdkmodels').click();await settle();
 assert.match(node('inspector-content').textContent,/Recorded model · 1.000 us/);
 assert.match(node('inspector-content').textContent,/3 cache read \/ 2 cache write/);
-assert.match(node('inspector-content').textContent,/Prompt architecture/);
+assert.match(node('inspector-content').textContent,/SDK prompt architecture/);
 assert.match(node('inspector-content').textContent,/System Prompt1 part\(s\) · ~18 chars/);
 assert.match(node('inspector-content').textContent,/Fixed Instructions \(F0\/F1\)/);
 assert.equal(calls.filter(call=>call.key.endsWith('/trace')).length,beforeTrace);
