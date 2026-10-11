@@ -109,9 +109,9 @@ jobs:
         env:
           INSTALL_PACKAGES: ${{ matrix.check.install }}
         run: |
-          python -m pip install --quiet -U -r requirements.txt
+          python -m pip install -U -r requirements.txt
           read -r -a packages <<< "$INSTALL_PACKAGES"
-          python manage.py install "${packages[@]}" --editable --quiet
+          python manage.py install "${packages[@]}" --editable
       - name: Run checks
         id: checks
         shell: bash
