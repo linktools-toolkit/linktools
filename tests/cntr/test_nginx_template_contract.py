@@ -466,3 +466,26 @@ def test_identity_field_definition_drives_capture_output_and_protection(fresh_ma
         nginx.validated_auth_headers({"X-Auth-Display": "forged"})
     with pytest.raises(ContainerError, match="reserved"):
         nginx.header_items(site, {"X-Auth-Display": "forged"})
+
+
+def test_request_header_definition_drives_business_auth_and_waf(fresh_manager, monkeypatch):
+    nginx = fresh_manager.containers["nginx"]
+    monkeypatch.setattr(type(nginx), "request_headers", tuple(
+        (name, "$custom_host" if name == "Host" else value)
+        for name, value in nginx.request_headers
+    ))
+    site = make_site(waf=True)
+    for authentication in (False, True):
+        headers = dict(nginx.header_items(site, authentication=authentication))
+        assert headers["Host"] == '\"$custom_host\"'
+        assert headers["X-Forwarded-For"] == '\"$original_client_ip\"'
+        assert headers["Forwarded"] == '\"\"'
+    server = nginx._render_site_template(
+        nginx, nginx.get_source_path("templates", "server.conf"), site)
+    assert "proxy_set_header Host $custom_host;" in server
+    assert "proxy_set_header Host $original_host;" not in server
+    headers = dict(nginx.header_items(site, {"hOsT": "backend.example", "x-forwarded-port": ""}))
+    assert headers["hOsT"] == '\"backend.example\"'
+    assert headers["x-forwarded-port"] == '\"\"'
+    with pytest.raises(ContainerError, match="reserved"):
+        nginx.validated_auth_headers({"x-forwarded-for": "forged"})

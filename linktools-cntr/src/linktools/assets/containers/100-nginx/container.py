@@ -42,6 +42,16 @@ class Container(BaseContainer):
     )
     identity_headers = ("User", "Groups", "Name", "Email")
 
+    request_headers = (
+        ("Host", "$original_host"), ("Upgrade", "$http_upgrade"),
+        ("Connection", "$connection_upgrade"), ("X-Real-IP", "$original_client_ip"),
+        ("X-Original-URL", "$original_scheme://$original_host$original_uri"),
+        ("X-Original-Method", "$original_method"), ("X-Forwarded-Proto", "$original_scheme"),
+        ("X-Forwarded-Host", "$original_host"), ("X-Forwarded-URI", "$original_uri"),
+        ("X-Forwarded-Method", "$original_method"), ("X-Forwarded-For", "$original_client_ip"),
+        ("X-Forwarded-Port", "$original_port"), ("Forwarded", ""),
+    )
+
     def quote(self, value: object) -> str:
         data = str(value)
         if any(ch in data for ch in ("\r", "\n", "\x00")):
@@ -53,12 +63,8 @@ class Container(BaseContainer):
     def validated_auth_headers(cls, headers: "Mapping[str, str]") -> "dict[str, str]":
         result = {}
         seen = set()
-        forbidden = {
-            "host", "forwarded", "x-real-ip", "x-original-url",
-            "x-original-method", "x-forwarded-for", "x-forwarded-host",
-            "x-forwarded-method", "x-forwarded-proto", "x-forwarded-uri",
-            "x-forwarded-port",
-        }
+        forbidden = {name.lower() for name, _ in cls.request_headers
+                     if name not in ("Upgrade", "Connection")}
         forbidden.update("x-auth-" + name.lower() for name in cls.identity_headers)
         for key, value in headers.items():
             if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", key):
@@ -251,15 +257,7 @@ class Container(BaseContainer):
     def header_items(self, site: "ResolvedSite | SimpleNamespace", overrides: "Mapping[str, str | None] | None" = None,
                      authentication: bool = False) -> "tuple[tuple[str, str], ...]":
         """Build a complete case-insensitive header set for one proxy location."""
-        headers = {
-            "Host": "$original_host", "Upgrade": "$http_upgrade",
-            "Connection": "$connection_upgrade", "X-Real-IP": "$original_client_ip",
-            "X-Original-URL": "$original_scheme://$original_host$original_uri",
-            "X-Original-Method": "$original_method", "X-Forwarded-Proto": "$original_scheme",
-            "X-Forwarded-Host": "$original_host", "X-Forwarded-URI": "$original_uri",
-            "X-Forwarded-Method": "$original_method", "X-Forwarded-For": "$original_client_ip",
-            "X-Forwarded-Port": "$original_port", "Forwarded": "",
-        }
+        headers = dict(self.request_headers)
         for header, _, _, _ in self.original_headers:
             headers[header] = ""
         for name in self.identity_headers:
