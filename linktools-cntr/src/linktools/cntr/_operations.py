@@ -190,11 +190,11 @@ class ComposeOperations:
                     saved_compose[path] = stream.read()
             except FileNotFoundError:
                 pass
-        # Runtime inspection renders Compose files, so retain recovery inputs first.
         actual = manager.docker_inspector.get_project_state(explicit.project_containers)
         initial = actual.running_services
         selection = self.start_selection(explicit, running_services=initial)
-        refresh = frozenset(self.start_selection(explicit).services) if pull else frozenset()
+        refresh = frozenset(selection.services if explicit.full else
+                            self.start_selection(explicit).services) if pull else frozenset()
         context = self._make_context(["restart" if restart else "up", pull and "pull"], selection)
         context.refresh_services = refresh
         context.initial_runtime_state = actual

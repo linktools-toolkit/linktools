@@ -94,3 +94,36 @@ def test_full_operation_leaves_disabled_running_owner_unprepared(tmp_path, resta
     operation()
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
     assert "optional" in manager.running_state.get_persisted()
+
+
+@pytest.mark.parametrize("partial,expected", [(False, 3), (True, 4)])
+def test_pull_profile_resolution_reuses_only_full_selection_before_preparation(tmp_path, partial, expected):
+    from copy import deepcopy
+    from test_lifecycle_rebuild import setup_case
+    from linktools.cntr.artifacts import AppliedServiceModels
+    manager = setup_case(tmp_path, [
+        ("app", {"app": {"image": "app:old"}}),
+        ("optional", {"optional": {"image": "optional:old", "profiles": ["debug"]}}),
+    ], running=("app",))
+    AppliedServiceModels(manager, manager.model).record(("app", "optional"))
+    native = ComposeRunner(manager)
+    manager.compose_runner.final_model = native.final_model
+    manager.runtime = SimpleNamespace(create_docker_process=lambda *args, **kwargs: args)
+    calls = []
+
+    def resolve(args, **kwargs):
+        calls.append((args[args.index("config"):], manager.model["services"]["app"].get("environment")))
+        model = deepcopy(manager.model)
+        if "--no-interpolate" not in args:
+            model["services"].pop("optional")
+        return model
+
+    manager.structured_runner = SimpleNamespace(execute_json=resolve)
+    manager.containers["app"].on_starting = lambda context: manager.model["services"]["app"].update(
+        environment={"PREPARED": "yes"})
+    manager.compose_operations.up(["app"] if partial else None, pull=True)
+    assert len(calls) == expected
+    assert calls[0][1] is None
+    assert calls[-2][1] == {"PREPARED": "yes"}
+    assert "--no-interpolate" in calls[-1][0]
+    assert [event[1] for event in manager.events if event[0] == "images"] == [("app",)]

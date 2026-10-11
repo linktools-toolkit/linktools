@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from linktools.core import environ
+
 from ..container import ContainerError
 
 if TYPE_CHECKING:
@@ -114,12 +116,14 @@ class StructuredCommandRunner:
             timeout: "TimeoutType | None" = None,
             check: bool = True,
             error_type: "type | None" = None,
+            phase: str = "Structured command",
     ) -> "CommandResult":
         # Redacted immediately: CommandResult.args and every exception message
         # built from `args` below must never carry a secret (e.g. a
         # --build-arg proxy URL with embedded credentials).
         args = redact_command(tuple(str(a) for a in (getattr(process, "args", None) or ())))
         started = time.monotonic()
+        debug = False
         stdout_chunks: "list[str]" = []
         stderr_chunks: "list[str]" = []
         # `None` here means "fetch() never reaped it" -- captured right after
@@ -128,6 +132,9 @@ class StructuredCommandRunner:
         # real returncode.
         returncode = None
         try:
+            debug = environ.debug
+            if debug:
+                environ.logger.debug("Starting %s", phase)
             for out, err in process.fetch(timeout=timeout):
                 if out:
                     stdout_chunks.append(self._decode(out))
@@ -141,8 +148,12 @@ class StructuredCommandRunner:
             # the same stdin/stdout/stderr pipe FDs Process.close() exists
             # to release deterministically, and doesn't leave a zombie
             # process behind after a timeout kill.
-            process.recursive_kill()
-            process.close()
+            try:
+                process.recursive_kill()
+            finally:
+                process.close()
+                if debug:
+                    environ.logger.debug("Finished %s in %.2fs", phase, time.monotonic() - started)
         duration = time.monotonic() - started
 
         timed_out = returncode is None
@@ -173,16 +184,18 @@ class StructuredCommandRunner:
             process: "Process",
             timeout: "TimeoutType | None" = None,
             check: bool = True,
+            phase: str = "Structured command",
     ) -> "CommandResult":
-        return self.execute(process, timeout=timeout, check=check)
+        return self.execute(process, timeout=timeout, check=check, phase=phase)
 
     def execute_json(
             self,
             process: "Process",
             timeout: "TimeoutType | None" = None,
             check: bool = True,
+            phase: str = "Structured command",
     ) -> "Any":
-        result = self.execute(process, timeout=timeout, check=check)
+        result = self.execute(process, timeout=timeout, check=check, phase=phase)
         try:
             return json.loads(result.stdout)
         except (json.JSONDecodeError, ValueError) as exc:

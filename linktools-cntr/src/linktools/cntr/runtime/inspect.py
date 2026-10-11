@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Read-only Docker/Compose state inspection.
 
-Wraps ``docker version``/``docker compose version``/``docker compose ps
+Wraps ``docker version``/``docker compose version``/``docker container ls
 --quiet``/``docker inspect`` through StructuredCommandRunner; never mutates
 state, never a second runtime. Actual project state is built from a
 Compose-project container id list plus a batch ``docker inspect``, since
@@ -266,12 +266,13 @@ class DockerInspector:
             return None
         return result.stdout.strip() or None
 
-    def _list_project_container_ids(self, containers: "Iterable[BaseContainer]",
-                                    services: "Iterable[str]" = ()) -> "list[str]":
-        process = self.manager.runtime.create_docker_compose_process(
-            containers, "ps", "--all", "--quiet", *services,
-            capture_output=True,
-        )
+    def _list_project_container_ids(self, services: "tuple[str, ...]" = ()) -> "list[str]":
+        args = ["container", "ls", "--all", "--quiet", "--no-trunc",
+                "--filter", "label=com.docker.compose.project=" + self.manager.project_name,
+                "--filter", "label=com.docker.compose.config-hash"]
+        if len(services) == 1:
+            args.extend(["--filter", "label=com.docker.compose.service=" + services[0]])
+        process = self.manager.runtime.create_docker_process(*args, capture_output=True)
         result = self.manager.structured_runner.execute_text(process, check=True)
         return _parse_container_ids(result.stdout)
 
@@ -326,8 +327,7 @@ class DockerInspector:
         containers = tuple(containers)
         selected = None if services is None else tuple(dict.fromkeys(services))
         if not containers or selected == ():
-            # Nothing to build a --file set from -- there is trivially
-            # nothing running, not an unavailable/unqueryable runtime.
+            # An empty requested scope needs no runtime observation.
             return ProjectRuntimeState(
                 project=self.manager.project_name, services=(), backend=self.manager.container_type,
             )
@@ -340,11 +340,10 @@ class DockerInspector:
                     owners.append(container.name)
 
         try:
-            # Retained services can outlive their current Compose declaration.
-            # Compose rejects unknown service filters, so discover those by label
-            # from the full project instead of treating them as absent.
+            # Multiple service labels would be AND filters; filter that union
+            # after inspection, retaining orphan services and namespace identities.
             filters = selected if selected is not None and set(selected) <= set(service_owners) else ()
-            container_ids = self._list_project_container_ids(containers, filters)
+            container_ids = self._list_project_container_ids(filters)
         except (StructuredCommandError, OSError) as exc:
             raise RuntimeInspectionUnavailable(str(exc)) from exc
 
@@ -364,7 +363,7 @@ class DockerInspector:
             # already turned an invalid-JSON response into
             # RuntimeInspectionOutputError before it could reach here, so
             # this branch is never entered for corrupted output). Every id
-            # just came from `compose ps`, so an empty recovery result here
+            # just came from `docker container ls`, so an empty recovery result here
             # means every one of them disappeared in the meantime -- a
             # legitimate empty project state, not an error.
             items = self._inspect_containers_recovering(container_ids)

@@ -199,7 +199,7 @@ class ComposeRunner:
                 model = complete
             return model
     def _resolved_model(self, process: "Process") -> "dict[str, Any]":
-        result = self.manager.structured_runner.execute_json(process, check=True)
+        result = self.manager.structured_runner.execute_json(process, check=True, phase="Compose configuration")
         if not isinstance(result, dict) or not isinstance(result.get("services"), dict):
             from ..errors import ContainerError
             raise ContainerError("Docker Compose returned an invalid final model")
