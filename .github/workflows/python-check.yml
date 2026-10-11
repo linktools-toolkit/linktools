@@ -118,9 +118,9 @@ jobs:
           INSTALL_PACKAGES: ${{ matrix.check.install }}
         run: |
           rm -- .github/.pip-install-scope
-          python -m pip install -U -r requirements.txt
+          python -m pip install --quiet -U -r requirements.txt
           read -r -a packages <<< "$INSTALL_PACKAGES"
-          python manage.py install "${packages[@]}" --editable
+          python manage.py install "${packages[@]}" --editable --quiet
       - name: Run checks
         id: checks
         shell: bash
