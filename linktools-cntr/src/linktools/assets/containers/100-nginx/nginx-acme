@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+umask 077
+
+state=$1
+shift
+credentials=/run/acme-secrets/dns.env
+keys=/opt/acme/dns-keys
+
+strip_credentials() (
+    test -d "$state" || exit 0
+    rules=$(mktemp)
+    trap 'rm -f "$rules"' EXIT
+    { cat "$keys"; sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$credentials"; } |
+        sort -u | while IFS= read -r key; do
+            test -n "$key" || continue
+            printf '/^%s=/d\n/^SAVED_%s=/d\n' "$key" "$key"
+        done > "$rules"
+    find "$state" -type f -name '*.conf' -exec sed -i -f "$rules" {} +
+)
+
+strip_credentials
+status=0
+(
+    . "$credentials"
+    exec /opt/acme/acme.sh --home /opt/acme --config-home "$state" "$@"
+) || status=$?
+strip_credentials
+exit "$status"

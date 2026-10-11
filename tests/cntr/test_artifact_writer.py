@@ -264,6 +264,7 @@ def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager)
     nginx = fresh_manager.containers["nginx"]
     compose_path = nginx.get_docker_compose_file()
     before = os.stat(compose_path).st_mtime_ns
+    content = compose_path.read_text()
 
     # Re-render from a fresh container instance over the same data dir --
     # deterministic config means byte-identical output.
@@ -272,4 +273,100 @@ def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager)
     nginx_again.get_docker_compose_file()
 
     after = os.stat(compose_path).st_mtime_ns
+    assert compose_path.read_text() == content
     assert after == before
+
+
+def test_nginx_network_attachment_resolves_dependencies_without_prepared_enable_flags(fresh_manager, monkeypatch):
+    fresh_manager.installed_state.remove(*fresh_manager.containers)
+    fresh_manager.installed_state.add("portainer")
+    monkeypatch.setattr(type(fresh_manager.containers["portainer"]), "dependencies",
+                        property(lambda self: ["safeline"]))
+    for container in fresh_manager.containers.values():
+        container.enable = False
+    nginx = fresh_manager.containers["nginx"]
+    nginx.__dict__.pop("docker_compose", None)
+
+    networks = nginx.docker_compose["services"]["nginx"]["networks"]
+
+    assert fresh_manager.installed_state.load_names() == ["portainer"]
+    assert "safeline-ce" in networks
+    assert not any(container.enable for container in fresh_manager.containers.values())
+
+
+@pytest.mark.parametrize("compose,docker_file", [
+    ({"services": {"app": {"image": "example:1", "labels": {"label": "café"}}}}, "FROM scratch\n"),
+    ({"services": {"app": {"image": "example:1"}}}, None),
+    (None, "FROM scratch\n"),
+    ({}, ""),
+])
+def test_candidates_match_written_content_without_creating_paths(tmp_path, compose, docker_file):
+    from types import SimpleNamespace
+    from linktools.cntr.artifacts import collect_candidates
+    from linktools.cntr._container.compose import write_docker_compose_file, write_docker_file
+
+    data_path = tmp_path / "not-created"
+    manager = _FakeManager(data_path)
+    manager.docker_compose_names = ("docker-compose.yml",)
+    manager.artifact_index = ArtifactIndex(manager)
+    container = SimpleNamespace(
+        manager=manager, name="app", docker_compose=compose, docker_file=docker_file,
+        repo_context=None, get_source_path=lambda name: tmp_path / "sources" / name,
+    )
+
+    candidates = collect_candidates(manager, (container,))
+
+    assert not data_path.exists()
+    compose_path = write_docker_compose_file(container)
+    docker_file_path = write_docker_file(container)
+    written = {str(path) for path in (compose_path, docker_file_path) if path is not None}
+    assert set(candidates) == written
+    for path, (kind, owner, content) in candidates.items():
+        assert owner == "app"
+        with open(path, encoding="utf-8") as stream:
+            assert stream.read() == content
+        entry = manager.artifact_index.load()[os.path.relpath(path, str(data_path))]
+        assert entry["kind"] == kind
+        assert entry["sha256"] == sha256_of(content)
+
+
+def test_candidate_serializers_read_each_model_once(tmp_path):
+    from linktools.cntr.artifacts import collect_candidates
+
+    class Container:
+        name = "app"
+        manager = _FakeManager(tmp_path / "unused")
+        compose_reads = 0
+        docker_file_reads = 0
+
+        @property
+        def docker_compose(self):
+            self.compose_reads += 1
+            return {"services": {"app": {"image": "example:1"}}}
+
+        @property
+        def docker_file(self):
+            self.docker_file_reads += 1
+            return "FROM scratch\n"
+
+    container = Container()
+    assert len(collect_candidates(container.manager, (container,))) == 2
+    assert container.compose_reads == 1
+    assert container.docker_file_reads == 1
+
+
+def test_invalid_compose_candidate_fails_before_creating_destination(tmp_path):
+    from types import SimpleNamespace
+    import yaml
+    from linktools.cntr.artifacts import collect_candidates
+    from linktools.cntr._container.compose import write_docker_compose_file
+
+    manager = _FakeManager(tmp_path / "not-created")
+    container = SimpleNamespace(
+        manager=manager, name="app", docker_compose={"unsafe": object()}, docker_file=None,
+    )
+    for render in (lambda: collect_candidates(manager, (container,)),
+                   lambda: write_docker_compose_file(container)):
+        with pytest.raises(yaml.representer.RepresenterError):
+            render()
+        assert not manager.data_path.exists()

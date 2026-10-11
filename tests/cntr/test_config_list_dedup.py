@@ -1,16 +1,6 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`ct-cntr config list` must never print the same config key twice.
-
-Regression: a repo-backed (non-builtin) container's own `env_config` is a
-different Config *object* from the shared `manager.env_config` (only the
-Environment/RuntimeOverride/Persistent sources are actually shared across
-them -- the local-file layer differs per repo). `on_command_list` used to
-dedup by `(id(config), key)`, so a key declared by that container's own
-`configs` (added via its own env_config) was never recognized as the same
-key later re-discovered through `manager.env_config.persisted_keys()`
-(which enumerates the whole shared Persistent namespace, not just
-manager-declared fields) -- printing it twice.
-"""
+"""Shared config keys are listed once even when both declared and persisted."""
 import os
 
 import _harness

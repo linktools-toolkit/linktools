@@ -12,7 +12,6 @@ import yaml
 
 from linktools import utils
 from linktools.rich import choose, confirm
-from ..runtime.compose import ComposeOptions
 
 if TYPE_CHECKING:
     from typing import Any
@@ -20,44 +19,15 @@ if TYPE_CHECKING:
 
 
 def up(container: "BaseContainer", pull: bool = False) -> None:
-    context = container.make_exec_context(["up", pull and "pull"])
-    services = container.compose_runner.collect_services(context)
-    # exec never emitted default --pull flags -> emit_default_pull=False.
-    with container.lifecycle.notify_start(context):
-        model = container.compose_runner.final_model(context)
-        container.manager.image_preparer.execute(
-            context, model, services, force_pull=pull)
-        container.compose_runner.up(context, ComposeOptions(services=services))
-        # Recorded immediately after up succeeds, still inside this `with`
-        # (before notify_start's on_started/AFTER_START hooks) -- see
-        # operations.ComposeOperations.up's identical comment for why.
-        container.running_state.mark_started(context)
+    container.manager.compose_operations.up((container.name,), pull=pull)
 
 
 def restart(container: "BaseContainer", pull: bool = False) -> None:
-    context = container.make_exec_context(["restart", pull and "pull"])
-    services = container.compose_runner.collect_services(context)
-    with container.lifecycle.notify_stop(context):
-        container.compose_runner.stop(context, services)
-        # If build/up below then fails, persisted state must reflect that
-        # the target is actually stopped.
-        container.running_state.mark_stopped(context)
-
-    with container.lifecycle.notify_start(context):
-        model = container.compose_runner.final_model(context)
-        container.manager.image_preparer.execute(
-            context, model, services, force_pull=pull)
-        container.compose_runner.up(context, ComposeOptions(services=services))
-        container.running_state.mark_started(context)
+    container.manager.compose_operations.restart((container.name,), pull=pull)
 
 
 def down(container: "BaseContainer") -> None:
-    context = container.make_exec_context("down")
-    services = container.compose_runner.collect_services(context)
-
-    with container.lifecycle.notify_stop(context):
-        container.compose_runner.down(context, services)
-        container.running_state.mark_stopped(context)
+    container.manager.compose_operations.down((container.name,))
 
 
 def config(container: "BaseContainer") -> "dict[str, Any] | None":
