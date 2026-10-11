@@ -134,3 +134,32 @@ def test_optional_site_url_does_not_swallow_provider_configuration_errors(fresh_
         server_name="sso.example.com", https=True, proxy="http://app"), 0)
     with pytest.raises(ContainerError, match="disabled global capability"):
         site.get_url(default="")
+
+
+@pytest.mark.parametrize("domain", ["", "sso.example.com"])
+@pytest.mark.parametrize("https", [False, True])
+@pytest.mark.parametrize("auth", [False, True])
+@pytest.mark.parametrize("installed", [False, True])
+def test_builtin_public_site_declares_https_requirement(fresh_manager, monkeypatch, domain, https, auth, installed):
+    from linktools.cntr import ContainerError
+    fresh_manager.env_config.set("AUTHELIA_DOMAIN", domain)
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", https)
+    fresh_manager.env_config.set("NGINX_AUTH_ENABLE", auth)
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", False)
+    if not installed:
+        monkeypatch.setattr(fresh_manager, "integration_snapshot", {
+            name: declarations for name, declarations in fresh_manager.integration_snapshot.items()
+            if name != "nginx"
+        })
+    site = ResolvedSite.find(fresh_manager.containers["authelia"])
+    enabled = bool(domain) and installed
+    if enabled and not https:
+        with pytest.raises(ContainerError, match="https explicitly requires a disabled global capability"):
+            site.resolve()
+        with pytest.raises(ContainerError, match="https explicitly requires a disabled global capability"):
+            site.get_url()
+    else:
+        assert site.resolve() is site
+        assert site.enabled == enabled
+        assert site.https == enabled
+        assert site.get_url() == ("https://sso.example.com" if enabled else "")

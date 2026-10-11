@@ -64,6 +64,7 @@ class Container(BaseContainer):
         return endpoint(
             self,
             domain=self.get_config_later("AUTHELIA_DOMAIN"),
+            https=True,
             template=self.get_source_path("templates", "nginx.conf"),
             waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
             auth=(None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False),

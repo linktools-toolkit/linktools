@@ -529,3 +529,11 @@ def test_omitted_reference_requires_a_declared_site() -> None:
     producer.manager.containers["nginx"].sites.clear()
     with pytest.raises(ContainerError, match="Expected one declared nginx site"):
         str(load_nginx_url(producer))
+
+
+def test_site_resolution_does_not_special_case_producer_names():
+    producer = Producer(Nginx.site("public.example.test", proxy="http://app",
+                                  https=False, auth=False, waf=False))
+    producer.name = "authelia"
+    assert producer.site.resolve() is producer.site
+    assert producer.site.public_url == "http://public.example.test"

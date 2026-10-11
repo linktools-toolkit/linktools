@@ -213,6 +213,4 @@ class ResolvedSite:
         for field in ("default_server", "https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
                       "cert_domains", "template_vars"):
             getattr(self, field)
-        if self.producer.name == "authelia" and not self.https:
-            self._error("Authelia public site requires HTTPS")
         return self
