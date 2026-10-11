@@ -62,7 +62,9 @@ def test_authelia_waf_bypass_preserves_auth_and_other_sites(
     assert site.waf is waf_enabled
     assert site.auth is True
     assert site.auth_bypass == (r"\.(css|js)$",)
-    assert site.auth_rule["subject"] == ["group:lldap_admin"]
+    acl = fresh_manager.containers["authelia"].acl_rules
+    rule = next(rule for rule in acl if rule.get("domain") == site.literal_domain)
+    assert rule["subject"] == ["group:lldap_admin"]
     assert "auth_request /_internal/auth;" in rendered
     assert "location /auth-admin {" in rendered
     if not waf_enabled:

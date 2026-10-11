@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import Flare, Nginx, load_port_url
+from linktools.cntr.ext import Authelia, Flare, Nginx, load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -70,8 +70,8 @@ class Container(BaseContainer):
                 proxy="http://flare:5005",
                 auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
-                auth_rule={"policy": "one_factor"} if self.get_config("FLARE_AUTH_ENABLE") else None,
             )},
+            Authelia.access(policy="one_factor"),
         ]
 
 

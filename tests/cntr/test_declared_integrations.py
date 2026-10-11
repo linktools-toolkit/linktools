@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Declarative integrations do not depend on navigation registration."""
 
-from linktools.cntr.ext import Nginx, load_nginx_url
+from linktools.cntr.ext import Nginx, iter_declarations, load_nginx_url
 from linktools.cntr.lifecycle import HookPhase
 
 
@@ -73,7 +73,7 @@ def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monke
         original = container.get_config
         monkeypatch.setattr(container, "get_config", lambda key, *args, _get=original, **kwargs:
                             _get(key, *args, **kwargs) if key.endswith("AUTH_ENABLE") else fail())
-        links = [value for value in container.integrations if isinstance(value, Flare)]
+        links = [value for _, value in iter_declarations(container.integrations) if isinstance(value, Flare)]
         assert links
         assert all(isinstance(link, Flare) for link in links)
     assert not hasattr(BaseContainer, "exposes")
@@ -137,10 +137,11 @@ def test_proxy_runtime_dependency_does_not_select_authelia_admin(fresh_manager):
 
 
 def test_integrations_public_type_accepts_named_and_anonymous_declarations() -> None:
-    from typing import Iterable, Mapping, Union
+    from typing import Iterable, List, Mapping, Tuple, Union
     from linktools.cntr import Integration, Integrations
 
-    assert Integrations == Union[Mapping[str, Integration], Iterable[Union[Mapping[str, Integration], Integration]]]
+    declaration = Union[Integration, Mapping[str, Integration], List["Declaration"], Tuple["Declaration", ...]]
+    assert Integrations == Union[Mapping[str, Integration], Iterable[declaration]]
 
 
 def _site_navigation_manager(declarations, links=None, nginx=True):
@@ -464,7 +465,7 @@ def test_flare_container_factory_preserves_lazy_urls() -> None:
     assert isinstance(link, Flare)
     assert link.display_category is Flare.category("container")
     assert link.desc == "Internal"
-    assert not hasattr(link, "with_default_url")
+    assert link.with_default_url("https://app.test")._url is link._url
     manager, _ = _site_navigation_manager({}, [link])
     assert reads == []
     result = _render_navigation(manager)
@@ -495,7 +496,7 @@ def test_flare_container_factory_requires_explicit_site_urls() -> None:
     ]
     assert reads == ["NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
     assert omitted.url is empty.url is disabled.url is None
-    assert not hasattr(Flare, "with_default_url")
+    assert omitted.with_default_url("https://app.test").url is None
 
 
 def test_flare_bookmark_factories_preserve_category_description_and_url_contract() -> None:
@@ -617,5 +618,25 @@ def test_flare_display_category_does_not_shadow_factory():
     link = category("Docs", "web", "Docs")
     assert link.display_category is category
     assert callable(link.category)
-    assert not hasattr(link, "with_default_url")
+    assert link.with_default_url("https://app.test")._url is link._url
     assert category("Docs", "web", "Docs", "https://docs.test").display_category is category
+
+
+def test_standalone_flare_output_reports_missing_metadata_instead_of_serializing_sentinels() -> None:
+    import pytest
+    from linktools.cntr.ext import Flare
+
+    for link, field in ((Flare.public(icon="web", url="https://app.test"), "name"),
+                        (Flare.container(name="App", url="https://app.test"), "icon")):
+        manager, _ = _site_navigation_manager({}, [link])
+        with pytest.raises(ValueError, match="requires (a|an) " + field):
+            _render_navigation(manager)
+
+
+def test_unbound_partial_flare_metadata_is_not_consumed_without_a_url() -> None:
+    from linktools.cntr.ext import Flare
+
+    manager, reads = _site_navigation_manager({}, [Flare.public(), Flare.container()])
+    assert _render_navigation(manager) == {"apps.yml": {"links": []},
+                                           "bookmarks.yml": {"categories": [], "links": []}}
+    assert reads == []

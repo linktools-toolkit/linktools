@@ -267,26 +267,34 @@ return [
 ]
 ```
 
-常见的 HTTP 服务可以用纯函数 `endpoint` 组合已有声明：
+常见服务使用平铺的 `endpoint` 声明主入口；首页导航按需添加：
 
 ```python
-from linktools.cntr.ext import endpoint
+from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
 
-return endpoint(
-    self, "web", name="应用", icon="web", desc="应用描述",
-    domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
-    direct_port="APP_PORT",
-)
+return [
+    endpoint(
+        self,
+        domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
+        extensions=[
+            Flare.links(
+                Flare.public(),
+                Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+                name="应用", icon="web", desc="应用描述",
+            ),
+            Authelia.access(policy="one_factor"),
+        ],
+    ),
+]
 ```
 
-该函数返回普通声明元组，不注册代理或读取配置；可选的 `direct_port` 生成 HTTP
-直连书签，`oidc_paths` 生成独立回调声明。复杂模板、通配域名及其他高级选项仍直接
-使用 `ext`，也可以与展开的 `endpoint(...)` 结果混用。
-
-每个 Nginx 站点都必须显式提供 key（默认站点通常使用 `"web"`），同一容器内的
-站点 key 不可重复；不同容器可以复用。`Nginx` 不再含 `local_id` / `link`。
-迁移原附属导航时，为原来省略的 URL 显式传入 `load_nginx_url(self, key)`，保留
-已有 URL、`None` 和空字符串；先放原附属导航，再放原独立导航，以保留显示顺序。
+`endpoint` 内部使用稳定的 `web` 站点名，不接收导航信息，也不自动生成导航。
+只有首页应用省略 URL 时关联本站；显式 URL、`None` 和空字符串不覆盖。
+`Flare.links` 仅共享省略的显示字段，直连地址仍自行指定。两者返回普通元组，
+可以直接作为数组元素；框架按声明顺序统一展开列表/元组，不需要 `*`。
+同一容器的多个独立站点继续使用显式命名字典；重复 `web` 会报错，不自动编号。
+`Nginx` 不含 `local_id` / `link` / `auth_rule`；授权规则归 `Authelia.access`，
+OIDC 回调仍由 `Authelia.oidc` 声明准确的绝对地址。
 
 `Flare.public` 创建带描述的应用；`Flare.container(name, icon, url)` 创建容器分区书签；
 `Flare.bookmark` 支持自定义分区。
@@ -294,7 +302,7 @@ return endpoint(
 域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
 扩展声明与 URL 工厂位于 `ext/` 包中；容器在已有准备、检查回调中处理自己的输入，
 服务应用、文件变更判断和恢复统一由框架负责。
-导航 URL 不负责注册代理，也不会从相邻站点隐式继承。
+导航 URL 不负责注册代理；仅 endpoint 内省略 URL 的首页应用关联该主入口。
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
 外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
 详见 [集成协议与迁移说明](docs/integrations.md)。

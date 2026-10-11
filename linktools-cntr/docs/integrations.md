@@ -1,6 +1,6 @@
 # Container integrations
 
-`integrations` returns a finite sequence of named mappings and anonymous
+`integrations` returns a finite, ordered composition of named mappings and anonymous
 `Integration` declarations. A named mapping binds a nonempty string key to a
 declaration, for example `{"web": Nginx.site(...)}`. The mapping key is the only
 site identifier: nginx looks up `(producer.name, key)`. Each declaration
@@ -43,13 +43,13 @@ The generic `Integration` and `Integrations` contracts are available from
 New consumer-specific subclasses set their own `consumer` name.
 
 `Integrations` accepts a named mapping directly or a finite iterable mixing
-named mappings with anonymous declarations. Return a list, tuple, or fresh
+named mappings with anonymous declarations and nested lists/tuples. Return a list, tuple, or fresh
 iterator; mapping values must be declarations, not lists or nested mappings.
 Consumer-keyed groups such as `{"nginx": [...]}` are not accepted: the consumer
 comes from the declaration, never its mapping key.
 
-Every nginx site needs an explicit mapping key, including `"web"` for a
-single/default site. Add another site as `{"api": Nginx.site("api.example.com")}`.
+Every nginx site has a mapping key; `endpoint` supplies `"web"` for its
+primary site. Raw declarations provide the key explicitly. Add another site as `{"api": Nginx.site("api.example.com")}`.
 Nginx keys must be nonempty strings and unique within their producer. Different
 producers can reuse a key. `Flare` and `Authelia.oidc` can remain anonymous and
 do not need invented names. `Nginx` has no `local_id` or `link` field; a resolved
@@ -74,8 +74,8 @@ installed consumer.
 
 Navigation is an independent `Flare` declaration. Pass
 `load_nginx_url(self, "web")` explicitly to use a named site's lazy URL.
-An explicit URL stays unchanged; `None`, `""`, or an omitted URL skips the
-navigation entry. No URL is inherited from a neighboring nginx declaration.
+An explicit URL stays unchanged; `None`, `""`, or an omitted standalone URL skips the
+navigation entry. Within endpoint extensions, an omitted application URL inherits that site URL. No URL is inherited from a neighboring nginx declaration.
 The link's category is presentation metadata, not an authentication policy;
 there is no `public` site boolean. A site without a `Flare` declaration creates
 no navigation.
@@ -140,49 +140,78 @@ set `Nginx.site(..., auth=False)` explicitly to retain its no-auth behavior.
 sites must use `auth=False` when global authentication is enabled.
 Migrate callers and templates together; there is no compatibility wrapper.
 
-## Common endpoint recipe
+## Primary endpoints and explicit extensions
 
-`endpoint` is a pure convenience function that composes the existing declarations
-for a common HTTP service. It returns an ordinary tuple containing a named nginx
-site and an anonymous public Flare link, followed by an optional direct-port
-Flare bookmark and optional Authelia callback declaration. It does not register
-sites, access configuration values, render files, or change authentication state.
+`endpoint` is a pure function returning ordinary declarations for the producer's
+primary `web` site. Its flat parameters configure the site; it has no identity,
+display metadata, default navigation, or OIDC callback parameters. Native nginx
+options, including templates, headers and capability inheritance, are forwarded
+without changing their semantics.
 
 ```python
-from linktools.cntr import Integrations
-from linktools.cntr.ext import endpoint
-from linktools.decorator import cached_property
+from linktools.cntr.ext import Authelia, Flare, endpoint, load_nginx_url, load_port_url
 
-
-@cached_property
-def integrations(self) -> "Integrations":
-    return endpoint(
-        self, "web",
-        name="App", icon="apps", desc="Application",
+return [
+    endpoint(
+        self,
         domain=self.get_config_later("APP_DOMAIN"),
         proxy="http://app:8080",
-        auth=None,
-        auth_bypass=(r"^/public/",),
-        path="ui",
-        direct_port="APP_PORT",
-        oidc_paths=("sso/callback",),
-        oidc_enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
-    )
+        extensions=[
+            Flare.links(
+                Flare.public(),
+                Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+                name="App", icon="apps", desc="Application",
+            ),
+            Authelia.access(policy="one_factor"),
+            Authelia.oidc(
+                redirect_uris=(load_nginx_url(self, "web", "sso/callback"),),
+                enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
+            ),
+        ],
+    ),
+]
 ```
 
-`path` is appended to the public navigation URL and, when present, the direct
-port URL. `direct_port` names a port configuration key; that optional bookmark
-uses HTTP. Each `oidc_paths` entry is joined independently to the named site's
-URL, not to `path`. `oidc_enabled` defaults to `True`; pass a lazy enable condition
-when the callbacks depend on an optional capability. The recipe forwards
-`auth`, `auth_bypass`, and `waf_bypass` without adding access rules. It does not
-change the semantics of `auth=None` or validate native provider configuration.
+Both `endpoint` and `Flare.links` return plain tuples. Nested lists/tuples are
+flattened in order by the same generic declaration iterator used by Manager.
+They can be array elements without `*`; dictionaries still name individual
+Integration values. Nested arbitrary iterables, strings, and mapping values that
+are groups are not declaration compositions. Existing finite top-level iterable
+producers remain supported and are frozen once.
 
-For multiple services, expand the returned tuples into the same declaration
-sequence. For custom templates, wildcard routes, explicit public URLs, HTTPS
-direct ports, custom Flare categories, or other advanced options, construct the
-existing `ext` declarations directly. They can be mixed with recipe results;
-there is no second endpoint model or special runtime resolution path.
+`Flare.links(*links, name=..., icon=..., desc=...)` copies Flare declarations,
+filling only omitted display fields. Explicit values, including `None` and empty
+strings, are not replaced. Description `None`/empty retains the ordinary fallback
+to the effective name. Category identity and title never inherit display fields.
+An emitted link must have a name and icon; disabled URLs are skipped first.
+
+Only application links (`apps=True`) with an omitted URL inherit an endpoint's
+lazy public URL. Explicit URLs, `None`, and empty strings are retained. Container
+and other bookmarks always own their URLs. Without a Flare extension an endpoint
+does not appear in navigation. Display metadata remains entirely within Flare;
+multiple uses copy declarations without modifying the original values.
+
+Each producer can have one primary `web` endpoint. Multiple independently named
+sites use existing explicit mappings, preserving stable filenames and references;
+repeated `web` declarations fail instead of being numbered or silently replaced.
+Raw ext declarations can be mixed with endpoint results and grouped links.
+
+## Authelia access rules
+
+`Authelia.access(policy="one_factor")` declares native ACL fields for the current
+producer's `web` site; `site="other"` references another explicitly named site.
+Move `Nginx.site(auth_rule=...)` values here. `domain` and `domain_regex` retain
+native Authelia meanings, not declaration identities. A missing matcher uses the
+site's literal hostname; nonliteral sites require an explicit native matcher.
+Only an absent policy uses `AUTHELIA_MIN_AUTH_LEVEL`. Disabled sites and
+`auth=False` skip rules before reading lazy data. Declaration order and the final
+administrator fallback/default-deny policy remain unchanged.
+
+For a whole lazy rule mapping, pass it positionally: `Authelia.access(lazy_rule)`.
+A mapping and keyword rule fields are mutually exclusive; both forms use the same
+consumer path. Rules never create clients, secrets, or access outside their native
+explicit configuration. OIDC declarations continue to contribute exact absolute
+callback URIs independently of navigation and access rules.
 
 ## Migrating named sites and navigation
 
@@ -250,8 +279,7 @@ templates retain only the explicit context described below.
   path without query; no application path is implicitly trusted
 - `auth_headers` is literal data, injected only after actual successful
   authentication; bypass and explicit native auth-off preserve client tokens
-- `auth_rule` is an optional native Authelia rule; a literal domain is filled in
-  when omitted. Pattern domains need an explicit native domain/domain_regex
+- Native access rules belong to `Authelia.access`, independently of request authentication
 - Only a single literal hostname implies a public URL. Pattern/default sites
   need explicit `public_url`; navigation placeholders such as `{{port}}` remain literal
 - `cert_domains` declares additional certificate names; `template_vars` owns business

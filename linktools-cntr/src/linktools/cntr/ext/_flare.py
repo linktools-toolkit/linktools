@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Flare application, bookmark, and category declarations."""
+from copy import copy
 from typing import TYPE_CHECKING
 
 from linktools.types import MISSING
@@ -19,25 +20,51 @@ class _FlareCategory:
         self.apps = apps
         self.order = order
 
-    def __call__(self, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> "Flare":
-        return Flare(self, name, icon, desc or name, url)
+    def __call__(self, name: "str | None" = MISSING, icon: "str | None" = MISSING,
+                 desc: "str | None" = MISSING, url: "str | None" = MISSING) -> "Flare":
+        return Flare(self, name, icon, desc, url)
 
 
 class Flare(Integration):
     consumer = "flare"
 
-    def __init__(self, category: "_FlareCategory", name: str, icon: str, desc: str, url: "str | None" = MISSING) -> None:
+    def __init__(self, category: "_FlareCategory", name: "str | None" = MISSING,
+                 icon: "str | None" = MISSING, desc: "str | None" = MISSING,
+                 url: "str | None" = MISSING) -> None:
         self.display_category = category
-        self.name = name
-        self.icon = icon
-        self.desc = desc
+        self._name = name
+        self._icon = icon
+        self._desc = desc
         self._url = url
+
+    @property
+    def name(self) -> "str | None":
+        if self._name is MISSING:
+            raise ValueError("Flare link requires a name; set it on the link or with Flare.links")
+        return self._name
+
+    @property
+    def icon(self) -> "str | None":
+        if self._icon is MISSING:
+            raise ValueError("Flare link requires an icon; set it on the link or with Flare.links")
+        return self._icon
+
+    @property
+    def desc(self) -> "str | None":
+        return self.name if self._desc is MISSING or not self._desc else self._desc
 
     @property
     def url(self) -> "str | None":
         if self._url is MISSING or not self._url:
             return None
         return str(self._url)
+
+    def with_default_url(self, url: "str | None") -> "Flare":
+        """Copy this link, filling an omitted application URL without resolving it."""
+        result = copy(self)
+        if self.display_category.apps and self._url is MISSING:
+            result._url = url
+        return result
 
     _public = _FlareCategory("public", "Public", apps=True)
     _bookmarks = {
@@ -47,13 +74,32 @@ class Flare(Integration):
     }
 
     @classmethod
-    def public(cls, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> "Flare":
+    def links(cls, *links: "Flare", name: "str | None", icon: "str | None",
+              desc: "str | None" = None) -> "tuple[Flare, ...]":
+        """Copy links with shared defaults for omitted display metadata."""
+        result = []
+        for link in links:
+            if not isinstance(link, Flare):
+                raise TypeError("Flare.links accepts only Flare declarations")
+            value = copy(link)
+            if value._name is MISSING:
+                value._name = name
+            if value._icon is MISSING:
+                value._icon = icon
+            if value._desc is MISSING:
+                value._desc = desc
+            result.append(value)
+        return tuple(result)
+
+    @classmethod
+    def public(cls, name: "str | None" = MISSING, icon: "str | None" = MISSING,
+               desc: "str | None" = MISSING, url: "str | None" = MISSING) -> "Flare":
         """Declare an application with a description."""
         return cls._public(name, icon, desc, url)
 
     @classmethod
-    def container(cls, name: str, icon: str, url: "str | None" = MISSING, *,
-                  desc: "Optional[str]" = None) -> "Flare":
+    def container(cls, name: "str | None" = MISSING, icon: "str | None" = MISSING,
+                  url: "str | None" = MISSING, *, desc: "str | None" = MISSING) -> "Flare":
         """Declare a bookmark in the standard container group."""
         return cls.bookmark(name, icon, url, category="container", desc=desc)
 
@@ -68,8 +114,9 @@ class Flare(Integration):
                              apps=apps, order=100 if order is None else order)
 
     @classmethod
-    def bookmark(cls, name: str, icon: str, url: "str | None" = MISSING, *,
-                 category: "str | _FlareCategory" = "other", desc: "Optional[str]" = None) -> "Flare":
+    def bookmark(cls, name: "str | None" = MISSING, icon: "str | None" = MISSING,
+                 url: "str | None" = MISSING, *, category: "str | _FlareCategory" = "other",
+                 desc: "str | None" = MISSING) -> "Flare":
         """Declare a bookmark using a category ID or explicit display group."""
         if isinstance(category, str):
             category = cls.category(category)
@@ -77,4 +124,4 @@ class Flare(Integration):
             raise TypeError("bookmark category must be a string or _FlareCategory")
         if category.apps:
             raise ValueError("bookmark category must use the bookmarks output area")
-        return Flare(category, name, icon, desc or name, url)
+        return Flare(category, name, icon, desc, url)

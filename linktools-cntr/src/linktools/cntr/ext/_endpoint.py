@@ -1,41 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Small, side-effect-free recipes for common service access declarations."""
+"""Compose a primary site with explicit consumer declarations."""
 from typing import TYPE_CHECKING
 
-from ._authelia import Authelia
+from ._base import iter_declarations
 from ._flare import Flare
 from ._nginx import Nginx
-from ._urls import load_nginx_url, load_port_url
+from ._urls import load_nginx_url
 
 if TYPE_CHECKING:
-    from typing import Mapping, Optional, Sequence, Union
+    from typing import Any, Mapping, Optional, Sequence, Tuple, Union
+    from linktools.types import PathType
     from ..container import BaseContainer
-    from ._base import Integration
+    from ._base import Integration, Integrations
 
 
 def endpoint(
-    producer: "BaseContainer", key: str, *, name: str, icon: str, desc: str,
-    domain: str, proxy: str, auth: "Optional[bool]" = None,
-    auth_bypass: "Sequence[str]" = (), waf_bypass: "Sequence[str]" = (),
-    path: str = "", direct_port: "Optional[str]" = None,
-    oidc_paths: "Sequence[str]" = (), oidc_enabled: bool = True,
-) -> "tuple[Union[Mapping[str, Nginx], Integration], ...]":
-    """Declare a proxy site, navigation and optional site-relative OIDC callbacks.
+        producer: "BaseContainer", *, domain: str,
+        proxy: "Optional[str]" = None, template: "Optional[PathType]" = None,
+        https: "Optional[bool]" = None,
+        waf: "Optional[bool]" = None, waf_bypass: "Sequence[str]" = (),
+        auth: "Optional[bool]" = None, auth_bypass: "Sequence[str]" = (),
+        auth_headers: "Optional[Mapping[str, str]]" = None,
+        public_url: "Optional[str]" = None, cert_domains: "Sequence[str]" = (),
+        template_vars: "Optional[Mapping[str, Any]]" = None,
+        default_server: bool = False, extensions: "Integrations" = (),
+) -> "Tuple[Union[Mapping[str, Integration], Integration], ...]":
+    """Declare the primary ``web`` site and explicitly associated extensions.
 
-    ``path`` selects the public and direct-port navigation page. Callback paths
-    are relative to the site root, independently of that navigation page.
-    All configuration values remain lazy until their consumers resolve them.
+    Applications with an omitted URL inherit the site's lazy public URL.
+    Other URLs and all display metadata belong to the extension declarations.
     """
-    result = [
-        {key: Nginx.site(server_name=domain, proxy=proxy, auth=auth,
-                        auth_bypass=auth_bypass, waf_bypass=waf_bypass)},
-        Flare.public(name, icon, desc, load_nginx_url(producer, key, path)),
-    ]
-    if direct_port is not None:
-        result.append(Flare.container(name, icon, load_port_url(
-            producer, direct_port, path, https=False), desc=desc))
-    if oidc_paths:
-        result.append(Authelia.oidc(tuple(load_nginx_url(producer, key, part)
-            for part in oidc_paths), enabled=oidc_enabled))
+    result = [{"web": Nginx.site(
+        domain, proxy=proxy, template=template, https=https,
+        waf=waf, waf_bypass=waf_bypass, auth=auth, auth_bypass=auth_bypass,
+        auth_headers=auth_headers, public_url=public_url, cert_domains=cert_domains,
+        template_vars=template_vars, default_server=default_server,
+    )}]
+    for key, declaration in iter_declarations(extensions):
+        if isinstance(declaration, Flare):
+            declaration = declaration.with_default_url(load_nginx_url(producer, "web"))
+        result.append({key: declaration} if key is not None else declaration)
     return tuple(result)

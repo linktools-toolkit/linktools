@@ -180,17 +180,6 @@ class ResolvedSite:
                                  for k, v in self._mapping("auth_headers").items()})
 
     @cached_property
-    def auth_rule(self) -> "Optional[Mapping]":
-        if not self.auth or self._declaration.auth_rule is None:
-            return None
-        rule = dict(self._mapping("auth_rule"))
-        if "domain" not in rule and "domain_regex" not in rule:
-            if self.literal_domain is None:
-                self._error("auth_rule requires domain or domain_regex for nonliteral server_name")
-            rule["domain"] = self.literal_domain
-        return MappingProxyType(rule)
-
-    @cached_property
     def cert_domains(self) -> "tuple[str, ...]":
         return self._sequence("cert_domains")
 
@@ -204,7 +193,7 @@ class ResolvedSite:
         if not self.template and not self.proxy:
             self._error("default proxy template requires a nonempty proxy")
         for field in ("default_server", "https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
-                      "auth_rule", "cert_domains", "template_vars"):
+                      "cert_domains", "template_vars"):
             getattr(self, field)
         if self.producer.name == "authelia" and not self.https:
             self._error("Authelia public site requires HTTPS")

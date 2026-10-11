@@ -68,8 +68,8 @@ class Container(BaseContainer):
                 waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
                 auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
-                auth_rule={"subject": ["group:lldap_admin"]} if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else None,
             )},
+            Authelia.access(subject=["group:lldap_admin"]),
             Flare.public(
                 "Authelia", "account", "单点登录", load_nginx_url(self, "web", "auth-admin")),
         ]
@@ -117,14 +117,26 @@ class Container(BaseContainer):
     @cached_property
     def acl_rules(self) -> "list[dict[str, Any]]":
         rules = []
-        for site in self.containers["nginx"].sites.values():
-            if not site.enabled or not site.auth or not site.auth_rule:
+        sites = self.containers["nginx"].sites
+        for producer, declaration in self.manager.iter_integrations("authelia"):
+            if not isinstance(declaration, Authelia):
+                raise ContainerError("Invalid Authelia declaration in " + producer.name)
+            if declaration.site is None:
                 continue
-            rule = dict(site.auth_rule)
-            rule.setdefault(
-                "policy",
-                "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor",
-            )
+            site = sites.get((producer.name, declaration.site))
+            if site is None:
+                raise ContainerError("Unknown nginx site %s/%s for Authelia access" % (
+                    producer.name, declaration.site))
+            if not site.enabled or not site.auth:
+                continue
+            rule = dict(declaration.rule)
+            if "domain" not in rule and "domain_regex" not in rule:
+                if site.literal_domain is None:
+                    raise ContainerError("Authelia access for %s/%s requires domain or domain_regex" % (
+                        producer.name, declaration.site))
+                rule["domain"] = site.literal_domain
+            if "policy" not in rule:
+                rule["policy"] = "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor"
             rules.append(rule)
         return rules
 

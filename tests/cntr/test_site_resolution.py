@@ -7,7 +7,7 @@ import pytest
 
 from linktools.cntr import ContainerError, ContainerManager, Integration
 from linktools.cntr.ext import Authelia, Flare, Nginx, load_nginx_url
-from linktools.cntr.ext import ResolvedSite
+from linktools.cntr.ext import ResolvedSite, endpoint, iter_declarations
 from linktools.runtime import lazy_load
 
 
@@ -72,9 +72,8 @@ def test_http_auth_rejected_and_disabled_auth_fields_unread():
     with pytest.raises(ContainerError, match="requires HTTPS"):
         producer.site.auth
     producer = Producer(Nginx.site("a.test", proxy="http://app", auth=False,
-                                 auth_rule=lazy_load(fail), auth_headers=lazy_load(fail),
+                                 auth_headers=lazy_load(fail),
                                  auth_bypass=lazy_load(fail)))
-    assert producer.site.auth_rule is None
     assert dict(producer.site.auth_headers) == {}
     assert producer.site.auth_bypass == ()
 
@@ -109,13 +108,12 @@ def test_literal_template_url_is_not_executed():
     assert producer.site.public_url == "https://app:{{port}}"
 
 
-def test_auth_rule_preserves_native_fields_and_is_read_only():
-    rule = {"policy": "two_factor", "networks": ["10.0.0.0/8"]}
-    producer = Producer(Nginx.site("a.test", proxy="http://app", auth_rule=rule))
-    assert dict(producer.site.auth_rule) == dict(rule, domain="a.test")
-    assert "domain" not in rule
-    with pytest.raises(TypeError):
-        producer.site.auth_rule["policy"] = "bypass"
+def test_access_rules_are_not_nginx_declaration_or_resolution_fields() -> None:
+    producer = Producer(Nginx.site("a.test", proxy="http://app"))
+    assert not hasattr(producer.site, "auth_rule")
+    assert not hasattr(producer.site._declaration, "auth_rule")
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        Nginx.site("a.test", auth_rule=lazy_load(fail))
 
 
 def test_identity_encoding_has_no_separator_collisions():
@@ -238,7 +236,7 @@ def test_empty_integration_sequences_are_valid(values: object) -> None:
 
 @pytest.mark.parametrize("declarations", [
     "text", b"text", 42, None, [object()], {"nginx": []},
-    [[Nginx.site("app.test")]], [("web", Nginx.site("app.test"))],
+    [iter(())], [("web", Nginx.site("app.test"))], [{"web": [Nginx.site("app.test")]}],
 ])
 def test_snapshot_rejects_invalid_declaration_shapes_or_non_markers(declarations: object) -> None:
     app = SimpleNamespace(name="app", integrations=declarations)
@@ -290,7 +288,7 @@ def test_site_factory_and_resolved_view_use_explicit_field_names() -> None:
     assert site.default_server is declaration.default_server is True
     assert site.key == "web"
     assert not hasattr(declaration, "key")
-    for old in ("url", "vars", "expose", "default", "local_id", "link"):
+    for old in ("url", "vars", "expose", "default", "local_id", "link", "auth_rule"):
         assert not hasattr(declaration, old)
         assert not hasattr(site, old)
         with pytest.raises(TypeError, match="unexpected keyword argument"):
@@ -352,7 +350,8 @@ def test_disabled_default_is_lazy() -> None:
     assert producer.site.resolve() is producer.site
 
 
-@pytest.mark.parametrize("wrapper", [lambda value: value, lambda value: [value], lambda value: iter([value])])
+@pytest.mark.parametrize("wrapper", [lambda value: value, lambda value: [value],
+                                      lambda value: iter([value]), lambda value: [([value],)]])
 def test_named_mapping_shapes_freeze_keys_without_mutating_declarations(wrapper) -> None:
     site = Nginx.site(lazy_load(fail))
     link = Flare.bookmark("Docs", "web", lazy_load(fail))
@@ -396,3 +395,55 @@ def test_named_non_nginx_integrations_validate_key_shape(key: object) -> None:
     manager = manager_with({"app": app, "flare": SimpleNamespace(name="flare", integrations=())}, ["app"])
     with pytest.raises(ContainerError, match="Invalid integration key in app"):
         manager.integration_snapshot
+
+
+def test_nested_composition_freezes_order_and_structure_without_resolving_leaves() -> None:
+    access = Authelia.access(lazy_load(fail))
+    first = Flare.public("First", "web", url=lazy_load(fail))
+    second = Flare.bookmark("Second", "web", lazy_load(fail))
+    web = Nginx.site(lazy_load(fail))
+    nested = [first, ({"web": web}, [access, {"docs": second}])]
+    app = SimpleNamespace(name="app", integrations=nested)
+    consumers = {name: SimpleNamespace(name=name, integrations=())
+                 for name in ("nginx", "flare", "authelia")}
+    manager = manager_with(dict(consumers, app=app), ["app"] + list(consumers))
+    assert list(iter_declarations(nested)) == [(None, first), ("web", web), (None, access), ("docs", second)]
+    snapshot = manager.integration_snapshot["app"]
+    nested[1][1].clear()
+    nested.clear()
+    assert snapshot == ((None, first), ("web", web), (None, access), ("docs", second))
+    assert list(manager.iter_integrations("flare")) == [(app, first), (app, second)]
+    assert list(manager.iter_integrations("authelia")) == [(app, access)]
+    assert tuple(manager.containers["nginx"].sites) == (("app", "web"),)
+
+
+@pytest.mark.parametrize("unpack", [False, True])
+def test_endpoint_is_a_nested_array_element_or_can_be_expanded(unpack: bool) -> None:
+    app = SimpleNamespace(name="app")
+    recipe = endpoint(app, domain=lazy_load(fail), extensions=[Authelia.access(lazy_load(fail))])
+    other = {"api": Nginx.site(lazy_load(fail))}
+    app.integrations = [*recipe, other] if unpack else [recipe, other]
+    consumers = {name: SimpleNamespace(name=name, integrations=()) for name in ("nginx", "authelia")}
+    manager = manager_with(dict(consumers, app=app), ["app"] + list(consumers))
+    assert manager.integration_snapshot["app"] == (("web", recipe[0]["web"]), (None, recipe[1]),
+                                                   ("api", other["api"]))
+    assert tuple(manager.containers["nginx"].sites) == (("app", "web"), ("app", "api"))
+
+
+def test_multiple_endpoints_in_one_producer_reject_duplicate_web_before_resolution() -> None:
+    app = SimpleNamespace(name="app")
+    app.integrations = [endpoint(app, domain=lazy_load(fail)), endpoint(app, domain=lazy_load(fail))]
+    manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=())}, ["app"])
+    assert len(manager.integration_snapshot["app"]) == 2
+    with pytest.raises(ContainerError, match="Duplicate nginx site key 'web' in app"):
+        manager.containers["nginx"].sites
+
+
+def test_endpoint_web_keys_remain_local_to_each_producer() -> None:
+    first = SimpleNamespace(name="first")
+    second = SimpleNamespace(name="second")
+    first.integrations = [endpoint(first, domain=lazy_load(fail))]
+    second.integrations = [endpoint(second, domain=lazy_load(fail))]
+    manager = manager_with({"first": first, "second": second, "nginx": SimpleNamespace(integrations=())},
+                           ["first", "second"])
+    assert tuple(manager.containers["nginx"].sites) == (("first", "web"), ("second", "web"))

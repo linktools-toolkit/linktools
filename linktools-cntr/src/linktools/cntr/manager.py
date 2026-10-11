@@ -13,7 +13,7 @@ from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvi
 from linktools.decorator import cached_property
 
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
-from .ext import Integration
+from .ext import Integration, iter_declarations
 from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
@@ -310,33 +310,18 @@ class ContainerManager:
     def integration_snapshot(self) -> "Mapping[str, Tuple[Tuple[Optional[str], Integration], ...]]":
         """Freeze declaration structure once without resolving its lazy values."""
         from collections import OrderedDict
-        from collections.abc import Mapping
         from types import MappingProxyType
 
         result = OrderedDict()
         for producer in self.installed_state.get(resolve=True):
-            integrations = producer.integrations
-            if isinstance(integrations, Mapping):
-                integrations = (integrations,)
-            if isinstance(integrations, (str, bytes)):
-                raise ContainerError("Invalid integrations in " + producer.name)
             try:
-                entries = tuple(integrations)
-            except TypeError:
-                raise ContainerError("Invalid integrations in " + producer.name)
-            declarations = []
-            for entry in entries:
-                named = isinstance(entry, Mapping)
-                items = entry.items() if named else ((None, entry),)
-                for key, declaration in items:
-                    if named and (not isinstance(key, str) or not key):
-                        raise ContainerError("Invalid integration key in " + producer.name)
-                    if not isinstance(declaration, Integration):
-                        raise ContainerError("Invalid integration in %s: expected Integration" % producer.name)
-                    name = declaration.consumer
-                    if not isinstance(name, str) or name not in self.containers:
-                        raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
-                    declarations.append((key, declaration))
+                declarations = tuple(iter_declarations(producer.integrations))
+            except ValueError as error:
+                raise ContainerError("%s in %s" % (error, producer.name)) from error
+            for key, declaration in declarations:
+                name = declaration.consumer
+                if not isinstance(name, str) or name not in self.containers:
+                    raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
             result[producer.name] = tuple(declarations)
         return MappingProxyType(result)
 

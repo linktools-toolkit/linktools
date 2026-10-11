@@ -11,6 +11,7 @@ from linktools.cntr import ContainerManager, Integration, OperationContext
 from linktools.cntr.artifacts import (AppliedServiceModels, stage_files, bind_prepared_files,
                                      publish_prepared_files, prune_prepared_files)
 from linktools.cntr.errors import ContainerError
+from linktools.cntr.ext import endpoint
 from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
 
@@ -70,9 +71,13 @@ def set_sources(owner: SimpleNamespace, sources: dict) -> None:
     owner.manager.integration_snapshot = manager.integration_snapshot
 
 
-def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(owner):
+@pytest.mark.parametrize("nested_endpoint", [False, True])
+def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(owner, nested_endpoint):
+    auth = declaration("auth")
+    sources = ([endpoint(object(), domain="app.test", extensions=[({"auth": auth},)])]
+               if nested_endpoint else [{"web": declaration("nginx")}, {"auth": auth}])
     set_sources(owner, {
-        "app": [{"web": declaration("nginx")}, {"auth": declaration("auth")}],
+        "app": sources,
         "other": [declaration("auth")],
         "unrelated": {"web": declaration("nginx")},
     })

@@ -45,11 +45,12 @@ def test_acl_supports_native_optional_fields(fresh_manager, monkeypatch):
     site = Nginx.site(
         server_name="secure.example.com",
         proxy="http://app:8080",
-        auth_rule={"policy": "one_factor", "networks": ["10.0.0.0/8"]},
     )
     monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", {
         (producer.name, "web"): ResolvedSite(producer, "web", site),
     })
+    declaration = Authelia.access(policy="one_factor", networks=["10.0.0.0/8"])
+    monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, declaration),)))
     assert authelia.acl_rules == [
         {"policy": "one_factor", "networks": ["10.0.0.0/8"],
          "domain": "secure.example.com"}

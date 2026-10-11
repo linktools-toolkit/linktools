@@ -9,7 +9,7 @@ import pytest
 
 from linktools.cntr import ContainerManager
 from linktools.cntr.artifacts import stage_files
-from linktools.cntr.ext import Flare, Nginx, load_nginx_url
+from linktools.cntr.ext import Flare, Nginx, endpoint, load_nginx_url
 from linktools.runtime import lazy_load
 from test_lifecycle_rebuild import setup_case
 
@@ -31,8 +31,9 @@ def set_declarations(manager: SimpleNamespace, producer: str, declarations: obje
 
 
 @pytest.mark.parametrize("named_navigation", [False, True])
+@pytest.mark.parametrize("nested_endpoint", [False, True])
 def test_independent_navigation_and_named_site_refresh_running_consumers(
-        tmp_path: Path, named_navigation: bool) -> None:
+        tmp_path: Path, named_navigation: bool, nested_endpoint: bool) -> None:
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new"}}),
         ("nginx", {"nginx": {"image": "nginx:new"}}),
@@ -41,10 +42,10 @@ def test_independent_navigation_and_named_site_refresh_running_consumers(
     ], running=("nginx", "flare", "other"))
     app = manager.containers["app"]
     navigation = Flare.public("App", "web", "Application", load_nginx_url(app, "web"))
-    set_declarations(manager, "app", [
-        {"web": Nginx.site(lazy_load(fail))},
-        {"web": navigation} if named_navigation else navigation,
-    ])
+    navigation = {"web": navigation} if named_navigation else navigation
+    declarations = ([endpoint(app, domain=lazy_load(fail), extensions=[(navigation,)])]
+                    if nested_endpoint else [{"web": Nginx.site(lazy_load(fail))}, navigation])
+    set_declarations(manager, "app", declarations)
     assert manager.integration_snapshot["app"][0][0] == "web"
     manager.compose_operations.up(["app"])
     assert ("prepare", "nginx") in manager.events

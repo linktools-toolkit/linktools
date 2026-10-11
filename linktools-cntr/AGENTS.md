@@ -20,9 +20,11 @@ Project-profile values layer user `~/.linktools/linktools.json` and local `<root
 - Integration declarations are command-local, lazy and side-effect free. Named
   mapping keys are the only nginx site identifiers; Flare and Authelia declarations
   can remain anonymous. Read resolved nginx sites through the shared snapshot and
-  reference their keys explicitly in lazy URLs. Navigation never registers proxy
+  reference their keys explicitly in lazy URLs. The primary endpoint uses `web`;
+  nested list/tuple compositions share one generic normalization path. Navigation never registers proxy
   configuration or mutates ACL/OIDC state. Keep `endpoint` a pure composition of
-  existing declarations; advanced options remain available through `ext`.
+  existing declarations, with explicit extensions and no navigation metadata.
+  Flare owns display grouping; Authelia owns native access rules and exact callbacks.
 - Keep native nginx business templates single-pass with explicit namespaces and
   context. Preserve application routing, capture and authentication behavior.
 - Generated configuration must be validated before publication or explicit

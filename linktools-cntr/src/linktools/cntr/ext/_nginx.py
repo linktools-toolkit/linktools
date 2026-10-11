@@ -27,7 +27,6 @@ class Nginx(Integration):
             waf: "Optional[bool]" = None, waf_bypass: "Sequence[str]" = (),
             auth: "Optional[bool]" = None, auth_bypass: "Sequence[str]" = (),
             auth_headers: "Optional[Mapping[str, str]]" = None,
-            auth_rule: "Optional[Mapping[str, Any]]" = None,
             public_url: "Optional[str]" = None,
             cert_domains: "Sequence[str]" = (),
             template_vars: "Optional[Mapping[str, Any]]" = None,
@@ -45,7 +44,6 @@ class Nginx(Integration):
         self.waf_bypass = tuple(waf_bypass) if type(waf_bypass) in (tuple, list) else waf_bypass
         self.auth_bypass = tuple(auth_bypass) if type(auth_bypass) in (tuple, list) else auth_bypass
         self.auth_headers = {} if auth_headers is None else auth_headers
-        self.auth_rule = auth_rule
         self.public_url = public_url
         self.cert_domains = tuple(cert_domains) if type(cert_domains) in (tuple, list) else cert_domains
         self.template_vars = {} if template_vars is None else template_vars
