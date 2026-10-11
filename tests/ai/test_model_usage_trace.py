@@ -14,6 +14,7 @@ from linktools.ai.runtime._capabilities import (
 from linktools.ai.runtime._history_projection import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
+from linktools.ai.runtime._message import decode_model_messages
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
@@ -153,6 +154,52 @@ async def _completed_usage(
     ]
     assert all(value is not None for value in values)
     return [value for value in values if value is not None]
+
+
+async def _assert_recorded_responses(
+    store: StagingAgentRunStore, agent_run_id: str, messages: list[ModelMessage],
+) -> None:
+    expected = tuple(message for message in messages if isinstance(message, ModelResponse))
+    transcript = store.staged_transcript(agent_run_id)
+    assert transcript is not None
+    assert tuple(message for message in transcript.messages if isinstance(message, ModelResponse)) == expected
+    interactions = await store.list_model_interactions(agent_run_id=agent_run_id)
+    responses = tuple(
+        message
+        for interaction in interactions
+        if interaction.response_context is not None
+        for item in interaction.response_context.items
+        for message in decode_model_messages(store.staged_payload(agent_run_id, item.payload_digest))
+    )
+    assert responses == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("producer_identity", (None, "", "producer"))
+async def test_completed_response_preserves_resolved_identity_and_payload(producer_identity: str | None) -> None:
+    store = StagingAgentRunStore()
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        return ModelResponse(
+            parts=[TextPart("complete", id="part-id")],
+            run_id=producer_identity,
+            conversation_id=producer_identity,
+            provider_name="fixture",
+            provider_response_id="response-id",
+            provider_details={"fixture": {"value": [1, 2]}},
+            metadata={"application": "preserved"},
+        )
+
+    agent = Agent(FunctionModel(model), capabilities=[_persistence(store, "identity-run")])
+    result = await agent.run("hello", conversation_id="existing-conversation")
+    response = result.all_messages()[-1]
+    assert isinstance(response, ModelResponse)
+    assert response.run_id
+    assert response.conversation_id == (producer_identity or "existing-conversation")
+    if producer_identity:
+        assert response.run_id == producer_identity
+    await _assert_recorded_responses(store, "identity-run", result.all_messages())
 
 
 @pytest.mark.asyncio
@@ -495,6 +542,7 @@ async def test_model_retry_records_each_request_usage() -> None:
     assert attempts == 2
     assert len(values) == result.usage.requests == 2
     _assert_token_sum(values, result.usage)
+    await _assert_recorded_responses(store, "retry-run", result.all_messages())
 
 
 @pytest.mark.asyncio
@@ -515,6 +563,7 @@ async def test_tool_loop_records_usage_before_and_after_tool() -> None:
     assert result.usage.tool_calls == 1
     assert len(values) == result.usage.requests == 2
     _assert_token_sum(values, result.usage)
+    await _assert_recorded_responses(store, "tool-run", result.all_messages())
 
 
 @pytest.mark.asyncio
@@ -532,3 +581,4 @@ async def test_streaming_records_completed_request_usage() -> None:
     values = await _completed_usage(store, "stream-run")
     assert len(values) == usage.requests == 1
     _assert_token_sum(values, usage)
+    await _assert_recorded_responses(store, "stream-run", result.all_messages())

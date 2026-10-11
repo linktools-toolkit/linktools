@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Contract tests for model interaction projection primitives."""
 
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -91,6 +92,40 @@ def _agent_group() -> CapabilityGroup[object]:
     group = CapabilityGroup[object]("application")
     group.agent("default", model="default", allow_tools=())
     return group
+
+
+@pytest.mark.asyncio
+async def test_session_projections_do_not_copy_previous_response_bodies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = "assistant-" * 256
+    monkeypatch.setattr(_TextModelBinding, "materialize", lambda self: TestModel(custom_output_text=response))
+    database = tmp_path / "state.db"
+    sizes = []
+    async with Runtime.open(
+        "response-growth", storage=RuntimeStorage.sqlite(database),
+        models=_TextModels(), capabilities=(_agent_group(),),
+    ) as runtime:
+        agent = runtime.agents.get("default")
+        await agent.create_session("session")
+        for turn in range(8):
+            execution = await agent.session("session").start(f"turn-{turn}:" + "user-" * 400)
+            result = (await execution.wait(timeout_seconds=10)).result
+            assert result.status == "SUCCEEDED"
+            interactions = await execution.model_interactions(include_content=True)
+            assert len(interactions.items) == 1
+            messages = interactions.items[0].request["messages"]
+            assert len(messages) == 2 * turn + 1
+            if turn in (3, 7):
+                with sqlite3.connect(database) as connection:
+                    sizes.append(dict(connection.execute(
+                        "SELECT kind, SUM(length(payload_json)) FROM ai_state_records "
+                        "WHERE kind IN ('context_projection', 'model_interaction') GROUP BY kind"
+                    )))
+    assert len(sizes) == 2
+    assert sizes[0].keys() == sizes[1].keys() == {"context_projection", "model_interaction"}
+    for kind in sizes[0]:
+        assert sizes[1][kind] < 2.6 * sizes[0][kind]
 
 
 def _journal() -> ModelRequestJournal:
