@@ -144,12 +144,12 @@ def test_operation_accepts_one_prepared_tree_per_owner(owner):
 def test_acl_change_recreates_only_its_actual_consumer(owner):
     old = context(owner)
     old.write_files(owner, {"base.yml": "same", "acl.yml": "deny"})
-    old.compose_model = bind_prepared_files(old, model(owner), {})
+    old.compose_model = bind_prepared_files(old, model(owner))
     AppliedServiceModels(owner.manager, old.compose_model).record(("auth", "admin"))
     new = context(owner)
     new.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
     store = AppliedServiceModels(owner.manager, model(owner))
-    new_model = bind_prepared_files(new, model(owner), store.previous)
+    new_model = bind_prepared_files(new, model(owner), store)
     store.set_model(new_model)
     assert store.changed_services == {"auth"}
     assert new_model["services"]["admin"] == old.compose_model["services"]["admin"]
@@ -165,7 +165,7 @@ def test_inactive_profile_input_is_not_rebound_or_required_in_active_prepared_tr
     inactive = desired["services"]["admin"]
     inactive["profiles"] = ["debug"]
     inactive["volumes"][0]["source"] = str(owner.get_app_path("generated/current/old.yml"))
-    bound = bind_prepared_files(ctx, desired, {})
+    bound = bind_prepared_files(ctx, desired)
     assert bound["services"]["admin"] == inactive
     assert bound["services"]["auth"]["volumes"][0]["source"] == str(candidate / "base.yml")
 
@@ -173,12 +173,12 @@ def test_inactive_profile_input_is_not_rebound_or_required_in_active_prepared_tr
 def test_no_change_reuses_identical_paths_and_model(owner):
     first = context(owner)
     first.write_files(owner, {"base.yml": "same", "acl.yml": "same"})
-    original = bind_prepared_files(first, model(owner), {})
+    original = bind_prepared_files(first, model(owner))
     AppliedServiceModels(owner.manager, original).record(("auth", "admin"))
     later = context(owner)
     later.write_files(owner, {"base.yml": "same", "acl.yml": "same"})
     store = AppliedServiceModels(owner.manager, model(owner))
-    store.set_model(bind_prepared_files(later, model(owner), store.previous))
+    store.set_model(bind_prepared_files(later, model(owner), store))
     assert not store.changed_services
 
 
@@ -186,19 +186,19 @@ def test_missing_prepared_mount_fails_before_any_current_switch(owner):
     ctx = context(owner)
     ctx.write_files(owner, {"base.yml": "base"})
     with pytest.raises(ContainerError, match="Missing prepared input"):
-        bind_prepared_files(ctx, model(owner), {})
+        bind_prepared_files(ctx, model(owner))
     assert not owner.get_app_path("generated/current").exists()
 
 
 def test_confirmed_model_and_previous_snapshot_are_retained(owner):
     first = context(owner)
     first.write_files(owner, {"base.yml": "old", "acl.yml": "old"})
-    first.compose_model = bind_prepared_files(first, model(owner), {})
+    first.compose_model = bind_prepared_files(first, model(owner))
     AppliedServiceModels(owner.manager, first.compose_model).record(("auth", "admin"))
     later = context(owner)
     later.write_files(owner, {"base.yml": "new", "acl.yml": "new"})
     store = AppliedServiceModels(owner.manager, model(owner))
-    later.compose_model = bind_prepared_files(later, model(owner), store.previous)
+    later.compose_model = bind_prepared_files(later, model(owner), store)
     later.service_models = store
     store.set_model(later.compose_model)
     abandoned = stage_files(owner, {"base.yml": "abandoned", "acl.yml": "abandoned"})
@@ -219,7 +219,7 @@ def test_combined_site_file_switch_preserves_previous_generation(owner):
     old = context(owner)
     original = old.write_files(owner, {"nginx.conf": "include sites/web.conf;",
                                       "sites/web.conf": "server { server_name old.test; }"})
-    old.compose_model = bind_prepared_files(old, native_model, {})
+    old.compose_model = bind_prepared_files(old, native_model)
     AppliedServiceModels(owner.manager, old.compose_model).record(("auth",))
     owner.get_app_path("generated/current").symlink_to(original.name)
     custom = owner.get_app_path("custom.conf")
@@ -230,7 +230,7 @@ def test_combined_site_file_switch_preserves_previous_generation(owner):
                                            "sites/generated.conf": "server { server_name new.test; }"})
     store = AppliedServiceModels(owner.manager, native_model)
     current.service_models = store
-    current.compose_model = bind_prepared_files(current, native_model, store.previous)
+    current.compose_model = bind_prepared_files(current, native_model, store)
     store.set_model(current.compose_model)
     assert store.changed_services == {"auth"}
     assert owner.get_app_path("generated/current").resolve() == original
@@ -249,12 +249,13 @@ def test_unselected_legacy_consumer_keeps_current_pointer(owner):
     owner.get_app_path("generated/current").symlink_to(old.name)
     ctx = context(owner)
     ctx.write_files(owner, {"base.yml": "new", "acl.yml": "new"})
-    ctx.compose_model = bind_prepared_files(ctx, model(owner), {})
+    ctx.compose_model = bind_prepared_files(ctx, model(owner))
     ctx.initial_runtime_state = ProjectRuntimeState("test", tuple(
         SimpleNamespace(service=name, state="running") for name in ("auth", "admin")), "docker")
     legacy = {"services": {"admin": {"volumes": [{"type": "bind", "target": "/generated",
                                                   "source": str(owner.get_app_path("generated"))}]}}}
-    ctx.service_models.previous = {"admin": yaml.safe_dump(legacy)}
+    ctx.service_models = AppliedServiceModels(owner.manager, ctx.compose_model)
+    ctx.service_models.retain_previous({"admin": yaml.safe_dump(legacy)})
     publish_prepared_files(ctx, ("auth",))
     assert owner.get_app_path("generated/current").resolve() == old
     assert Path(ctx.compose_model["services"]["auth"]["volumes"][0]["source"]).read_text() == "new"
@@ -270,7 +271,7 @@ def _apply_prepared(owner, value, services, running=(), desired_services=(), ful
     desired["services"] = {name: desired["services"][name] for name in desired_services or services}
     owner.services = {name: {} for name in declared_services or desired["services"]}
     models = AppliedServiceModels(owner.manager, desired, retained_services=running)
-    ctx.compose_model = bind_prepared_files(ctx, desired, models.previous)
+    ctx.compose_model = bind_prepared_files(ctx, desired, models)
     ctx.service_models = models
     models.set_model(ctx.compose_model)
     models.record(services)

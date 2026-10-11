@@ -209,6 +209,22 @@ def test_yaml_alias_identity_does_not_affect_normalization(manager):
     assert not AppliedServiceModels(manager, model).changed_services
 
 
+@pytest.mark.parametrize("key", ["TOKEN", 42])
+def test_decoded_saved_aliases_match_normalized_snapshot_semantics(manager, key):
+    model = _model()
+    values = {key: "old"}
+    model["services"]["app"].update(environment=values, labels=values)
+    path = _path(manager, "app")
+    path.parent.mkdir(parents=True)
+    path.write_text(yaml.safe_dump(model))
+
+    store = AppliedServiceModels(manager, model)
+    decoded = store.previous_model("app")
+    assert decoded == yaml.safe_load(store.previous["app"])
+    decoded["services"]["app"]["environment"][str(key)] = "new"
+    assert decoded["services"]["app"]["labels"] == {str(key): "old"}
+
+
 def test_unreferenced_named_volume_does_not_recreate_other_services(manager):
     model = _model()
     model["services"]["app"]["volumes"] = [
@@ -235,3 +251,65 @@ def test_secrets_and_configs_affect_only_referencing_service(manager):
     changed["secrets"]["token"]["file"] = "/host/token-v2"
     changed["configs"]["rules"]["file"] = "/host/rules-v2"
     assert AppliedServiceModels(manager, changed).changed_services == frozenset({"app"})
+
+
+@pytest.mark.parametrize("different", [False, True])
+def test_operation_decodes_each_snapshot_content_once(manager, monkeypatch, different):
+    AppliedServiceModels(manager, _model()).record(("app", "worker"))
+    if different:
+        AppliedServiceModels(manager, _model("other")).record(("worker",))
+    parse = yaml.safe_load
+    calls = []
+
+    def counted(text):
+        calls.append(text)
+        return parse(text)
+
+    monkeypatch.setattr(yaml, "safe_load", counted)
+    store = AppliedServiceModels(manager, _model("desired"))
+    for service in ("app", "worker"):
+        detached = store.previous_model(service)
+        detached["services"]["app"]["environment"]["TOKEN"] = "mutated"
+    store.set_model(_model("prepared"))
+
+    assert len(calls) == (2 if different else 1)
+    assert store.previous_model("app")["services"]["app"]["environment"]["TOKEN"] == "old"
+    assert store.previous_model("worker")["services"]["worker"]["environment"]["TOKEN"] == (
+        "other" if different else "old")
+    assert store.changed_services == frozenset(("app", "worker"))
+    store.record(("app",))
+    assert parse(_path(manager, "worker").read_text())["services"]["worker"]["environment"]["TOKEN"] == (
+        "other" if different else "old")
+
+
+def test_retained_snapshot_reuses_decode_and_does_not_replace_captured_input(manager, monkeypatch):
+    AppliedServiceModels(manager, _model()).record(("app",))
+    store = AppliedServiceModels(manager, _model("new"))
+    captured = store.previous["app"]
+    legacy = yaml.safe_dump(_model("legacy"))
+    parse = yaml.safe_load
+    calls = []
+    monkeypatch.setattr(yaml, "safe_load", lambda text: calls.append(text) or parse(text))
+
+    store.retain_previous({"app": legacy, "worker": legacy})
+    first = store.previous_model("worker")
+    first["services"]["worker"]["environment"]["TOKEN"] = "mutated"
+    assert store.previous_model("worker") == _model("legacy")
+    assert store.previous["app"] == captured
+    assert store.previous_model("app") == _model()
+    assert calls == [legacy]
+
+
+def test_current_copies_and_later_operation_do_not_share_mutable_models(manager, monkeypatch):
+    AppliedServiceModels(manager, _model()).record(("app", "worker"))
+    store = AppliedServiceModels(manager, _model("first"))
+    first = store.current_model("app")
+    first["services"]["worker"]["environment"]["TOKEN"] = "mutated"
+    assert store.current_model("worker") == _model("first")
+    assert store.current_model("absent") is None
+    store.set_model(_model("second"))
+    assert store.current_model("app") == _model("second")
+    assert store.previous_model("app") == _model()
+    AppliedServiceModels(manager, _model("external")).record(("app",))
+    assert AppliedServiceModels(manager, _model()).previous_model("app") == _model("external")
+    assert store.previous_model("app") == _model()

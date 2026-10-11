@@ -279,9 +279,8 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
 
 
 def bind_prepared_files(context: "OperationContext", model: dict,
-                        previous: "Mapping[str, str]") -> dict:
+                        models: "AppliedServiceModels | None" = None) -> dict:
     """Bind immutable inputs, reusing unchanged single-file mounts per consumer."""
-    import yaml
     from pathlib import Path
 
     roots = [(container.get_app_path("generated"), context.prepared_dirs[container.name])
@@ -290,7 +289,8 @@ def bind_prepared_files(context: "OperationContext", model: dict,
     for service, spec in model["services"].items():
         if context.target_services is not None and service not in context.target_services:
             continue
-        old = yaml.safe_load(previous[service])["services"][service] if service in previous else {}
+        previous = models.previous_model(service) if models is not None else None
+        old = previous["services"][service] if previous is not None else {}
         old_mounts = {item["target"]: item for item in old.get("volumes", ())
                       if isinstance(item, dict) and item.get("type") == "bind"}
         volumes = []
@@ -344,7 +344,6 @@ def publish_prepared_files(context: "OperationContext", services: "Iterable[str]
     Legacy or unknown running inputs must keep their current pointer untouched.
     """
     import uuid
-    import yaml
     from pathlib import Path
 
     services = tuple(services)
@@ -354,7 +353,7 @@ def publish_prepared_files(context: "OperationContext", services: "Iterable[str]
         return
     legacy_sources = [Path(item["source"]) for service in unapplied
                       if service in context.service_models.previous
-                      for item in yaml.safe_load(context.service_models.previous[service])["services"][service].get("volumes", ())
+                      for item in context.service_models.previous_model(service)["services"][service].get("volumes", ())
                       if isinstance(item, dict) and item.get("type") == "bind"]
     sources = [Path(item["source"]) for service in services
                for item in context.compose_model["services"][service].get("volumes", ())
@@ -392,16 +391,15 @@ def publish_prepared_files(context: "OperationContext", services: "Iterable[str]
 def prune_prepared_files(context: "OperationContext", models: "AppliedServiceModels") -> None:
     """Retain every applied input and the preceding rollback inputs."""
     import shutil
-    import yaml
     from pathlib import Path
 
     unapplied = _unapplied_running_services(context, context.target_services or ())
     if models.untracked_services.intersection(unapplied):
         return
     references = []
-    for collection in (models.current, models.previous):
-        for service, text in collection.items():
-            spec = yaml.safe_load(text)["services"][service]
+    for collection, read in ((models.current, models.current_model), (models.previous, models.previous_model)):
+        for service in collection:
+            spec = read(service)["services"][service]
             references.extend(Path(item["source"]) for item in spec.get("volumes", ())
                               if isinstance(item, dict) and item.get("type") == "bind")
     for candidate in context.prepared_dirs.values():
@@ -444,6 +442,8 @@ class AppliedServiceModels:
         if not isinstance(model, dict) or not isinstance(model.get("services"), dict):
             raise ContainerError("Resolved Compose model must contain a services mapping")
         previous = {}
+        loaded = {}
+        self._parsed_models = {}
         for service, spec in model["services"].items():
             if not isinstance(service, str) or not service or not isinstance(spec, dict):
                 raise ContainerError("Resolved Compose services must have names and mapping definitions")
@@ -454,7 +454,11 @@ class AppliedServiceModels:
             path = self._path(service)
             try:
                 with open(path, encoding="utf-8") as stream:
-                    saved = yaml.safe_load(stream)
+                    text = stream.read()
+                if text not in loaded:
+                    saved = yaml.safe_load(text)
+                    loaded[text] = saved, self._normalize(saved)
+                saved, normalized = loaded[text]
             except FileNotFoundError:
                 if os.path.lexists(path):
                     raise ContainerError("Cannot read applied Compose model for service {}".format(service)) from None
@@ -466,7 +470,9 @@ class AppliedServiceModels:
                     or any(not isinstance(name, str) or not name or not isinstance(definition, dict)
                            for name, definition in saved["services"].items())):
                 raise ContainerError("Invalid applied Compose model for service {}".format(service))
-            previous[service] = self._normalize(saved)
+            previous[service] = normalized
+            if normalized not in self._parsed_models:
+                self._parsed_models[normalized] = saved if text == normalized else yaml.safe_load(normalized)
         self.previous = MappingProxyType(previous)
         self.set_model(model)
         self.untracked_services = frozenset(service for service in retained_services if service not in previous)
@@ -481,9 +487,21 @@ class AppliedServiceModels:
 
     def previous_model(self, service: str) -> "dict | None":
         """Decode a separate working copy without exposing mutable snapshot state."""
-        import yaml
+        from copy import deepcopy
         text = self.previous.get(service)
-        return yaml.safe_load(text) if text is not None else None
+        return deepcopy(self._decode_model(text)) if text is not None else None
+
+    def current_model(self, service: str) -> "dict | None":
+        """Decode a separate working copy of the current service snapshot."""
+        from copy import deepcopy
+        text = self.current.get(service)
+        return deepcopy(self._decode_model(text)) if text is not None else None
+
+    def _decode_model(self, text: str) -> dict:
+        import yaml
+        if text not in self._parsed_models:
+            self._parsed_models[text] = yaml.safe_load(text)
+        return self._parsed_models[text]
 
     @classmethod
     def _projection(cls, model: dict, service: str) -> str:
@@ -568,4 +586,4 @@ class AppliedServiceModels:
         self.current = MappingProxyType({name: normalized for name in model["services"]})
         self.changed_services = frozenset(
             name for name in model["services"] if name not in self.previous or
-            self._projection(self.previous_model(name), name) != self._projection(model, name))
+            self._projection(self._decode_model(self.previous[name]), name) != self._projection(model, name))

@@ -648,7 +648,7 @@ class ComposeRunner:
         for service in dict.fromkeys(services):
             text = context.service_models.previous.get(service)
             if text is not None:
-                model = yaml.safe_load(text)
+                model = context.service_models.previous_model(service)
             else:
                 if legacy is None:
                     if not context.previous_compose_contents:

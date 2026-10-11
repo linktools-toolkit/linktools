@@ -223,7 +223,7 @@ class ComposeOperations:
                     break
                 model_store.retain_previous(runner.saved_service_models(context, tuple(sorted(legacy))))
                 missing.difference_update(legacy)
-            model = bind_prepared_files(context, raw_model, model_store.previous)
+            model = bind_prepared_files(context, raw_model, model_store)
             context.compose_model = manager.image_preparer.with_build_revisions(
                 model, selection.project_containers, selection.services)
             model_store.set_model(context.compose_model)
