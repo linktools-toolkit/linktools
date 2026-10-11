@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import warnings
 from collections import Counter
 
 import pytest
@@ -27,7 +28,7 @@ class _InterruptedSetup(RuntimeError):
     ("AUTOCOMMIT", False), ("AUTOCOMMIT", True),
 ))
 async def test_mysql_consistent_reads_preserve_caller_transactions(
-    _server, isolation, skip_rollback, monkeypatch, capsys,
+    _server, isolation, skip_rollback, monkeypatch,
 ) -> None:
     _, command = _server
     socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
@@ -130,11 +131,10 @@ async def test_mysql_consistent_reads_preserve_caller_transactions(
                 # A probe must not contaminate the next independent experiment.
                 await reader.dispose()
             observations[name] = observed
-        with capsys.disabled():
-            print("MYSQL_READ_TRANSACTION_PROBE " + json.dumps({
-                "isolation": isolation, "skip_autocommit_rollback": skip_rollback,
-                "expected_following_transaction": expected, "observations": observations,
-            }, sort_keys=True))
+        warnings.warn("MYSQL_READ_TRANSACTION_PROBE " + json.dumps({
+            "isolation": isolation, "skip_autocommit_rollback": skip_rollback,
+            "expected_following_transaction": expected, "observations": observations,
+        }, sort_keys=True), pytest.PytestWarning, stacklevel=1)
     finally:
         await reader.dispose()
         await writer.dispose()
