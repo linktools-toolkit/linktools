@@ -425,3 +425,44 @@ def test_embedded_business_preserves_multiline_quoted_values(fresh_manager, tmp_
     nginx.__dict__["sites"] = {("nginx", "web"): site}
     rendered = prepared_config(nginx)["sites/generated.conf"]
     assert content in rendered
+
+
+def test_original_header_definition_drives_send_parse_validate_and_clear(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    nginx.original_headers = tuple(
+        ("X-Proxy-Original-Client-Address" if name == "client_ip" else header,
+         name, expression, actual)
+        for header, name, expression, actual in nginx.original_headers
+    )
+    root = nginx._render_site_template(
+        nginx, nginx.get_source_path("templates", "nginx.conf"),
+        SimpleNamespace(template_vars={"waf": True, "site_files": ()}))
+    server = nginx._render_site_template(
+        nginx, nginx.get_source_path("templates", "server.conf"), make_site(waf=True))
+    assert "$http_x_proxy_original_client_address" in root
+    assert "$http_x_proxy_original_client_ip" not in root
+    assert "real_ip_header X-Proxy-Original-Client-Address;" in server
+    assert "proxy_set_header X-Proxy-Original-Client-Address $original_client_ip;" in server
+    assert "X-Proxy-Original-Client-IP" not in server
+    for authentication in (False, True):
+        headers = dict(nginx.header_items(make_site(), authentication=authentication))
+        assert headers["X-Proxy-Original-Client-Address"] == '\"\"'
+        assert "X-Proxy-Original-Client-IP" not in headers
+
+
+def test_identity_field_definition_drives_capture_output_and_protection(fresh_manager, monkeypatch):
+    nginx = fresh_manager.containers["nginx"]
+    monkeypatch.setattr(type(nginx), "identity_headers", ("User", "Groups", "Name", "Display"))
+    site = make_site()
+    for source in ("server.conf", "maps.conf", "default.conf"):
+        rendered = nginx._render_site_template(
+            nginx, nginx.get_source_path("templates", source), site, route_auth=True)
+        assert "email" not in rendered.lower()
+        assert "display" in rendered.lower()
+    headers = dict(nginx.header_items(site))
+    assert headers["X-Auth-Display"].startswith('\"$identity_')
+    assert "X-Auth-Email" not in headers
+    with pytest.raises(ContainerError, match="reserved"):
+        nginx.validated_auth_headers({"X-Auth-Display": "forged"})
+    with pytest.raises(ContainerError, match="reserved"):
+        nginx.header_items(site, {"X-Auth-Display": "forged"})

@@ -31,6 +31,17 @@ if TYPE_CHECKING:
 
 class Container(BaseContainer):
 
+    # Wire header, internal name, public request value, trusted-origin comparison.
+    # Scheme uses its native http/https allowlist instead of an HTTP-hop comparison.
+    original_headers = (
+        ("X-Proxy-Original-Scheme", "scheme", "$scheme", None),
+        ("X-Proxy-Original-Host", "host", "$http_host", "$http_host"),
+        ("X-Proxy-Original-URI", "uri", "$request_uri", "$request_uri"),
+        ("X-Proxy-Original-Method", "method", "$request_method", "$request_method"),
+        ("X-Proxy-Original-Client-IP", "client_ip", "$peer_address", "$remote_addr"),
+    )
+    identity_headers = ("User", "Groups", "Name", "Email")
+
     def quote(self, value: object) -> str:
         data = str(value)
         if any(ch in data for ch in ("\r", "\n", "\x00")):
@@ -38,17 +49,17 @@ class Container(BaseContainer):
         data = data.replace("\\", "\\\\").replace('"', '\\"')
         return '"' + data.replace("$", "$" + "{literal_dollar}") + '"'
 
-    @staticmethod
-    def validated_auth_headers(headers: "Mapping[str, str]") -> "dict[str, str]":
+    @classmethod
+    def validated_auth_headers(cls, headers: "Mapping[str, str]") -> "dict[str, str]":
         result = {}
         seen = set()
         forbidden = {
             "host", "forwarded", "x-real-ip", "x-original-url",
             "x-original-method", "x-forwarded-for", "x-forwarded-host",
             "x-forwarded-method", "x-forwarded-proto", "x-forwarded-uri",
-            "x-forwarded-port", "x-auth-user", "x-auth-groups",
-            "x-auth-name", "x-auth-email",
+            "x-forwarded-port",
         }
+        forbidden.update("x-auth-" + name.lower() for name in cls.identity_headers)
         for key, value in headers.items():
             if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", key):
                 raise ContainerError("Invalid nginx auth header name")
@@ -249,9 +260,9 @@ class Container(BaseContainer):
             "X-Forwarded-Method": "$original_method", "X-Forwarded-For": "$original_client_ip",
             "X-Forwarded-Port": "$original_port", "Forwarded": "",
         }
-        for name in ("Scheme", "Host", "URI", "Method", "Client-IP"):
-            headers["X-Proxy-Original-" + name] = ""
-        for name in ("User", "Groups", "Name", "Email"):
+        for header, _, _, _ in self.original_headers:
+            headers[header] = ""
+        for name in self.identity_headers:
             headers["X-Auth-" + name] = (
                 "$identity_" + site.var_name + "_" + name.lower()
                 if site.auth and not authentication else "")
@@ -261,12 +272,13 @@ class Container(BaseContainer):
                 headers[key] = "$credential_" + site.var_name + "_" + str(index)
         seen = set()
         protected = {key.lower() for key in auth_headers}
+        identity_names = {"x-auth-" + name.lower() for name in self.identity_headers}
         for key, value in (overrides or {}).items():
             if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
                 raise ContainerError("Invalid nginx header override name")
             normalized = key.lower()
             if (normalized in seen or normalized.startswith("x-proxy-original-") or
-                    normalized in {"x-auth-user", "x-auth-groups", "x-auth-name", "x-auth-email"} or
+                    normalized in identity_names or
                     (not authentication and normalized in protected)):
                 raise ContainerError("Duplicate or reserved nginx header override: " + key)
             seen.add(normalized)

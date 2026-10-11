@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import Flare, Nginx, load_port_url
+from linktools.cntr.ext import Flare, load_port_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
@@ -29,7 +29,6 @@ class Container(BaseContainer):
 
         return dict(
             LLDAP_TAG="stable",
-            LLDAP_DOMAIN=Nginx.domain(self, "ldap"),
             LLDAP_PORT=ConfigField(cast=int, default=0),
             LLDAP_WEB_PORT=ConfigField(cast=int, default=0),
             LLDAP_BASE_DN=ConfigField(provider=LazyProvider(get_base_dn)),
