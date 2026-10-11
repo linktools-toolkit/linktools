@@ -156,9 +156,8 @@ return endpoint(
 Return `endpoint(...)` directly when it is the only entry; use an array when
 there are additional sibling declarations. Both `endpoint` and `Flare.links` return plain tuples. Nested lists/tuples are
 flattened in order by the same generic declaration iterator used by Manager.
-They can be array elements without `*`; dictionaries still name individual
-Integration values. Nested arbitrary iterables, strings, and mapping values that
-are groups are not declaration compositions. Existing finite top-level iterable
+They can be array elements without `*`. Dictionaries, strings and nested
+arbitrary iterables are not declaration compositions. Existing finite top-level iterable
 producers remain supported and are frozen once.
 
 `Flare.links(*links, name=..., icon=..., desc=...)` copies Flare declarations,
@@ -172,6 +171,28 @@ lazy public URL. Explicit URLs, `None`, and empty strings are retained. Containe
 and other bookmarks always own their URLs. Without a Flare extension an endpoint
 does not appear in navigation. Display metadata remains entirely within Flare;
 multiple uses copy declarations without modifying the original values.
+
+For custom URLs or OIDC callbacks, `extensions` can be a declaration factory:
+
+```python
+extensions=lambda url, auth: [
+    Flare.public("Mihomo", "server", "Dashboard", url=url(
+        "ui", "metacubexd", "#", "setup",
+        queries={"hostname": self.get_config_later("MIHOMO_DOMAIN")},
+    )),
+    Authelia.oidc((url(), "http://portainer.local:9000"), enabled=auth),
+]
+```
+
+The factory runs once while building declarations. `url` is the existing lazy
+nginx URL builder bound to this site; its path and query arguments retain
+`load_nginx_url` semantics. `auth` is the site's lazy authentication flag.
+Store these lazy values in declarations; do not resolve them or branch on `auth`
+in the factory. An unavailable site returns an empty URL without reading query
+values. The example's `#/setup?...` is a fragment route, not an HTTP query.
+OIDC receives only the explicitly listed callbacks; `enabled=auth` keeps them
+conditional without changing standalone OIDC defaults or `enabled=None` behavior.
+Ordinary extension lists, tuples and generators remain supported.
 
 Multiple endpoints are ordinary array elements. Cache any endpoint referenced
 outside its own extensions, then pass that original object to URL/ACL helpers:

@@ -242,3 +242,112 @@ def test_endpoint_binds_reused_access_and_public_links_to_each_actual_site() -> 
     assert str(load_nginx_url(producer, second)) == "https://two.test"
     with pytest.raises(ContainerError, match="Expected one declared nginx site"):
         str(load_nginx_url(producer))
+
+
+@pytest.mark.parametrize("active,auth_enabled", [(True, True), (True, False), (False, True), (False, False)])
+def test_extension_factory_binds_lazy_url_and_auth_without_early_reads(active, auth_enabled):
+    from urllib.parse import urlsplit
+
+    reads = []
+    calls = []
+    values = {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443,
+              "NGINX_AUTH_ENABLE": auth_enabled}
+    producer = SimpleNamespace(name="app", get_config=lambda key, **kwargs: values[key])
+
+    def query_value():
+        reads.append("query")
+        return "public-fixture-value"
+
+    def extensions(url, auth):
+        calls.append("factory")
+        return [
+            Flare.links(
+                Flare.public(url=url("ui", "metacubexd", "#", "setup", queries={"secret": lazy_load(query_value)})),
+                name="Mihomo", icon="server",
+            ),
+            Authelia.oidc((url(), "http://10.10.10.1:9000"), enabled=auth),
+        ]
+
+    declarations = endpoint(producer, domain="app.test" if active else "", extensions=extensions)
+    assert calls == ["factory"] and reads == []
+    producer.manager = SimpleNamespace(
+        integration_snapshot={"nginx": (), "authelia": ()},
+        containers={"nginx": SimpleNamespace(sites={declarations[0]: ResolvedSite(producer, declarations[0], 0)})},
+    )
+    url = declarations[1].url
+    if active:
+        parsed = urlsplit(url)
+        assert parsed.path == "/ui/metacubexd/" and parsed.query == ""
+        assert parsed.fragment == "/setup?secret=public-fixture-value"
+        assert reads == ["query"]
+    else:
+        assert url is None and reads == []
+    assert declarations[2].redirect_uris == (
+        ("https://app.test:9443", "http://10.10.10.1:9000") if active and auth_enabled else ()
+    )
+    assert calls == ["factory"]
+
+
+def test_extension_factory_reuse_and_generator_keep_original_site_bindings():
+    calls = []
+    producer = SimpleNamespace(name="app", get_config=fail)
+
+    def factory(url, auth):
+        calls.append("start")
+        yield Flare.public("App", "web", url=url())
+        calls.append("end")
+
+    first = endpoint(producer, domain="one.test", public_url="https://one.test/exact/", extensions=factory)
+    second = endpoint(producer, domain="two.test", public_url="https://two.test/other?x=1", extensions=factory)
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
+        first[0]: ResolvedSite(producer, first[0], 0), second[0]: ResolvedSite(producer, second[0], 1),
+    })})
+    assert first[1].url == "https://one.test/exact/"
+    assert second[1].url == "https://two.test/other?x=1"
+    assert calls == ["start", "end", "start", "end"]
+
+
+def test_extension_factory_does_not_reinterpret_existing_lazy_declarations_or_none_enable():
+    declarations = endpoint(object(), domain="app.test", extensions=lazy_load(lambda: [
+        Flare.public("App", "web", url=None),
+        Flare.public("Empty", "web", url=""),
+        Authelia.oidc((lazy_load(fail),), enabled=None),
+    ]))
+    assert declarations[1].url is None and declarations[2].url is None
+    assert declarations[3].redirect_uris == ()
+
+
+def test_extension_factory_errors_propagate_without_retry():
+    calls = []
+
+    def extensions(url, auth):
+        calls.append(1)
+        raise ValueError("broken extension factory")
+
+    with pytest.raises(ValueError, match="broken extension factory"):
+        endpoint(object(), domain="app.test", extensions=extensions)
+    assert calls == [1]
+
+
+def test_extension_factory_uninstalled_nginx_does_not_read_domain_queries_or_auth():
+    producer = SimpleNamespace(name="app", get_config=fail)
+    declarations = endpoint(producer, domain=lazy_load(fail), extensions=lambda url, auth: [
+        Flare.public("App", "web", url=url("ui", queries={"secret": lazy_load(fail)})),
+        Authelia.oidc((url(), lazy_load(fail)), enabled=auth),
+    ])
+    producer.manager = SimpleNamespace(integration_snapshot={}, containers={"nginx": SimpleNamespace(sites={
+        declarations[0]: ResolvedSite(producer, declarations[0], 0),
+    })})
+    assert declarations[1].url is None
+    assert declarations[2].redirect_uris == ()
+
+
+def test_extension_factory_preserves_callable_integration_leaf():
+    class CallableIntegration(Integration):
+        consumer = "custom"
+
+        def __call__(self, *args):
+            raise AssertionError("a declaration is not an extension factory")
+
+    leaf = CallableIntegration()
+    assert endpoint(object(), domain="app.test", extensions=leaf)[1] is leaf
