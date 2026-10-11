@@ -127,3 +127,89 @@ async def test_cancelled_overlay_close_finishes_refresh_before_closing_backend()
         await asyncio.gather(waiter, *(() if closing is None else (closing,)), return_exceptions=True)
         loop.set_exception_handler(previous)
         await overlay.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_at", ("head", "source_head", "backend_correction", "source_correction"))
+async def test_metadata_write_invalidates_an_inflight_revision_check(pause_at: str) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    pause = False
+
+    async def wait_at(stage: str) -> None:
+        if pause and pause_at == stage:
+            started.set()
+            await release.wait()
+
+    class Backend(InMemoryAssetBackend):
+        async def head_revision(self) -> StorageRevision | None:
+            value = await super().head_revision()
+            await wait_at("head" if pause_at == "head" else "backend_correction")
+            return value
+
+    class Source:
+        async def head_revision(self) -> StorageRevision | None:
+            value = (await InMemoryAssetBackend.head_revision(backend)
+                     if pause_at == "source_head" else StorageRevision("source-needs-correction"))
+            await wait_at("source_head")
+            return value
+
+        async def revision_bumped(self, revision: StorageRevision) -> None:
+            await wait_at("source_correction")
+
+    backend = Backend()
+    view = LayerMetadataView(backend, LayerRefreshPolicy.REVISIONED,
+                             revision_source=None if pause_at == "head" else Source())
+    key = AssetKey("test", "write-during-head")
+    await backend.put(key, b"old")
+    await view.refresh()
+    pause = True
+    reader = asyncio.create_task(view.refresh())
+    try:
+        await started.wait()
+        written = await backend.put(key, b"new")
+        view.apply_write(key, written.info, written.store_revision)
+        release.set()
+        result = await reader
+        assert result.revision == written.store_revision
+        assert result.entries[key] == written.info
+    finally:
+        release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_revision_check_started_after_external_write_observes_it() -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    pause = False
+
+    class Backend(InMemoryAssetBackend):
+        async def head_revision(self) -> StorageRevision | None:
+            value = await super().head_revision()
+            if pause:
+                started.set()
+                await release.wait()
+            return value
+
+    backend = Backend()
+    view = LayerMetadataView(backend, LayerRefreshPolicy.REVISIONED)
+    key = AssetKey("test", "external-write")
+    await backend.put(key, b"old")
+    await view.refresh()
+    pause = True
+    first = asyncio.create_task(view.refresh())
+    second = None
+    try:
+        await started.wait()
+        written = await backend.put(key, b"new")
+        second = asyncio.create_task(view.refresh())
+        await asyncio.sleep(0)
+        release.set()
+        await first
+        result = await second
+        assert result.revision == written.store_revision
+        assert result.entries[key] == written.info
+    finally:
+        release.set()
+        await asyncio.gather(first, *(() if second is None else (second,)), return_exceptions=True)
+        await backend.close()
