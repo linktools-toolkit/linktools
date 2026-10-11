@@ -122,11 +122,14 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
                 def discard(done: "asyncio.Task[MetadataState[KeyT, InfoT]]") -> None:
                     if self._refresh_task is done:
                         self._refresh_task = None
+                    if not done.cancelled():
+                        done.exception()
 
                 task.add_done_callback(discard)
             task = self._refresh_task
         try:
-            return await asyncio.shield(task)
+            await asyncio.wait((task,))
+            return task.result()
         finally:
             if task.done():
                 async with self._lock:

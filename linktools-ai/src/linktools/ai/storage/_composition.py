@@ -62,7 +62,8 @@ async def _settle_task(task: "asyncio.Task[object]") -> bool:
     cancelled = False
     while True:
         try:
-            await asyncio.shield(task)
+            await asyncio.wait((task,))
+            task.result()
             return cancelled
         except asyncio.CancelledError:
             if task.done():
