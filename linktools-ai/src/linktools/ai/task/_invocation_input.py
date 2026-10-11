@@ -57,7 +57,7 @@ class TaskInvocationInputContract:
 
 @dataclass(frozen=True, slots=True)
 class TaskGraphTemplate:
-    nodes: tuple[TaskNode, ...]
+    nodes: tuple[TaskNode[object], ...]
     limits: TaskGraphLimits | None = None
     task_contracts: tuple[Mapping[str, JsonValue], ...] = ()
     expander_contracts: tuple[Mapping[str, JsonValue], ...] = ()

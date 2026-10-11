@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from ._tasks import TaskEngine
 
 AppT = TypeVar("AppT")
-_ResultT = TypeVar("_ResultT", bound=JsonValue)
+_ResultT = TypeVar("_ResultT")
 _logger = environ.get_logger("ai.runtime.task")
 
 
@@ -205,7 +205,7 @@ class TaskGraphRun(Generic[AppT]):
     @overload
     async def result(self, node_id: str) -> JsonValue: ...
 
-    async def result(self, node_id: str | TaskNodeResultRef) -> JsonValue:
+    async def result(self, node_id: str | TaskNodeResultRef[object]) -> object:
         if isinstance(node_id, TaskNodeResultRef):
             node_id = node_id.node_id
         record = await self._result_record(node_id)
@@ -220,7 +220,7 @@ class TaskGraphRun(Generic[AppT]):
     @overload
     async def result_ref(self, node_id: str) -> TaskResultRef: ...
 
-    async def result_ref(self, node_id: str | TaskNodeResultRef) -> TaskResultRef:
+    async def result_ref(self, node_id: str | TaskNodeResultRef[object]) -> TaskResultRef[object]:
         if isinstance(node_id, TaskNodeResultRef):
             node_id = node_id.node_id
         record = await self._result_record(node_id)

@@ -17,7 +17,8 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.task import (
-    Task, TaskDependency, TaskDependencyState, TaskGraph, TaskNode, TaskNodeContext,
+    Task, TaskDependency, TaskDependencyState, TaskExpander, TaskExpansionContext,
+    TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeContext,
     TaskNodeResultRef, TaskRef, TaskResultRef,
 )
 
@@ -86,6 +87,78 @@ async def test_typed_result_references_keep_json_and_alias_reads() -> None:
         assert retained == await run.result_ref("prepare")
         assert decode_domain(encode_domain(retained), TaskResultRef) == retained
         assert await run.result("finish") == "PREPARED"
+
+
+@pytest.mark.asyncio
+async def test_collection_result_types_survive_expansion_and_json_round_trip() -> None:
+    async def words(context: TaskNodeContext[None]) -> list[str]:
+        return ["one", "two"]
+
+    async def counts(context: TaskNodeContext[None]) -> dict[str, int]:
+        return {"one": 1, "two": 2}
+
+    word_task = Task("authoring.words", words, effect_policy="none")
+    count_task = Task("authoring.counts", counts, effect_policy="none")
+    word_node = TaskNode("words", task=word_task)
+    count_node = TaskNode("counts", task=count_task)
+    word_ref = TaskNodeResultRef(word_node)
+    count_ref = TaskNodeResultRef(count_node)
+    assert_type(word_task, Task[None, list[str]])
+    assert_type(count_task.ref, TaskRef[dict[str, int]])
+    assert_type(word_ref, TaskNodeResultRef[list[str]])
+    assert_type(count_node, TaskNode[dict[str, int]])
+    if TYPE_CHECKING:
+        TaskNode[list[int]]("wrong", task=word_task)  # type: ignore[arg-type]
+        TaskNodeResultRef[list[int]](word_node)  # type: ignore[arg-type]
+
+    async def collect(context: TaskNodeContext[None]) -> dict[str, list[dict[str, int]]]:
+        names = await context.read_dependency(word_ref)
+        totals = await context.read_dependency(count_ref)
+        assert_type(names, list[str])
+        assert_type(totals, dict[str, int])
+        if TYPE_CHECKING:
+            _not_numbers: list[int] = names  # type: ignore[assignment]
+            _not_text: dict[str, str] = totals  # type: ignore[assignment]
+        assert await context.read_dependency("names") == names
+        return {"groups": [{name: totals[name]} for name in names]}
+
+    collect_task = Task("authoring.collect", collect, effect_policy="none")
+    collect_node = TaskNode("collect", ("words", "counts"), task=collect_task,
+                            input_refs={"names": word_ref})
+    collected = TaskNodeResultRef(collect_node)
+
+    def expand(context: TaskExpansionContext) -> tuple[TaskNode[object], ...]:
+        return (collect_node,)
+
+    async def dispatch(context: TaskNodeContext[None]) -> JsonValue:
+        return None
+
+    dispatch_task = Task[None]("authoring.dispatch", dispatch, effect_policy="none")
+    assert_type(dispatch_task, Task[None, JsonValue])
+    expander = TaskExpander("authoring.expand", expand)
+    template = TaskGraphTemplate((word_node, count_node, TaskNode(
+        "dispatch", task=dispatch_task, expander=expander,
+    )))
+    assert decode_domain(encode_domain(template), TaskGraphTemplate) == template
+    graph = TaskGraph("typed-collections", template.nodes)
+    async with Runtime.open("typed-collections", models=ModelRegistry(),
+                            storage=RuntimeStorage.in_memory()) as runtime:
+        engine = runtime.tasks.bind(word_task, count_task, expander).with_definitions(
+            collect_task, dispatch_task,
+        )
+        assert_type(engine.definition(word_task.ref), Task[None, list[str]])
+        assert_type(engine.definition(TaskRef("authoring.dispatch", 1)), Task[None, JsonValue])
+        run = await engine.start(graph, idempotency_key="typed-collections")
+        assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
+        value = await run.result(collected)
+        assert_type(value, dict[str, list[dict[str, int]]])
+        assert value == {"groups": [{"one": 1}, {"two": 2}]}
+        assert await run.result(word_ref) == ["one", "two"]
+        retained = await run.result_ref(collected)
+        assert_type(retained, TaskResultRef[dict[str, list[dict[str, int]]]])
+        assert decode_domain(encode_domain(retained), TaskResultRef) == retained
+        reuse = TaskNode("reuse", task=collect_task, input_refs={"collected": retained})
+        assert decode_domain(encode_domain(reuse), TaskNode) == reuse
 
 
 @pytest.mark.asyncio
@@ -191,3 +264,25 @@ async def test_describe_submission_locates_invalid_node_without_execution(invali
         with pytest.raises(AIError) as missing:
             await engine.get("planning")
         assert missing.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_output", (False, True))
+async def test_result_type_annotations_do_not_bypass_json_validation(model_output: bool) -> None:
+    async def invalid(context: TaskNodeContext[None]) -> object:
+        return _Answer(answer="not a JSON object") if model_output else object()
+
+    definition = Task("authoring.invalid", invalid, effect_policy="none",
+                      output_type=_Answer if model_output else None)
+    node = TaskNode("invalid", task=definition)
+    reference = TaskNodeResultRef(node)
+    async with Runtime.open("invalid-json-result", models=ModelRegistry(),
+                            storage=RuntimeStorage.in_memory()) as runtime:
+        run = await runtime.tasks.bind(definition).start(
+            TaskGraph("invalid-json-result", (node,)), idempotency_key="invalid-json-result",
+        )
+        assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.FAILED
+        with pytest.raises(AIError) as caught:
+            await run.result(reference)
+        assert caught.value.code is ErrorCode.TASK_NODE_FAILED
+        assert caught.value.safe_details["error_code"] == ErrorCode.OUTPUT_CONTRACT_INVALID.value

@@ -36,7 +36,7 @@ from ._capture import TaskInvocationInputRef
 from ._definitions import Task, TaskExpander, TaskExpanderRef, TaskRef
 
 _AppT = TypeVar("_AppT")
-_ResultT = TypeVar("_ResultT", bound=JsonValue, covariant=True, default=JsonValue)
+_ResultT = TypeVar("_ResultT", covariant=True, default=JsonValue)
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -164,7 +164,7 @@ class TaskNode(Generic[_ResultT]):
     task: "TaskRef[_ResultT] | None"
     budget_cost: int
     expander: "TaskExpanderRef | None"
-    input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
+    input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]]"
     input_capture: "TaskInvocationInputRef | None"
     original_input: "Mapping[str, JsonValue] | None" = field(repr=False)
     timeout_seconds: "float | None"
@@ -187,7 +187,7 @@ class TaskNode(Generic[_ResultT]):
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpander | TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None" = None,
+        input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]] | None" = None,
         input_capture: "TaskInvocationInputRef | None" = None,
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
@@ -228,7 +228,7 @@ class TaskNode(Generic[_ResultT]):
         original_input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None" = None,
+        input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]] | None" = None,
         input_capture: "TaskInvocationInputRef | None" = None,
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
@@ -273,7 +273,7 @@ class TaskNode(Generic[_ResultT]):
         original_input: "Mapping[str, JsonValue] | None",
         budget_cost: int,
         expander: "TaskExpander | TaskExpanderRef | None",
-        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None",
+        input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]] | None",
         input_capture: "TaskInvocationInputRef | None",
         timeout_seconds: "float | None",
         max_attempts: int,
@@ -507,7 +507,7 @@ class TaskNode(Generic[_ResultT]):
         return cls(
             node_id,
             dependencies,
-            task=TaskRef.deferred_input(),
+            task=TaskRef[JsonValue].deferred_input(),
             input=values,
             output_type=output_type,
         )
@@ -618,7 +618,7 @@ class TaskGraph:
     """An immutable DAG of task invocations, validated when constructed."""
 
     graph_id: str
-    nodes: "tuple[TaskNode, ...]"
+    nodes: "tuple[TaskNode[object], ...]"
 
     def __post_init__(self) -> None:
         if not self.graph_id.strip():
@@ -939,7 +939,7 @@ class TaskGraphHandle:
 class TaskGraphView:
     graph_id: str
     status: TaskStatus
-    nodes: "tuple[TaskNode, ...]"
+    nodes: "tuple[TaskNode[object], ...]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -947,11 +947,11 @@ class TaskNodeInfo:
     """Safe public task-node metadata without raw input content."""
 
     node_id: str
-    task: "TaskRef | None"
+    task: "TaskRef[object] | None"
     dependencies: tuple[str, ...]
     budget_cost: int
     expander: "TaskExpanderRef | None"
-    input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
+    input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]]"
     input_capture: "TaskInvocationInputRef | None"
     timeout_seconds: "float | None"
     max_attempts: int
@@ -963,7 +963,7 @@ class TaskNodeInfo:
     failure_policy: str = "propagate"
 
     @classmethod
-    def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
+    def from_node(cls, node: TaskNode[object]) -> "TaskNodeInfo":
         return cls(
             node.node_id,
             node.task,
@@ -1013,7 +1013,7 @@ class TaskGraphInfo:
 class TaskGraphState:
     graph_id: str
     status: TaskStatus
-    nodes: "tuple[TaskNode, ...]"
+    nodes: "tuple[TaskNode[object], ...]"
     node_states: "tuple[TaskNodeView, ...]"
     event_seq: int = 0
 

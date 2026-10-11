@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from ..agent import AgentInputCaptureRef
 from ..core import BudgetUsage, RunBudget, Page, Principal
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
+_ResultT = TypeVar("_ResultT")
 
 
 class RuntimeTasks(Generic[AppT]):
@@ -97,8 +98,8 @@ class RuntimeTasks(Generic[AppT]):
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return self._runtime._task_from_agent_capture(id, value.binding, revision=revision)
 
-    def bind(self, *definitions: Task[AppT] | TaskExpander) -> "TaskEngine[AppT]":
-        tasks: dict[tuple[str, int], Task[AppT]] = {}
+    def bind(self, *definitions: Task[AppT, object] | TaskExpander) -> "TaskEngine[AppT]":
+        tasks: dict[tuple[str, int], Task[AppT, Any]] = {}
         expanders: dict[tuple[str, int], TaskExpander] = {}
         for definition in definitions:
             if isinstance(definition, Task):
@@ -128,7 +129,7 @@ class TaskEngine(Generic[AppT]):
         self,
         runtime: "Runtime[AppT]",
         graph_service: TaskGraphService,
-        tasks: Mapping[tuple[str, int], Task[AppT]],
+        tasks: Mapping[tuple[str, int], Task[AppT, Any]],
         expanders: Mapping[tuple[str, int], TaskExpander],
     ) -> None:
         runtime._validate_task_bindings(tuple(tasks.values()))
@@ -142,14 +143,14 @@ class TaskEngine(Generic[AppT]):
         return self._runtime
 
     @property
-    def definitions(self) -> tuple[Task[AppT], ...]:
+    def definitions(self) -> tuple[Task[AppT, object], ...]:
         return tuple(self._tasks.values())
 
     @property
     def expanders(self) -> tuple[TaskExpander, ...]:
         return tuple(self._expanders.values())
 
-    def definition(self, ref: TaskRef) -> Task[AppT]:
+    def definition(self, ref: TaskRef[_ResultT]) -> Task[AppT, _ResultT]:
         try:
             return self._tasks[(ref.id, ref.revision)]
         except KeyError as error:
@@ -161,7 +162,7 @@ class TaskEngine(Generic[AppT]):
         except KeyError as error:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED) from error
 
-    def with_definitions(self, *definitions: Task[AppT]) -> "TaskEngine[AppT]":
+    def with_definitions(self, *definitions: Task[AppT, object]) -> "TaskEngine[AppT]":
         return self._runtime.tasks.bind(
             *self._tasks.values(), *self._expanders.values(), *definitions,
         )
@@ -407,7 +408,7 @@ class TaskEngine(Generic[AppT]):
         )
 
     @property
-    def _task_definitions(self) -> Mapping[tuple[str, int], Task[AppT]]:
+    def _task_definitions(self) -> Mapping[tuple[str, int], Task[AppT, Any]]:
         return self._tasks
 
     @property

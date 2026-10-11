@@ -23,7 +23,7 @@ from ._capture import TaskInvocationInputRef
 from ._graph import TaskNodeResultRef, TaskResultRef, normalize_retry_delay_seconds, normalize_timeout_seconds
 
 AppT = TypeVar("AppT")
-_ResultT = TypeVar("_ResultT", bound=JsonValue)
+_ResultT = TypeVar("_ResultT")
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -248,7 +248,7 @@ class TaskNodeContext(Generic[AppT]):
     @overload
     async def read_dependency(self, name: str) -> JsonValue: ...
 
-    async def read_dependency(self, name: str | TaskNodeResultRef) -> JsonValue:
+    async def read_dependency(self, name: str | TaskNodeResultRef[object]) -> object:
         """Read one dependency body through its authorized Execution owner."""
         if isinstance(name, TaskNodeResultRef):
             name = name.node_id

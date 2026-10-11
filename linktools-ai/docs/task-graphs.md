@@ -50,6 +50,14 @@ consumer that previously needed `isinstance(value, str)` after reading a known
 producer can instead retain `TaskNodeResultRef(prepare_node)` and let the type
 checker validate operations on the result. There is no extra decode method.
 
+Container results such as `list[str]`, `dict[str, int]`, and nested JSON
+collections retain their types too. The result type parameter is deliberately
+unbounded: a recursive mutable `JsonValue` bound would reject these valid
+containers through invariance. Runtime JSON validation still rejects unsupported
+Python objects; a type annotation does not change serialization. Heterogeneous
+graphs and definition registries erase result types while each retained typed
+reference preserves its producer association.
+
 This association describes JSON values, not model instances. `context.input`
 is still an immutable `Mapping[str, JsonValue]`; validate application models
 at the callback boundary. `output_type=SomeModel` declares the durable output

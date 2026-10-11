@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from ._runner import TaskNodeRunner
 
 AppT = TypeVar("AppT")
-_ResultT = TypeVar("_ResultT", bound=JsonValue, covariant=True, default=JsonValue)
+_ResultT = TypeVar("_ResultT", covariant=True, default=JsonValue)
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _TASK_TYPE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
@@ -42,7 +42,7 @@ class TaskRef(Generic[_ResultT]):
             raise ValueError("task reference is invalid")
 
     @classmethod
-    def deferred_input(cls) -> "TaskRef":
+    def deferred_input(cls: "type[TaskRef[JsonValue]]") -> "TaskRef":
         return cls("linktools.ai.input", 1)
 
 
@@ -80,7 +80,7 @@ class TaskExpansionContext(Protocol):
 class TaskExpander:
     id: str
     revision: int
-    expand: Callable[[TaskExpansionContext], Sequence["TaskNode"]] = field(
+    expand: Callable[[TaskExpansionContext], Sequence["TaskNode[object]"]] = field(
         repr=False,
         compare=False,
     )
@@ -88,7 +88,7 @@ class TaskExpander:
     def __init__(
         self,
         id: str,
-        expand: Callable[[TaskExpansionContext], Sequence["TaskNode"]],
+        expand: Callable[[TaskExpansionContext], Sequence["TaskNode[object]"]],
         *,
         revision: int = 1,
     ) -> None:
@@ -169,7 +169,7 @@ class Task(Generic[AppT, _ResultT]):
 
     @classmethod
     def from_runner(
-        cls,
+        cls: "type[Task[AppT, JsonValue]]",
         id: str,
         runner: "TaskNodeRunner[AppT]",
         *,
