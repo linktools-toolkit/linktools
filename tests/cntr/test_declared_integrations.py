@@ -640,3 +640,17 @@ def test_unbound_partial_flare_metadata_is_not_consumed_without_a_url() -> None:
     assert _render_navigation(manager) == {"apps.yml": {"links": []},
                                            "bookmarks.yml": {"categories": [], "links": []}}
     assert reads == []
+
+
+def test_builtin_primary_sites_use_direct_endpoint_compositions(fresh_manager) -> None:
+    for name in ("authelia", "safeline", "portainer", "flare"):
+        producer = fresh_manager.containers[name]
+        declarations = producer.integrations
+        assert isinstance(declarations, tuple)
+        assert tuple(declarations[0]) == ("web",)
+        site = declarations[0]["web"]
+        assert isinstance(site, Nginx)
+        assert list(Integration.iter_declarations(declarations))[0] == ("web", site)
+        assert fresh_manager.containers["nginx"].sites[(name, "web")]._declaration is site
+    assert all(declaration.consumer == "flare" for declaration in fresh_manager.containers["lldap"].integrations)
+    assert ("lldap", "web") not in fresh_manager.containers["nginx"].sites

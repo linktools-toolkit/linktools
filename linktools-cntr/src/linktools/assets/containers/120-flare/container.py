@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import Authelia, Flare, Nginx, load_port_url
+from linktools.cntr.ext import endpoint, Authelia, Flare, Nginx, load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -61,24 +61,23 @@ class Container(BaseContainer):
 
     @cached_property
     def integrations(self) -> "Integrations":
-        return [
-            Flare.container(
-                "Flare",
-                "bookmark",
-                load_port_url(self, "FLARE_PORT", https=False),
-            ),
-            {
-                "web": Nginx.site(
-                    server_name=self.get_config_later("FLARE_DOMAIN"),
-                    proxy="http://flare:5005",
-                    auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
-                    auth_bypass=(r"\.(css|js)$",),
+        return endpoint(
+            self,
+            domain=self.get_config_later("FLARE_DOMAIN"),
+            proxy="http://flare:5005",
+            auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
+            auth_bypass=(r"\.(css|js)$",),
+            extensions=[
+                Flare.container(
+                    "Flare",
+                    "bookmark",
+                    load_port_url(self, "FLARE_PORT", https=False),
                 ),
-            },
-            Authelia.access(
-                policy="one_factor",
-            ),
-        ]
+                Authelia.access(
+                    policy="one_factor",
+                ),
+            ],
+        )
 
     def _iter_links(self) -> "Iterator[Flare]":
         declarations = sorted(

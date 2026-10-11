@@ -13,7 +13,7 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import Flare, Nginx, Authelia, load_nginx_url
+from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_nginx_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -61,28 +61,25 @@ class Container(BaseContainer):
 
     @cached_property
     def integrations(self) -> "Integrations":
-        return [
-            {
-                "web": Nginx.site(
-                    server_name=self.get_config_later("AUTHELIA_DOMAIN"),
-                    template=self.get_source_path("templates", "nginx.conf"),
-                    waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
-                    auth=None
-                    if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE")
-                    else False,
-                    auth_bypass=(r"\.(css|js)$",),
+        return endpoint(
+            self,
+            domain=self.get_config_later("AUTHELIA_DOMAIN"),
+            template=self.get_source_path("templates", "nginx.conf"),
+            waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
+            auth=(None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False),
+            auth_bypass=(r"\.(css|js)$",),
+            extensions=[
+                Authelia.access(
+                    subject=["group:lldap_admin"],
                 ),
-            },
-            Authelia.access(
-                subject=["group:lldap_admin"],
-            ),
-            Flare.public(
-                "Authelia",
-                "account",
-                "单点登录",
-                load_nginx_url(self, "web", "auth-admin"),
-            ),
-        ]
+                Flare.public(
+                    "Authelia",
+                    "account",
+                    "单点登录",
+                    load_nginx_url(self, "web", "auth-admin"),
+                ),
+            ],
+        )
 
     @cached_property
     def public_url(self) -> str:
