@@ -2,12 +2,6 @@
 # -*- coding: utf-8 -*-
 """Provider error projection for model bindings."""
 
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-    APIError as OpenAIAPIError,
-    APIStatusError as OpenAIAPIStatusError,
-    APITimeoutError as OpenAIAPITimeoutError,
-)
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
 from ..core import JsonValue
@@ -16,6 +10,13 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics
 
 def model_binding_error(error: Exception) -> "AIError | None":
     """Project provider failures; leave execution and output failures to callers."""
+    from openai import (
+        APIConnectionError as OpenAIAPIConnectionError,
+        APIError as OpenAIAPIError,
+        APIStatusError as OpenAIAPIStatusError,
+        APITimeoutError as OpenAIAPITimeoutError,
+    )
+
     details: dict[str, JsonValue] = {}
     if isinstance(error, ModelHTTPError):
         code = _http_error_code(error.status_code)
