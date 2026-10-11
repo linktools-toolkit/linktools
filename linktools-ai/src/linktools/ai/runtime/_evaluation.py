@@ -266,7 +266,7 @@ class RuntimeEvaluations:
         position = self._cursor_position(cursor, "evaluation.cases", digest, principal) if cursor else "0"
         index = int(position)
         validate_page_limit(limit)
-        cases = tuple([await self._case(item) for item in dataset.ordered_case_refs[index:index + limit]])
+        cases = await self._state.get_cases(dataset.ordered_case_refs[index:index + limit])
         next_cursor = self._cursor("evaluation.cases", digest, str(index + limit), principal) if index + limit < len(dataset.ordered_case_refs) else None
         return Page(cases, next_cursor)
 

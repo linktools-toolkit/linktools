@@ -224,6 +224,26 @@ class EvaluationRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
         return None if record is None else record.contract
 
+    async def get_cases(self, refs: tuple[CaseRef, ...]) -> tuple[CaseContract, ...]:
+        """Read required cases in order; missing content fails at its position."""
+        result = []
+        for offset in range(0, len(refs), 64):
+            identities = tuple([ref.dataset_id, ref.case_id, ref.revision] for ref in refs[offset:offset + 64])
+            keys = tuple(self._key("evaluation_case", identity) for identity in identities)
+            tombstones = tuple(self._key("evaluation_content_tombstone", ["evaluation_case", identity])
+                               for identity in identities)
+            records = await self._store.read(lambda tx: tx.get_records((*keys, *tombstones)))
+            for key, tombstone in zip(keys, tombstones):
+                row = records.get(key)
+                if row is None:
+                    raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE if records.get(tombstone) is not None
+                                  else ErrorCode.STORAGE_NOT_FOUND)
+                case = await self._decode(row, EvaluationCaseRecord)
+                if case.content_expires_at is not None and case.content_expires_at <= datetime.now(timezone.utc):
+                    raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
+                result.append(case.contract)
+        return tuple(result)
+
     async def reserve_experiment(self, record: EvaluationRecord) -> EvaluationRecord:
         async def write(transaction: StateTransaction) -> EvaluationRecord:
             scope = "evaluation.run"
