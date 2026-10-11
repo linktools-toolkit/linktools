@@ -4,13 +4,13 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
-from httpx2 import Limits, Request, RequestNotRead
+from httpx2 import AsyncByteStream, ByteStream, DecodingError, EventSource, Limits, Request, RequestNotRead, Response, SSEError
 from linktools.core import environ
 from openai import DefaultAsyncHttpxClient
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
@@ -30,9 +30,10 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ._client_request import _record_client_request
+from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request
 
 _logger = environ.get_logger("ai.model.openai")
+_CLIENT_REQUEST_ENTRY = "linktools.model.client_request_entry"
 
 
 async def _capture_chat_request(request: Request) -> None:
@@ -41,9 +42,109 @@ async def _capture_chat_request(request: Request) -> None:
     try:
         body = request.content
     except RequestNotRead:
-        _record_client_request("openai-chat", None, capture_error="body_unavailable")
+        entry = _record_client_request("openai-chat", None, capture_error="body_unavailable")
     else:
-        _record_client_request("openai-chat", body)
+        entry = _record_client_request("openai-chat", body)
+    if entry is not None:
+        request.extensions[_CLIENT_REQUEST_ENTRY] = entry
+
+
+def _chat_response_snapshot(
+    response: Response, body: bytes | None, *, content_encoding: str | None, eof: bool,
+) -> ModelClientResponse:
+    content_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+    format = "sse" if content_type == "text/event-stream" else (
+        "json" if content_type == "application/json" or content_type.endswith("+json") else "unknown"
+    )
+    complete = eof and body is not None
+    capture_error = "response_capture_failed" if body is None else None
+    if format == "sse" and body is not None:
+        replica = Response(
+            200, headers={"content-type": "text/event-stream", "content-encoding": content_encoding or ""},
+            stream=ByteStream(body), request=Request("GET", "https://model-response.invalid"),
+        )
+        try:
+            complete = any(event.data == "[DONE]" for event in EventSource(replica))
+        except (DecodingError, SSEError, ImportError):
+            complete = False
+            capture_error = "response_decode_failed"
+    return ModelClientResponse(
+        body=body, status_code=response.status_code, format=format,
+        content_encoding=content_encoding, complete=complete, capture_error=capture_error,
+    )
+
+
+class _CapturedChatResponseStream(AsyncByteStream):
+    def __init__(self, response: Response, entry: _ClientRequestEntry) -> None:
+        self._response = response
+        self._inner = response.stream
+        self._entry = entry
+        self._parts: list[bytes] | None = []
+        self._eof = False
+
+    def _capture(self, part: bytes | None = None, *, buffered: bool = False) -> None:
+        if not self._entry.active:
+            self._parts = None
+            return
+        try:
+            if part is not None:
+                if self._parts is not None:
+                    self._parts.append(part)
+                return
+            body = self._response.content if buffered else (
+                b"".join(self._parts) if self._parts is not None else None
+            )
+            self._entry.record_response(_chat_response_snapshot(
+                self._response, body,
+                content_encoding=None if buffered else self._response.headers.get("content-encoding") or None,
+                eof=buffered or self._eof,
+            ))
+        except Exception:
+            # Observation failures must not change SDK reads or cleanup errors.
+            self._parts = None
+            if part is None:
+                try:
+                    self._entry.record_response(ModelClientResponse(
+                        body=None, status_code=self._response.status_code, format="unknown",
+                        content_encoding=None, complete=False, capture_error="response_capture_failed",
+                    ))
+                except Exception:
+                    # An unavailable recorder cannot provide a replacement view.
+                    pass
+        finally:
+            if part is None:
+                self._parts = None
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        iterator = self._inner.__aiter__()
+        try:
+            async for part in iterator:
+                self._capture(part)
+                yield part
+            self._eof = True
+        finally:
+            if isinstance(iterator, AsyncGenerator):
+                await iterator.aclose()
+
+    async def aclose(self) -> None:
+        try:
+            await self._inner.aclose()
+        finally:
+            # HTTPX retains elapsed timing on its own stream wrapper.
+            self._response.stream = self._inner
+            self._capture()
+
+
+async def _capture_chat_response(response: Response) -> None:
+    entry = response.request.extensions.pop(_CLIENT_REQUEST_ENTRY, None)
+    if entry is None or not entry.active:
+        return
+    capture = _CapturedChatResponseStream(response, entry)
+    if response.is_stream_consumed:
+        # A custom transport may return a response it already read and decoded.
+        capture._capture(buffered=True)
+    else:
+        response.stream = capture
 
 
 class _CapturedOpenAIProvider(OpenAIProvider):
@@ -62,7 +163,7 @@ class _CapturedOpenAIProvider(OpenAIProvider):
         # retaining the SDK's timeout defaults.
         return DefaultAsyncHttpxClient(
             limits=Limits(), follow_redirects=False,
-            event_hooks={"request": [_capture_chat_request]},
+            event_hooks={"request": [_capture_chat_request], "response": [_capture_chat_response]},
         )
 
     async def __aenter__(self) -> "_CapturedOpenAIProvider":
