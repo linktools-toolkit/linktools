@@ -106,14 +106,72 @@ their combined result, or choosing an evaluation path and collecting its outputs
 Domain-specific routing and result models belong to the caller. A shared helper
 is useful only when independent real callers repeat the same operation.
 
-The collector's default `all_succeeded` policy blocks it if a worker fails.
+## Join membership and terminal policies
+
+A join is an ordinary TaskNode whose declared dependencies identify its members.
+For dynamic work, the expander can return workers and their collector together,
+with the collector depending on exactly those selected worker IDs. Unselected
+branches are absent; they are not persisted as a separate `SKIPPED` status.
+
+| Dependency policy | When the node can run | No dependencies |
+| --- | --- | --- |
+| `all_succeeded` | Every dependency succeeded; a failed, blocked, or cancelled dependency blocks the node | Ready |
+| `all_terminal` | Every dependency is terminal, regardless of success | Ready |
+| `any_succeeded` | Every dependency is terminal and at least one succeeded | Blocked |
+
+`SUCCEEDED`, `FAILED`, `BLOCKED`, and `CANCELLED` are terminal. `WAITING` and
+`RECOVERY_REQUIRED` are not. `any_succeeded` is an all-terminal barrier, not an
+early winner: it never cancels siblings. An empty worker batch can still emit
+an empty collector, but a source that fails before expansion is not a successful
+empty batch.
+
 For partial-result reporting, use `all_terminal`, inspect
-`context.dependency_states`, and read only successful dependencies. Deliberately
-choose `failure_policy="isolate"` on workers if their failure should remain local.
-`any_succeeded` also waits until **all** dependencies are terminal; it is not a
-race and does not cancel siblings. Scheduling edges alone do not inject data
-into model prompts. Agent-backed consumers still need explicit `input_refs`
-and their input contract.
+`context.dependency_states`, and read only successful dependencies. A successful
+JSON `null` remains a result; a failed or cancelled dependency is not converted
+to `null`. Choose `failure_policy="isolate"` on workers whose `FAILED` or
+`BLOCKED` status should not propagate to the final graph status. This does not
+change those nodes' statuses or the collector's dependency policy. `CANCELLED`
+nodes can still make the graph `CANCELLED`; cancellation is not isolated.
+
+### Nested expansion is not an implicit subtree barrier
+
+If `branch` expands a `grandchild`, a collector depending only on `branch` can
+run once `branch` succeeds, even while `grandchild` is still running. The whole
+graph remains unsettled until its nodes settle. Declare the actual nodes that a
+collector must wait for when constructing its expansion. Observe the whole graph
+with the existing run `wait()` operation. Inspect `outcome.result.wait_status`:
+`WAITING` and `RECOVERY_REQUIRED` can stop that wait without terminal completion.
+
+A scoped descendant join would require an explicit membership and closure
+contract that survives cancellation and recovery. It is not part of the current
+API. Do not approximate it with all graph nodes or an Execution parent/subagent
+tree: those are different relationships. Existing direct barriers keep their
+meaning after nested expansion and restart.
+
+Scheduling edges alone do not inject data into model prompts. Agent-backed
+consumers still need explicit `input_refs` and their input contract. Collect
+results through the existing authorized readers; keep application-specific
+failure conversion and reduction order in the consumer.
+
+## Comparison choices
+
+The useful ideas from pydantic-graph's
+[typed steps](https://github.com/pydantic/pydantic-ai/blob/v2.55.0/pydantic_graph/pydantic_graph/step.py)
+and [fork-scoped joins](https://github.com/pydantic/pydantic-ai/blob/v2.54.0/pydantic_graph/pydantic_graph/graph_builder.py)
+are evaluated against this durable execution model:
+
+| Capability | LinkTools choice |
+| --- | --- |
+| Typed step results | Preserve JSON result types on existing definitions and references, including collections |
+| Decisions and mapped work | Select nodes in ordinary Python; admit dynamic work with TaskExpander |
+| Join and collection | Keep explicit dependency membership, the three terminal policies, and authorized result reads |
+| Nested fork scope / early winner | Not added to direct dependencies; neither recursive waiting nor sibling cancellation is implicit |
+| Definition diagnostics | Reuse TaskGraph validation and describe_submission |
+| Graph display and execution state | Reuse existing read-only projections and the durable scheduler; no parallel graph state or shared mutable State framework |
+
+A new scoped join remains a possible future capability when a concrete consumer
+needs it. It is not required to express the existing flat expansion and
+collection pattern, and must not silently change existing graph behavior.
 
 ## Diagnose before submission
 
