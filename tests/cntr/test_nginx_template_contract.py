@@ -81,13 +81,30 @@ def test_auth_maps_require_exact_success_without_regex_capture_side_effects(fres
     nginx = fresh_manager.containers["nginx"]
     rendered = nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "maps.conf"), make_site(auth_bypass=(r"^/public",)))
-    gate = rendered[rendered.index('map "$auth_status_'):]
-    assert '"200:0:1" 1;' in gate and '"299:0:1" 1;' in gate
-    assert '"300:0:1:1" 1;' not in gate and '"204:1:1" 1;' not in gate
+    gate = rendered[rendered.index('map "$auth_success_'):]
+    assert '"1:0:1" 1;' in gate
+    assert '"0:0:1" 1;' not in gate and '"1:1:1" 1;' not in gate
     assert "~" not in gate
     assert "default ${http_authorization};" in gate
     assert "${literal_dollar}host" in gate
 
+
+
+def test_auth_status_regex_is_shared_and_only_bound_from_subrequests(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    source = nginx.get_source_path("templates", "nginx.conf")
+    root = nginx._render_site_template(nginx, source, SimpleNamespace(
+        template_vars={"waf": False, "site_files": ()}))
+    assert root.count("map $upstream_status $auth_response_success") == 1
+    status_map = root.split("map $upstream_status $auth_response_success", 1)[1].split("}", 1)[0]
+    assert "volatile;" in status_map
+    assert "~^2[0-9][0-9]$ 1;" in status_map
+    assert "(?<" not in status_map
+    server = nginx._render_site_template(
+        nginx, nginx.get_source_path("templates", "server.conf"), make_site())
+    references = [line.strip() for line in server.splitlines() if "$auth_response_success" in line]
+    assert references
+    assert all(line.startswith("auth_request_set $auth_success_") for line in references)
 
 def test_header_names_are_quoted_and_auth_data_is_not_reinterpreted(fresh_manager, tmp_path):
     nginx = fresh_manager.containers["nginx"]
@@ -270,7 +287,7 @@ def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, 
     for site in (api, web):
         assert "# site {}".format(site.producer.name) in server
         assert "$auth_verified_" + site.var_name in server
-        assert "auth_request_set $auth_status_" + site.var_name in server
+        assert "auth_request_set $auth_success_" + site.var_name in server
 
 
 def test_shared_hostname_preserves_independent_auth_and_bypass(fresh_manager, tmp_path):

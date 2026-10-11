@@ -40,6 +40,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         pytest.skip("Native nginx with SSL, realip, auth_request and openssl is required")
     nginx = fresh_manager.containers["nginx"]
     events = []
+    auth_responses = []
     release_stream = threading.Event()
     origin_port = _port()
 
@@ -98,7 +99,8 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                 self.close_connection = True
                 return
             if kind == "auth":
-                self.send_response(int(self.headers.get("X-Test-Auth-Status", "204")))
+                status = auth_responses.pop(0) if auth_responses else int(self.headers.get("X-Test-Auth-Status", "204"))
+                self.send_response(status)
                 self.send_header("Remote-User", "verified")
                 self.send_header("Location", "https://login.example.test/")
                 self.end_headers()
@@ -153,6 +155,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         business = render("default.conf") + "\n" + "\n".join((
             "location /off { auth_request off; " + header_text + proxy + " }",
             "location /fallback { error_page 403 = /off; " + header_text + proxy + " }",
+            "location /reauth { error_page 403 = /capture/hello; " + header_text + proxy + " }",
             "location ~ ^/capture/(.+)$ { " + header_text + "proxy_set_header X-Capture $1; " + proxy + " }",
         ))
         server_text = nginx._render_site_template(
@@ -221,6 +224,30 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                     assert headers["X-Original-Method"] == "POST"
             if path.startswith("/capture"):
                 assert response["headers"]["X-Capture"] == "hello"
+
+        # The subrequest-only status regex must leave business captures intact.
+        for accepted in (200, 204, 299):
+            status, data = request("/capture/hello", {"X-Test-Auth-Status": str(accepted)})
+            assert status == 200, data
+            headers = json.loads(data)["headers"]
+            assert headers["X-Capture"] == "hello"
+            assert headers["X-Auth-User"] == "verified"
+            assert headers["Authorization"] == "Bearer secret$host"
+
+        # Internal redirects can authenticate twice with shared variable storage.
+        for responses, expected in (((403, 204), 200), ((403, 401), 401)):
+            events.clear()
+            auth_responses[:] = responses
+            status, data = request("/reauth")
+            assert status == expected, data
+            assert not auth_responses
+            if expected == 200:
+                headers = json.loads(data)["headers"]
+                assert headers["X-Capture"] == "hello"
+                assert headers["X-Auth-User"] == "verified"
+                assert headers["Authorization"] == "Bearer secret$host"
+            else:
+                assert "app" not in [event[0] for event in events]
 
         for denied in (401, 403, 500):
             events.clear()
