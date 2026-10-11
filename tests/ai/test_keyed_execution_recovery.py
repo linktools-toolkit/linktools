@@ -20,7 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 
 from .test_live_history_readback_integration import _Models
-from .test_runtime_recovery_ownership import _NAMESPACE, _RuntimeProcess, _capabilities
+from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
 
 
 @asynccontextmanager
