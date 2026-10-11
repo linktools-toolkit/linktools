@@ -2691,7 +2691,10 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
     )
     await recovery.materialize_checkpoint(run, checkpoint)
 
-    async def fail_resolution(_interactions: Any) -> Any:
+    async def fail_resolution(
+        _interactions: Any, *, include_client_requests: bool = False,
+    ) -> Any:
+        del include_client_requests
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     monkeypatch.setattr(recovery, "resolve_model_interactions", fail_resolution)

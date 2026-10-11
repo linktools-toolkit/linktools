@@ -116,8 +116,10 @@ class _HistoryStore:
     async def resolve_model_interactions(
         self,
         interactions: Any,
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]:
-        del interactions
+        del interactions, include_client_requests
         raise AssertionError("lightweight queries do not resolve request content")
 
 
