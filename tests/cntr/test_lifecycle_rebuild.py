@@ -49,6 +49,9 @@ class Owner:
     def get_runtime_requirements(self, required):
         return {}
 
+    def on_prepare(self):
+        pass
+
     def on_starting(self, context):
         self.manager.events.append(("prepare", self.name))
 
@@ -520,3 +523,18 @@ def test_stopped_restart_only_dependent_not_started(tmp_path):
     manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
     manager.compose_operations.up(["db"])
     assert ("restart", "web") not in manager.events
+
+
+@pytest.mark.parametrize("action", ["up", "restart", "down", "render"])
+def test_execution_prepares_each_installed_owner_before_selected_operation(tmp_path, action):
+    manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}}),
+                                    ("other", {"other": {"image": "other:new"}})])
+    for owner in manager.containers.values():
+        owner.on_prepare = lambda owner=owner: manager.events.append(("load-prepare", owner.name))
+    manager.compose_runner.config = lambda *args, **kwargs: manager.events.append(("config",))
+    manager.compose_runner.down = lambda *args, **kwargs: manager.events.append(("down",))
+    getattr(manager.compose_operations, action)(["app"])
+    assert manager.events[:2] == [("load-prepare", "app"), ("load-prepare", "other")]
+    assert len([event for event in manager.events if event[0] == "load-prepare"]) == 2
+    assert len([event for event in manager.events if event == ("prepare", "app")]) == (
+        1 if action in ("up", "restart") else 0)

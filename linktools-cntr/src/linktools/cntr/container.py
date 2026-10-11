@@ -218,6 +218,9 @@ class BaseContainer(metaclass=AbstractMetaClass):
     def on_init(self) -> None:
         pass
 
+    def on_prepare(self) -> None:
+        """Prepare execution inputs before execution scope and service selection."""
+        pass
 
     def get_build_revision(self, service: str) -> "str | None":
         """Optional local build identity; never refresh remote inputs."""

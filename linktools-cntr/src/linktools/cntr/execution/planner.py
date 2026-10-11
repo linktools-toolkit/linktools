@@ -118,7 +118,8 @@ class ExecutionPlanner:
                     name=hook.name, opaque=hook.opaque,
                 ))
 
-        warnings = []
+        warnings = ["Read-only planning does not call on_prepare(); execution-time preparation "
+                    "may change services, dependencies or registered hooks."]
         if unresolved_selection:
             warnings.append("Compose profile selection could not be resolved; startup commands and hooks "
                             "are omitted until native Compose configuration is available.")

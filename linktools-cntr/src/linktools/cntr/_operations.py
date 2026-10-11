@@ -29,11 +29,13 @@ class ComposeOperations:
         self.manager = manager
 
     def select(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
-               for_start: bool = False) -> ComposeSelection:
+               for_start: bool = False, prepare: bool = False) -> ComposeSelection:
         project = tuple(self.manager.load_installed_config_metadata())
         if not project:
             from .container import NoContainerInstalledError
             raise NoContainerInstalledError("No container installed")
+        if prepare:
+            self.manager.lifecycle.prepare(project)
         if not names:
             return ComposeSelection(project, project, (), True)
         installed = {container.name for container in project}
@@ -164,7 +166,7 @@ class ComposeOperations:
 
         manager = self.manager
         runner = manager.compose_runner
-        explicit = self.select(names, for_start=True)
+        explicit = self.select(names, for_start=True, prepare=True)
         requested_services = {service for container in explicit.target_containers for service in container.services}
         warned_actions = set()
 
@@ -646,7 +648,7 @@ class ComposeOperations:
     def down(self, names: "Sequence[str] | None" = None, report: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
             manager = self.manager
-            selection = self.select(names)
+            selection = self.select(names, prepare=True)
             context = self._make_context("down", selection)
             with manager.lifecycle.notify_stop(context):
                 with record_phase(context, "down", command=("down", *selection.services), logger=manager.logger):
@@ -658,7 +660,7 @@ class ComposeOperations:
 
     def render(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
                output_format: "str | None" = None, check: bool = False) -> "int | None":
-        selection = self.select(names, with_dependencies=with_dependencies)
+        selection = self.select(names, with_dependencies=with_dependencies, prepare=True)
         context = self._make_context("compose", selection)
         return self.manager.compose_runner.config(
             context, selection.services, output_format=output_format, quiet=check)

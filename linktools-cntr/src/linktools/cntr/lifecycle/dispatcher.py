@@ -35,6 +35,11 @@ class LifecycleDispatcher:
             return callback()
         return callback(context)
 
+    def prepare(self, containers: "Iterable[BaseContainer]") -> None:
+        """Prepare installed declarations before constructing an execution model."""
+        for container in containers:
+            self._invoke_callback(container.on_prepare)
+
     @classmethod
     def _preparation_steps(cls, containers):
         for container in containers:

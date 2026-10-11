@@ -355,8 +355,9 @@ class ContainerManager:
         return containers
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
-        """Load installed declarations without lifecycle side effects."""
+        """Load config metadata and prepare all installed execution inputs."""
         containers = self.load_installed_config_metadata()
         if not containers:
             raise NoContainerInstalledError("No container installed")
+        self.lifecycle.prepare(containers)
         return containers

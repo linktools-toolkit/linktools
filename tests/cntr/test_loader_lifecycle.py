@@ -37,6 +37,7 @@ def test_loading_preserves_native_capabilities_without_invoking_runtime_lifecycl
             def fail(self, *args):
                 raise AssertionError("Loading must not invoke runtime lifecycle")
 
+            on_prepare = fail
             on_starting = fail
             on_check = fail
             get_runtime_requirements = fail
@@ -113,3 +114,108 @@ def test_builtin_containers_do_not_implement_removed_config_lifecycle(fresh_mana
         assert callable(container.on_starting)
         assert callable(container.on_check)
     assert not hasattr(fresh_manager, "generated_configs")
+
+
+def test_external_prepare_runs_after_configs_before_selected_services(tmp_path, monkeypatch):
+    containers, errors = _load(tmp_path, '''\
+        from linktools.cntr import BaseContainer
+        from linktools.cntr.lifecycle import HookPhase
+
+        class Container(BaseContainer):
+            def on_init(self):
+                self.events = []
+                self.services = {}
+                self.requirements = ()
+
+            @property
+            def dependencies(self):
+                return self.requirements
+
+            @property
+            def configs(self):
+                return {"PREPARED_SERVICE": "example-service"}
+
+            def on_prepare(self):
+                self.events.append("prepare")
+                self.requirements = ("prepared-provider",)
+                name = self.get_config("PREPARED_SERVICE")
+                self.services[name] = {"image": "example:local"}
+                self.add_start_hook(("prepared",), lambda: self.events.append("hook"))
+    ''')
+    assert errors == []
+    container = containers[0]
+    manager = container.manager
+    monkeypatch.setattr(manager, "containers", {container.name: container})
+    monkeypatch.setattr(manager.installed_state, "get", lambda **kwargs: containers)
+    assert manager.load_installed_config_metadata() == containers
+    assert manager.compose_operations.select([container.name], for_start=True).services == ()
+    assert container.events == []
+    def resolve(selected):
+        assert selected == (container,)
+        assert container.dependencies == ("prepared-provider",)
+        assert container.events == ["prepare"]
+        return selected
+
+    monkeypatch.setattr(manager.resolver, "resolve_dependencies", resolve)
+    selected = manager.compose_operations.select([container.name], with_dependencies=True, prepare=True)
+    assert selected.services == ("example-service",)
+    assert container.events == ["prepare"]
+    from linktools.cntr.lifecycle import HookPhase
+    container.hooks.call(HookPhase.BEFORE_START)
+    assert container.events == ["prepare", "hook"]
+
+
+def test_external_prepare_failure_propagates_before_model_selection(tmp_path, monkeypatch):
+    containers, errors = _load(tmp_path, '''\
+        from linktools.cntr import BaseContainer
+
+        class Container(BaseContainer):
+            def on_prepare(self):
+                raise ValueError("prepare failed")
+
+            @property
+            def services(self):
+                raise AssertionError("services read before successful preparation")
+    ''')
+    assert errors == []
+    manager = containers[0].manager
+    monkeypatch.setattr(manager, "load_installed_config_metadata", lambda: containers)
+    with pytest.raises(ValueError, match="prepare failed"):
+        manager.prepare_installed_containers()
+    with pytest.raises(ValueError, match="prepare failed"):
+        manager.compose_operations.select([containers[0].name], prepare=True)
+
+
+def test_exec_nested_operation_preserves_each_prepare_entry(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from linktools.cntr.commands import _shared
+    from linktools.cntr.commands.exec_ import ExecCommand
+
+    containers, errors = _load(tmp_path, '''\
+        from linktools.cntr import BaseContainer
+
+        class Container(BaseContainer):
+            def on_init(self):
+                self.prepared = 0
+                self.services = {"example": {"image": "example:local"}}
+
+            def on_prepare(self):
+                self.prepared += 1
+    ''')
+    assert errors == []
+    container = containers[0]
+    manager = container.manager
+    monkeypatch.setattr(manager, "load_installed_config_metadata", lambda: containers)
+    monkeypatch.setattr(_shared, "manager", manager)
+    command = ExecCommand()
+    args = SimpleNamespace(exec_name="example", exec_args=[])
+    monkeypatch.setattr(ExecCommand, "_subparser", property(lambda self: SimpleNamespace(parse_args=lambda argv: args)))
+
+    def run(parsed):
+        assert container.prepared == 1
+        manager.compose_operations.select([container.name], prepare=True)
+        assert container.prepared == 2
+        return 7
+
+    monkeypatch.setattr(command, "parse_subcommand", lambda parsed: SimpleNamespace(run=run))
+    assert command.run(args) == 7

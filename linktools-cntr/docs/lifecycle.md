@@ -74,16 +74,27 @@ The operation then runs:
    reports that services were applied; it does not trigger deployment rollback.
 
 `restart` performs its explicit stop only after step 3. Required providers that
-were not explicitly selected are not included in the stop set. `down` only uses
-the stop callbacks and performs no start preparation, build or native check.
+were not explicitly selected are not included in the stop set. `down` uses the stop callbacks after loading preparation and performs no
+start preparation, build or native check.
 Status reads metadata and actual state without invoking preparation callbacks.
 Partial `up` warns before changing a service outside the explicitly requested
 containers, identifying the action and dependency/configuration reason. Unchanged
 services produce no such warning; recovery reports additional actions when needed.
 
-Existing callbacks are retained for loading, stopping and removal. The former
-`on_prepare` side-effectful loading hook is removed. The existing seven
-`HookPhase` values are unchanged.
+`on_prepare()` runs for all installed containers after config registration and
+before execution selects services or expands their runtime requirements. Static
+installation dependencies have already been resolved during metadata loading. It is available
+to `up`, `restart`, `down`, `compose`, and container `exec` commands. Exceptions
+propagate before the requested operation starts. Each preparation entry calls it
+once; an `exec` subcommand that invokes another operation enters preparation
+again, so custom callbacks must support repeated calls. Generated integration files still
+belong in `on_starting(context)`, which runs later for selected targets.
+
+Metadata-only planning, status, doctor and config commands do not call
+`on_prepare()`. A hook that changes declarations can therefore change the actual
+execution selection compared with a read-only plan. Keep declarative service and
+dependency definitions side-effect free when they need to be visible in plans.
+The existing seven `HookPhase` values are unchanged.
 
 ## Preparing files
 
