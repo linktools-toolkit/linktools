@@ -91,7 +91,7 @@ def test_ci_matrix_retains_new_packages_and_partitions_ai(tmp_path: Path, monkey
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
     checks = package_checks(("linktools", "linktools-ai", "linktools-new"))
     assert [(check["package"], check["group"]) for check in checks] == [
-        ("linktools", "all"), ("linktools-ai", "evaluation"),
+        ("linktools", "all"), ("linktools-ai", "evaluation-recovery"),
         ("linktools-ai", "runtime"), ("linktools-new", "all"),
     ]
     assert len({check["name"] for check in checks}) == len(checks)
@@ -102,7 +102,7 @@ def test_ci_matrix_retains_new_packages_and_partitions_ai(tmp_path: Path, monkey
 
 
 @pytest.mark.parametrize("tier", ("daily", "merge", "all"))
-@pytest.mark.parametrize("group", ("all", "evaluation", "runtime"))
+@pytest.mark.parametrize("group", ("all", "evaluation-recovery", "runtime"))
 def test_ai_groups_partition_file_families_without_changing_tiers(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tier: str, group: str,
 ) -> None:
@@ -114,12 +114,16 @@ def test_ai_groups_partition_file_families_without_changing_tiers(
     check["paths"] = [str(pytester.path / "tests/ai"), str(pytester.path / "linktools-ai/tests")]
     monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
     families = {
-        "tests/ai/test_evaluation_new.py": "evaluation",
+        "tests/ai/test_evaluation_new.py": "evaluation-recovery",
         "tests/ai/test_new_capture.py": "runtime",
-        "tests/ai/test_captured_new.py": "evaluation",
-        "tests/ai/test_graph_capture_new.py": "evaluation",
+        "tests/ai/test_captured_new.py": "evaluation-recovery",
+        "tests/ai/test_graph_capture_new.py": "evaluation-recovery",
+        "tests/ai/test_runtime_recovery_ownership.py": "evaluation-recovery",
+        "tests/ai/test_runtime_process_recovery.py": "evaluation-recovery",
+        "tests/ai/test_keyed_execution_recovery.py": "evaluation-recovery",
+        "tests/ai/test_runtime_other.py": "runtime",
         "tests/ai/test_new_feature.py": "runtime",
-        "linktools-ai/tests/test_evaluation_local.py": "evaluation",
+        "linktools-ai/tests/test_evaluation_local.py": "evaluation-recovery",
         "linktools-ai/tests/test_local_capture.py": "runtime",
         "linktools-ai/tests/test_local_feature.py": "runtime",
         "tests/core/test_evaluation_other.py": "all",
@@ -162,7 +166,7 @@ def test_empty_ai_group_fails_instead_of_reporting_coverage(
     path = pytester.path / "tests" / "ai" / "test_runtime.py"
     path.parent.mkdir(parents=True)
     path.write_text("def test_runtime(): pass\n", encoding="utf-8")
-    result = pytester.runpytest("-q", "-p", "no:asyncio", "--test-group", "evaluation")
+    result = pytester.runpytest("-q", "-p", "no:asyncio", "--test-group", "evaluation-recovery")
     assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
 
 

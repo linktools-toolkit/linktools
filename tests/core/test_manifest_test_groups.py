@@ -523,7 +523,7 @@ def test_repository_pool_preserves_all_discovered_package_coverage() -> None:
     assert core["name"] == " + ".join(core["packages"].split()) + " checks"
     assert core["install"] == ""
     ai = [row for row in rows if row["packages"] == "linktools-ai"]
-    assert {"evaluation", "runtime"} <= {row["group"] for row in ai}
+    assert {"evaluation-recovery", "runtime"} <= {row["group"] for row in ai}
     assert all(row["install"] == "linktools-ai" for row in ai)
     assert all(row["name"] == "linktools-ai checks (%s)" % row["group"] for row in ai)
     cntr = next(row for row in rows if row["name"] == "linktools-cntr checks")
