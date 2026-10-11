@@ -9,6 +9,8 @@
 
 import json
 import os
+import threading
+from contextlib import contextmanager
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,7 +29,7 @@ from ..errors import (
 from ..types import MISSING
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Literal, Sequence, Union
+    from typing import Any, Callable, ContextManager, Iterator, Literal, Sequence, Union
 
     # The two string literals _cast_value special-cases: "path"
     # expands/absolutizes a filesystem path, "json" parses a JSON string.
@@ -633,7 +635,33 @@ def _cast_value(cast: "ConfigType", value: "Any", base_path: "PathLike | None" =
     return value
 
 
+_resolution_context = threading.local()
+
+
+class _ReadOnlyConfigNotFoundError(ConfigNotFoundError):
+    """A value cannot be discovered without an effectful provider."""
+
+
 class ConfigResolver:
+    @classmethod
+    @contextmanager
+    def read_only_resolution(cls) -> "Iterator[None]":
+        """Resolve existing values without prompts or creating cached values.
+
+        The scope includes other resolvers created or consulted on this thread.
+        Lazy, uncached providers remain responsible for being pure computations.
+        """
+        depth = getattr(_resolution_context, "depth", 0)
+        _resolution_context.depth = depth + 1
+        try:
+            yield
+        finally:
+            _resolution_context.depth = depth
+
+    @classmethod
+    def is_read_only_resolution(cls) -> bool:
+        return getattr(_resolution_context, "depth", 0) > 0
+
     def __init__(self, schema: "ConfigSchema", sources: "Sequence[ConfigSource]") -> None:
         self._schema = schema
         self._sources = list(sources)
@@ -662,6 +690,8 @@ class ConfigResolver:
         try:
             result = self.resolve(key)
             value = result.value
+        except _ReadOnlyConfigNotFoundError:
+            raise
         except ConfigNotFoundError:
             return default
         if type is not None and value is not MISSING:
@@ -726,6 +756,9 @@ class ConfigResolver:
         if present:
             value = self._cast_validate(field, raw)
             return ResolvedConfig(value, field, "persistent", raw)
+        if self.is_read_only_resolution():
+            raise _ReadOnlyConfigNotFoundError(
+                "config %r is not configured; read-only resolution cannot create a cached value" % field.name)
         raw = compute()
         value = self._cast_validate(field, raw)
         persistent.set(field.name, value)
@@ -832,7 +865,7 @@ class ConfigResolver:
 
     def resolve(self, key: str, _stack: "list[str] | None" = None,
                 field: "ConfigField | None" = None) -> "ResolvedConfig":
-        if _stack is None:
+        if _stack is None and not self.is_read_only_resolution():
             cached = self._memo.get(key)
             if cached is not None:
                 cached_token, cached_result = cached
@@ -846,7 +879,7 @@ class ConfigResolver:
 
         result = self._resolve_inner(key, _stack, field=field)
 
-        if _stack is None:
+        if _stack is None and not self.is_read_only_resolution():
             # Recompute the token AFTER resolving, not before: a cached=True
             # provider can write PersistentSource as a side effect of this
             # very call, which would otherwise be memoized under a
@@ -876,6 +909,9 @@ class ConfigResolver:
             return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
 
         if isinstance(provider, PromptProvider):
+            if self.is_read_only_resolution() and not provider.cached:
+                raise _ReadOnlyConfigNotFoundError(
+                    "config %r is not configured; read-only resolution cannot prompt" % field.name)
             def compute_prompt() -> "Any":
                 try:
                     return self._prompt_value(provider, field)
@@ -895,6 +931,9 @@ class ConfigResolver:
             return ResolvedConfig(self._cast_validate(field, value), field, "prompt", value)
 
         if isinstance(provider, ConfirmProvider):
+            if self.is_read_only_resolution() and not provider.cached:
+                raise _ReadOnlyConfigNotFoundError(
+                    "config %r is not configured; read-only resolution cannot prompt" % field.name)
             from ..rich import confirm
             default = provider.default if provider.default is not MISSING else field.default
 
@@ -977,12 +1016,16 @@ class ConfigResolver:
             if isinstance(provider, AliasProvider):
                 return self._resolve_alias(provider, key, _stack)
             return self._resolve_leaf_provider(provider, field)
+        except _ReadOnlyConfigNotFoundError:
+            raise
         except (ConfigNotFoundError, ConfigPromptError) as exc:
             raise ConfigProviderUnavailable(str(exc)) from exc
 
     def explain(self, key: str) -> dict:
         try:
             resolved = self.resolve(key)
+        except _ReadOnlyConfigNotFoundError:
+            raise
         except ConfigNotFoundError:
             # Key is neither in the schema nor present in any source.
             return {
@@ -1033,6 +1076,15 @@ class ConfigResolver:
 class Config:
     """The user-facing config, backed by ConfigResolver."""
 
+    @classmethod
+    def read_only_resolution(cls) -> "ContextManager[None]":
+        """Return a thread-local scope that never prompts or creates cached values."""
+        return ConfigResolver.read_only_resolution()
+
+    @classmethod
+    def is_read_only_resolution(cls) -> bool:
+        return ConfigResolver.is_read_only_resolution()
+
     def __init__(self, environ: "Any", schema: "ConfigSchema",
                  sources: "Sequence[ConfigSource]") -> None:
         self._environ = environ
@@ -1078,6 +1130,8 @@ class Config:
         try:
             result = self._resolver.resolve(name, field=field)
             value = result.value
+        except _ReadOnlyConfigNotFoundError:
+            raise
         except ConfigNotFoundError:
             if default is MISSING:
                 raise
@@ -1115,6 +1169,8 @@ class Config:
         self._resolver.clear_memo()
 
     def persist(self, key: str, value: "Any") -> None:
+        if self.is_read_only_resolution():
+            raise ConfigError("Persistent config changes are unavailable during read-only resolution")
         persistent = self._find(PersistentSource)
         if persistent is None:
             raise ConfigError("no PersistentSource configured")
@@ -1142,6 +1198,8 @@ class Config:
         can never leave some keys written and others not if the underlying
         store write itself fails partway (``PersistentSource.set_many``/
         ``ConfigStore.save`` write everything in a single flush)."""
+        if self.is_read_only_resolution():
+            raise ConfigError("Persistent config changes are unavailable during read-only resolution")
         persistent = self._find(PersistentSource)
         if persistent is None:
             raise ConfigError("no PersistentSource configured")
@@ -1155,6 +1213,8 @@ class Config:
         self._resolver.clear_memo()
 
     def remove(self, key: str) -> None:
+        if self.is_read_only_resolution():
+            raise ConfigError("Persistent config changes are unavailable during read-only resolution")
         persistent = self._find(PersistentSource)
         if persistent:
             persistent.delete(key)

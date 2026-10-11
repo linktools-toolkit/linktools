@@ -58,7 +58,6 @@ def test_update_unavailable_returns_failed_result_and_does_not_raise(fresh_manag
     assert isinstance(result, RepoGitResult)
     assert result.success is False
     assert result.revision is None
-    assert result.dirty is None
     assert "Python 3.10" in result.error
 
 
@@ -198,3 +197,69 @@ def test_repo_service_add_remote_url_while_unavailable_leaves_no_trace(fresh_man
         fresh_manager.repos.add("https://example.com/some/repo.git")
 
     assert fresh_manager.repos.get_all() == {}
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_update_unusable_checkout_never_clones(fresh_manager, tmp_path, monkeypatch, existing):
+    path = tmp_path / "checkout"
+    if existing:
+        path.mkdir()
+
+    def unexpected_clone(*args, **kwargs):
+        raise AssertionError("update must never clone")
+
+    monkeypatch.setattr(repo_git_module.GitRepository, "clone", unexpected_clone)
+    result = RepoGit(fresh_manager).update("https://example.com/repo.git", str(path))
+    assert result.success is False
+    assert "missing or unusable" in result.error
+    assert path.exists() is existing
+
+
+def test_update_does_not_scan_dirty_state(fresh_manager, tmp_path, monkeypatch):
+    class Checkout:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def sync(self, policy):
+            pass
+
+        def head_sha(self):
+            return "deadbeef"
+
+        def is_dirty(self):
+            raise AssertionError("update has no dirty-state consumer")
+
+    monkeypatch.setattr(repo_git_module.GitRepository, "open_if_valid",
+                        lambda *args: Checkout())
+    result = RepoGit(fresh_manager).update("https://example.com/repo.git", str(tmp_path))
+    assert result.success
+    assert result.revision == "deadbeef"
+
+
+def test_update_checkout_removed_after_service_validation_fails_without_recloning(
+        fresh_manager, tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    repos = fresh_manager.repos
+    monkeypatch.setattr(repos, "get_all", lambda: {
+        "https://example.com/repo.git": dict(type="git", repo_path=str(checkout)),
+    })
+    validate = repos._validate_repo_root
+
+    def validate_then_remove(path):
+        root = validate(path)
+        checkout.rmdir()
+        return root
+
+    def unexpected_clone(*args, **kwargs):
+        raise AssertionError("raced-away checkout must not be recreated")
+
+    monkeypatch.setattr(repos, "_validate_repo_root", validate_then_remove)
+    monkeypatch.setattr(repo_git_module.GitRepository, "clone", unexpected_clone)
+    result, = repos.update()
+    assert result.updated is False
+    assert "missing or unusable" in result.error
+    assert not checkout.exists()

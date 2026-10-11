@@ -101,4 +101,6 @@ class InstalledStateStore:
         return list(result)
 
     def _dump(self, containers: "Iterable[BaseContainer]") -> None:
-        self._dump_names(list(set([container.name for container in containers])))
+        # A temporary load/compatibility failure does not uninstall a container.
+        unresolved = set(self.load_names()).difference(self.manager.containers)
+        self._dump_names(unresolved.union(container.name for container in containers))

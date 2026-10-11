@@ -3,17 +3,24 @@
 """Lifecycle plans describe exactly the registered hooks dispatch will visit."""
 import pytest
 
-from linktools.cntr.context import EventContext
+from linktools.cntr.container import BaseContainer
+from linktools.cntr.context import OperationContext
 from linktools.cntr.lifecycle import HookCycleError, HookPhase, HookRegistry, HookValidationError
 
 
-class _Container:
-    def __init__(self, name, events, dependencies=(), order=500):
-        self.name = name
+class _Container(BaseContainer):
+
+    def __init__(self, manager, root_path, name, events, dependencies=(), order=500):
+        super().__init__(manager, root_path, name=name)
         self.events = events
-        self.dependencies = dependencies
-        self.order = order
+        self._dependencies = dependencies
+        self._order = order
+        self.services = {name: {}}
         self.hooks = HookRegistry(owner=self, scope="container")
+
+    @property
+    def dependencies(self):
+        return self._dependencies
 
     def on_check(self, context):
         self.events.append(("callback", self.name, "check"))
@@ -32,10 +39,11 @@ class _Container:
 
 
 @pytest.fixture
-def lifecycle_case(fresh_manager, monkeypatch):
+def lifecycle_case(fresh_manager, monkeypatch, tmp_path):
     events = []
-    first = _Container("first", events, order=900)
-    second = _Container("second", events, dependencies=("first",), order=100)
+    first = _Container(fresh_manager, tmp_path, "first", events, order=900)
+    second = _Container(fresh_manager, tmp_path, "second", events, dependencies=("first",), order=100)
+    monkeypatch.setattr(fresh_manager, "integration_snapshot", {"first": (), "second": ()})
     monkeypatch.setattr(fresh_manager, "containers", {c.name: c for c in (second, first)})
     monkeypatch.setattr(fresh_manager, "hooks", HookRegistry(owner=fresh_manager, scope="manager"))
     monkeypatch.setattr(
@@ -51,8 +59,15 @@ def lifecycle_case(fresh_manager, monkeypatch):
     monkeypatch.setattr(fresh_manager.running_state, "mark_started", fail)
     monkeypatch.setattr(fresh_manager.running_state, "mark_stopped", fail)
     monkeypatch.setattr(fresh_manager.artifact_index, "record", fail)
-    monkeypatch.setattr("linktools.cntr.execution.planner.collect_candidates", lambda *args: {})
-    context = EventContext()
+    monkeypatch.setattr("linktools.cntr.execution.planner.collect_candidates",
+                        lambda manager, containers: {
+                            str(tmp_path / (container.name + ".yml")): (
+                                "compose", container.name,
+                                "services:\\n  {}:\\n    image: {}:latest\\n".format(container.name, container.name),
+                            ) for container in containers})
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates",
+                        lambda values: "skipped")
+    context = OperationContext()
     context.target_containers = [first, second]
     return fresh_manager, (first, second), context, events
 
@@ -64,21 +79,24 @@ def _register(registry, phase, events, owner, key, **kwargs):
 
 
 def _execute(manager, context, action):
-    if action in ("restart", "down"):
+    if action == "down":
         with manager.lifecycle.notify_stop(context):
             pass
-    if action in ("restart", "up"):
+    else:
         with manager.lifecycle.notify_start(context):
-            pass
+            manager.lifecycle.check(context)
+            if action == "restart":
+                with manager.lifecycle.notify_stop(context):
+                    pass
 
 
 def _expected_hooks(action):
     start = [
-        ("check", "first", "a"), ("check", "first", "b"),
-        ("check", "second", "a"), ("check", "second", "b"),
         ("before-start", "first", "a"), ("before-start", "first", "b"),
         ("before-start", "second", "a"), ("before-start", "second", "b"),
         ("before-start", None, "a"), ("before-start", None, "b"),
+        ("check", "first", "a"), ("check", "first", "b"),
+        ("check", "second", "a"), ("check", "second", "b"),
         ("after-start", "second", "b"), ("after-start", "second", "a"),
         ("after-start", "first", "b"), ("after-start", "first", "a"),
     ]
@@ -90,7 +108,7 @@ def _expected_hooks(action):
         ("after-stop", "second", "a"), ("after-stop", "second", "b"),
         ("after-stop", None, "a"), ("after-stop", None, "b"),
     ]
-    return {"up": start, "restart": stop + start, "down": stop}[action]
+    return {"up": start, "restart": start[:-4] + stop + start[-4:], "down": stop}[action]
 
 
 @pytest.mark.parametrize("action", ["up", "restart", "down"])
@@ -171,52 +189,55 @@ def test_starting_callbacks_all_finish_before_start_registry_lookup(lifecycle_ca
 
     second.on_starting = on_starting
     with manager.lifecycle.notify_start(context):
+        manager.lifecycle.check(context)
         events.append(("runtime", None, "up"))
 
     assert events == [
-        ("callback", "first", "check"), ("callback", "second", "check"),
         ("callback", "first", "starting"), ("callback", "second", "starting"),
         ("before-start", "first", "a"), ("before-start", "first", "b"),
+        ("callback", "first", "check"), ("callback", "second", "check"),
         ("runtime", None, "up"),
         ("callback", "second", "started"), ("callback", "first", "started"),
     ]
 
 
-@pytest.mark.parametrize("reassign_at", ["on_check", "check_hook", "on_starting"])
-def test_start_phases_reread_reassigned_targets(lifecycle_case, reassign_at):
-    manager, containers, context, events = lifecycle_case
-    first, second = containers
+def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_case, monkeypatch) -> None:
+    manager, containers, _, events = lifecycle_case
+    provider, target = containers
+    target._dependencies = ()
+    monkeypatch.setattr(
+        provider, "get_runtime_requirements",
+        lambda names: {provider.name: tuple(provider.services)} if target.name in names else {},
+    )
+    for container in containers:
+        for phase in (HookPhase.CHECK, HookPhase.BEFORE_START, HookPhase.AFTER_START,
+                      HookPhase.BEFORE_STOP, HookPhase.AFTER_STOP):
+            _register(container.hooks, phase, events, container.name, phase.value)
 
-    def reassign(context):
-        events.append(("reassign", "first", reassign_at))
-        context.target_containers = [second]
+    plan = manager.planner.plan("restart", names=[target.name])
+    assert events == []
+    planned = [(hook.phase, hook.container, hook.name) for hook in plan.hooks]
+    provider_phases = [phase for phase, name, _ in planned if name == provider.name]
+    assert provider_phases == ["before-start", "check", "after-start"]
+    assert [(phase, name) for phase, name, _ in planned if phase.endswith("stop")] == [
+        ("before-stop", target.name), ("after-stop", target.name),
+    ]
 
-    if reassign_at == "check_hook":
-        first.hooks.register(HookPhase.CHECK, reassign)
-    else:
-        setattr(first, reassign_at, reassign)
-
-    def removed_target_hook():
-        raise AssertionError("Removed target must not run before-start hooks")
-
-    first.hooks.register(HookPhase.BEFORE_START, removed_target_hook)
-    _register(second.hooks, HookPhase.BEFORE_START, events, "second", "remaining")
-    _register(manager.hooks, HookPhase.BEFORE_START, events, None, "manager")
-
-    with manager.lifecycle.notify_start(context):
+    selection = manager.compose_operations.select([target.name], for_start=True)
+    start_selection = manager.compose_operations.start_selection(selection)
+    start_context = OperationContext()
+    start_context.target_containers = start_selection.target_containers
+    stop_context = OperationContext()
+    stop_context.target_containers = selection.target_containers
+    with manager.lifecycle.notify_start(start_context):
+        manager.lifecycle.check(start_context)
+        with manager.lifecycle.notify_stop(stop_context):
+            events.append(("runtime", None, "stop"))
         events.append(("runtime", None, "up"))
 
-    check_events = [("callback", "first", "check"), ("callback", "second", "check")]
-    starting_events = [("callback", "second", "starting")]
-    if reassign_at == "on_check":
-        check_events[0] = ("reassign", "first", reassign_at)
-    elif reassign_at == "check_hook":
-        check_events.insert(1, ("reassign", "first", reassign_at))
-    else:
-        starting_events.insert(0, ("reassign", "first", reassign_at))
-    assert events == check_events + starting_events + [
-        ("before-start", "second", "remaining"),
-        ("before-start", None, "manager"),
-        ("runtime", None, "up"),
-        ("callback", "second", "started"),
-    ]
+    assert [event for event in events if event[0] not in ("callback", "runtime")] == planned
+    assert ("callback", provider.name, "stopping") not in events
+    assert ("callback", provider.name, "stopped") not in events
+    before_stop = next(index for index, event in enumerate(events) if event[0] == "before-stop")
+    assert all(index < before_stop for index, event in enumerate(events)
+               if event[0] in ("check", "before-start"))

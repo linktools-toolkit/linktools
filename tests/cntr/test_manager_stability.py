@@ -99,7 +99,7 @@ def test_change_file_mode_probes_chmod_not_chown(monkeypatch):
 MANAGER_API = (
     "containers",
     "debug", "prepare_installed_containers",
-    "project_name", "hooks", "start_hooks", "stop_hooks",
+    "project_name", "hooks",
     "user", "uid", "gid", "system", "machine", "host",
     "container_type", "container_host",
     "docker_container_name", "docker_compose_names",
@@ -151,8 +151,6 @@ _DESCRIPTOR_TYPES = {
     "settings": _CachedProperty,
     "containers": _CachedProperty,
     "hooks": _CachedProperty,
-    "start_hooks": _CachedProperty,
-    "stop_hooks": _CachedProperty,
     "compose_runner": _CachedProperty,
     "compose_operations": _CachedProperty,
     "resolver": _CachedProperty,

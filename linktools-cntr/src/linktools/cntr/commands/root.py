@@ -8,9 +8,10 @@ from linktools.cli import (
     BaseCommandGroup, CommandGroupRef, CommandParser, SubCommandWrapper, subcommand, subcommand_argument,
 )
 from linktools.cli.argparse import BooleanOptionalAction, LazyChoices
+from linktools.core import Config
 from linktools.errors import ConfigError, GitError
 from ..container import ContainerError
-from ..doctor import WARN, Doctor
+from ..doctor import WARN, Doctor, Finding
 from . import _shared
 from ._order import ROOT_COMMAND_ORDER
 from .compose import ComposeCommand
@@ -188,22 +189,28 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("--runtime", action="store_true", default=False,
                          help="also validate compose config against the actual docker/compose runtime")
     def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False) -> None:
-        findings = Doctor(_shared.manager).run(runtime=runtime)
-        if as_json:
-            import json
-            payload = dict(
-                schema_version=1,
-                project=_shared.manager.project_name,
-                findings=[
-                    dict(severity=f.severity, code=f.code, component=f.component,
-                        message=f.message, details=f.details)
-                    for f in findings
-                ],
-            )
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            for finding in findings:
-                self.logger.info(f"[{finding.severity}] {finding.message}")
-            self.logger.info("[INFO] No change has been made.")
-        if check and any(f.severity == WARN for f in findings):
-            raise ContainerError("Doctor found WARN-or-worse issues")
+        with Config.read_only_resolution():
+            findings = Doctor(_shared.manager).run(runtime=runtime)
+            if as_json:
+                import json
+                try:
+                    project = _shared.manager.project_name
+                except ConfigError as exc:
+                    project = None
+                    findings.append(Finding(WARN, f"project name could not be resolved: {exc}", component="project"))
+                payload = dict(
+                    schema_version=1,
+                    project=project,
+                    findings=[
+                        dict(severity=f.severity, code=f.code, component=f.component,
+                            message=f.message, details=f.details)
+                        for f in findings
+                    ],
+                )
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                for finding in findings:
+                    self.logger.info(f"[{finding.severity}] {finding.message}")
+                self.logger.info("[INFO] No change has been made.")
+            if check and any(f.severity == WARN for f in findings):
+                raise ContainerError("Doctor found WARN-or-worse issues")
