@@ -608,7 +608,7 @@ class StagingAgentRunStore(AgentRunStore):
         return values[-1].model_request_seq if values else 0
 
     async def resolve_model_interaction(
-        self, interaction: object, *, include_client_requests: bool = False,
+        self, interaction: object, *, include_client_requests: bool = False, include_content: bool = True,
     ) -> object:
         del interaction
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -618,6 +618,7 @@ class StagingAgentRunStore(AgentRunStore):
         interactions: Sequence[object],
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> list[object]:
         del interactions
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -931,6 +932,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
         interaction: object,
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> tuple[
         tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None,
         bytes | None, tuple[ModelClientRequest, ...] | None,
@@ -940,7 +942,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
         client_requests = await resolve_client_requests(
             interaction.client_requests, self._runtime_domain,
         ) if include_client_requests else None
-        if interaction.request_context is None or interaction.request_envelope is None:
+        if not include_content or interaction.request_context is None or interaction.request_envelope is None:
             return None, None, None, client_requests
         checkpoint = await self.latest_checkpoint(
             agent_run_id=interaction.agent_run_id,
@@ -981,10 +983,11 @@ class InMemoryStepArchive(StagingAgentRunStore):
         interactions: Sequence[object],
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> list[object]:
         return [
             await self.resolve_model_interaction(
-                interaction, include_client_requests=include_client_requests,
+                interaction, include_client_requests=include_client_requests, include_content=include_content,
             )
             for interaction in interactions
         ]
@@ -1210,6 +1213,7 @@ class StateStepArchive(AgentRunStore):
         interaction: object,
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> tuple[
         tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None,
         bytes | None, tuple[ModelClientRequest, ...] | None,
@@ -1219,7 +1223,7 @@ class StateStepArchive(AgentRunStore):
         client_requests = await resolve_client_requests(
             interaction.client_requests, self._runtime_domain, self._history,
         ) if include_client_requests else None
-        if interaction.request_context is None or interaction.request_envelope is None:
+        if not include_content or interaction.request_context is None or interaction.request_envelope is None:
             return None, None, None, client_requests
         request = await self._history.load_projected_context(
             interaction.agent_run_id,
@@ -1243,6 +1247,7 @@ class StateStepArchive(AgentRunStore):
         interactions: Sequence[object],
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> list[object]:
         require_no_run_history_lock(
             "StateStepArchive.resolve_model_interactions"
@@ -1268,7 +1273,7 @@ class StateStepArchive(AgentRunStore):
         contexts = await self._history.load_projected_contexts(
             records[0].agent_run_id,
             projections,
-        )
+        ) if include_content else ()
         envelopes: dict[str, bytes] = {}
         result: list[object] = []
         context_index = 0
@@ -1276,7 +1281,7 @@ class StateStepArchive(AgentRunStore):
             client_requests = await resolve_client_requests(
                 record.client_requests, self._runtime_domain, self._history,
             ) if include_client_requests else None
-            if record.request_context is None or record.request_envelope is None:
+            if not include_content or record.request_context is None or record.request_envelope is None:
                 result.append((None, None, None, client_requests))
                 continue
             request = contexts[context_index].model_messages()

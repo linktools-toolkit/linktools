@@ -2693,8 +2693,9 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
 
     async def fail_resolution(
         _interactions: Any, *, include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> Any:
-        del include_client_requests
+        del include_client_requests, include_content
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     monkeypatch.setattr(recovery, "resolve_model_interactions", fail_resolution)

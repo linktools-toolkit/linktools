@@ -118,8 +118,9 @@ class _HistoryStore:
         interactions: Any,
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> list[object]:
-        del interactions, include_client_requests
+        del interactions, include_client_requests, include_content
         raise AssertionError("lightweight queries do not resolve request content")
 
 

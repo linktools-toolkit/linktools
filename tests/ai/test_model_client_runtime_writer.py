@@ -20,7 +20,7 @@ from linktools.ai.core import Principal, RunBudget, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder
 from linktools.ai.model import _openai
-from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.runtime import Execution, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
@@ -29,16 +29,12 @@ from .test_model_client_request_capture import _agents, _model, _registry, _resp
 from .test_model_client_response_capture import _DONE, _EVENT, _Stream, _invoke
 
 
-async def _attempts(storage: RuntimeStorage, execution: Any) -> list[tuple[ModelClientRequest, ...]]:
-    items = (await execution.model_interactions()).items
-    archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
-    records = await archive.list_model_interactions(agent_run_id=agent_run_id(
-        namespace="default", tenant_id="default", execution_id=execution.execution_id,
-        agent_run_seq=items[0].agent_run_seq,
-    ))
-    values = await archive.resolve_model_interactions(records, include_client_requests=True)
-    assert all(value[3] is not None for value in values)
-    return [value[3] for value in values]
+async def _attempts(execution: Execution) -> list[tuple[ModelClientRequest, ...]]:
+    items = (await execution.model_interactions(include_client_requests=True)).items
+    assert all(item.client_requests_included and not item.content_included for item in items)
+    assert all(item.request == {} and item.response is None for item in items)
+    assert all(item.client_requests is not None for item in items)
+    return [item.client_requests for item in items if item.execution_id == execution.execution_id]
 
 
 @pytest.mark.asyncio
@@ -128,7 +124,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
         if budgeted:
             usage = await execution.budget_usage()
             assert usage.model_requests == 2 and usage.in_flight_model_requests == 0
-        attempts = await _attempts(storage, execution)
+        attempts = await _attempts(execution)
         assert len(attempts) == 2 and all(len(value) == 1 for value in attempts)
         assert [value[0].body for value in attempts] == sent
         assert [value[0].response.body for value in attempts] == received
@@ -186,7 +182,7 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
             await execution.cancel()
         result = (await execution.wait(timeout_seconds=10)).result
         assert result.status == {"read_error": "FAILED", "cancel": "CANCELLED"}.get(outcome, "SUCCEEDED")
-        logical_requests = await _attempts(storage, execution)
+        logical_requests = await _attempts(execution)
         assert len(logical_requests) == 1
         attempts = logical_requests[0]
         assert [attempt.body for attempt in attempts] == sent
@@ -247,11 +243,11 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
         results = await asyncio.gather(*(execution.wait(timeout_seconds=15) for execution in parents))
         assert all(value.result.status == "SUCCEEDED" for value in results)
         for index, parent in enumerate(parents):
-            attempts = await _attempts(storage, parent)
+            attempts = await _attempts(parent)
             assert [value.body for request in attempts for value in request] == sent[f"root-{index}"]
             children = await runtime.executions.list_children(parent.execution_id, principal=principal)
             assert len(children) == 1
             child = await runtime.executions.get(children[0].execution_id, principal=principal)
-            attempts = await _attempts(storage, child)
+            attempts = await _attempts(child)
             assert [value.body for request in attempts for value in request] == sent[f"child-{index}"]
         assert child_count == 2

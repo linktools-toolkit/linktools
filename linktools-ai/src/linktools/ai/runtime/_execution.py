@@ -3839,6 +3839,7 @@ class DefaultExecutionService:
         principal: Principal,
         cursor: "str | None" = None,
         include_content: bool = False,
+        include_client_requests: bool = False,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
@@ -3849,6 +3850,7 @@ class DefaultExecutionService:
             principal=principal,
             cursor=cursor,
             include_content=include_content,
+            **({"include_client_requests": include_client_requests} if include_client_requests is not False else {}),
             limit=limit,
             cutoffs=cutoffs,
         )

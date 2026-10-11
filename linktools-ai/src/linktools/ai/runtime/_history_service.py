@@ -353,12 +353,16 @@ class DefaultExecutionHistoryService:
         principal: Principal,
         cursor: "str | None" = None,
         include_content: bool = False,
+        include_client_requests: bool = False,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> Page[ModelInteractionItem]:
         await self._authorize(execution_id, principal)
+        if not isinstance(include_client_requests, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         filter_digest = self._content_filter_digest(
             execution_id, "model_interactions", include_content,
+            {"include_client_requests": True} if include_client_requests else None,
         )
         inner_cursor = self._decode_query_cursor(
             cursor,
@@ -373,6 +377,7 @@ class DefaultExecutionHistoryService:
             limit=limit,
             cutoffs=cutoffs,
             include_content=include_content,
+            **({"include_client_requests": include_client_requests} if include_client_requests is not False else {}),
         )
         return Page(
             page.items,

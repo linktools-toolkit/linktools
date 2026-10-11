@@ -246,8 +246,8 @@ class RuntimeExecutions(Generic[AppT]):
             part_index=part_index,
         )
 
-    async def model_interactions(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100, cutoffs: tuple[UsageReadCutoff, ...] | None = None) -> Page[ModelInteractionItem]:
-        return await self._service.model_interactions(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit, cutoffs=cutoffs)
+    async def model_interactions(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, include_client_requests: bool = False, limit: int = 100, cutoffs: tuple[UsageReadCutoff, ...] | None = None) -> Page[ModelInteractionItem]:
+        return await self._service.model_interactions(execution_id, principal=principal, cursor=cursor, include_content=include_content, **({"include_client_requests": include_client_requests} if include_client_requests is not False else {}), limit=limit, cutoffs=cutoffs)
 
 class RuntimeSessions(Generic[AppT]):
     def __init__(

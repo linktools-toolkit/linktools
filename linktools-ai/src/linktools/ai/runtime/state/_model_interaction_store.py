@@ -181,6 +181,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         interactions: Sequence[object],
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> list[object]:
         values = tuple(interactions)
         if not values:
@@ -193,7 +194,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         if any(record.agent_run_id != records[0].agent_run_id for record in records):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await super().resolve_model_interactions(
-            records, include_client_requests=include_client_requests,
+            records, include_client_requests=include_client_requests, include_content=include_content,
         )
 
     async def prepare_interactions(

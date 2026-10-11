@@ -236,7 +236,7 @@ class _ExecutionHistoryStore(Protocol):
     ) -> list[object]: ...
 
     async def resolve_model_interactions(
-        self, interactions: Sequence[object], *, include_client_requests: bool = False,
+        self, interactions: Sequence[object], *, include_client_requests: bool = False, include_content: bool = True,
     ) -> Sequence[object]: ...
 
 
@@ -607,6 +607,7 @@ class StepExecutionHistoryReader:
         limit: int,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
         include_content: bool = True,
+        include_client_requests: bool = False,
     ) -> Page[ModelInteractionItem]:
         limit = validate_page_limit(limit)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
@@ -715,9 +716,11 @@ class StepExecutionHistoryReader:
         selected_items: dict[tuple[str, int], ModelInteractionItem] = {}
         for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
             resolved_values: tuple[object, ...]
-            if include_content:
+            if include_content or include_client_requests:
                 resolved_values = tuple(await self._store.resolve_model_interactions(
-                    tuple(value.interaction for value in occurrence_group)
+                    tuple(value.interaction for value in occurrence_group),
+                    include_client_requests=include_client_requests,
+                    include_content=include_content,
                 ))
                 if len(resolved_values) != len(occurrence_group):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -737,6 +740,7 @@ class StepExecutionHistoryReader:
                     occurrence.depth,
                     resolved_context,
                     include_content=include_content,
+                    include_client_requests=include_client_requests,
                 )
         selected = tuple(
             selected_items[
@@ -1000,14 +1004,18 @@ class StepExecutionHistoryReader:
         resolved: object | None,
         *,
         include_content: bool,
+        include_client_requests: bool = False,
     ) -> ModelInteractionItem:
         request: dict[str, JsonValue] = {}
         response: JsonValue | None = None
-        if include_content:
+        client_requests = None
+        if include_content or include_client_requests:
             if not isinstance(resolved, tuple) or len(resolved) != 4:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request_messages, response_messages, envelope_raw, _client_requests = resolved
-            if request_messages is None and interaction.request_context is not None:
+            request_messages, response_messages, envelope_raw, resolved_client_requests = resolved
+            if include_client_requests:
+                client_requests = resolved_client_requests
+            if include_content and request_messages is None and interaction.request_context is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if include_content and interaction.request_context is not None:
             if not isinstance(request_messages, tuple) or not isinstance(
@@ -1051,6 +1059,8 @@ class StepExecutionHistoryReader:
             duration_ns=interaction.duration_ns,
             usage=interaction.usage,
             content_included=include_content,
+            client_requests=client_requests,
+            client_requests_included=include_client_requests,
             started_at=interaction.started_at,
             finished_at=interaction.finished_at,
         )

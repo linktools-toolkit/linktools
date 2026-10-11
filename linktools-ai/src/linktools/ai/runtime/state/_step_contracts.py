@@ -169,6 +169,7 @@ class AgentRunStore(Protocol):
         interaction: object,
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> object: ...
 
     async def resolve_model_interactions(
@@ -176,6 +177,7 @@ class AgentRunStore(Protocol):
         interactions: Sequence[object],
         *,
         include_client_requests: bool = False,
+        include_content: bool = True,
     ) -> list[object]: ...
 
     async def release_agent_run(
