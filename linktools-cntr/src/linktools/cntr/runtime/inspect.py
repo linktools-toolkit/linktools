@@ -32,7 +32,7 @@ class RuntimeInspectionError(ContainerError):
 
 class RuntimeInspectionUnavailable(RuntimeInspectionError):
     """Docker/Compose could not be queried at all: missing binary, a denied
-    sudo policy, no compose file for these containers, a timeout, or an
+    sudo policy, a timeout, or an
     unparsable container-id list. Callers treat this as "state unknown" and
     may fall back to persisted state."""
 
@@ -111,7 +111,7 @@ _CONTAINER_ID_RE = re.compile(r"^[0-9a-fA-F]{12,64}$")
 
 
 def _parse_container_ids(text: str) -> "list[str]":
-    """Stably deduped, order-preserving container ids from ``compose ps
+    """Stably deduped, order-preserving container ids from ``docker container ls
     --quiet`` output. An empty result is a legitimate "nothing here" -- only
     a non-empty line that isn't a plausible hex id is an error."""
     ids: "list[str]" = []
@@ -121,7 +121,7 @@ def _parse_container_ids(text: str) -> "list[str]":
         if not line:
             continue
         if not _CONTAINER_ID_RE.match(line):
-            raise RuntimeInspectionOutputError(f"Unexpected `compose ps --quiet` output line: {line!r}")
+            raise RuntimeInspectionOutputError(f"Unexpected `docker container ls --quiet` output line: {line!r}")
         if line not in seen:
             seen.add(line)
             ids.append(line)
