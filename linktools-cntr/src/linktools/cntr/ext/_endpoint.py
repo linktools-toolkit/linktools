@@ -3,7 +3,7 @@
 """Compose a primary site with explicit consumer declarations."""
 from typing import TYPE_CHECKING
 
-from ._base import iter_declarations
+from ._base import Integration
 from ._flare import Flare
 from ._nginx import Nginx
 from ._urls import load_nginx_url
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from typing import Any, Mapping, Optional, Sequence, Tuple, Union
     from linktools.types import PathType
     from ..container import BaseContainer
-    from ._base import Integration, Integrations
+    from ._base import Integrations
 
 
 def endpoint(
@@ -37,7 +37,7 @@ def endpoint(
         auth_headers=auth_headers, public_url=public_url, cert_domains=cert_domains,
         template_vars=template_vars, default_server=default_server,
     )}]
-    for key, declaration in iter_declarations(extensions):
+    for key, declaration in Integration.iter_declarations(extensions):
         if isinstance(declaration, Flare):
             declaration = declaration.with_default_url(load_nginx_url(producer, "web"))
         result.append({key: declaration} if key is not None else declaration)

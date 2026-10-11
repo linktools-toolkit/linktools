@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Declarative integrations do not depend on navigation registration."""
 
-from linktools.cntr.ext import Nginx, iter_declarations, load_nginx_url
+from linktools.cntr.ext import Integration, Nginx, load_nginx_url
 from linktools.cntr.lifecycle import HookPhase
 
 
@@ -73,7 +73,7 @@ def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monke
         original = container.get_config
         monkeypatch.setattr(container, "get_config", lambda key, *args, _get=original, **kwargs:
                             _get(key, *args, **kwargs) if key.endswith("AUTH_ENABLE") else fail())
-        links = [value for _, value in iter_declarations(container.integrations) if isinstance(value, Flare)]
+        links = [value for _, value in Integration.iter_declarations(container.integrations) if isinstance(value, Flare)]
         assert links
         assert all(isinstance(link, Flare) for link in links)
     assert not hasattr(BaseContainer, "exposes")

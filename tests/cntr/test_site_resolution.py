@@ -7,7 +7,7 @@ import pytest
 
 from linktools.cntr import ContainerError, ContainerManager, Integration
 from linktools.cntr.ext import Authelia, Flare, Nginx, load_nginx_url
-from linktools.cntr.ext import ResolvedSite, endpoint, iter_declarations
+from linktools.cntr.ext import ResolvedSite, endpoint
 from linktools.runtime import lazy_load
 
 
@@ -407,7 +407,7 @@ def test_nested_composition_freezes_order_and_structure_without_resolving_leaves
     consumers = {name: SimpleNamespace(name=name, integrations=())
                  for name in ("nginx", "flare", "authelia")}
     manager = manager_with(dict(consumers, app=app), ["app"] + list(consumers))
-    assert list(iter_declarations(nested)) == [(None, first), ("web", web), (None, access), ("docs", second)]
+    assert list(Integration.iter_declarations(nested)) == [(None, first), ("web", web), (None, access), ("docs", second)]
     snapshot = manager.integration_snapshot["app"]
     nested[1][1].clear()
     nested.clear()

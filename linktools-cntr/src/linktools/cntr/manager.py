@@ -13,7 +13,7 @@ from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvi
 from linktools.decorator import cached_property
 
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
-from .ext import Integration, iter_declarations
+from .ext import Integration
 from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
@@ -315,7 +315,7 @@ class ContainerManager:
         result = OrderedDict()
         for producer in self.installed_state.get(resolve=True):
             try:
-                declarations = tuple(iter_declarations(producer.integrations))
+                declarations = tuple(Integration.iter_declarations(producer.integrations))
             except ValueError as error:
                 raise ContainerError("%s in %s" % (error, producer.name)) from error
             for key, declaration in declarations:
