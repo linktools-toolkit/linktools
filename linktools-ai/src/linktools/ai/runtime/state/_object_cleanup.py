@@ -50,7 +50,7 @@ async def purge_unreferenced_objects(
     async with exclusive.offline_exclusivity():
         candidate_locations = {(id(object_stores[domain]), reference.key) for domain, reference in candidates}
         protected: set[str] = set()
-        visited: set[tuple[RuntimeDomain, str, str]] = set()
+        visited: set[tuple[int, str, str, int]] = set()
 
         async def visit(reference: ObjectRef, domain: RuntimeDomain, *, root: bool = True) -> None:
             source = object_stores[domain]
@@ -58,7 +58,7 @@ async def purge_unreferenced_objects(
                 return
             if root:
                 protected.add(reference.key)
-            identity = domain, reference.key, reference.digest
+            identity = id(source), reference.key, reference.digest, reference.size
             if identity in visited or not reference.key.startswith(_MANIFEST_PREFIXES):
                 return
             visited.add(identity)
@@ -123,7 +123,11 @@ async def purge_unreferenced_objects(
                 operation_cursor = OperationScanCursor(operations[-1].key_digest)
 
         # Captures are public durable handles and need not occur in a state row.
+        inspected: set[int] = set()
         for domain, source in object_stores.items():
+            if id(source) in inspected:
+                continue
+            inspected.add(id(source))
             async for stat in cast(ObjectStoreInspection, source).list_objects():
                 if (id(source), stat.key) not in candidate_locations and stat.key.startswith(_MANIFEST_PREFIXES):
                     await visit(ObjectRef(source.store_id, stat.key, stat.digest, stat.size), domain, root=False)
