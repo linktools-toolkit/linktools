@@ -203,13 +203,18 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
             dataset = await self._decode(row, EvaluationDatasetRecord)
             deadlines = [] if dataset.content_expires_at is None else [dataset.content_expires_at]
-            for reference in dataset.contract.ordered_case_refs:
-                row = await transaction.get_record(self._key("evaluation_case", [reference.dataset_id, reference.case_id, reference.revision]))
-                if row is None:
-                    raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
-                case = await self._decode(row, EvaluationCaseRecord)
-                if case.content_expires_at is not None:
-                    deadlines.append(case.content_expires_at)
+            references = dataset.contract.ordered_case_refs
+            for offset in range(0, len(references), 64):
+                keys = tuple(self._key("evaluation_case", [ref.dataset_id, ref.case_id, ref.revision])
+                             for ref in references[offset:offset + 64])
+                records = await transaction.get_records(keys)
+                for key in keys:
+                    row = records.get(key)
+                    if row is None:
+                        raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
+                    case = await self._decode(row, EvaluationCaseRecord)
+                    if case.content_expires_at is not None:
+                        deadlines.append(case.content_expires_at)
             return min(deadlines) if deadlines else None
         return await self._store.read(read)
 
