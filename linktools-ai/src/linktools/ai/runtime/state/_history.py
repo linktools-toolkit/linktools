@@ -3,7 +3,6 @@
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib
-import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -41,6 +40,7 @@ from ._contracts import (
 from ._history_index import (
     resolve_history_range_lazy,
 )
+from ._payload import PAYLOAD_COMPRESS_MINIMUM, decode_payload_bytes, encode_payload_bytes
 from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
@@ -59,8 +59,6 @@ from ._store import (
 
 _logger = environ.get_logger("ai.runtime.state.history")
 _CHUNK_TARGET = 256 * 1024
-_COMPRESS_MINIMUM = 16 * 1024
-_COMPRESS_RATIO = 0.9
 _TRANSCRIPT_PAGE_SIZE = 64
 _TRANSCRIPT_CHUNK_MAX_MESSAGES = 64
 _TRANSCRIPT_SEEK_BLOCK = 128
@@ -663,18 +661,8 @@ class TranscriptRepository:
         origin: TranscriptOrigin,
     ) -> TranscriptChunk:
         raw = encode_model_messages(messages)
-        raw_digest = hashlib.sha256(raw).hexdigest()
-        content = raw
-        codec = "raw"
-        if len(raw) >= _COMPRESS_MINIMUM:
-            compressed = zlib.compress(raw)
-            if len(compressed) <= len(raw) * _COMPRESS_RATIO:
-                content = compressed
-                codec = "zlib"
-        payload = await self._store_payload(
-            content,
-            raw_size=len(raw),
-        )
+        codec, raw_digest, raw_size, content = encode_payload_bytes(raw)
+        payload = await self.store_payload(content, raw_size=raw_size)
         return TranscriptChunk(
             owner_id,
             first_message_index,
@@ -686,14 +674,14 @@ class TranscriptRepository:
             RuntimePayloadRef(payload, self._runtime_domain),
         )
 
-    async def _store_payload(
+    async def store_payload(
         self,
         value: bytes,
         *,
         raw_size: int,
     ) -> StoredPayload:
-        require_no_run_history_lock("TranscriptRepository._store_payload")
-        if self._object_store is None or raw_size < _COMPRESS_MINIMUM:
+        require_no_run_history_lock("TranscriptRepository.store_payload")
+        if self._object_store is None or raw_size < PAYLOAD_COMPRESS_MINIMUM:
             return StoredPayload.inline_bytes(value)
         key = runtime_object_key(
             namespace_digest=self._namespace_digest,
@@ -870,7 +858,7 @@ class TranscriptRepository:
             if (
                 not isinstance(item, InlineContextBlock)
                 or item.content.payload.kind != "inline"
-                or item.content.payload.size < _COMPRESS_MINIMUM
+                or item.content.payload.size < PAYLOAD_COMPRESS_MINIMUM
                 or self._object_store is None
             ):
                 items.append(item)
@@ -1013,15 +1001,9 @@ class TranscriptRepository:
 
     async def _decode_chunk_messages(self, chunk: TranscriptChunk) -> tuple[ModelMessage, ...]:
         raw = await self._read_payload(chunk.content.payload)
-        if chunk.codec == "zlib":
-            try:
-                raw = zlib.decompress(raw)
-            except zlib.error as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        elif chunk.codec != "raw":
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if hashlib.sha256(raw).hexdigest() != chunk.raw_digest or len(raw) != chunk.raw_size:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raw = decode_payload_bytes(
+            raw, codec=chunk.codec, raw_digest=chunk.raw_digest, raw_size=chunk.raw_size,
+        )
         return decode_model_messages(raw)
 
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:

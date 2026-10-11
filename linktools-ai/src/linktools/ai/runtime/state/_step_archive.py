@@ -18,6 +18,7 @@ from pydantic_ai.messages import ModelMessage
 
 from ...core import ExecutionStatus, canonical_json_bytes
 from ...errors import AIError, ErrorCode
+from ...model import ModelClientRequest
 from ...storage import ObjectStore, StoredPayload
 from .._message import decode_model_messages, encode_model_messages
 from .._transcript_staging import StagedTranscript
@@ -56,6 +57,7 @@ from ._history import (
     TranscriptRepository,
     _exact_message_signature,
 )
+from ._model_client import prepare_client_requests, resolve_client_requests
 from ._plan import RuntimeDomain
 from ._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
@@ -605,13 +607,17 @@ class StagingAgentRunStore(AgentRunStore):
         values = self._interactions.get(agent_run_id, ())
         return values[-1].model_request_seq if values else 0
 
-    async def resolve_model_interaction(self, interaction: object) -> object:
+    async def resolve_model_interaction(
+        self, interaction: object, *, include_client_requests: bool = False,
+    ) -> object:
         del interaction
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     async def resolve_model_interactions(
         self,
         interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]:
         del interactions
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -873,6 +879,7 @@ class InMemoryStepArchive(StagingAgentRunStore):
                 tuple[ModelMessage, ...] | None,
                 tuple[ModelMessage, ...] | None,
                 bytes | None,
+                tuple[ModelClientRequest, ...] | None,
             ]
         ],
     ) -> tuple[ModelInteractionRecord, ...]:
@@ -894,11 +901,13 @@ class InMemoryStepArchive(StagingAgentRunStore):
             )
 
         values: list[ModelInteractionRecord] = []
-        for interaction, (request, response, envelope) in zip(
+        for interaction, (request, response, envelope, client_requests) in zip(
             interactions,
             resolved,
             strict=True,
         ):
+            if (interaction.client_requests is None) != (client_requests is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.append(
                 replace(
                     interaction,
@@ -910,6 +919,9 @@ class InMemoryStepArchive(StagingAgentRunStore):
                     response_context=(
                         None if response is None else inline_context(response)
                     ),
+                    client_requests=await prepare_client_requests(
+                        client_requests, self._runtime_domain,
+                    ),
                 )
             )
         return tuple(values)
@@ -917,11 +929,19 @@ class InMemoryStepArchive(StagingAgentRunStore):
     async def resolve_model_interaction(
         self,
         interaction: object,
-    ) -> tuple[tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None, bytes | None]:
+        *,
+        include_client_requests: bool = False,
+    ) -> tuple[
+        tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None,
+        bytes | None, tuple[ModelClientRequest, ...] | None,
+    ]:
         if not isinstance(interaction, ModelInteractionRecord):
             raise TypeError("model interaction is invalid")
+        client_requests = await resolve_client_requests(
+            interaction.client_requests, self._runtime_domain,
+        ) if include_client_requests else None
         if interaction.request_context is None or interaction.request_envelope is None:
-            return None, None, None
+            return None, None, None, client_requests
         checkpoint = await self.latest_checkpoint(
             agent_run_id=interaction.agent_run_id,
             include_interrupted=True,
@@ -954,14 +974,18 @@ class InMemoryStepArchive(StagingAgentRunStore):
             if interaction.response_context is None
             else resolve(interaction.response_context)
         )
-        return resolve(interaction.request_context), response, envelope
+        return resolve(interaction.request_context), response, envelope, client_requests
 
     async def resolve_model_interactions(
         self,
         interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]:
         return [
-            await self.resolve_model_interaction(interaction)
+            await self.resolve_model_interaction(
+                interaction, include_client_requests=include_client_requests,
+            )
             for interaction in interactions
         ]
 
@@ -1122,6 +1146,7 @@ class StateStepArchive(AgentRunStore):
                 tuple[ModelMessage, ...] | None,
                 tuple[ModelMessage, ...] | None,
                 bytes | None,
+                tuple[ModelClientRequest, ...] | None,
             ]
         ],
     ) -> tuple[ModelInteractionRecord, ...]:
@@ -1147,11 +1172,13 @@ class StateStepArchive(AgentRunStore):
             return await self._history.prepare_projection(agent_run_id, projection)
 
         values: list[ModelInteractionRecord] = []
-        for interaction, (request, response, envelope) in zip(
+        for interaction, (request, response, envelope, client_requests) in zip(
             interactions,
             resolved,
             strict=True,
         ):
+            if (interaction.client_requests is None) != (client_requests is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.append(
                 replace(
                     interaction,
@@ -1171,6 +1198,9 @@ class StateStepArchive(AgentRunStore):
                         if response is None
                         else await inline_context(interaction.agent_run_id, response)
                     ),
+                    client_requests=await prepare_client_requests(
+                        client_requests, self._runtime_domain, self._history,
+                    ),
                 )
             )
         return tuple(values)
@@ -1178,11 +1208,19 @@ class StateStepArchive(AgentRunStore):
     async def resolve_model_interaction(
         self,
         interaction: object,
-    ) -> tuple[tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None, bytes | None]:
+        *,
+        include_client_requests: bool = False,
+    ) -> tuple[
+        tuple[ModelMessage, ...] | None, tuple[ModelMessage, ...] | None,
+        bytes | None, tuple[ModelClientRequest, ...] | None,
+    ]:
         if not isinstance(interaction, ModelInteractionRecord):
             raise TypeError("model interaction is invalid")
+        client_requests = await resolve_client_requests(
+            interaction.client_requests, self._runtime_domain, self._history,
+        ) if include_client_requests else None
         if interaction.request_context is None or interaction.request_envelope is None:
-            return None, None, None
+            return None, None, None, client_requests
         request = await self._history.load_projected_context(
             interaction.agent_run_id,
             interaction.request_context,
@@ -1198,11 +1236,13 @@ class StateStepArchive(AgentRunStore):
         envelope = await self._history.read_payload(
             interaction.request_envelope.payload
         )
-        return request.model_messages(), response, envelope
+        return request.model_messages(), response, envelope, client_requests
 
     async def resolve_model_interactions(
         self,
         interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]:
         require_no_run_history_lock(
             "StateStepArchive.resolve_model_interactions"
@@ -1233,8 +1273,11 @@ class StateStepArchive(AgentRunStore):
         result: list[object] = []
         context_index = 0
         for record in records:
+            client_requests = await resolve_client_requests(
+                record.client_requests, self._runtime_domain, self._history,
+            ) if include_client_requests else None
             if record.request_context is None or record.request_envelope is None:
-                result.append((None, None, None))
+                result.append((None, None, None, client_requests))
                 continue
             request = contexts[context_index].model_messages()
             context_index += 1
@@ -1247,7 +1290,7 @@ class StateStepArchive(AgentRunStore):
                 envelopes[digest] = await self._history.read_payload(
                     record.request_envelope.payload
                 )
-            result.append((request, response, envelopes[digest]))
+            result.append((request, response, envelopes[digest], client_requests))
         return result
 
     async def prepare_interactions(
@@ -1353,6 +1396,9 @@ class StateStepArchive(AgentRunStore):
                     staged.started_at,
                     staged.finished_at,
                     staged.attachments,
+                    await prepare_client_requests(
+                        staged.client_requests, self._runtime_domain, self._history,
+                    ),
                 )
             )
         return tuple(result)

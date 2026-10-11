@@ -23,6 +23,7 @@ from ._contracts import (
     TranscriptSpanRef,
 )
 from ._history import PreparedTranscriptObservation
+from ._model_client import prepare_client_requests
 from ._plan import RuntimeDomain
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from ._step_archive import (
@@ -84,7 +85,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                 local_message_base=local_message_base,
             )
 
-        return tuple(
+        return tuple([
             ModelInteractionRecord(
                 staged.agent_run_id,
                 staged.step_index,
@@ -111,9 +112,10 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                 staged.started_at,
                 staged.finished_at,
                 staged.attachments,
+                await prepare_client_requests(staged.client_requests, self.runtime_domain),
             )
             for staged in values
-        )
+        ])
 
     async def sync_projection(
         self,
@@ -177,6 +179,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
     async def resolve_model_interactions(
         self,
         interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]:
         values = tuple(interactions)
         if not values:
@@ -188,7 +192,9 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         )
         if any(record.agent_run_id != records[0].agent_run_id for record in records):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await super().resolve_model_interactions(records)
+        return await super().resolve_model_interactions(
+            records, include_client_requests=include_client_requests,
+        )
 
     async def prepare_interactions(
         self,

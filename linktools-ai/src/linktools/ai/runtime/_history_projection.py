@@ -235,7 +235,9 @@ class _ExecutionHistoryStore(Protocol):
         limit: int | None = None,
     ) -> list[object]: ...
 
-    async def resolve_model_interactions(self, interactions: Sequence[object]) -> Sequence[object]: ...
+    async def resolve_model_interactions(
+        self, interactions: Sequence[object], *, include_client_requests: bool = False,
+    ) -> Sequence[object]: ...
 
 
 class _ToolOperationHistoryReader(Protocol):
@@ -1001,12 +1003,13 @@ class StepExecutionHistoryReader:
     ) -> ModelInteractionItem:
         request: dict[str, JsonValue] = {}
         response: JsonValue | None = None
-        if include_content and resolved == (None, None, None) and interaction.request_context is not None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if include_content and resolved != (None, None, None):
-            if not isinstance(resolved, tuple) or len(resolved) != 3:
+        if include_content:
+            if not isinstance(resolved, tuple) or len(resolved) != 4:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request_messages, response_messages, envelope_raw = resolved
+            request_messages, response_messages, envelope_raw, _client_requests = resolved
+            if request_messages is None and interaction.request_context is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if include_content and interaction.request_context is not None:
             if not isinstance(request_messages, tuple) or not isinstance(
                 envelope_raw, bytes
             ):

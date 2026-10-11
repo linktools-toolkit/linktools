@@ -167,11 +167,15 @@ class AgentRunStore(Protocol):
     async def resolve_model_interaction(
         self,
         interaction: object,
+        *,
+        include_client_requests: bool = False,
     ) -> object: ...
 
     async def resolve_model_interactions(
         self,
         interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]: ...
 
     async def release_agent_run(

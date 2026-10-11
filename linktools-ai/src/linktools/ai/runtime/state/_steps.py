@@ -503,7 +503,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             if any(not isinstance(value, ModelInteractionRecord) or value.status == "RUNNING" for value in archived):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             missing = await archive.prepare_relocated_interactions(
-                archived, await source.resolve_model_interactions(archived),
+                archived, await source.resolve_model_interactions(archived, include_client_requests=True),
             )
         interactions = missing + await archive.prepare_interactions(
             run, staged,
@@ -622,8 +622,12 @@ class RuntimeAgentRunStore(AgentRunStore):
             terminal.append(value)
         return tuple(terminal)
 
-    async def resolve_model_interaction(self, interaction: object) -> object:
-        values = await self.resolve_model_interactions((interaction,))
+    async def resolve_model_interaction(
+        self, interaction: object, *, include_client_requests: bool = False,
+    ) -> object:
+        values = await self.resolve_model_interactions(
+            (interaction,), include_client_requests=include_client_requests,
+        )
         if len(values) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values[0]
@@ -631,6 +635,8 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def resolve_model_interactions(
         self,
         interactions: Sequence[object],
+        *,
+        include_client_requests: bool = False,
     ) -> list[object]:
         await self._ensure_business()
         values = tuple(interactions)
@@ -693,6 +699,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                             None if value.request_envelope_digest is None else self._staging.staged_payload(
                                 agent_run_id, value.request_envelope_digest,
                             ),
+                            value.client_requests if include_client_requests else None,
                         )
                     )
                 return resolved_values
@@ -715,14 +722,16 @@ class RuntimeAgentRunStore(AgentRunStore):
                     )
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                resolved = await archive.resolve_model_interactions(archived)
+                resolved = await archive.resolve_model_interactions(
+                    archived, include_client_requests=include_client_requests,
+                )
                 if len(resolved) != len(staged):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result: list[object] = []
                 for staged_value, value in zip(staged, resolved, strict=True):
-                    if not isinstance(value, tuple) or len(value) != 3:
+                    if not isinstance(value, tuple) or len(value) != 4:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    request, response, envelope = value
+                    request, response, envelope, client_requests = value
                     result.append(
                         (
                             request,
@@ -730,10 +739,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                             if staged_value.response_context is not None
                             else None,
                             envelope,
+                            client_requests if staged_value.client_requests is not None else None,
                         )
                     )
                 return result
-        return await self._staging.resolve_model_interactions(values)
+        return await self._staging.resolve_model_interactions(
+            values, include_client_requests=include_client_requests,
+        )
 
     def read_store(self, runtime_domain: RuntimeDomain) -> AgentRunStore:
         if runtime_domain not in self._archives:
@@ -1042,7 +1054,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if len(source_interactions) != len(source_values):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 source_resolved = tuple(
-                    await recovery.resolve_model_interactions(source_interactions)
+                    await recovery.resolve_model_interactions(source_interactions, include_client_requests=True)
                 )
                 if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -1104,7 +1116,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         value.model_request_seq
                     ]
                     existing_projection = (
-                        await destination.resolve_model_interactions((existing_value,))
+                        await destination.resolve_model_interactions((existing_value,), include_client_requests=True)
                     )[0]
                     if existing_value.status == "RUNNING" and source_value.status != "RUNNING":
                         if existing_value.request_context is not None:
@@ -1198,7 +1210,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         for value in source_interactions if value.model_request_seq in observed_by_sequence
                     )
                     observed_resolved = tuple(
-                        await destination.resolve_model_interactions(observed_interactions)
+                        await destination.resolve_model_interactions(observed_interactions, include_client_requests=True)
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
