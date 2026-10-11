@@ -58,20 +58,6 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             kind = self.server.kind
             events.append((kind, self.path, self.command, dict(self.headers), body))
-            if kind == "waf":
-                connection = http.client.HTTPConnection(
-                    "127.0.0.253", origin_port, source_address=("127.0.0.254", 0), timeout=3)
-                connection.request(self.command, self.path, body, dict(self.headers))
-                response = connection.getresponse()
-                data = response.read()
-                self.send_response(response.status)
-                for key, value in response.getheaders():
-                    if key.lower() not in ("connection", "transfer-encoding", "content-length"):
-                        self.send_header(key, value)
-                self.end_headers()
-                self.wfile.write(data)
-                connection.close()
-                return
             if kind == "app" and self.path == "/waf-public/sse":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -81,7 +67,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                 release_stream.wait(2)
                 self.wfile.write(b"data: second\n\n")
                 return
-            if kind == "app" and self.path == "/waf-public/ws":
+            if kind == "app" and self.path.endswith("/ws"):
                 self.protocol_version = "HTTP/1.1"
                 self.send_response(101)
                 self.send_header("Upgrade", "websocket")
@@ -122,7 +108,6 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
 
         app_port = backend("app")
         auth_port = backend("auth")
-        backend("waf", "127.0.0.254", origin_port)
         http_port, https_port, health_port = _port(), _port(), _port()
         config = {"NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
                   "NGINX_WAF_PORT": origin_port, "NGINX_ROOT_DOMAIN": "test",
@@ -148,6 +133,24 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             root = root.replace("/run/nginx-health.sock", str(tmp_path / "health.sock"))
         (tmp_path / "logs").mkdir()
         (tmp_path / "sites").mkdir()
+        # Model the verified SafeLine XFF append contract with a native proxy,
+        # including WebSocket upgrades and the two distinct trusted proxy sockets.
+        root = root.rsplit("}", 1)[0] + """
+        server {
+            listen 127.0.0.254:PORT;
+            location / {
+                proxy_bind 127.0.0.254;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Fixture-Waf-Input $http_x_forwarded_for;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection $connection_upgrade;
+                proxy_pass http://127.0.0.253:PORT;
+            }
+        }
+        }
+        """.replace("PORT", str(origin_port))
         (tmp_path / "nginx.conf").write_text(root)
         header_text = "\n".join("proxy_set_header " + nginx.complex_value(key) + " " + value + ";"
                                 for key, value in nginx.header_items(site))
@@ -160,6 +163,15 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         ))
         server_text = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
+        plain_site = _native_site(app_port)
+        plain_site.server_name = "plain.test"
+        plain_site.var_name = "plain"
+        plain_site.https = False
+        plain_site.auth = False
+        server_text += nginx._render_site_template(
+            producer, nginx.get_source_path("templates", "server.conf"), plain_site,
+            business=render("default.conf", plain_site))
+        server_text = server_text.replace("location @waf {", "location @waf { proxy_bind 127.0.0.253;")
         server_text = server_text.replace("/etc/certs/" + nginx.cert_image_revision + "/live/", str(tmp_path) + "/")
         server_text = server_text.replace("listen " + str(origin_port) + " ",
                                           "listen 127.0.0.253:" + str(origin_port) + " ")
@@ -208,12 +220,13 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             response = json.loads(data)
             assert response["method"] == "POST" and response["path"] == path
             assert response["body"] == "00ff626f6479"
-            assert [event[0] for event in events] == (["waf"] if waf else []) + (["auth"] if auth else []) + ["app"]
+            assert [event[0] for event in events] == (["auth"] if auth else []) + ["app"]
             headers = response["headers"]
             assert headers["Authorization"] == ("Bearer secret$host" if auth else "Bearer client")
             assert headers.get("X-Auth-User") == ("verified" if auth else None)
             assert headers["X-Original-URL"] == "https://app.test:" + str(https_port) + path
             assert headers["X-Original-Method"] == "POST"
+            assert headers.get("X-Fixture-Waf-Input") == ("127.0.0.1" if waf else None)
             assert headers["X-Forwarded-For"] == "127.0.0.1"
             assert headers["X-Forwarded-Port"] == str(https_port)
             assert "Forwarded" not in headers
@@ -273,7 +286,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         tls = ssl._create_unverified_context().wrap_socket(
             socket.create_connection(("127.0.0.1", https_port), timeout=2), server_hostname="app.test")
         try:
-            tls.sendall(b"GET /waf-public/ws HTTP/1.1\r\nHost: app.test\r\nUpgrade: websocket\r\n"
+            tls.sendall(b"GET /auth-public/ws HTTP/1.1\r\nHost: app.test\r\nUpgrade: websocket\r\n"
                         b"Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
                         b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
             response = b""
@@ -294,19 +307,72 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             assert frame == b"\x82\x04ping"
         finally:
             tls.close()
-        # The origin accepts only the actual WAF socket and matching original metadata.
+        events.clear()
+        connection = http.client.HTTPConnection("127.0.0.1", http_port, timeout=3)
+        connection.request("GET", "/private", headers={"Host": "app.test"})
+        response = connection.getresponse()
+        assert response.status == 301
+        response.read()
+        connection.close()
+        assert events == []
+        connection = http.client.HTTPConnection("127.0.0.1", http_port, timeout=3)
+        connection.request("GET", "/plain?x=%2f", headers={"Host": "plain.test", "X-Forwarded-For": "forged"})
+        response = connection.getresponse()
+        assert response.status == 200
+        payload = json.loads(response.read())
+        connection.close()
+        assert payload["headers"]["X-Original-URL"] == "http://plain.test/plain?x=%2f"
+        assert payload["headers"]["X-Forwarded-For"] == "127.0.0.1"
+
+        # Origin admission is independent of client identity or custom headers.
         connection = http.client.HTTPConnection("127.0.0.253", origin_port, timeout=3)
         connection.request("GET", "/private", headers={"Host": "app.test"})
         assert connection.getresponse().status == 403
         connection.close()
-        for headers in ({"Host": "app.test"}, {"Host": "app.test", "X-Proxy-Original-Scheme": "https",
-                        "X-Proxy-Original-Host": "other.test", "X-Proxy-Original-URI": "/private",
-                        "X-Proxy-Original-Method": "GET", "X-Proxy-Original-Client-IP": "127.0.0.1"}):
-            connection = http.client.HTTPConnection("127.0.0.253", origin_port, timeout=3,
-                                                    source_address=("127.0.0.254", 0))
-            connection.request("GET", "/private", headers=headers)
-            assert connection.getresponse().status == 400
+
+        def origin_request(path, headers, source="127.0.0.254", destination="127.0.0.253"):
+            connection = http.client.HTTPConnection(destination, origin_port, timeout=3,
+                                                    source_address=(source, 0))
+            connection.request("GET", path, headers=dict({"Host": "app.test"}, **headers))
+            response = connection.getresponse()
+            result = response.status, response.read()
             connection.close()
+            return result
+
+        assert origin_request("/private", {"X-Forwarded-For": "198.51.100.1"}, "127.0.0.253")[0] == 403
+        events.clear()
+        status, data = origin_request("/probe", {"Host": "plain.test"})
+        assert status == 200
+        assert [event[0] for event in events] == ["app"]
+        assert "X-Forwarded-For" not in json.loads(data)["headers"]
+
+        events.clear()
+        status, data = origin_request("/auth-public/probe?x=%2f", {}, "127.0.0.4", "127.0.0.254")
+        assert status == 200
+        assert json.loads(data)["headers"]["X-Forwarded-For"] == "127.0.0.4"
+        assert [event[0] for event in events] == ["app"]
+
+        for headers, expected_ip in (
+            ({}, None),
+            ({"X-Forwarded-For": "2001:0db8:0:0::1, 127.0.0.253"}, "2001:db8::1"),
+            ({"X-Forwarded-For": "invalid"}, None),
+            ({"X-Proxy-Original-Host": "other.test", "X-Proxy-Original-Scheme": "invalid"}, None),
+        ):
+            status, data = origin_request("/auth-public/probe?x=%2f", headers)
+            assert status == 200
+            forwarded = json.loads(data)["headers"]
+            assert forwarded.get("X-Forwarded-For") == expected_ip
+            assert forwarded.get("X-Real-IP") == expected_ip
+            assert forwarded["X-Original-URL"] == "https://app.test/auth-public/probe?x=%2f"
+            assert forwarded["X-Original-Method"] == "GET"
+
+        events.clear()
+        auth_responses[:] = [401]
+        status, _ = origin_request("/private", {})
+        assert status == 302
+        assert [event[0] for event in events] == ["auth"]
+        assert "X-Forwarded-For" not in events[0][3]
+        assert "X-Real-IP" not in events[0][3]
 
 
 
@@ -413,7 +479,10 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         root = root.replace("/var/log/nginx/error.log", str(tmp_path / "error.log"))
         root = root.replace("/var/log/nginx/access.log", str(tmp_path / "access.log"))
         root = root.replace("/var/run/nginx.pid", str(tmp_path / "nginx.pid"))
-        root = root.replace("/run/nginx-health.sock", str(tmp_path / "health.sock"))
+        if os.environ.get("CNTR_NGINX_TEST_TCP_HEALTH") == "1":
+            root = root.replace("unix:/run/nginx-health.sock", "127.0.0.1:" + str(_port()))
+        else:
+            root = root.replace("/run/nginx-health.sock", str(tmp_path / "health.sock"))
         root = root.replace("worker_processes auto", "worker_processes 1")
         (tmp_path / "sites").mkdir()
         (tmp_path / "sites/shared.conf").write_text(server)

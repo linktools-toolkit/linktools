@@ -324,6 +324,7 @@ Nginx 保留自己的应用网络，但 Tengine 不加入它。网段沿用 `SAF
 
 回源契约仍是 `http://nginx:<NGINX_WAF_PORT>`，默认 `http://nginx:8000`，已有正确配置无需改名。
 固定地址避免容器重建后双向代理仍使用旧 IP；两者不共享网络命名空间，Nginx 健康检查不等待 Tengine。
-回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS；SafeLine 必须保留原始 Host 和 `X-Proxy-Original-*` 头。
-该端口不发布到宿主机，并只信任 Tengine 的精确地址。不能把回源指向 Nginx 的公开入口，否则会形成循环。
+回源端口只走业务/认证路由，不再次进入 WAF，也不跳转 HTTPS。入口覆盖 `X-Forwarded-For` 为真实客户端地址；SafeLine 保留 Host 并按原生 `$proxy_add_x_forwarded_for` 追加代理地址。
+该端口不发布到宿主机，仍仅允许 Tengine 的精确 TCP 来源；realip 递归仅信任 `.253`、`.254` 两个代理，不信任整个网段。无需私有回源头，也不因缺少客户端身份直接返回 400；认证与业务按自身规则处理。
+不能把回源指向 Nginx 的公开入口，否则会形成循环。
 详见 [网络与回源契约](docs/integrations.md#nginx-and-safeline-networks)。

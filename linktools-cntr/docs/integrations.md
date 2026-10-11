@@ -388,9 +388,9 @@ whole header set; call the macro in every location that needs customized headers
 `Host` and ordinary `Authorization` can be overridden as above. If a header is
 explicitly configured in `auth_headers`, it is instead an authenticated credential:
 its override is rejected to preserve the successful-authentication requirement.
-`X-Auth-*` identity headers and `X-Proxy-Original-*` internal metadata are reserved.
-The WAF forwarding location sets the latter; application and auth locations strip
-them. Original request values are `$original_scheme`, `$original_host`,
+`X-Auth-*` identity headers are reserved. The former `X-Proxy-Original-*`
+headers are no longer used as metadata; application and auth locations still strip
+the known fields and reject their explicit overrides. Original request values are `$original_scheme`, `$original_host`,
 `$original_uri`, `$original_method`, `$original_client_ip`, and `$original_port`.
 
 Generated output consists of `nginx.conf` and `sites/generated.conf`, containing
@@ -408,8 +408,7 @@ Business templates are evaluated once and their text is embedded without another
 Jinja pass. There are no generated per-site auth/business include directories.
 
 For custom integrations migrating older generated names, replace `$cntr_*`
-request references with the corresponding `$original_*` values above. Private
-WAF metadata is now `X-Proxy-Original-*`, the internal auth URI is
+request references with the corresponding `$original_*` values above. The internal auth URI is
 `/_internal/auth`, and reload acknowledgement uses `/run/nginx-health.sock`
 with `/health`. Producer and consumer must use the same generated configuration;
 there are no old-name aliases. CLI names are unchanged; URL-helper imports migrate as described above.
@@ -444,9 +443,26 @@ Public requests enter Nginx's HTTP/HTTPS listeners and WAF-protected requests
 are forwarded to Tengine at `.254:<NGINX_WAF_PORT>`. SafeLine returns them to
 Nginx's separate HTTP origin listener at `nginx:<NGINX_WAF_PORT>`. That listener
 runs the application/authentication routes without forwarding into WAF again.
-SafeLine must preserve the original Host and `X-Proxy-Original-*` metadata;
-Nginx validates those values and accepts them only from the exact Tengine peer,
-not the entire subnet. Pointing the origin at the public HTTP/HTTPS listener
+Nginx replaces incoming `X-Forwarded-For` with the actual client address before
+forwarding to SafeLine. SafeLine preserves Host and appends its incoming proxy
+address with `$proxy_add_x_forwarded_for`. The origin accepts only the exact
+Tengine TCP peer; recursive realip trusts only the two configured proxy addresses
+(`.253` and `.254`), not the entire subnet. Host, URI and method come from the
+native request and are snapshotted before business rewrites. The origin scheme
+comes from the site's HTTPS setting: HTTPS sites redirect their public HTTP
+listener rather than serving application traffic there.
+
+No private metadata headers or client-identity gate are required for forwarding.
+A probe routed through Tengine uses its actual connection source in the standard
+forwarding chain. If a direct trusted-origin request has no usable forwarded
+client address, nginx omits X-Real-IP and X-Forwarded-For instead of claiming the
+proxy is the end user. Existing authentication and business policies still apply;
+Authelia's native missing-XFF behavior uses its connection peer, so an ACL that
+trusts the proxy network also applies to that case. This does not create or change
+any ACL. A direct request from the management container is still outside the
+Tengine-only origin boundary.
+
+Pointing the origin at the public HTTP/HTTPS listener
 instead would create a forwarding loop. The WAF port is not published to the
 host. `SAFELINE_PORT=0` disables the optional management host port; its default
 remains `9200` mapped to `1443`.

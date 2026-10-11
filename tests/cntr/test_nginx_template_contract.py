@@ -427,27 +427,27 @@ def test_embedded_business_preserves_multiline_quoted_values(fresh_manager, tmp_
     assert content in rendered
 
 
-def test_original_header_definition_drives_send_parse_validate_and_clear(fresh_manager):
+def test_original_field_definition_drives_native_values_and_snapshot(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    nginx.original_headers = tuple(
-        ("X-Proxy-Original-Client-Address" if name == "client_ip" else header,
-         name, expression, actual)
-        for header, name, expression, actual in nginx.original_headers
+    nginx.original_fields = tuple(
+        (name, "$custom_host" if name == "host" else expression, origin)
+        for name, expression, origin in nginx.original_fields
     )
     root = nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "nginx.conf"),
         SimpleNamespace(template_vars={"waf": True, "site_files": ()}))
-    server = nginx._render_site_template(
-        nginx, nginx.get_source_path("templates", "server.conf"), make_site(waf=True))
-    assert "$http_x_proxy_original_client_address" in root
-    assert "$http_x_proxy_original_client_ip" not in root
-    assert "real_ip_header X-Proxy-Original-Client-Address;" in server
-    assert "proxy_set_header X-Proxy-Original-Client-Address $original_client_ip;" in server
-    assert "X-Proxy-Original-Client-IP" not in server
-    for authentication in (False, True):
-        headers = dict(nginx.header_items(make_site(), authentication=authentication))
-        assert headers["X-Proxy-Original-Client-Address"] == '\"\"'
-        assert "X-Proxy-Original-Client-IP" not in headers
+    assert "map $server_port $original_host {\n        default $custom_host;" in root
+    assert "$http_x_proxy_original_" not in root
+    assert "$waf_origin_valid" not in root
+    for https in (False, True):
+        server = nginx._render_site_template(
+            nginx, nginx.get_source_path("templates", "server.conf"), make_site(waf=True, https=https))
+        assert "real_ip_header X-Forwarded-For;" in server
+        assert "real_ip_recursive on;" in server
+        assert "set $waf_scheme " + ("https" if https else "http") + ";" in server
+        assert "$original_host|$original_uri|$original_method|" in server
+        waf_location = server.split("location @waf {", 1)[1].split("}", 1)[0]
+        assert "X-Proxy-Original-" not in waf_location
 
 
 def test_identity_field_definition_drives_capture_output_and_protection(fresh_manager, monkeypatch):

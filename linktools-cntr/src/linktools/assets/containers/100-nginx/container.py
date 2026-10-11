@@ -18,6 +18,7 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvi
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import choose
+from linktools.runtime import lazy_load
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
@@ -31,14 +32,13 @@ if TYPE_CHECKING:
 
 class Container(BaseContainer):
 
-    # Wire header, internal name, public request value, trusted-origin comparison.
-    # Scheme uses its native http/https allowlist instead of an HTTP-hop comparison.
-    original_headers = (
-        ("X-Proxy-Original-Scheme", "scheme", "$scheme", None),
-        ("X-Proxy-Original-Host", "host", "$http_host", "$http_host"),
-        ("X-Proxy-Original-URI", "uri", "$request_uri", "$request_uri"),
-        ("X-Proxy-Original-Method", "method", "$request_method", "$request_method"),
-        ("X-Proxy-Original-Client-IP", "client_ip", "$peer_address", "$remote_addr"),
+    # Snapshot native request values before business rewrites or auth subrequests.
+    original_fields = (
+        ("scheme", "$scheme", "$waf_scheme"),
+        ("host", "$http_host", None),
+        ("uri", "$request_uri", None),
+        ("method", "$request_method", None),
+        ("client_ip", "$peer_address", "$waf_client_ip"),
     )
     identity_headers = ("User", "Groups", "Name", "Email")
 
@@ -50,6 +50,9 @@ class Container(BaseContainer):
         ("X-Forwarded-Host", "$original_host"), ("X-Forwarded-URI", "$original_uri"),
         ("X-Forwarded-Method", "$original_method"), ("X-Forwarded-For", "$original_client_ip"),
         ("X-Forwarded-Port", "$original_port"), ("Forwarded", ""),
+        ("X-Proxy-Original-Scheme", ""), ("X-Proxy-Original-Host", ""),
+        ("X-Proxy-Original-URI", ""), ("X-Proxy-Original-Method", ""),
+        ("X-Proxy-Original-Client-IP", ""),
     )
 
     def quote(self, value: object) -> str:
@@ -258,8 +261,6 @@ class Container(BaseContainer):
                      authentication: bool = False) -> "tuple[tuple[str, str], ...]":
         """Build a complete case-insensitive header set for one proxy location."""
         headers = dict(self.request_headers)
-        for header, _, _, _ in self.original_headers:
-            headers[header] = ""
         for name in self.identity_headers:
             headers["X-Auth-" + name] = (
                 "$identity_" + site.var_name + "_" + name.lower()
@@ -341,6 +342,10 @@ class Container(BaseContainer):
                 container=container,
                 nginx=nginx,
                 config=container.env_config,
+                waf_addresses=lazy_load(lambda: {
+                    name: str(container.env_config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
+                    for name, suffix in (("nginx", "253"), ("tengine", "254"))
+                }),
                 template_vars=site.template_vars,
                 **extra,
             )

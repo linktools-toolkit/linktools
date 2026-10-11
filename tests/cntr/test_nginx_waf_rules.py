@@ -37,7 +37,7 @@ def test_site_waf_bypass_routes_through_named_location(fresh_manager):
     assert "location @waf" in rendered
     assert "location / { return 204; }" in rendered
     assert "include sites/" not in rendered
-    assert "real_ip_header X-Proxy-Original-Client-IP;" in rendered
+    assert "real_ip_header X-Forwarded-For;" in rendered
 
 
 def test_disabled_waf_has_no_bypass_or_internal_origin(fresh_manager):
@@ -102,7 +102,7 @@ def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
     assert "proxy_http_version 1.1;" in waf_location
     assert "proxy_set_header Upgrade $http_upgrade;" in waf_location
     assert "proxy_set_header Connection $connection_upgrade;" in waf_location
-    assert "proxy_set_header X-Proxy-Original-Client-IP $original_client_ip;" in waf_location
+    assert "proxy_set_header X-Forwarded-For $original_client_ip;" in waf_location
 
 
 def test_nginx_literal_preserves_data_not_template_expression(fresh_manager):
