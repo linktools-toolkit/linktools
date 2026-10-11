@@ -121,6 +121,17 @@ jobs:
           python -m pip install --quiet -U -r requirements.txt
           read -r -a packages <<< "$INSTALL_PACKAGES"
           python manage.py install "${packages[@]}" --editable --quiet
+          python - <<'PYCOMPILE'
+          from compileall import compile_dir
+          from pathlib import Path
+          from py_compile import PycInvalidationMode
+          from manage import get_modules
+
+          for module in get_modules().values():
+              if not compile_dir(Path(module["path"]) / "src", quiet=1,
+                                 invalidation_mode=PycInvalidationMode.CHECKED_HASH):
+                  raise SystemExit(1)
+          PYCOMPILE
       - name: Run checks
         id: checks
         shell: bash
