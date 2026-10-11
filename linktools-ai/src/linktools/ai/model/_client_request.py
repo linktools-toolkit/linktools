@@ -4,10 +4,18 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from types import TracebackType
-from typing import Literal
+from typing import Any, Literal
+
+from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import RunContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +97,23 @@ class ModelClientRequestRecorder:
         """Immutable views; response closure replaces values in later views."""
         return tuple(self._requests)
 
+    def wrap_model(self, model: Model) -> Model:
+        """Bind supported client dispatches to this logical request's recorder.
+
+        The owner must keep this recorder open until the request and its stream
+        finish. SDK streaming may open the model in a separate consumer task.
+        Model preparation, connection ownership and response handling are unchanged.
+        """
+        return _ClientRecordingModel(model, self)
+
+    @contextmanager
+    def _bind(self) -> Iterator[None]:
+        token = _current_capture.set(self)
+        try:
+            yield
+        finally:
+            _current_capture.reset(token)
+
     def __enter__(self) -> ModelClientRequestRecorder:
         if self._entered:
             raise RuntimeError("client request capture cannot be entered again")
@@ -106,6 +131,34 @@ class ModelClientRequestRecorder:
         if token is not None:
             _current_capture.reset(token)
             self._token = None
+
+
+class _ClientRecordingModel(WrapperModel):
+    def __init__(self, model: Model, recorder: ModelClientRequestRecorder) -> None:
+        super().__init__(model)
+        self._recorder = recorder
+
+    async def request(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        with self._recorder._bind():
+            return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+    @asynccontextmanager
+    async def request_stream(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        async with AsyncExitStack() as stack:
+            # Chat dispatch happens while opening the stream. Keep token reset
+            # in this task; the SDK may close the stream from another task.
+            with self._recorder._bind():
+                response = await stack.enter_async_context(self.wrapped.request_stream(
+                    messages, model_settings, model_request_parameters, run_context,
+                ))
+            yield response
 
 
 @dataclass(frozen=True, slots=True)

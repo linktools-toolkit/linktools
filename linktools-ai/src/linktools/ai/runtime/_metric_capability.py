@@ -35,7 +35,7 @@ from pydantic_ai.usage import RequestUsage, UsageLimitExceeded
 from ..capability import AgentContext
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
-from ..model import model_binding_error
+from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
@@ -86,6 +86,7 @@ class ModelInteractionRecorder(Protocol):
         error_code: str | None,
         duration_ns: int,
         usage: object | None,
+        client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None: ...
 
     async def record_model_event(
@@ -218,14 +219,14 @@ class _ProviderStreamedResponse(StreamedResponse):
 
 
 class _PreparedRequestModel(WrapperModel):
-    """Freeze provider input after SDK preparation and before provider execution."""
+    """Freeze SDK input after preparation and before provider execution."""
 
     def __init__(
         self,
         wrapped: Model,
         prepare: Callable[
             [Sequence[ModelMessage], ModelSettings | None, ModelRequestParameters, bool],
-            Awaitable[None],
+            Awaitable[Model],
         ],
         failed: Callable[[Exception], None],
     ) -> None:
@@ -239,8 +240,8 @@ class _PreparedRequestModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        await self._prepare(messages, model_settings, model_request_parameters, False)
-        return await self.wrapped.request(messages, model_settings, model_request_parameters)
+        model = await self._prepare(messages, model_settings, model_request_parameters, False)
+        return await model.request(messages, model_settings, model_request_parameters)
 
     @asynccontextmanager
     async def request_stream(
@@ -250,9 +251,9 @@ class _PreparedRequestModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
         run_context: PydanticRunContext[Any] | None = None,
     ) -> AsyncIterator[StreamedResponse]:
-        await self._prepare(messages, model_settings, model_request_parameters, True)
+        model = await self._prepare(messages, model_settings, model_request_parameters, True)
         try:
-            manager = self.wrapped.request_stream(
+            manager = model.request_stream(
                 messages, model_settings, model_request_parameters, run_context,
             )
             response = await manager.__aenter__()
@@ -312,6 +313,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._event_sink = event_sink
         self._budget = budget
         self._prepared_models: dict[int, Model] = {}
+        self._client_recorders: dict[int, ModelClientRequestRecorder] = {}
         self._provider_errors: dict[int, Exception] = {}
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -342,14 +344,19 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             settings: ModelSettings | None,
             parameters: ModelRequestParameters,
             streaming: bool,
-        ) -> None:
+        ) -> Model:
             nonlocal request_sequence
+            compaction = self._journal.latest_for_step(ctx.run_step, purpose="compaction")
+            if compaction is not None and compaction.status is None:
+                # SDKs may prepare the agent wrapper before running compaction.
+                # The summary's external recorder owns its input and completion.
+                return model
             fact = self._journal.latest_for_step(ctx.run_step)
             if fact is None or fact.status is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request_sequence = fact.model_request_seq
             if fact.model_request_seq in self._prepared_models:
-                return
+                return self._client_recorders[fact.model_request_seq].wrap_model(model)
             self._stage_request(
                 fact,
                 messages=messages,
@@ -363,6 +370,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             self._prepared_models[fact.model_request_seq] = model
             if self._interaction_recorder is not None:
                 await self._interaction_recorder.commit_history_boundary()
+            return self._client_recorders[fact.model_request_seq].wrap_model(model)
 
         def provider_failed(error: Exception) -> None:
             if request_sequence is None:
@@ -387,127 +395,130 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             output_retry_index=None if ctx.retry <= 0 else ctx.retry,
         )
         model_request_seq = fact.model_request_seq
-        try:
-            self._stage_request(fact, request_context)
+        with ModelClientRequestRecorder() as client_recorder:
+            self._client_recorders[model_request_seq] = client_recorder
             try:
-                await self._record_request_event(fact, phase="started")
-                await self._publish_request_event(fact, phase="started")
-            except asyncio.CancelledError:
-                await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="CANCELLED",
-                    response=None,
-                    error_code=None,
-                    usage=None,
-                    phase="cancelled",
-                )
-                raise
-            except RunCancelled as error:
-                interrupted = await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="CANCELLED",
-                    response=None,
-                    error_code=_model_error_code(error),
-                    usage=None,
-                    phase="cancelled",
-                )
-                if interrupted:
-                    raise asyncio.CancelledError from error
-                raise
-            except Exception as error:
-                interrupted = await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="FAILED",
-                    response=None,
-                    error_code=_model_error_code(error),
-                    usage=None,
-                    phase="failed",
-                )
-                if interrupted:
-                    raise asyncio.CancelledError from error
-                if isinstance(error, AIError):
-                    raise
-                raise AIError(
-                    ErrorCode.INTERNAL_ERROR,
-                    safe_details={"phase": "model_request_started_event"},
-                ) from error
-
-            try:
-                response = (
-                    await handler(request_context) if self._budget is None else
-                    await self._budget.run_model(
-                        fact.observation_id, lambda: handler(request_context),
+                self._stage_request(fact, request_context)
+                try:
+                    await self._record_request_event(fact, phase="started")
+                    await self._publish_request_event(fact, phase="started")
+                except asyncio.CancelledError:
+                    await self._complete_request(
+                        fact,
+                        run_context,
+                        selected_model,
+                        status="CANCELLED",
+                        response=None,
+                        error_code=None,
+                        usage=None,
+                        phase="cancelled",
                     )
-                )
-            except asyncio.CancelledError:
-                provider_error = self._provider_errors.get(model_request_seq)
-                failed = provider_error is not None and not isinstance(provider_error, RunCancelled)
-                await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="FAILED" if failed else "CANCELLED",
-                    response=None,
-                    error_code=None if provider_error is None else _model_error_code(provider_error),
-                    usage=None,
-                    phase="failed" if failed else "cancelled",
-                )
-                raise
-            except RunCancelled as error:
-                interrupted = await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="CANCELLED",
-                    response=None,
-                    error_code=_model_error_code(error),
-                    usage=None,
-                    phase="cancelled",
-                )
-                if interrupted:
-                    raise asyncio.CancelledError from error
-                raise
-            except Exception as error:
-                interrupted = await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="FAILED",
-                    response=None,
-                    error_code=_model_error_code(error),
-                    usage=None,
-                    phase="failed",
-                )
-                if interrupted:
-                    raise asyncio.CancelledError from error
-                raise
+                    raise
+                except RunCancelled as error:
+                    interrupted = await self._complete_request(
+                        fact,
+                        run_context,
+                        selected_model,
+                        status="CANCELLED",
+                        response=None,
+                        error_code=_model_error_code(error),
+                        usage=None,
+                        phase="cancelled",
+                    )
+                    if interrupted:
+                        raise asyncio.CancelledError from error
+                    raise
+                except Exception as error:
+                    interrupted = await self._complete_request(
+                        fact,
+                        run_context,
+                        selected_model,
+                        status="FAILED",
+                        response=None,
+                        error_code=_model_error_code(error),
+                        usage=None,
+                        phase="failed",
+                    )
+                    if interrupted:
+                        raise asyncio.CancelledError from error
+                    if isinstance(error, AIError):
+                        raise
+                    raise AIError(
+                        ErrorCode.INTERNAL_ERROR,
+                        safe_details={"phase": "model_request_started_event"},
+                    ) from error
 
-            # Freeze the resolved SDK identity before publishing the completed request.
-            response.run_id = response.run_id or ctx.run_id
-            response.conversation_id = response.conversation_id or ctx.conversation_id
-            interrupted = await self._complete_request(
-                fact,
-                run_context,
-                selected_model,
-                status="SUCCEEDED",
-                response=response,
-                error_code=None,
-                usage=response.usage,
-                phase="completed",
-            )
-            if interrupted:
-                raise asyncio.CancelledError
-            return response
-        finally:
-            self._prepared_models.pop(model_request_seq, None)
-            self._provider_errors.pop(model_request_seq, None)
-            self._journal.consume(model_request_seq)
+                try:
+                    response = (
+                        await handler(request_context) if self._budget is None else
+                        await self._budget.run_model(
+                            fact.observation_id, lambda: handler(request_context),
+                        )
+                    )
+                except asyncio.CancelledError:
+                    provider_error = self._provider_errors.get(model_request_seq)
+                    failed = provider_error is not None and not isinstance(provider_error, RunCancelled)
+                    await self._complete_request(
+                        fact,
+                        run_context,
+                        selected_model,
+                        status="FAILED" if failed else "CANCELLED",
+                        response=None,
+                        error_code=None if provider_error is None else _model_error_code(provider_error),
+                        usage=None,
+                        phase="failed" if failed else "cancelled",
+                    )
+                    raise
+                except RunCancelled as error:
+                    interrupted = await self._complete_request(
+                        fact,
+                        run_context,
+                        selected_model,
+                        status="CANCELLED",
+                        response=None,
+                        error_code=_model_error_code(error),
+                        usage=None,
+                        phase="cancelled",
+                    )
+                    if interrupted:
+                        raise asyncio.CancelledError from error
+                    raise
+                except Exception as error:
+                    interrupted = await self._complete_request(
+                        fact,
+                        run_context,
+                        selected_model,
+                        status="FAILED",
+                        response=None,
+                        error_code=_model_error_code(error),
+                        usage=None,
+                        phase="failed",
+                    )
+                    if interrupted:
+                        raise asyncio.CancelledError from error
+                    raise
+
+                # Freeze the resolved SDK identity before publishing the completed request.
+                response.run_id = response.run_id or ctx.run_id
+                response.conversation_id = response.conversation_id or ctx.conversation_id
+                interrupted = await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="SUCCEEDED",
+                    response=response,
+                    error_code=None,
+                    usage=response.usage,
+                    phase="completed",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError
+                return response
+            finally:
+                self._client_recorders.pop(model_request_seq, None)
+                self._prepared_models.pop(model_request_seq, None)
+                self._provider_errors.pop(model_request_seq, None)
+                self._journal.consume(model_request_seq)
 
     async def after_model_request(
         self,
@@ -542,6 +553,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         parameters: ModelRequestParameters,
         streaming: bool = False,
         source_messages: Sequence[ModelMessage] | None = None,
+        client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None:
         if phase == "started":
             self._stage_request(
@@ -582,6 +594,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     error_code=None,
                     usage=None,
                     phase="cancelled",
+                    client_requests=client_requests,
                 )
                 raise
             except RunCancelled as error:
@@ -594,6 +607,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     error_code=_model_error_code(error),
                     usage=None,
                     phase="cancelled",
+                    client_requests=client_requests,
                 )
                 if interrupted:
                     raise asyncio.CancelledError from error
@@ -608,6 +622,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     error_code=_model_error_code(error),
                     usage=None,
                     phase="failed",
+                    client_requests=client_requests,
                 )
                 if interrupted:
                     raise asyncio.CancelledError from error
@@ -640,6 +655,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             status,
             error_code,
             usage,
+            client_requests=client_requests,
         )
         self._record_model(
             ctx.deps,
@@ -737,6 +753,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         error_code: str | None,
         usage: object | None,
         phase: str,
+        client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> bool:
         model = self._prepared_models.get(fact.model_request_seq, model)
         finished = self._journal.finish(fact.model_request_seq, status=status)
@@ -747,6 +764,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             status,
             error_code,
             usage,
+            client_requests=client_requests,
         )
         measurements = (
             _provider_usage_measurements(response)
@@ -828,10 +846,16 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         status: str,
         error_code: str | None,
         usage: object | None,
+        *,
+        client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None:
         recorder = self._interaction_recorder
         if recorder is None:
             return
+        if client_requests is None:
+            client_recorder = self._client_recorders.get(fact.model_request_seq)
+            if client_recorder is not None:
+                client_requests = client_recorder.requests
         recorder.finish_model_interaction(
             fact,
             model=model,
@@ -840,6 +864,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             error_code=error_code,
             duration_ns=fact.duration_ns or 0,
             usage=usage,
+            client_requests=client_requests,
         )
 
     def _record_model(

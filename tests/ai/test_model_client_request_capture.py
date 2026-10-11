@@ -24,7 +24,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
 from linktools.ai.capability import CapabilityGroup
-from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits
+from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.model import ModelClientRequestRecorder, ModelRegistry
@@ -32,6 +32,7 @@ from linktools.ai.model import _openai
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._compaction import CompactionCapability
 from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.runtime.state import RuntimeDomain
 
 
 class _ObservedHttpClient(DefaultAsyncHttpxClient):
@@ -357,8 +358,9 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
         return _response(request)
 
     registry, clients = _registry(monkeypatch, handler)
+    storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "default", models=registry, storage=RuntimeStorage.in_memory(), capabilities=(_agents(),),
+        "default", models=registry, storage=storage, capabilities=(_agents(),),
     ) as runtime:
         with ModelClientRequestRecorder() as recorder:
             execution = await runtime.agents.get("default").start("hello")
@@ -378,7 +380,14 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
                     "cancel": ExecutionStatus.CANCELLED,
                     "cancel_cleanup": ExecutionStatus.CANCELLED}[outcome]
         assert result.status is expected
-        assert len(recorder.requests) == 1
+        assert recorder.requests == ()
+        item = (await execution.model_interactions()).items[0]
+        archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        records = await archive.list_model_interactions(agent_run_id=agent_run_id(
+            namespace="default", tenant_id="default", execution_id=item.execution_id, agent_run_seq=item.agent_run_seq,
+        ))
+        attempts = (await archive.resolve_model_interaction(records[0], include_client_requests=True))[3]
+        assert attempts is not None and len(attempts) == 1
         assert len(clients) == 1 and clients[0].is_closed and clients[0].close_calls == 1
 
 
@@ -464,6 +473,11 @@ async def test_model_client_request_capture_compaction_reuses_owned_client(
         source_namespace="workspace", tenant_id="tenant", execution_id="execution", agent_run_id="run",
     )
     phases: list[str] = []
+    compaction_requests = []
+
+    async def record(ctx, fact, phase, model, response, error, messages, settings, parameters, streaming, source, client_requests):
+        if phase == "completed":
+            compaction_requests.extend(client_requests)
 
     async def observer(ctx, fact, phase, selected_model, response, error) -> None:
         assert selected_model is model and not clients[0].is_closed
@@ -477,7 +491,7 @@ async def test_model_client_request_capture_compaction_reuses_owned_client(
             ModelResponse(parts=[TextPart(f"answer {index} " + "y" * 240)]),
         ))
     agent = Agent(model, capabilities=[CompactionCapability(
-        300, limits=PromptLimits(), journal=journal, observer=observer,
+        300, limits=PromptLimits(), journal=journal, observer=observer, request_recorder=record,
     )])
     async with model:
         with ModelClientRequestRecorder() as recorder:
@@ -485,5 +499,7 @@ async def test_model_client_request_capture_compaction_reuses_owned_client(
         assert result.output == "done"
         assert len(clients) == 1 and not clients[0].is_closed
     assert phases == ["started", "completed"]
-    assert len(recorder.requests) == 2
+    assert len(recorder.requests) == 1
+    assert len(compaction_requests) == 1
+    assert compaction_requests[0].response is not None and compaction_requests[0].response.complete
     assert clients[0].is_closed and clients[0].close_calls == 1

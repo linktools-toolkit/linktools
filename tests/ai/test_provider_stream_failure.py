@@ -13,6 +13,7 @@ from pydantic_ai.settings import ModelSettings
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
+from linktools.ai.model import ModelClientRequestRecorder
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._metric_capability import _PreparedRequestModel
 
@@ -75,7 +76,8 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("suppress", (False, True))
-async def test_provider_observation_preserves_consumer_error_and_context_suppression(suppress: bool) -> None:
+@pytest.mark.parametrize("client_capture", (False, True))
+async def test_provider_observation_preserves_consumer_error_and_context_suppression(suppress: bool, client_capture: bool) -> None:
     class ConsumerFailure(ValueError):
         pass
 
@@ -96,10 +98,14 @@ async def test_provider_observation_preserves_consumer_error_and_context_suppres
                 if not suppress:
                     raise
 
-    async def prepare(messages, settings, parameters, streaming) -> None:
-        pass
+    async def prepare(messages, settings, parameters, streaming):
+        return model.wrapped
 
-    model = _PreparedRequestModel(ConsumerModel(lambda messages, info: response), prepare, provider_errors.append)
+    recorder = ModelClientRequestRecorder()
+    consumer_model = ConsumerModel(lambda messages, info: response)
+    model = _PreparedRequestModel(
+        recorder.wrap_model(consumer_model) if client_capture else consumer_model, prepare, provider_errors.append,
+    )
     error = ConsumerFailure("consumer output failed")
 
     async def consume() -> None:
@@ -107,11 +113,12 @@ async def test_provider_observation_preserves_consumer_error_and_context_suppres
             assert stream.get() == response
             raise error
 
-    if suppress:
-        await consume()
-    else:
-        with pytest.raises(ConsumerFailure) as caught:
+    with recorder:
+        if suppress:
             await consume()
-        assert caught.value is error
+        else:
+            with pytest.raises(ConsumerFailure) as caught:
+                await consume()
+            assert caught.value is error
     assert received == [error]
     assert provider_errors == []

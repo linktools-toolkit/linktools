@@ -536,7 +536,7 @@ class StagingAgentRunStore(AgentRunStore):
         self._interaction_dirty.setdefault(interaction.agent_run_id, set()).add(interaction.model_request_seq)
 
     def prepare_model_interaction(self, interaction: object) -> None:
-        """Freeze a pending request's final provider input exactly once."""
+        """Freeze a pending request's prepared SDK input exactly once."""
         self._ensure_open()
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
