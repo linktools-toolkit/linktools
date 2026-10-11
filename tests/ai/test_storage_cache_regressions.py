@@ -98,7 +98,12 @@ async def test_cancelled_write_settles_its_capacity_accounting(
             with pytest.raises(asyncio.CancelledError) as raised:
                 await task
             if fails:
-                assert raised.value.__context__ is failure
+                cause: BaseException | None = raised.value
+                seen: set[int] = set()
+                while isinstance(cause, asyncio.CancelledError) and id(cause) not in seen:
+                    seen.add(id(cause))
+                    cause = cause.__cause__ or cause.__context__
+                assert cause is failure
             await loop.run_in_executor(executor, lambda: None)
             monkeypatch.setattr(cache, "_put_sync", original_put)
             await cache.put("b", b"b" * 6)
