@@ -118,7 +118,9 @@ class SqlAlchemyDialect(Protocol):
         table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]",
         index_elements: "Sequence[str]",
-    ) -> None: ...
+    ) -> int | None:
+        """Return the inserted count, or None when conflicts cannot be distinguished."""
+        ...
 
     async def upsert(
         self,
@@ -259,16 +261,17 @@ class SQLiteDialect:
         table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]",
         index_elements: "Sequence[str]",
-    ) -> None:
+    ) -> int | None:
         if not rows:
-            return
+            return None
 
         statement = (
             self._insert(table)
             .values([dict(row) for row in rows])
             .on_conflict_do_nothing(index_elements=list(index_elements))
         )
-        await session.execute(statement)
+        result = await session.execute(statement)
+        return result.rowcount if result.rowcount >= 0 else None
 
     async def upsert(
         self,
@@ -462,9 +465,9 @@ class MySQLDialect(SQLiteDialect):
         table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]",
         index_elements: "Sequence[str]",
-    ) -> None:
+    ) -> int | None:
         if not rows:
-            return
+            return None
         from sqlalchemy.dialects.mysql import insert
 
         statement = insert(table).values([dict(row) for row in rows])
@@ -472,6 +475,8 @@ class MySQLDialect(SQLiteDialect):
         await session.execute(
             statement.on_duplicate_key_update(**{column: statement.inserted[column]})
         )
+        # FOUND_ROWS makes an ignored duplicate indistinguishable from an insert.
+        return None
 
     async def upsert(
         self,

@@ -55,6 +55,8 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
+# Six CASE assignments plus key/version predicates stay below 999 SQLite binds.
+_RECORD_REPLACE_BATCH_SIZE = 64
 
 
 class _SqlGroupTransaction:
@@ -714,37 +716,36 @@ class _SqlTransaction:
                 raise ValueError(
                     "replacement must increment storage_version exactly once"
                 )
-        from sqlalchemy import bindparam, func, update
+        from sqlalchemy import case, func, literal, tuple_, update
 
         table = self._table("ai_state_records")
-        statement = (
-            update(table)
-            .where(
-                table.c.store_digest == self._store_hex,
-                table.c.key_digest == bindparam("_replacement_key_digest"),
-                table.c.storage_version == bindparam("_replacement_expected_version"),
+        statement_count = 0
+        for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
+            batch = ordered[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
+            rows = [_record_values(value.record) for value in batch]
+            versions = [(row["key_digest"], value.expected_storage_version)
+                        for row, value in zip(rows, batch)]
+            updates = {
+                column: rows[0][column] if len(rows) == 1 else case(
+                    {row["key_digest"]: literal(row[column], type_=table.c[column].type)
+                     for row in rows},
+                    value=table.c.key_digest,
+                    else_=table.c[column],
+                )
+                for column in ("state", "storage_version", "lease_owner", "lease_fence",
+                               "lease_expires_at", "payload_json")
+            }
+            result = await self._execute(
+                update(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.key_digest.in_([row["key_digest"] for row in rows]),
+                    tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                ).values(**updates, updated_at=func.current_timestamp())
             )
-            .values(
-                scope_digest=bindparam("_replacement_scope_digest"),
-                parent_digest=bindparam("_replacement_parent_digest"),
-                kind=bindparam("_replacement_kind"),
-                sort_key=bindparam("_replacement_sort_key"),
-                state=bindparam("_replacement_state"),
-                storage_version=bindparam("_replacement_storage_version"),
-                lease_owner=bindparam("_replacement_lease_owner"),
-                lease_fence=bindparam("_replacement_lease_fence"),
-                lease_expires_at=bindparam("_replacement_lease_expires_at"),
-                payload_json=bindparam("_replacement_payload_json"),
-                updated_at=func.current_timestamp(),
-            )
-        )
-        parameters = [
-            _record_replacement_values(replacement) for replacement in ordered
-        ]
-        result = await self._execute(statement, parameters)
-        self._log_batch("replace_records", len(parameters), 1)
-        if result.rowcount != len(parameters):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            statement_count += 1
+            if result.rowcount != len(batch):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._log_batch("replace_records", len(ordered), statement_count)
         for replacement in ordered:
             self._guarded_record_keys.add(replacement.record.key_digest)
             self._record_cache[replacement.record.key_digest] = replacement.record
@@ -1575,28 +1576,6 @@ def _record_values(
 
         values["updated_at"] = func.current_timestamp()
     return values
-
-
-def _record_replacement_values(replacement: RecordReplacement) -> dict[str, object]:
-    record = replacement.record
-    return {
-        "_replacement_key_digest": _hex(record.key_digest),
-        "_replacement_expected_version": replacement.expected_storage_version,
-        "_replacement_scope_digest": None
-        if record.scope_digest is None
-        else _hex(record.scope_digest),
-        "_replacement_parent_digest": None
-        if record.parent_digest is None
-        else _hex(record.parent_digest),
-        "_replacement_kind": record.kind,
-        "_replacement_sort_key": record.sort_key,
-        "_replacement_state": record.state,
-        "_replacement_storage_version": record.storage_version,
-        "_replacement_lease_owner": record.lease_owner,
-        "_replacement_lease_fence": record.lease_fence,
-        "_replacement_lease_expires_at": record.lease_expires_at,
-        "_replacement_payload_json": dict(record.data),
-    }
 
 
 def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
