@@ -1222,6 +1222,21 @@ class _SqlTransaction:
         if not requests:
             return {}
         table = self._table("ai_state_sequences")
+        if len(requests) == 1:
+            key, count = next(iter(requests.items()))
+            value = await self._context.run_statement(
+                self._context.dialect.upsert_increment(
+                    self._session,
+                    table=table,
+                    values={"store_digest": self._store_hex, "key_digest": _hex(key)},
+                    column="value",
+                    index_elements=("store_digest", "key_digest"),
+                    step=count,
+                )
+            )
+            result = {key: _row_nonnegative_int(value)}
+            self._sequence_cache.update(result)
+            return result
         rows = [
             {
                     "store_digest": self._store_hex,
