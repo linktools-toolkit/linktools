@@ -52,7 +52,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         return (f"Prepared in {context.graph_id}: ", *context.prompt)
 
     async with Runtime.open("inline-capture", models=models, context=CONTEXT,
-            storage=RuntimeStorage.filesystem(tmp_path / "state"),
+            storage=RuntimeStorage.in_memory(),
             capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
         target = runtime.tasks.from_agent("inline.agent", runtime.agents.get(),
                                           build_input=project if projected else None)
@@ -93,7 +93,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         for input_mode in ("fixed_input", "reproject_input"):
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (candidate,), (rule_scorer(scorer),), input_mode=input_mode,
-                policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+                policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
                 PRINCIPAL, f"{capture_kind}-{input_mode}"), engine=engine)
             assert (await run.wait(timeout_seconds=20)).result.completion == "complete", (capture_kind, input_mode)
             assert (await run.create_report()).scores[0].valid == 1, (capture_kind, input_mode)
