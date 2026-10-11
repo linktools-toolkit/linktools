@@ -168,3 +168,89 @@ async def test_cleanup_shared_manifest_still_validates_each_reference_size() -> 
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_cleanup_reuses_capture_metadata_only_within_exclusive_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    from collections import Counter
+    from linktools.ai.runtime.state import input_capture_expiry_key
+    from .test_state_batch_delete_backends import _record
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'captures.sqlite'}")
+    await provision_database(engine)
+    objects = (InMemoryObjectStore() if backend == "memory" else
+               FilesystemObjectStore(tmp_path / "objects") if backend == "filesystem" else SqlObjectStore(engine))
+    storage = RuntimeStorage.sql(engine, object_store=objects)
+    await storage.initialize(namespace="cleanup", tenant_id="tenant")
+    try:
+        target = await put(objects, "target", {"content": "retained"})
+        capture = await put(objects, input_capture_key("cleanup", "tenant", "agent", "captured"), {
+            "kind": "agent", "version": 1, "namespace": "cleanup", "tenant_id": "tenant",
+            "payload": encode_domain(target),
+        })
+        ref = AgentInputCaptureRef("cleanup", "tenant", "captured", capture.digest, None)
+        await storage.artifact.records.state_store.mutate(lambda tx: tx.insert_record(
+            replace(_record(1), data={"captures": [encode_domain(ref)] * 16})))
+        original = objects.stat
+        reads: Counter[str] = Counter()
+        failed = False
+        failure = RuntimeError("metadata transport failure")
+        async def stat(key):
+            nonlocal failed
+            reads[key] += 1
+            if not failed:
+                failed = True
+                raise failure
+            return await original(key)
+        monkeypatch.setattr(objects, "stat", stat)
+        candidate = ((RuntimeDomain.EVALUATION, target),)
+        with pytest.raises(RuntimeError) as raised:
+            await storage.purge_unreferenced_objects(candidate, exclusive=Offline())
+        assert raised.value is failure
+        reads.clear()
+        assert (await storage.purge_unreferenced_objects(candidate, exclusive=Offline())).retained == candidate
+        assert reads[input_capture_expiry_key(capture.key)] <= 1
+        assert reads[capture.key] <= 1
+        changed = replace(_record(1), storage_version=1, data={"captures": [encode_domain(ref)] * 15
+                          + [encode_domain(replace(ref, digest="0" * 64))]})
+        assert await storage.artifact.records.state_store.mutate(lambda tx: tx.replace_record(
+            changed, expected_storage_version=0))
+        with pytest.raises(AIError) as mismatch:
+            await storage.purge_unreferenced_objects(candidate, exclusive=Offline())
+        assert mismatch.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        await put(objects, input_capture_expiry_key(capture.key), {
+            "namespace": "cleanup", "tenant_id": "tenant", "capture_key": capture.key,
+            "expired_at": NOW.isoformat(),
+        })
+        reads.clear()
+        assert not (await storage.purge_unreferenced_objects(candidate, exclusive=Offline())).retained
+        assert reads[input_capture_expiry_key(capture.key)] <= 1
+    finally:
+        await storage.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_expiry_metadata_does_not_cross_object_instances() -> None:
+    from linktools.ai.runtime.state import input_capture_expiry_key
+
+    first, second = InMemoryObjectStore(), InMemoryObjectStore()
+    assert first.store_id == second.store_id
+    target = await put(second, "target", {"content": "retained"})
+    key = input_capture_key("cleanup", "tenant", "agent", "capture")
+    payload = {"kind": "agent", "version": 1, "namespace": "cleanup", "tenant_id": "tenant",
+               "payload": encode_domain(RuntimePayloadRef(StoredPayload.object(target), RuntimeDomain.ARTIFACT))}
+    await put(first, key, payload)
+    await put(second, key, payload)
+    await put(first, input_capture_expiry_key(key), {
+        "namespace": "cleanup", "tenant_id": "tenant", "capture_key": key, "expired_at": NOW.isoformat(),
+    })
+    sources = {domain: first for domain in RuntimeDomain}
+    sources[RuntimeDomain.ARTIFACT] = second
+    candidate = ((RuntimeDomain.ARTIFACT, target),)
+    result = await purge_unreferenced_objects(candidate, namespace="cleanup", tenant_id="tenant", stores={},
+                                              object_stores=sources, exclusive=Offline())
+    assert result.retained == candidate
