@@ -76,14 +76,14 @@ async def test_failed_admission_does_not_persist_private_templates(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_graph_case_merges_preserve_captured_parameters_and_dependencies(tmp_path: Path) -> None:
+async def test_graph_case_merges_preserve_captured_parameters_and_dependencies() -> None:
     async def source(context: TaskNodeContext[None]) -> JsonValue:
         return "frozen"
 
     async def consume(context: TaskNodeContext[None]) -> JsonValue:
         return [await context.read_dependency("frozen"), dict(context.input)]
 
-    async with Runtime.open("merge", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("merge", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         producer, consumer = Task("merge.source", source, effect_policy="none"), Task("merge.consume", consume, effect_policy="none")
         scorer = Task("merge.score", score, effect_policy="none")
         engine = runtime.tasks.bind(producer, consumer, scorer)
@@ -105,7 +105,7 @@ async def test_graph_case_merges_preserve_captured_parameters_and_dependencies(t
             )
         )), principal=PRINCIPAL, idempotency_key="dataset")
         spec = EvaluationSpec(dataset, (CandidateSpec("candidate", graph_template=GraphTargetSpec(capture=template, outputs={"answer": "consume"})),),
-            (ScorerSpec("score", scorer.ref, (DIMENSION,)),))
+            (ScorerSpec("score", scorer.ref, (DIMENSION,)),), policy=EvaluationPolicy(allow_volatile=True))
         run = await runtime.evaluations.start(StartEvaluationRequest(spec, PRINCIPAL, "evaluate"), engine=engine)
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         for trial in (await run.trials()).items:
