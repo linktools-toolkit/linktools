@@ -186,6 +186,54 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     assert jobs["coverage"]["name"] == "Python checks passed"
 
 
+def test_ci_pip_cache_distinguishes_installation_sets(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    steps = workflow["jobs"]["python"]["steps"]
+    setup_index = next(index for index, step in enumerate(steps) if step.get("with", {}).get("cache") == "pip")
+    patterns = steps[setup_index]["with"]["cache-dependency-path"].splitlines()
+    assert {"requirements.txt", "linktools*/linktools.yml"}.issubset(patterns)
+    (tmp_path / ".github").mkdir()
+    original_inputs = set()
+    for pattern in patterns:
+        for source in root.glob(pattern):
+            if source.is_file():
+                target = tmp_path / source.relative_to(root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+                original_inputs.add(target)
+
+    def cache_inputs() -> tuple:
+        paths = {path for pattern in patterns for path in tmp_path.glob(pattern) if path.is_file()}
+        return tuple((str(path.relative_to(tmp_path)), path.read_bytes()) for path in sorted(paths))
+
+    preparations = [step for step in steps[:setup_index]
+                    if step.get("env", {}).get("INSTALL_PACKAGES") == "${{ matrix.check.install }}"]
+    original_snapshot = cache_inputs()
+    snapshots = []
+    for packages in ("first second", "  second\tfirst first  ", "", "first"):
+        environment = dict(os.environ, INSTALL_PACKAGES=packages)
+        for step in preparations:
+            subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]],
+                           cwd=tmp_path, env=environment, check=True)
+        snapshots.append(cache_inputs())
+    assert snapshots[0] == snapshots[1]
+    assert len({snapshots[0], snapshots[2], snapshots[3]}) == 3
+
+    install = next(step for step in steps[setup_index + 1:]
+                   if step.get("env", {}).get("INSTALL_PACKAGES") == "${{ matrix.check.install }}")
+    generated_inputs = {tmp_path / path for path, _ in cache_inputs()} - original_inputs
+    stub = tmp_path / "python"
+    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    environment = dict(os.environ, INSTALL_PACKAGES="first",
+                       PATH=str(tmp_path) + os.pathsep + os.environ["PATH"])
+    subprocess.run(["bash", "-eo", "pipefail", "-c", install["run"]],
+                   cwd=tmp_path, env=environment, check=True)
+    assert not any(path.exists() for path in generated_inputs)
+    assert cache_inputs() == original_snapshot
+
+
 def test_ci_coverage_rejects_every_incomplete_dependency(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())

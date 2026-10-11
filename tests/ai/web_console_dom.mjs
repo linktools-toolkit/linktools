@@ -366,25 +366,25 @@ assert.equal(calls.filter(call=>call.key==='/api/sessions/a' && call.query.inclu
 for(const commitCancel of [false,true]){
   await resetEnd({cancelError:'network outcome unknown',commitCancel});
   const start=cancellations().length,recoverStart=recoveries().length;
-  await node('end-stopped').click();await settle();
+  await node('end-stopped').click();
   assert.equal(recoveries().length,recoverStart);assert.match(node('notice').textContent,/network outcome unknown/);
-  await node('end-stopped').click();await settle();
+  await node('end-stopped').click();
   const sent=cancellations().slice(start);assert.equal(sent.length,commitCancel?1:2);
   if(!commitCancel)assert.equal(sent[0].body.request_id,sent[1].body.request_id);
   assert.match(node('notice').textContent,/ended and session released/);
 }
 // Interruption after durable cancel is safe: a fresh attempt reads CANCELLING first.
 await resetEnd({},'CANCELLING');const beforeResumeCancel=cancellations().length;
-await node('end-stopped').click();await settle();assert.equal(cancellations().length,beforeResumeCancel);
+await node('end-stopped').click();assert.equal(cancellations().length,beforeResumeCancel);
 assert.match(node('notice').textContent,/ended and session released/);
 
 await resetEnd({recoverError:'recovery reply lost'});const beforeUnknownRecovery=recoveries().length;
-await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeUnknownRecovery+1);
+await node('end-stopped').click();assert.equal(recoveries().length,beforeUnknownRecovery+1);
 assert.match(node('notice').textContent,/recovery reply lost/);
 // If that request completed, the next explicit attempt must not recover again.
 executions.get('orphan').status='CANCELLED';sessions.get('a').active_execution_id=null;
 node('refresh').click();await settle();assert.equal(node('end-stopped').disabled,false);
-await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeUnknownRecovery+1);
+await node('end-stopped').click();assert.equal(recoveries().length,beforeUnknownRecovery+1);
 assert.match(node('notice').textContent,/ended and session released/);
 
 for(const [mode,status,message] of [
@@ -394,14 +394,14 @@ for(const [mode,status,message] of [
   [{effectError:true},'STARTED',/TOOL_EFFECT_OUTCOME_UNKNOWN/],
 ]){
   await resetEnd(mode,status);const before=recoveries().length;
-  await node('end-stopped').click();await settle();assert.match(node('notice').textContent,message);
+  await node('end-stopped').click();assert.match(node('notice').textContent,message);
   assert.doesNotMatch(node('notice').textContent,/ended and session released/);
   if(mode.blockCancel)assert.equal(recoveries().length,before);
 }
 await resetEnd({directTerminal:true},'PENDING_START');const beforeDirect=recoveries().length;
-await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeDirect);
+await node('end-stopped').click();assert.equal(recoveries().length,beforeDirect);
 assert.match(node('notice').textContent,/ended and session released/);
-await resetEnd({nextOwner:'a-new'});await node('end-stopped').click();await settle();
+await resetEnd({nextOwner:'a-new'});await node('end-stopped').click();
 assert.match(node('notice').textContent,/another execution now owns/);
 
 // Failed owner readback remains retryable after a terminal refresh, without controls.
@@ -409,11 +409,11 @@ await resetEnd();const failedOwnerRead=deferred('GET /api/sessions/a');
 node('end-stopped').click();await tick();failedOwnerRead.reject(new Error('owner read unavailable'));await settle();
 assert.match(node('notice').textContent,/owner read unavailable/);
 node('refresh').click();await settle();assert.equal(node('end-stopped').disabled,false);
-const beforeOwnerRetry=recoveries().length;await node('end-stopped').click();await settle();
+const beforeOwnerRetry=recoveries().length;await node('end-stopped').click();
 assert.equal(recoveries().length,beforeOwnerRetry);assert.match(node('notice').textContent,/ended and session released/);
 
 // Auxiliary rendering failures do not overturn confirmed terminal/owner facts.
-await resetEnd();endMode.listError=true;await node('end-stopped').click();await settle();
+await resetEnd();endMode.listError=true;await node('end-stopped').click();
 assert.match(node('notice').textContent,/ended and session released.*Display refresh failed: list unavailable/);
 assert.doesNotMatch(node('notice').textContent,/No action was automatically resent/);
 

@@ -3,14 +3,13 @@
 """Callable graph captures retain the current invocation's accepted inputs."""
 
 from collections.abc import Mapping
-from pathlib import Path
 
 import pytest
 
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
-    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
+    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy, EvaluationSpec,
     GraphTargetSpec, ScoreBundle, StartEvaluationRequest, TaskCaseInput,
 )
 from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runtime, RuntimeStorage
@@ -25,7 +24,7 @@ async def _score(context: TaskNodeContext[None]) -> JsonValue:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_mode", ("fixed_input", "reproject_input"))
 async def test_callable_graph_recapture_uses_current_accepted_input(
-    tmp_path: Path, source_mode: str,
+    source_mode: str,
 ) -> None:
     preparation = "source"
 
@@ -39,7 +38,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
     current = Task("capture.current", echo, normalize=normalize, effect_policy="none")
     scorer = Task("capture.score", _score, effect_policy="none")
     async with Runtime.open("callable-graph", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+                            storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(original, current, scorer)
         source = await engine.start(TaskGraph("source", (
             TaskNode("target", task=original, input={"value": 1}),
@@ -51,7 +50,8 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
             CaseSpec.from_capture(CaseRef("source", "one", 1), capture=captured),
         )), principal=PRINCIPAL, idempotency_key="source-dataset")
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-            (CandidateSpec("current", task=current.ref),), (rule_scorer(scorer),), input_mode=source_mode),
+            (CandidateSpec("current", task=current.ref),), (rule_scorer(scorer),), input_mode=source_mode,
+            policy=EvaluationPolicy(allow_volatile=True)),
             PRINCIPAL, "source-evaluation"), engine=engine)
         assert (await run.wait(timeout_seconds=30)).result.completion == "complete"
         trial = (await run.trials()).items[0]
@@ -82,7 +82,8 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
                 preparation = input_mode
                 replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                     (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=graph_capture, outputs={"answer": "target"})),),
-                    (rule_scorer(scorer),), input_mode=input_mode), PRINCIPAL, graph_mode + "-" + input_mode), engine=engine)
+                    (rule_scorer(scorer),), input_mode=input_mode, policy=EvaluationPolicy(allow_volatile=True)),
+                    PRINCIPAL, graph_mode + "-" + input_mode), engine=engine)
                 assert (await replay.wait(timeout_seconds=30)).result.completion == "complete"
                 for replay_trial in (await replay.trials()).items:
                     replay_graph = await engine.get(replay_trial.graph_ref.graph_id, principal=PRINCIPAL)
@@ -93,7 +94,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
 
 
 @pytest.mark.asyncio
-async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies(tmp_path: Path) -> None:
+async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies() -> None:
     produced = 0
 
     async def produce(context: TaskNodeContext[None]) -> JsonValue:
@@ -107,7 +108,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies(tmp_p
     producer = Task("capture.produce", produce, effect_policy="none")
     consumer = Task("capture.consume", consume, effect_policy="none")
     async with Runtime.open("callable-dependencies", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+                            storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(producer, consumer)
         source = await engine.start(TaskGraph("source", (
             TaskNode("external", task=producer),
@@ -140,7 +141,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies(tmp_p
 
 @pytest.mark.asyncio
 async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def echo(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
@@ -154,7 +155,7 @@ async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invoc
     task = Task("capture.echo", echo, effect_policy="none")
     gate = Task("capture.gate", fail, effect_policy="none")
     async with Runtime.open("callable-unavailable", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+                            storage=RuntimeStorage.in_memory()) as runtime:
         engine = runtime.tasks.bind(task, gate)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"value": 1}),)),
                                     principal=PRINCIPAL, idempotency_key="source")

@@ -298,6 +298,7 @@ async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
     guardian_source = (
         "import os,subprocess,sys\n"
         "from linktools.ai.workspace import sandbox_guardian as g\n"
+        "g._CLOSE_SECONDS = 0.5\n"
         "def start(arguments):\n"
         "    reader, writer = os.pipe()\n"
         "    child = subprocess.Popen(\n"

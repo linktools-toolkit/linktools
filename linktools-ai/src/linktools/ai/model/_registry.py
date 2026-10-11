@@ -12,7 +12,6 @@ from pydantic_ai.models import Model
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding, ModelResolver
-from ._openai import _OpenAIModelBinding
 
 _logger = environ.get_logger("ai.model.registry")
 
@@ -72,6 +71,8 @@ class ModelRegistry:
         max_tokens: "int | None" = None,
         connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
     ) -> None:
+        from ._openai import _OpenAIModelBinding
+
         self.register(
             _OpenAIModelBinding(
                 route_id=route_id,

@@ -97,6 +97,13 @@ jobs:
         check: ${{ fromJSON(needs.discover.outputs.plan).checks }}
     steps:
       - uses: actions/checkout@v7
+      - name: Scope dependency cache
+        shell: bash
+        env:
+          INSTALL_PACKAGES: ${{ matrix.check.install }}
+        run: |
+          read -r -a packages <<< "$INSTALL_PACKAGES"
+          printf '%s\n' "${packages[@]}" | LC_ALL=C sort -u > .github/.pip-install-scope
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
@@ -105,10 +112,12 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             linktools*/linktools.yml
+            .github/.pip-install-scope
       - name: Install tooling
         env:
           INSTALL_PACKAGES: ${{ matrix.check.install }}
         run: |
+          rm -- .github/.pip-install-scope
           python -m pip install --quiet -U -r requirements.txt
           read -r -a packages <<< "$INSTALL_PACKAGES"
           python manage.py install "${packages[@]}" --editable --quiet
