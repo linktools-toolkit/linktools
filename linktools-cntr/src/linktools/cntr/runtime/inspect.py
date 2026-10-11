@@ -68,6 +68,10 @@ class ServiceRuntimeState:
 _RUNNING_STATES = ("running", "restarting")
 
 
+def _is_oneoff(item: "ServiceRuntimeState") -> bool:
+    return item.labels.get("com.docker.compose.oneoff", "").lower() == "true"
+
+
 @dataclass(frozen=True)
 class ProjectRuntimeState:
     project: str
@@ -75,22 +79,27 @@ class ProjectRuntimeState:
     backend: str
     source: str = "docker-inspect"
 
+    def service_instances(self, service: "str | None" = None) -> "tuple[ServiceRuntimeState, ...]":
+        """Regular service replicas; keep maintenance oneoffs only in raw diagnostics."""
+        return tuple(item for item in self.services
+                     if (service is None or item.service == service) and not _is_oneoff(item))
+
     @property
     def existing_services(self) -> "frozenset[str]":
-        return frozenset(item.service for item in self.services if item.service)
+        return frozenset(item.service for item in self.service_instances() if item.service)
 
     @property
     def running_services(self) -> "frozenset[str]":
-        return frozenset(item.service for item in self.services
+        return frozenset(item.service for item in self.service_instances()
                          if item.service and item.state in _RUNNING_STATES)
 
     @property
     def image_ids(self) -> "dict[str, str]":
-        return {item.service: item.image_id for item in self.services if item.service and item.image_id}
+        return {item.service: item.image_id for item in self.service_instances() if item.service and item.image_id}
 
     @property
     def running_images(self) -> "dict[str, str]":
-        return {item.service: item.image_id for item in self.services
+        return {item.service: item.image_id for item in self.service_instances()
                 if item.service and item.image_id and item.state in _RUNNING_STATES}
 
     @property
@@ -100,7 +109,7 @@ class ProjectRuntimeState:
         A shared service contributes all of its owners to the running set.
         """
         names = set()
-        for service in self.services:
+        for service in self.service_instances():
             if service.state.lower() in _RUNNING_STATES:
                 for owner in service.logical_containers:
                     names.add(owner)
@@ -326,7 +335,7 @@ class DockerInspector:
         """Inspect current containers, optionally limiting readiness observations to services."""
         containers = tuple(containers)
         selected = None if services is None else tuple(dict.fromkeys(services))
-        if not containers or selected == ():
+        if selected == ():
             # An empty requested scope needs no runtime observation.
             return ProjectRuntimeState(
                 project=self.manager.project_name, services=(), backend=self.manager.container_type,
@@ -378,7 +387,7 @@ class DockerInspector:
             mapped = _map_inspect_item(item, service_owners, self.manager.project_name)
             if mapped is not None:
                 mapped_items.append((item, mapped))
-                if mapped.service:
+                if mapped.service and not _is_oneoff(mapped):
                     for identity in (item.get("Id"), mapped.runtime_name):
                         if identity:
                             identities[identity] = mapped.service

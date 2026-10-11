@@ -4,11 +4,15 @@ import shutil
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from linktools.cntr import SourceContainer
 from linktools.cntr.errors import ContainerError
+
+if TYPE_CHECKING:
+    from typing import Type
 
 
 class Source(SourceContainer):
@@ -117,3 +121,91 @@ def test_existing_image_never_fetches_uncached_source_during_plain_up(tmp_path):
     assert container._source_digest() is None
     container._prepare_source(SimpleNamespace(refresh_services=frozenset(("web",))))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, OSError])
+@pytest.mark.parametrize("stage", ["tree", "archive"])
+def test_interrupted_legacy_migration_never_publishes_partial_inputs(
+        tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", error_type: "Type[BaseException]", stage: str) -> None:
+    import hashlib
+    from linktools.utils import get_md5
+
+    container, upstream, requests = case(tmp_path)
+    name = get_md5(container._source_url)
+    archive = container.get_app_path("source", name + ".in")
+    tree = container.get_app_path("source", name + ".out")
+    archive.parent.mkdir(parents=True)
+    shutil.copy2(str(upstream), str(archive))
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "version.txt").write_text("first")
+    original = archive.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    context = SimpleNamespace(refresh_services=frozenset())
+
+    def interrupted_copy(source: str, destination: str) -> None:
+        path = Path(destination)
+        if stage == "tree":
+            (path / "pkg").mkdir(parents=True)
+            path = path / "pkg" / "partial.txt"
+        path.write_text("partial")
+        raise error_type("interrupted copy")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, "copytree" if stage == "tree" else "copy2", interrupted_copy)
+        with pytest.raises(error_type, match="interrupted copy"):
+            container._prepare_source(context)
+
+    assert container._source_digest() is None
+    assert not list(container._source_root.glob(".migrate-*"))
+    assert not (container._source_root / "archives" / (digest + ".in")).exists()
+    if stage == "tree":
+        assert not (container._source_root / "versions" / digest).exists()
+    assert archive.read_bytes() == original
+    assert (tree / "pkg" / "version.txt").read_text() == "first"
+
+    container._prepare_source(context)
+
+    assert requests == []
+    assert container._source_digest() == digest
+    assert (container.get_docker_context_path() / "version.txt").read_text() == "first"
+    assert not (container.get_docker_context_path() / "partial.txt").exists()
+    assert (container._source_root / "archives" / (digest + ".in")).read_bytes() == original
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, OSError])
+def test_interrupted_archive_retention_preserves_current_source_and_retries(
+        tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", error_type: "Type[BaseException]") -> None:
+    import hashlib
+    import os
+
+    container, upstream, requests = case(tmp_path)
+    container._prepare_source(SimpleNamespace(refresh_services=frozenset()))
+    previous = container._source_digest()
+    make_archive(upstream, "second")
+    expected_archive = upstream.read_bytes()
+    digest = hashlib.sha256(expected_archive).hexdigest()
+    retained = container._source_root / "archives" / (digest + ".in")
+    context = SimpleNamespace(refresh_services=frozenset(("web",)))
+    replace = os.replace
+
+    def interrupted_replace(source: str, destination: str) -> None:
+        if Path(destination) == retained:
+            assert Path(source).read_bytes() == expected_archive
+            raise error_type("interrupted archive publication")
+        replace(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", interrupted_replace)
+        with pytest.raises(error_type, match="interrupted archive publication"):
+            container._prepare_source(context)
+
+    assert container._source_digest() == previous
+    assert (container.get_docker_context_path() / "version.txt").read_text() == "first"
+    assert not retained.exists()
+    assert not list(container._source_root.glob(".source-*"))
+    assert not list(container._source_root.glob(".extract-*"))
+    container._prepare_source(context)
+    assert len(requests) == 3
+    assert container._source_digest() == digest
+    assert (container.get_docker_context_path() / "version.txt").read_text() == "second"
+    assert retained.read_bytes() == expected_archive

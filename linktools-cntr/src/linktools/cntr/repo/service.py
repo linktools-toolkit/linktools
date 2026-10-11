@@ -195,7 +195,7 @@ class RepoService(object):
                 try:
                     self.git.clone(url, repo_path, branch)
                     self._validate_new_repo_requirement(repo_path)
-                except Exception:
+                except BaseException:
                     self._cleanup_failed_add(repo_path)
                     raise
                 new_entry = dict(type=_REPO_TYPE_GIT, repo_path=repo_path, repo_name=repo_name)
@@ -210,7 +210,7 @@ class RepoService(object):
                 os.symlink(path, repo_path, target_is_directory=True)
                 try:
                     self._validate_new_repo_requirement(repo_path)
-                except Exception:
+                except BaseException:
                     self._cleanup_failed_add(repo_path)
                     raise
                 new_entry = dict(type=_REPO_TYPE_LOCAL, repo_path=repo_path, repo_name=repo_name)

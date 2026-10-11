@@ -11,6 +11,9 @@ import shutil
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from linktools.core import Config
+from linktools.errors import ConfigError
+
 from .repo.service import safe_display_url
 
 if TYPE_CHECKING:
@@ -280,7 +283,14 @@ class Doctor:
         return findings
 
     def run(self, runtime: bool = False) -> "list[Finding]":
-        findings = self.check_runtime()
+        with Config.read_only_resolution():
+            return self._run(runtime=runtime)
+
+    def _run(self, runtime: bool = False) -> "list[Finding]":
+        try:
+            findings = self.check_runtime()
+        except ConfigError as exc:
+            findings = [Finding(WARN, f"runtime checks could not run: {exc}", component="docker")]
         findings.extend(self.check_repos())
         try:
             # Metadata only -- Doctor is documented read-only and must never

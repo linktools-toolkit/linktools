@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from ..container import BaseContainer
     from ..context import OperationContext
     from .structured import CommandResult
-    from .inspect import ProjectRuntimeState, ServiceRuntimeState
+    from .inspect import ProjectRuntimeState
     from ..manager import ContainerManager
 
 
@@ -351,11 +351,6 @@ class ComposeRunner:
         with self._model_args(context) as prefix:
             return self.manager.runtime.create_docker_process(*prefix, *args).check_call()
 
-    def service_instances(self, state: "ProjectRuntimeState", service: str) -> "tuple[ServiceRuntimeState, ...]":
-        """Compose run maintenance containers do not count as service replicas."""
-        return tuple(item for item in state.services if item.service == service and
-                     item.labels.get("com.docker.compose.oneoff", "").lower() != "true")
-
     def _completed_services(self, context: "OperationContext", services: "Sequence[str]") -> "set[str]":
         return {dependency for name in services for dependency, options in
                 service_dependencies(context.compose_model["services"][name]).items()
@@ -370,7 +365,7 @@ class ComposeRunner:
         for service in services:
             spec = definitions[service]
             replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
-            matches = self.service_instances(state, service)
+            matches = state.service_instances(service)
             if len(matches) != replicas or any(item.image_id != image_ids[service] for item in matches):
                 continue
             if service in completed:
@@ -395,7 +390,7 @@ class ComposeRunner:
             if not pending:
                 return state
             for service in pending:
-                matches = self.service_instances(state, service)
+                matches = state.service_instances(service)
                 if not matches or any((item.state not in ("running", "restarting") and not
                                        (item.state == "exited" and item.exit_code == 0 and
                                         (service in completed or item.health is None))) or
@@ -457,7 +452,7 @@ class ComposeRunner:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
-            matches = [item for item in state.services if item.service == service]
+            matches = state.service_instances(service)
             if self._service_healthy(matches, service, timeout is None):
                 return
             if deadline is not None and time.monotonic() >= deadline:
@@ -486,7 +481,7 @@ class ComposeRunner:
             if observed is None:
                 observed = self.manager.docker_inspector.get_project_state(
                     context.project_containers, services=tuple(dependencies))
-            return [item for item in observed.services if item.service == dependency]
+            return observed.service_instances(dependency)
 
         for dependency, options in dependencies.items():
             condition = options.get("condition", "service_started")
@@ -540,7 +535,7 @@ class ComposeRunner:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
-            matches = [item for item in state.services if item.service == service]
+            matches = state.service_instances(service)
             if self._service_completed(matches, service, timeout is None):
                 return
             if deadline is not None and time.monotonic() >= deadline:
@@ -568,7 +563,7 @@ class ComposeRunner:
         # Past service ownership comes from captured declarations, not today's owners.
         models, pinned = {}, set()
         actual = getattr(context, "initial_runtime_state", None)
-        namespaces = {item.service: item.namespace_bindings for item in actual.services
+        namespaces = {item.service: item.namespace_bindings for item in actual.service_instances()
                       if getattr(item, "namespace_bindings", None) is not None} if actual is not None else {}
         for path, text in context.previous_compose_contents.items():
             try:
@@ -727,7 +722,7 @@ class ComposeRunner:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             actual = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
-            matches = [item for item in actual.services if item.service == service]
+            matches = actual.service_instances(service)
             if matches and all(
                     (item.state == "running" and item.health in (None, "healthy")) or
                     (item.state == "exited" and item.exit_code == 0 and item.health is None)

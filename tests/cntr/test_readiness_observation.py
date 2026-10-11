@@ -7,12 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr.errors import ContainerError
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 from linktools.cntr.runtime.compose import ComposeRunner
 from linktools.cntr.runtime.inspect import RuntimeInspectionOutputError
 
 
 def item(name, state="running", health="healthy", exit_code=0):
-    return SimpleNamespace(service=name, state=state, health=health, exit_code=exit_code)
+    return SimpleNamespace(service=name, state=state, health=health, exit_code=exit_code, labels={})
 
 
 def context(dependencies):
@@ -30,7 +31,7 @@ def test_ready_dependency_fanout_uses_one_snapshot(condition):
 
     def inspect(containers, services=None):
         calls.append(services)
-        return SimpleNamespace(services=tuple(item(name, state=state) for name in names))
+        return ProjectRuntimeState(project="test", backend="docker", services=tuple(item(name, state=state) for name in names))
 
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=inspect)))
     runner.wait_service_dependencies(ctx, "app", model=ctx.compose_model)
@@ -44,8 +45,8 @@ def test_poll_refreshes_all_dependencies_without_reusing_previous_health(monkeyp
     def inspect(containers, services=None):
         observed.append(services)
         if len(observed) == 1:
-            return SimpleNamespace(services=(item("first", health="starting"), item("second")))
-        return SimpleNamespace(services=(item("first"), item("second", health="unhealthy")))
+            return ProjectRuntimeState(project="test", backend="docker", services=(item("first", health="starting"), item("second")))
+        return ProjectRuntimeState(project="test", backend="docker", services=(item("first"), item("second", health="unhealthy")))
 
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=inspect)))
@@ -77,7 +78,7 @@ def test_up_and_next_wait_phase_cannot_reuse_previous_observation():
 
     def inspect(containers, services=None):
         calls.append(("inspect", services))
-        return SimpleNamespace(services=(item("dep"), item("app")))
+        return ProjectRuntimeState(project="test", backend="docker", services=(item("dep"), item("app")))
 
     process = SimpleNamespace(check_call=lambda: calls.append(("up",)))
     runner = ComposeRunner(SimpleNamespace(
@@ -102,7 +103,7 @@ def test_single_service_wait_observes_every_replica(method, monkeypatch):
                         item("app", state="running" if len(calls) == 1 else "exited"))
         else:
             replicas = (item("app"), item("app", health="starting" if len(calls) == 1 else "healthy"))
-        return SimpleNamespace(services=replicas)
+        return ProjectRuntimeState(project="test", backend="docker", services=replicas)
 
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=inspect)))

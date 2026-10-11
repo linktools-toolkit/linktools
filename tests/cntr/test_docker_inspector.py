@@ -77,14 +77,22 @@ def _stub_dispatched(monkeypatch, manager, ps_stdout, dispatch):
 
 # -- container id parsing (`docker container ls --quiet`) ------------------------------
 
-def test_empty_containers_returns_empty_state_without_touching_process(inspector, monkeypatch):
+def test_explicit_empty_services_returns_empty_state_without_touching_process(inspector, monkeypatch):
     def fail(*a, **k):
-        raise AssertionError("must not attempt to create a process for an empty container list")
+        raise AssertionError("must not attempt to create a process for an empty service selection")
 
-    monkeypatch.setattr(inspector.manager.runtime, "create_docker_compose_process", fail)
-    state = inspector.get_project_state([])
+    monkeypatch.setattr(inspector.manager.runtime, "create_docker_process", fail)
+    state = inspector.get_project_state([], services=())
     assert state.services == ()
     assert state.running_container_names == []
+
+
+def test_empty_installed_containers_still_inspects_project_orphans(inspector, fresh_manager, monkeypatch):
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item(service="retired")])
+    state = inspector.get_project_state([])
+    assert state.running_services == {"retired"}
+    assert state.services[0].logical_containers == ()
 
 
 def test_empty_id_output_is_empty_project(inspector, fresh_manager, monkeypatch):
@@ -149,6 +157,24 @@ def test_volume_bindings_preserve_access_mode_and_resolve_runtime_names(inspecto
 
     assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
         "volumes_from": ["db:ro", "db:rw", "container:external-owner:ro"],
+    }
+
+
+def test_oneoff_namespace_identity_is_not_rebound_to_regular_service(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    maintenance = dict(_item(name="/aio-db-run", service="db"), Id="a" * 64)
+    maintenance["Config"]["Labels"]["com.docker.compose.oneoff"] = "True"
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={"NetworkMode": "container:" + maintenance["Id"],
+                                "VolumesFrom": ["aio-db-run:ro"]})
+    _stub_ids(monkeypatch, fresh_manager, maintenance["Id"] + "\n" + consumer["Id"])
+    _stub_inspect(monkeypatch, fresh_manager, [maintenance, consumer])
+    state = inspector.get_project_state([owner])
+    assert len(state.services) == 2
+    assert state.existing_services == {"worker"}
+    assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
+        "network_mode": "container:" + maintenance["Id"],
+        "volumes_from": ["container:aio-db-run:ro"],
     }
 
 

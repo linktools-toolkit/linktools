@@ -52,6 +52,9 @@ class Owner:
     def on_prepare(self):
         pass
 
+    def reset_rendered_inputs(self):
+        pass
+
     def on_starting(self, context):
         self.manager.events.append(("prepare", self.name))
 
@@ -129,8 +132,6 @@ class Runner:
                 recreated.add(service)
             if changed or cascade or service not in initial:
                 updated.add(service)
-
-    service_instances = ComposeRunner.service_instances
 
     def ready_services(self, context, services, state, image_ids):
         return set(self.applied)
@@ -342,7 +343,7 @@ def test_completed_job_not_marked_as_running(tmp_path):
     ("running", "unhealthy", None, "error"), ("exited", "healthy", 0, "error"),
 ])
 def test_effective_health_and_job_readiness(state, health, code, expected):
-    actual = SimpleNamespace(services=(SimpleNamespace(service="app", state=state, health=health, exit_code=code),))
+    actual = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="app", state=state, health=health, exit_code=code, labels={}),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
     ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {"app": {}}})
     if expected == "error":
@@ -353,7 +354,7 @@ def test_effective_health_and_job_readiness(state, health, code, expected):
 
 
 def test_explicit_completed_dependency_requires_completion():
-    actual = SimpleNamespace(services=(SimpleNamespace(service="migrate", state="running", health=None, exit_code=None),))
+    actual = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="migrate", state="running", health=None, exit_code=None, labels={}),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
     ctx = OperationContext(project_containers=[], target_services=("migrate", "web"), compose_model={"services": {
         "migrate": {}, "web": {"depends_on": {"migrate": {"condition": "service_completed_successfully"}}}}})
@@ -362,7 +363,7 @@ def test_explicit_completed_dependency_requires_completion():
 
 
 def test_unselected_completed_dependency_does_not_change_selected_service_policy():
-    actual = SimpleNamespace(services=(SimpleNamespace(service="app", state="running", health=None, exit_code=None),))
+    actual = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="app", state="running", health=None, exit_code=None, labels={}),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
     ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {
         "app": {}, "unrelated": {"depends_on": {"app": {"condition": "service_completed_successfully"}}}}})
@@ -384,7 +385,7 @@ def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_pa
     runner.wait_service_dependencies = lambda *args, **kwargs: None
     ctx = OperationContext(project_containers=[SimpleNamespace(name="app", services={"app": {}})])
     ctx.initial_runtime_state = ProjectRuntimeState("test", (
-        SimpleNamespace(service="app", state="running", image_id="sha256:old"),), "docker")
+        SimpleNamespace(service="app", state="running", image_id="sha256:old", labels={}),), "docker")
     runner.apply_saved_services(ctx, ("app",), {"previous.yml": "services:\n  app:\n    image: mutable:tag\n"})
     overlay = yaml.safe_load(documents[-1][-1])
     assert overlay == {"services": {"app": {"image": "sha256:old"}}}

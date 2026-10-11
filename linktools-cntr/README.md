@@ -195,7 +195,7 @@ cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用�
 
 ### Compose 渲染后 Hook
 
-在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。模板解析及服务、网络默认值补全后，Hook 按 `order`、依赖关系和注册顺序执行；接收渲染后的 Compose 字典，可原地修改。每个容器实例首次渲染时执行一次；没有 Compose 模板时不执行。
+在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。模板解析及服务、网络默认值补全后，Hook 按 `order`、依赖关系和注册顺序执行；接收渲染后的 Compose 字典，可原地修改。同一准备阶段只在首次渲染时执行；进入新的执行准备阶段会重置框架生成的 Compose、Dockerfile 和服务缓存，保留显式赋值的覆盖。没有 Compose 模板时不执行。
 
 ```python
 from typing import TYPE_CHECKING

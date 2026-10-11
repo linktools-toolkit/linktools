@@ -38,6 +38,7 @@ class LifecycleDispatcher:
     def prepare(self, containers: "Iterable[BaseContainer]") -> None:
         """Prepare installed declarations before constructing an execution model."""
         for container in containers:
+            container.reset_rendered_inputs()
             self._invoke_callback(container.on_prepare)
 
     @classmethod

@@ -132,7 +132,6 @@ def test_failed_batch_does_not_commit_or_rerun_an_untouched_previously_completed
     runner = manager.compose_runner
     runner.apply_services = fail_before_application
     runner.ready_services = ComposeRunner(manager).ready_services
-    runner.service_instances = ComposeRunner(manager).service_instances
     with pytest.raises(ContainerError, match="native failure before job application"):
         manager.compose_operations.up()
     receipts = AppliedServiceModels(manager, manager.model)

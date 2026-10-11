@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 from linktools.cntr.runtime.compose import ComposeRunner
 from test_service_application_order import Container
 
@@ -89,8 +90,8 @@ def test_native_legacy_capture_pins_observed_namespace_before_interpolation(nati
         project_containers=tuple(Container(name, {name: spec}) for name, spec in services.items()),
         service_models=SimpleNamespace(previous={}),
         previous_compose_contents={"old.yml": yaml.safe_dump({"services": services})},
-        initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(
-            service="worker", namespace_bindings={"network_mode": observed}),)),
+        initial_runtime_state=ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(
+            service="worker", namespace_bindings={"network_mode": observed}, labels={}),)),
     )
     captured = yaml.safe_load(ComposeRunner(manager).saved_service_models(context, ("worker",))["worker"])
     assert captured["services"]["worker"]["network_mode"] == observed

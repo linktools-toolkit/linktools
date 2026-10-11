@@ -64,6 +64,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
             self._name = name
         self._enable = False
         self._repo_context = None
+        self._rendered_inputs = {}
 
     @property
     def name(self) -> str:
@@ -190,15 +191,21 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
     @cached_property
     def docker_compose(self) -> "dict[str, Any] | None":
-        return _compose.load_docker_compose(self)
+        value = _compose.load_docker_compose(self)
+        self._rendered_inputs["docker_compose"] = value
+        return value
 
     @cached_property
     def docker_file(self) -> "str | None":
-        return _compose.load_docker_file(self)
+        value = _compose.load_docker_file(self)
+        self._rendered_inputs["docker_file"] = value
+        return value
 
     @cached_property
     def services(self) -> "dict[str, dict[str, Any]]":
-        return _compose.get_services(self)
+        value = _compose.get_services(self)
+        self._rendered_inputs["services"] = value
+        return value
 
     @cached_property
     def hooks(self) -> "HookRegistry":
@@ -217,6 +224,13 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
     def on_init(self) -> None:
         pass
+
+    def reset_rendered_inputs(self) -> None:
+        """Discard framework renders before preparation, preserving explicit overrides."""
+        for name, value in self._rendered_inputs.items():
+            if self.__dict__.get(name) is value:
+                self.__dict__.pop(name, None)
+        self._rendered_inputs.clear()
 
     def on_prepare(self) -> None:
         """Prepare execution inputs before execution scope and service selection."""
@@ -509,16 +523,26 @@ class SourceContainer(BaseContainer):
         if not refresh and legacy_archive.is_file() and legacy_tree.is_dir():
             import hashlib
             import shutil
+            import tempfile
+            from pathlib import Path
+
             root.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256(legacy_archive.read_bytes()).hexdigest()
             versions, archives = root / "versions", root / "archives"
             versions.mkdir(exist_ok=True)
             archives.mkdir(exist_ok=True)
             destination = versions / digest
-            if not destination.exists():
-                shutil.copytree(str(legacy_tree), str(destination))
-            if not (archives / (digest + ".in")).exists():
-                shutil.copy2(str(legacy_archive), str(archives / (digest + ".in")))
+            with tempfile.TemporaryDirectory(prefix=".migrate-", dir=str(root)) as directory:
+                temporary = Path(directory)
+                if not destination.exists():
+                    tree = temporary / "tree"
+                    shutil.copytree(str(legacy_tree), str(tree))
+                    os.rename(str(tree), str(destination))
+                retained = archives / (digest + ".in")
+                if not retained.exists():
+                    archive = temporary / "archive.in"
+                    shutil.copy2(str(legacy_archive), str(archive))
+                    os.replace(str(archive), str(retained))
             self._publish_source(digest)
             return
         if not refresh:
@@ -578,7 +602,7 @@ class SourceContainer(BaseContainer):
                     raise
             retained = archives / (digest + ".in")
             if not retained.exists():
-                shutil.copy2(str(archive), str(retained))
+                os.replace(str(archive), str(retained))
         self._publish_source(digest)
 
     def prepare_build_context(self) -> None:

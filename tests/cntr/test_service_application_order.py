@@ -8,6 +8,7 @@ import pytest
 
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 from linktools.cntr.runtime.compose import ComposeRunner, order_services
 
 
@@ -70,9 +71,9 @@ def test_group_co_selection_does_not_inject_runtime_dependency_cycle():
 def test_apply_service_always_waits_for_dependency_before_start(condition):
     calls = []
     process = SimpleNamespace(check_call=lambda: calls.append("apply"))
-    state = SimpleNamespace(services=(SimpleNamespace(
+    state = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(
         service="provider", state="running" if condition == "service_healthy" else "exited",
-        health="healthy", exit_code=0),))
+        health="healthy", exit_code=0, labels={}),))
 
     def inspect(containers, services=None):
         calls.append(("inspect", services))
@@ -90,7 +91,7 @@ def test_apply_service_always_waits_for_dependency_before_start(condition):
 
 @pytest.mark.parametrize("code", [0, 1, None])
 def test_completed_dependency_requires_observed_successful_exit(code):
-    state = SimpleNamespace(services=(SimpleNamespace(service="job", state="exited", exit_code=code),))
+    state = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="job", state="exited", exit_code=code, labels={}),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs, services=None: state)))
     context = SimpleNamespace(project_containers=())
     if code == 0:
@@ -101,7 +102,7 @@ def test_completed_dependency_requires_observed_successful_exit(code):
 
 
 def test_running_dependency_is_not_completed():
-    state = SimpleNamespace(services=(SimpleNamespace(service="job", state="running", exit_code=0),))
+    state = ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="job", state="running", exit_code=0, labels={}),))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs, services=None: state)))
     with pytest.raises(ContainerError, match="did not complete"):
         runner.wait_service_completed(SimpleNamespace(project_containers=()), "job", timeout=0)

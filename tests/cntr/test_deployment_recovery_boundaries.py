@@ -514,7 +514,7 @@ def test_recovery_configuration_explicitly_selects_profiled_service(tmp_path, le
     runner._resolved_model = lambda process: model if process.args[-1] == "optional" else {"services": {}}
     runner.wait_service_dependencies = lambda *args, **kwargs: None
     context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (
-        SimpleNamespace(service="optional", state="running", image_id="sha256:original"),), "docker"), project_containers=(),
+        SimpleNamespace(service="optional", state="running", image_id="sha256:original", labels={}),), "docker"), project_containers=(),
                               service_models=SimpleNamespace(previous={}),
                               previous_compose_contents={"old.yml": yaml.safe_dump(model)})
     if legacy:
@@ -644,8 +644,8 @@ def test_legacy_namespace_pinning_precedes_native_interpolation(tmp_path, bindin
         create_docker_process=lambda *args, **kwargs: SimpleNamespace(args=args))))
     context = SimpleNamespace(service_models=SimpleNamespace(previous={}), project_containers=(),
                               previous_compose_contents={"old.yml": yaml.safe_dump(old)},
-                              initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(
-                                  service="worker", namespace_bindings=bindings),)))
+                              initial_runtime_state=ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(
+                                  service="worker", namespace_bindings=bindings, labels={}),)))
 
     def resolve(process):
         path = process.args[process.args.index("--file") + 1]
@@ -665,9 +665,9 @@ def test_legacy_namespace_pinning_does_not_add_network_mode_to_networks_service(
         create_docker_process=lambda *args, **kwargs: SimpleNamespace(args=args))))
     context = SimpleNamespace(service_models=SimpleNamespace(previous={}), project_containers=(),
                               previous_compose_contents={"old.yml": yaml.safe_dump(old)},
-                              initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(service="worker",
+                              initial_runtime_state=ProjectRuntimeState(project="test", backend="docker", services=(SimpleNamespace(service="worker",
                                   namespace_bindings={"network_mode": "test_default", "ipc": "private",
-                                                      "pid": "", "volumes_from": []}),)))
+                                                      "pid": "", "volumes_from": []}, labels={}),)))
     runner._resolved_model = lambda process: yaml.safe_load(Path(process.args[process.args.index("--file") + 1]).read_text())
     assert yaml.safe_load(runner.saved_service_models(context, ("worker",))["worker"]) == old
 

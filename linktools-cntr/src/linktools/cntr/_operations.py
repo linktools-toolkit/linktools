@@ -329,7 +329,7 @@ class ComposeOperations:
                 batch_completed = True
                 running.difference_update(selection.services)
                 running.update(service for service in selection.services if any(
-                    item.state in ("running", "restarting") for item in runner.service_instances(observed, service)))
+                    item.state in ("running", "restarting") for item in observed.service_instances(service)))
                 pending_restart.difference_update(selection.services)
                 self._update_running_state(context, running, selection.target_containers)
                 applied_services.extend(selection.services)
@@ -359,9 +359,9 @@ class ComposeOperations:
                         confirmed = runner.ready_services(context, selection.services, observed, target_image_ids)
                         for service in confirmed & model_store.changed_services & actual.existing_services:
                             previous_hashes = {item.labels.get("com.docker.compose.config-hash")
-                                               for item in runner.service_instances(actual, service)}
+                                               for item in actual.service_instances(service)}
                             current_hashes = {item.labels.get("com.docker.compose.config-hash")
-                                              for item in runner.service_instances(observed, service)}
+                                              for item in observed.service_instances(service)}
                             # A ready old container is not evidence that a failed batch applied new configuration.
                             if None in current_hashes or current_hashes & previous_hashes:
                                 confirmed.discard(service)
@@ -369,17 +369,15 @@ class ComposeOperations:
                         applied_services.extend(service for service in selection.services if service in confirmed)
                         failed.difference_update(confirmed)
                         pending_restart.difference_update(confirmed)
-                        running = {item.service for item in observed.services if item.service and
-                                   item.state in ("running", "restarting") and
-                                   item.labels.get("com.docker.compose.oneoff", "").lower() != "true"}
+                        running = set(observed.running_services)
                         self._update_running_state(context, running, selection.target_containers)
                     restore = set()
                     if stop_attempted and not stopped:
                         from collections import Counter
                         observed = manager.docker_inspector.get_project_state(selection.project_containers)
-                        original_counts = Counter(item.service for item in actual.services
+                        original_counts = Counter(item.service for item in actual.service_instances()
                                                   if item.state in ("running", "restarting"))
-                        observed_counts = Counter(item.service for item in observed.services
+                        observed_counts = Counter(item.service for item in observed.service_instances()
                                                   if item.state in ("running", "restarting"))
                         restore.update(service for service in pending_restart
                                        if observed_counts[service] < original_counts[service])
@@ -558,7 +556,7 @@ class ComposeOperations:
                     if service in missing and isinstance(spec, dict):
                         definitions.setdefault(service, []).append(spec)
         native_dependencies, native_namespaces = {}, {}
-        for item in context.initial_runtime_state.services:
+        for item in context.initial_runtime_state.service_instances():
             if item.service not in definitions or item.service not in missing:
                 continue
             bindings = getattr(item, "namespace_bindings", None)

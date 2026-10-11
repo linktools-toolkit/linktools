@@ -5,10 +5,17 @@
 scan_compose is a pure function over a rendered compose dict; Doctor.run ties the
 checks together and must never modify the config store.
 """
+from typing import TYPE_CHECKING
+
 from linktools.cntr.doctor import (
     ARTIFACT_STALE, COMPOSE_VALIDATION_FAILED, SECURITY_DOCKER_SOCKET_MOUNT, SECURITY_LATEST_IMAGE,
     SECURITY_TLS_DISABLED, Doctor, Finding, WARN, scan_compose,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    from typing import Any
+    import pytest
 
 
 def _messages(findings):
@@ -85,6 +92,113 @@ def test_doctor_does_not_write_to_config_store(fresh_manager, monkeypatch):
     monkeypatch.setattr(store, "set", spy)
     Doctor(fresh_manager).run()
     assert writes == [], f"doctor wrote to config store: {writes}"
+
+
+def test_doctor_cli_does_not_resolve_new_cached_values(
+        tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch", capsys: "pytest.CaptureFixture[str]") -> None:
+    import json
+    import linktools.rich as rich
+    from linktools.cntr import BaseContainer
+    from linktools.cntr.commands import _shared
+    from linktools.cntr.commands.root import Command
+    from linktools.core import Config, ConfigField, LazyProvider, PromptProvider
+    from test_loader_structured_errors import _fresh_standalone_manager
+
+    manager = _fresh_standalone_manager(tmp_path)
+    calls = []
+
+    def prompt(*args: "Any", **kwargs: "Any") -> None:
+        calls.append("prompt")
+        raise AssertionError("doctor must not prompt")
+
+    monkeypatch.setattr(rich, "prompt", prompt)
+    monkeypatch.setattr("linktools.cntr.doctor.shutil.which", lambda name: None)
+    roots = [tmp_path / "prompted", tmp_path / "generated"]
+    providers = [PromptProvider(default="example:1", cached=True),
+                 LazyProvider(lambda config: calls.append("generate") or "example:1", cached=True)]
+    containers = []
+    for root, provider in zip(roots, providers):
+        root.mkdir()
+        key = root.name.upper() + "_IMAGE"
+        (root / "compose.yml").write_text('services:\n  app:\n    image: "{{ ' + key + ' }}"\n')
+        container = BaseContainer(manager, root, name=root.name)
+        manager.env_config.define(ConfigField(key, provider=provider))
+        containers.append(container)
+    monkeypatch.setattr(manager, "containers", {container.name: container for container in containers})
+    manager.settings.set("INSTALLED_CONTAINERS", [container.name for container in containers])
+    manager.env_config.persist("DOCKER_TYPE", "docker")
+    manager.env_config.persist("EXISTING", "unchanged")
+    monkeypatch.setattr(_shared, "manager", manager)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in manager.environ.paths.config.glob("*.json")}
+    persisted = manager.env_config.persisted_keys()
+
+    assert Command()(["doctor", "--json", "--check"]) != 0
+
+    payload = json.loads(capsys.readouterr().out)
+    unavailable = [finding for finding in payload["findings"]
+                   if finding["code"] == COMPOSE_VALIDATION_FAILED]
+    assert {finding["component"] for finding in unavailable} == {root.name for root in roots}
+    assert all("read-only" in finding["message"] for finding in unavailable)
+    assert calls == []
+    assert manager.env_config.persisted_keys() == persisted
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in manager.environ.paths.config.glob("*.json")} == before
+    assert not Config.is_read_only_resolution()
+
+
+def test_doctor_reports_unconfigured_runtime_without_skipping_other_checks(
+        tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch") -> None:
+    from linktools.core import Config, ConfigField, PromptProvider
+    from test_loader_structured_errors import _fresh_standalone_manager
+
+    manager = _fresh_standalone_manager(tmp_path)
+    manager.env_config.define(ConfigField("DOCKER_TYPE", provider=PromptProvider(cached=True)))
+    monkeypatch.setattr(manager, "containers", {})
+    monkeypatch.setattr(manager.repos, "get_all", lambda: {})
+    doctor = Doctor(manager)
+    later = Finding(WARN, "independent finding")
+    monkeypatch.setattr(doctor, "check_artifacts", lambda containers: [later])
+
+    findings = doctor.run()
+
+    assert any(finding.severity == WARN and "read-only" in finding.message for finding in findings)
+    assert later in findings
+    assert manager.env_config.persisted_keys() == []
+    assert not Config.is_read_only_resolution()
+
+
+def test_doctor_json_does_not_create_project_value_after_checks(
+        tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch", capsys: "pytest.CaptureFixture[str]") -> None:
+    import json
+    from linktools.cntr.commands import _shared
+    from linktools.cntr.commands.root import Command
+    from linktools.core import Config, ConfigField, LazyProvider
+    from test_loader_structured_errors import _fresh_standalone_manager
+
+    manager = _fresh_standalone_manager(tmp_path)
+    calls = []
+    manager.env_config.define(ConfigField("COMPOSE_PROJECT_NAME", provider=LazyProvider(
+        lambda config: calls.append("project") or "generated-project", cached=True)))
+    manager.env_config.persist("DOCKER_TYPE", "docker")
+    manager.settings.set("INSTALLED_CONTAINERS", [])
+    monkeypatch.setattr(manager, "containers", {})
+    monkeypatch.setattr(_shared, "manager", manager)
+    monkeypatch.setattr("linktools.cntr.doctor.shutil.which", lambda name: None)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in manager.environ.paths.config.glob("*.json")}
+
+    assert Command()(["doctor", "--json", "--check"]) != 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["project"] is None
+    assert any(finding["severity"] == WARN and finding["component"] == "project" and
+               "read-only" in finding["message"] for finding in payload["findings"])
+    assert calls == []
+    assert manager.env_config.persisted_keys() == ["DOCKER_TYPE"]
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in manager.environ.paths.config.glob("*.json")} == before
+    assert not Config.is_read_only_resolution()
 
 
 # -- Finding stable codes --------------------------------------------------

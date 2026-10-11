@@ -3,12 +3,16 @@
 """``ct-cntr status``: read-only; blocks on a sudo password prompt like any
 other docker call if the configured docker type needs one."""
 import json
+from typing import TYPE_CHECKING
 
 import pytest
 
 from linktools.cntr.commands.status import ServiceStatus, collect_status, select_status_containers
 from linktools.cntr.container import ContainerError
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
+
+if TYPE_CHECKING:
+    from linktools.cntr import ContainerManager
 
 
 def _state(services):
@@ -122,6 +126,39 @@ def test_orphan_service_excluded_by_default_included_with_all_services(fresh_man
     full_payload = collect_status(fresh_manager, all_services=True)
     assert len(full_payload["orphan_services"]) == 1
     assert full_payload["orphan_services"][0]["service"] == "orphan"
+
+
+def test_status_all_services_finds_orphans_after_last_container_removed(
+        fresh_manager: "ContainerManager", monkeypatch: "pytest.MonkeyPatch",
+        capsys: "pytest.CaptureFixture[str]") -> None:
+    from types import SimpleNamespace
+    from linktools.cntr.commands import _shared
+    from linktools.cntr.commands.root import Command
+    from linktools.cntr.runtime.structured import CommandResult
+
+    fresh_manager.installed_state.remove(*fresh_manager.installed_state.load_names(), force=True)
+    calls = []
+    monkeypatch.setattr(_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process",
+                        lambda *args, **kwargs: calls.append(args) or SimpleNamespace(args=args))
+    monkeypatch.setattr(fresh_manager.structured_runner, "execute_text", lambda *args, **kwargs: CommandResult(
+        args=("docker", "container", "ls"), returncode=0, stdout="a" * 64, stderr="", duration=0))
+    monkeypatch.setattr(fresh_manager.structured_runner, "execute_json", lambda *args, **kwargs: [{
+        "Id": "a" * 64, "Name": "/aio-orphan", "State": {"Status": "running"},
+        "Config": {"Image": "orphan:1", "Labels": {
+            "com.docker.compose.project": "aio", "com.docker.compose.service": "orphan"}},
+    }])
+
+    assert Command()(["status", "--all-services", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queryable"] is True
+    assert payload["containers"] == []
+    assert payload["orphan_services"] == [{
+        "service": "orphan", "runtime_name": "aio-orphan", "state": "running",
+        "health": None, "observed": True,
+    }]
+    assert [args[:2] for args in calls] == [("container", "ls"), ("inspect", "--type")]
 
 
 def test_json_schema_version_is_stable(fresh_manager, monkeypatch, with_nginx_services):
