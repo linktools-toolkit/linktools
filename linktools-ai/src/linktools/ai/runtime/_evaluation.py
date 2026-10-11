@@ -947,7 +947,8 @@ class RuntimeEvaluations:
                     await self._capture_evidence(record, intent, state, principal)
             if state.status in _TERMINAL:
                 await self._close_trial_scope((experiment_id, intent.slot_id))
-                await self._state.settle_intent(experiment_id, intent.slot_id, confirmed=True, released=True)
+                if not intent.released:
+                    await self._state.settle_intent(experiment_id, intent.slot_id, confirmed=True, released=True)
         record = await self._record(experiment_id, principal, allow_expired=True)
         if record.gate == "open" and await self._budget_exhausted(record, principal):
             record = await self._state.close_reservation_gate(experiment_id, budget=True)
