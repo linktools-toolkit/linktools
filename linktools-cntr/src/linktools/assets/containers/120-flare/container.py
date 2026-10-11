@@ -63,18 +63,22 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return [
             Flare.container(
-                "Flare", "bookmark", load_port_url(self, "FLARE_PORT", https=False),
+                "Flare",
+                "bookmark",
+                load_port_url(self, "FLARE_PORT", https=False),
             ),
-            {"web": Nginx.site(
-                server_name=self.get_config_later("FLARE_DOMAIN"),
-                proxy="http://flare:5005",
-                auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
-                auth_bypass=(r"\.(css|js)$",),
-            )},
-            Authelia.access(policy="one_factor"),
+            {
+                "web": Nginx.site(
+                    server_name=self.get_config_later("FLARE_DOMAIN"),
+                    proxy="http://flare:5005",
+                    auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
+                    auth_bypass=(r"\.(css|js)$",),
+                ),
+            },
+            Authelia.access(
+                policy="one_factor",
+            ),
         ]
-
-
 
     def _iter_links(self) -> "Iterator[Flare]":
         declarations = sorted(

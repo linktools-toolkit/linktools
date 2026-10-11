@@ -430,6 +430,18 @@ def test_endpoint_is_a_nested_array_element_or_can_be_expanded(unpack: bool) -> 
     assert tuple(manager.containers["nginx"].sites) == (("app", "web"), ("app", "api"))
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_single_endpoint_can_be_returned_directly_or_as_an_array_element(wrapped: bool) -> None:
+    app = SimpleNamespace(name="app")
+    access = Authelia.access(lazy_load(fail))
+    recipe = endpoint(app, domain=lazy_load(fail), extensions=[access])
+    app.integrations = [recipe] if wrapped else recipe
+    consumers = {name: SimpleNamespace(name=name, integrations=()) for name in ("nginx", "authelia")}
+    manager = manager_with(dict(consumers, app=app), ["app"] + list(consumers))
+    assert manager.integration_snapshot["app"] == (("web", recipe[0]["web"]), (None, access))
+    assert list(manager.iter_integrations("authelia")) == [(app, access)]
+
+
 def test_multiple_endpoints_in_one_producer_reject_duplicate_web_before_resolution() -> None:
     app = SimpleNamespace(name="app")
     app.integrations = [endpoint(app, domain=lazy_load(fail)), endpoint(app, domain=lazy_load(fail))]

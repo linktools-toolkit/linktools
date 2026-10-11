@@ -62,16 +62,26 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return [
-            {"web": Nginx.site(
-                server_name=self.get_config_later("AUTHELIA_DOMAIN"),
-                template=self.get_source_path("templates", "nginx.conf"),
-                waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
-                auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,
-                auth_bypass=(r"\.(css|js)$",),
-            )},
-            Authelia.access(subject=["group:lldap_admin"]),
+            {
+                "web": Nginx.site(
+                    server_name=self.get_config_later("AUTHELIA_DOMAIN"),
+                    template=self.get_source_path("templates", "nginx.conf"),
+                    waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
+                    auth=None
+                    if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE")
+                    else False,
+                    auth_bypass=(r"\.(css|js)$",),
+                ),
+            },
+            Authelia.access(
+                subject=["group:lldap_admin"],
+            ),
             Flare.public(
-                "Authelia", "account", "单点登录", load_nginx_url(self, "web", "auth-admin")),
+                "Authelia",
+                "account",
+                "单点登录",
+                load_nginx_url(self, "web", "auth-admin"),
+            ),
         ]
 
     @cached_property

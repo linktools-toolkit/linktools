@@ -151,28 +151,27 @@ without changing their semantics.
 ```python
 from linktools.cntr.ext import Authelia, Flare, endpoint, load_nginx_url, load_port_url
 
-return [
-    endpoint(
-        self,
-        domain=self.get_config_later("APP_DOMAIN"),
-        proxy="http://app:8080",
-        extensions=[
-            Flare.links(
-                Flare.public(),
-                Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
-                name="App", icon="apps", desc="Application",
-            ),
-            Authelia.access(policy="one_factor"),
-            Authelia.oidc(
-                redirect_uris=(load_nginx_url(self, "web", "sso/callback"),),
-                enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
-            ),
-        ],
-    ),
-]
+return endpoint(
+    self,
+    domain=self.get_config_later("APP_DOMAIN"),
+    proxy="http://app:8080",
+    extensions=[
+        Flare.links(
+            Flare.public(),
+            Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+            name="App", icon="apps", desc="Application",
+        ),
+        Authelia.access(policy="one_factor"),
+        Authelia.oidc(
+            redirect_uris=(load_nginx_url(self, "web", "sso/callback"),),
+            enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
+        ),
+    ],
+)
 ```
 
-Both `endpoint` and `Flare.links` return plain tuples. Nested lists/tuples are
+Return `endpoint(...)` directly when it is the only entry; use an array when
+there are additional sibling declarations. Both `endpoint` and `Flare.links` return plain tuples. Nested lists/tuples are
 flattened in order by the same generic declaration iterator used by Manager.
 They can be array elements without `*`; dictionaries still name individual
 Integration values. Nested arbitrary iterables, strings, and mapping values that

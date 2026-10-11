@@ -272,20 +272,18 @@ return [
 ```python
 from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
 
-return [
-    endpoint(
-        self,
-        domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
-        extensions=[
-            Flare.links(
-                Flare.public(),
-                Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
-                name="应用", icon="web", desc="应用描述",
-            ),
-            Authelia.access(policy="one_factor"),
-        ],
-    ),
-]
+return endpoint(
+    self,
+    domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
+    extensions=[
+        Flare.links(
+            Flare.public(),
+            Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+            name="应用", icon="web", desc="应用描述",
+        ),
+        Authelia.access(policy="one_factor"),
+    ],
+)
 ```
 
 `endpoint` 内部使用稳定的 `web` 站点名，不接收导航信息，也不自动生成导航。

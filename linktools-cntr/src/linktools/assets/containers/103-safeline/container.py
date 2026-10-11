@@ -38,19 +38,27 @@ class Container(BaseContainer):
 
     @cached_property
     def integrations(self) -> "Integrations":
-        return [endpoint(
+        return endpoint(
             self,
             domain=self.get_config_later("SAFELINE_DOMAIN"),
             proxy="https://safeline-mgt:1443",
             auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
             auth_bypass=(r"\.(css|js)$",),
-            auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
-            extensions=[Flare.links(
-                Flare.public(),
-                Flare.container(url=load_port_url(self, "SAFELINE_PORT", https=True)),
-                name="Safeline", icon="alienOutline", desc="雷池WAF",
-            )],
-        )]
+            auth_headers={
+                "X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN"),
+            },
+            extensions=[
+                Flare.links(
+                    Flare.public(),
+                    Flare.container(
+                        url=load_port_url(self, "SAFELINE_PORT", https=True),
+                    ),
+                    name="Safeline",
+                    icon="alienOutline",
+                    desc="雷池WAF",
+                ),
+            ],
+        )
 
     @subcommand("reset-admin", help="reset safeline admin password")
     def on_reset_admin(self) -> None:
