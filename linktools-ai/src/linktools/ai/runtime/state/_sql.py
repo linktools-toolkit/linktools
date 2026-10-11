@@ -194,7 +194,11 @@ class SqlStateStorageGroup:
             group_transaction = _SqlGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions)
             try:
-                return await fn(group_transaction)
+                result = await fn(group_transaction)
+                for transaction in transactions.values():
+                    if transaction._delete_error is not None:
+                        raise transaction._delete_error
+                return result
             finally:
                 reset_state_transaction(token)
 
@@ -538,6 +542,7 @@ class _SqlTransaction:
         self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
         self._now: datetime | None = None
+        self._delete_error: BaseException | None = None
 
     async def _execute(
         self,
@@ -802,6 +807,7 @@ class _SqlTransaction:
         return result.rowcount == 1
 
     async def delete_records(self, keys: Sequence[bytes]) -> None:
+        """A failed batch requires a new transaction, even if its error is caught."""
         unique_keys = tuple(dict.fromkeys(keys))
         if not unique_keys:
             return
@@ -812,41 +818,47 @@ class _SqlTransaction:
         facts = self._table("ai_state_facts")
         deleted_keys: set[bytes] = set()
         statement_count = 0
-        for offset in range(0, len(unique_keys), _RECORD_DELETE_BATCH_SIZE):
-            current = await self.get_records(
-                unique_keys[offset : offset + _RECORD_DELETE_BATCH_SIZE]
-            )
-            if not current:
-                continue
-            versions = tuple(
-                (_hex(key), record.storage_version)
-                for key, record in sorted(current.items())
-            )
-            key_hexes = tuple(key for key, _version in versions)
-            # Deleting the version-matched owners fences concurrent alias/fact writers.
-            result = await self._execute(
-                delete(table).where(
-                    table.c.store_digest == self._store_hex,
-                    table.c.key_digest.in_(key_hexes),
-                    tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+        try:
+            for offset in range(0, len(unique_keys), _RECORD_DELETE_BATCH_SIZE):
+                current = await self.get_records(
+                    unique_keys[offset : offset + _RECORD_DELETE_BATCH_SIZE]
                 )
-            )
-            if result.rowcount != len(current):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await self._execute(
-                delete(aliases).where(
-                    aliases.c.store_digest == self._store_hex,
-                    aliases.c.record_key_digest.in_(key_hexes),
+                if not current:
+                    continue
+                versions = tuple(
+                    (_hex(key), record.storage_version)
+                    for key, record in sorted(current.items())
                 )
-            )
-            await self._execute(
-                delete(facts).where(
-                    facts.c.store_digest == self._store_hex,
-                    facts.c.owner_key_digest.in_(key_hexes),
+                key_hexes = tuple(key for key, _version in versions)
+                # Deleting the version-matched owners fences concurrent alias/fact writers.
+                result = await self._execute(
+                    delete(table).where(
+                        table.c.store_digest == self._store_hex,
+                        table.c.key_digest.in_(key_hexes),
+                        tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                    )
                 )
-            )
-            deleted_keys.update(current)
-            statement_count += 3
+                if result.rowcount != len(current):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await self._execute(
+                    delete(aliases).where(
+                        aliases.c.store_digest == self._store_hex,
+                        aliases.c.record_key_digest.in_(key_hexes),
+                    )
+                )
+                await self._execute(
+                    delete(facts).where(
+                        facts.c.store_digest == self._store_hex,
+                        facts.c.owner_key_digest.in_(key_hexes),
+                    )
+                )
+                deleted_keys.update(current)
+                statement_count += 3
+        except BaseException as error:
+            # A caught partial deletion must still abort the owning transaction.
+            if self._delete_error is None:
+                self._delete_error = error
+            raise
         for key in deleted_keys:
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None
