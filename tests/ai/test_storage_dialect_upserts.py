@@ -53,6 +53,8 @@ def _rows(audit: bool) -> list[dict[str, str | int | datetime]]:
 
 
 class _Result:
+    rowcount = 1
+
     def first(self) -> tuple[str] | None:
         return ("13",)
 
@@ -148,6 +150,8 @@ async def test_conflict_statements_preserve_vendor_sql_and_one_roundtrip(
         returning = "ai_dialect_entries.id" if dialect.name == "postgresql" else "id"
         assert sql.endswith(f"RETURNING {returning}")
         assert result == InsertResult(True, 13)
+    elif operation == "insert_ignore_conflict_many":
+        assert result == 1
     elif operation == "upsert_increment":
         returning = "ai_dialect_entries.revision" if dialect.name == "postgresql" else "revision"
         assert sql.endswith(f"RETURNING {returning}")
@@ -207,6 +211,8 @@ async def _assert_conflict_execution(
             if operation.endswith("_many"):
                 result = await _execute(dialect, session, table, operation, rows)
                 assert len(statements) == 1
+                if operation == "insert_ignore_conflict_many":
+                    assert result == 1
                 if operation == "upsert_increment_many":
                     assert result == {"alpha": 17, "beta": 11}
             else:

@@ -2253,15 +2253,19 @@ class StateStepArchive(AgentRunStore):
             execution_id,
             history_head_guard,
         )
-        if await self._has_existing_fact_in_transaction(
-            transaction,
-            run,
-            "checkpoint",
-            checkpoint.stored,
-            checkpoint.stored.state,
+        # Pin ownership before the fact read so READ COMMITTED races fail the CAS.
+        owner_record = await self._ensure_run_in_transaction(transaction, run)
+        stream = self._stream(run.agent_run_id, "checkpoint")
+        subject = _step_subject(checkpoint.stored)
+        data = _encode_step(checkpoint.stored)
+        existing = await transaction.list_facts(
+            FactQuery(stream, subject_digest=subject, latest=True)
+        )
+        if any(
+            fact.data == data and fact.state == checkpoint.stored.state
+            for fact in existing
         ):
             return
-        await self._ensure_run_in_transaction(transaction, run)
         await self._history.append_chunks(
             transaction,
             checkpoint.owner_id,
@@ -2273,13 +2277,21 @@ class StateStepArchive(AgentRunStore):
             checkpoint.owner_id,
             checkpoint.projection,
         )
-        await self._materialize_fact_in_transaction(
-            transaction,
-            run,
-            "checkpoint",
-            checkpoint.stored,
-            checkpoint.stored.state,
-        )
+        owner = self._agent_run_key(run.agent_run_id)
+        if await transaction.guard_record(
+            owner,
+            expected_storage_version=owner_record.storage_version,
+        ) is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        sequence = (await _reserve_sequences(
+            transaction, self._sequence(run.agent_run_id, "checkpoint"), 1,
+        ))[0]
+        await _insert_facts(transaction, (
+            StoredFact(
+                stream, sequence, owner, "step_checkpoint", subject,
+                checkpoint.stored.state, data,
+            ),
+        ))
         if history_head_guard is not None and not supplied_history_head_guard:
             await self._advance_execution_history_head_in_transaction(
                 transaction,
@@ -2332,42 +2344,6 @@ class StateStepArchive(AgentRunStore):
             producer_generation=producer_generation,
             execution_id=execution_id,
             history_head_guard=history_head_guard,
-        )
-
-    async def _materialize_fact_in_transaction(
-        self,
-        transaction: StateTransaction,
-        run: AgentRunRecord,
-        family: str,
-        value: object,
-        kind: str,
-    ) -> None:
-        stream = self._stream(run.agent_run_id, family)
-        owner = self._agent_run_key(run.agent_run_id)
-        subject = _step_subject(value)
-        fact_kind = {
-            "checkpoint": "step_checkpoint",
-        }[family]
-        data = _encode_step(value)
-
-        owner_record = await self._ensure_run_in_transaction(transaction, run)
-        if await self._has_existing_fact_in_transaction(
-            transaction,
-            run,
-            family,
-            value,
-            kind,
-        ):
-            return
-        if await transaction.guard_record(
-            owner,
-            expected_storage_version=owner_record.storage_version,
-        ) is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        sequence = (await _reserve_sequences(transaction, self._sequence(run.agent_run_id, family), 1))[0]
-        await _insert_facts(
-            transaction,
-            (StoredFact(stream, sequence, owner, fact_kind, subject, kind, data),),
         )
 
     async def _ensure_run_in_transaction(
@@ -2423,26 +2399,6 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._history.decode_head(head_record)
         return owner_record, False
-
-    async def _has_existing_fact_in_transaction(
-        self,
-        transaction: StateTransaction,
-        run: AgentRunRecord,
-        family: str,
-        value: object,
-        kind: str,
-    ) -> bool:
-        stream = self._stream(run.agent_run_id, family)
-        subject = _step_subject(value)
-        data = _encode_step(value)
-        existing = await transaction.list_facts(
-            FactQuery(
-                stream,
-                subject_digest=subject,
-                latest=True,
-            )
-        )
-        return any(fact.data == data and fact.state == kind for fact in existing)
 
     async def append_event(
         self,

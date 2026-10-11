@@ -111,6 +111,7 @@ class _HistorySegment:
     history_id: str
     start: int
     end: int
+    observed_head: TranscriptHeadRecord | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -981,6 +982,7 @@ class TranscriptRepository:
             start=start,
             end=end,
             seek_owner_id=owner_id,
+            observed_head=head,
         ):
             yield message
 
@@ -1195,6 +1197,7 @@ class TranscriptRepository:
                 start=segment.start,
                 end=segment.end,
                 seek_owner_id=segment.history_id,
+                observed_head=segment.observed_head,
             ):
                 values.append(
                     LoadedContextMessage(
@@ -1261,6 +1264,7 @@ class TranscriptRepository:
                 start=segment.start,
                 end=segment.end,
                 seek_owner_id=segment.history_id,
+                observed_head=segment.observed_head,
             ):
                 emitted += 1
                 yield message
@@ -1670,6 +1674,7 @@ class TranscriptRepository:
                     item.segment.owner_history_id,
                     item.local_start,
                     item.local_end,
+                    transcript_head if item.segment.owner_history_id == history_id else None,
                 )
                 for item in resolved
             ))
@@ -1686,6 +1691,7 @@ class TranscriptRepository:
         start: int,
         end: int,
         seek_owner_id: "str | None" = None,
+        observed_head: "TranscriptHeadRecord | None" = None,
     ) -> AsyncIterator[ModelMessage]:
         if end <= start:
             return
@@ -1693,7 +1699,9 @@ class TranscriptRepository:
         emitted = 0
         after_sequence: int | None = None
         if seek_owner_id is not None:
-            after_sequence = await self._seek_fact_sequence(seek_owner_id, start)
+            after_sequence = await self._seek_fact_sequence(
+                seek_owner_id, start, observed_head=observed_head,
+            )
         while True:
             facts = await self._store.read(
                 lambda transaction, sequence=after_sequence: transaction.list_facts(

@@ -83,12 +83,13 @@ class SqlStorageContext:
         # cancellation traceback. Finish statement I/O before unwinding the session.
         task = asyncio.ensure_future(operation)
         try:
-            return await asyncio.shield(task)
+            await asyncio.wait((task,))
+            return task.result()
         except asyncio.CancelledError as cancelled:
             while not task.done():
                 try:
-                    await asyncio.shield(task)
-                except (asyncio.CancelledError, Exception):
+                    await asyncio.wait((task,))
+                except asyncio.CancelledError:
                     pass
             try:
                 task.result()

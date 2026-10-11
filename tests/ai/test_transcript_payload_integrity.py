@@ -151,6 +151,10 @@ async def test_transcript_object_cancellation_waits_for_owned_close(
         (b"abcd",), block_read=cancel_during == "read", block_close=True,
         close_error=close_error,
     )
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors: list[dict[str, object]] = []
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
     task = asyncio.create_task(_reader(stream).read_payload(_payload()))
     try:
         if cancel_during == "read":
@@ -167,9 +171,12 @@ async def test_transcript_object_cancellation_waits_for_owned_close(
         if close_fails:
             assert raised.value is close_error
         assert stream.closed
+        await asyncio.sleep(0)
+        assert errors == []
     finally:
         stream.read_release.set()
         stream.close_release.set()
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        loop.set_exception_handler(previous)

@@ -62,19 +62,27 @@ async def test_failed_index_scan_does_not_mark_cache_indexed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fails", (False, True))
 async def test_cancelled_write_settles_its_capacity_accounting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    fails: bool,
 ) -> None:
     cache = FilesystemContentCache(tmp_path, max_bytes=10)
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
     original_put = cache._put_sync
+    failure = RuntimeError("cache write failed")
+    previous = loop.get_exception_handler()
+    errors: list[dict[str, object]] = []
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
 
     def delayed_put(key: str, content: bytes) -> None:
         loop.call_soon_threadsafe(started.set)
         assert release.wait(5)
+        if fails:
+            raise failure
         original_put(key, content)
 
     monkeypatch.setattr(cache, "_put_sync", delayed_put)
@@ -87,15 +95,24 @@ async def test_cancelled_write_settles_its_capacity_accounting(
             await asyncio.sleep(0)
             task.cancel()
             release.set()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as raised:
                 await task
+            if fails:
+                cause: BaseException | None = raised.value
+                seen: set[int] = set()
+                while isinstance(cause, asyncio.CancelledError) and id(cause) not in seen:
+                    seen.add(id(cause))
+                    cause = cause.__cause__ or cause.__context__
+                assert cause is failure
             await loop.run_in_executor(executor, lambda: None)
             monkeypatch.setattr(cache, "_put_sync", original_put)
             await cache.put("b", b"b" * 6)
             assert cache._total == _disk_bytes(tmp_path) <= 10
+            assert errors == []
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)
+            loop.set_exception_handler(previous)
 
 
 @pytest.mark.asyncio

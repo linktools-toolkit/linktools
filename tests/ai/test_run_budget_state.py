@@ -525,10 +525,10 @@ async def test_admission_revalidates_mixed_revision_receipts_before_integrity_fa
     observed = await budgets.state_store.read(lambda tx: budgets._scope_record(tx, "scope"))
     if settled:
         await budgets.settle_model("scope", "first", 3)
-    original = budgets._scope_record
+    original = budgets._decode_scope_record
     first = True
 
-    async def mixed_observation(transaction, scope_id):
+    async def mixed_observation(scope_id, row):
         nonlocal first
         if first:
             first = False
@@ -536,9 +536,9 @@ async def test_admission_revalidates_mixed_revision_receipts_before_integrity_fa
                 return observed
             row, usage = observed
             return row, replace(usage, in_flight_model_requests=2, model_requests=2)
-        return await original(transaction, scope_id)
+        return await original(scope_id, row)
 
-    monkeypatch.setattr(budgets, "_scope_record", mixed_observation)
+    monkeypatch.setattr(budgets, "_decode_scope_record", mixed_observation)
     if settled:
         usage = await budgets.admit_tool("scope", "tool")
         assert (usage.total_tokens, usage.tool_calls) == (3, 1)

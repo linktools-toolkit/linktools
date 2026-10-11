@@ -9,7 +9,7 @@ from typing import cast
 
 from ...core import JsonValue, validate_page_limit
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectRef, ObjectStore, ObjectStoreInspection, ObjectStoreMaintenance, read_object
+from ...storage import ObjectRef, ObjectStat, ObjectStore, ObjectStoreInspection, ObjectStoreMaintenance, read_object
 from ._codec import iter_runtime_object_dependencies, iter_runtime_object_refs
 from ._input_capture import input_capture_expiry_key, iter_input_capture_dependencies, validate_input_capture_payload
 from ._plan import RuntimeDomain
@@ -50,15 +50,22 @@ async def purge_unreferenced_objects(
     async with exclusive.offline_exclusivity():
         candidate_locations = {(id(object_stores[domain]), reference.key) for domain, reference in candidates}
         protected: set[str] = set()
-        visited: set[tuple[RuntimeDomain, str, str]] = set()
+        visited: set[tuple[int, str, str, int]] = set()
+        metadata: dict[tuple[int, str], ObjectStat | None] = {}
+
+        async def read_metadata(source: ObjectStore, key: str) -> ObjectStat | None:
+            location = id(source), key
+            if location not in metadata:
+                metadata[location] = await source.stat(key)
+            return metadata[location]
 
         async def visit(reference: ObjectRef, domain: RuntimeDomain, *, root: bool = True) -> None:
             source = object_stores[domain]
-            if reference.key.startswith("v1/input-capture/") and await source.stat(input_capture_expiry_key(reference.key)) is not None:
+            if reference.key.startswith("v1/input-capture/") and await read_metadata(source, input_capture_expiry_key(reference.key)) is not None:
                 return
             if root:
                 protected.add(reference.key)
-            identity = domain, reference.key, reference.digest
+            identity = id(source), reference.key, reference.digest, reference.size
             if identity in visited or not reference.key.startswith(_MANIFEST_PREFIXES):
                 return
             visited.add(identity)
@@ -88,9 +95,9 @@ async def purge_unreferenced_objects(
             for key, digest in iter_input_capture_dependencies(value,
                     namespace=capture_namespace, tenant_id=capture_tenant, validate_scope=validate_scope):
                 source = object_stores[RuntimeDomain.TASK]
-                if await source.stat(input_capture_expiry_key(key)) is not None:
+                if await read_metadata(source, input_capture_expiry_key(key)) is not None:
                     continue
-                stat = await source.stat(key)
+                stat = await read_metadata(source, key)
                 if stat is None or stat.digest != digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await visit(ObjectRef(source.store_id, key, digest, stat.size), RuntimeDomain.TASK)
@@ -123,7 +130,11 @@ async def purge_unreferenced_objects(
                 operation_cursor = OperationScanCursor(operations[-1].key_digest)
 
         # Captures are public durable handles and need not occur in a state row.
+        inspected: set[int] = set()
         for domain, source in object_stores.items():
+            if id(source) in inspected:
+                continue
+            inspected.add(id(source))
             async for stat in cast(ObjectStoreInspection, source).list_objects():
                 if (id(source), stat.key) not in candidate_locations and stat.key.startswith(_MANIFEST_PREFIXES):
                     await visit(ObjectRef(source.store_id, stat.key, stat.digest, stat.size), domain, root=False)
