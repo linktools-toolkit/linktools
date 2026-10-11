@@ -74,3 +74,51 @@ def test_compose_render_hook_skipped_without_compose_template(
 
     container.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, unexpected, key="unexpected")
     assert container.docker_compose is None
+
+
+def test_cached_compose_defers_operation_values_and_retries_failed_render(fresh_manager, tmp_path):
+    import pytest
+
+    from linktools.cntr import OperationContext
+    from linktools.cntr.lifecycle import LifecycleDispatcher
+    from linktools.core import Config
+    from linktools.errors import ConfigNotFoundError
+
+    (tmp_path / "compose.yml").write_text(
+        "services:\n  app:\n    image: busybox\n", encoding="utf-8",
+    )
+    container = BaseContainer(fresh_manager, tmp_path, name="999-deferred")
+    values = {"public_ready": False, "credential": None}
+    calls = []
+
+    def prepare():
+        assert not Config.is_read_only_resolution()
+        if values["credential"] is None:
+            raise ConfigNotFoundError("fixture credential unavailable")
+        calls.append(values["credential"])
+
+    def configure(compose):
+        if not values["public_ready"]:
+            raise ConfigNotFoundError("fixture public configuration unavailable")
+        compose["services"]["app"]["environment"] = {"ENABLED": "true"}
+        container.add_start_hook(("deferred",), prepare)
+
+    container.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, configure, key="configure")
+    with Config.read_only_resolution():
+        with pytest.raises(ConfigNotFoundError, match="public configuration"):
+            container.docker_compose
+        assert "docker_compose" not in container.__dict__
+        values["public_ready"] = True
+        model = container.docker_compose
+    assert calls == []
+    assert model["services"]["app"]["environment"] == {"ENABLED": "true"}
+    context = OperationContext(target_containers=(container,))
+    dispatcher = LifecycleDispatcher(fresh_manager)
+    with pytest.raises(ConfigNotFoundError, match="credential unavailable"):
+        with dispatcher.notify_start(context):
+            pytest.fail("application entered after failed preparation")
+    for value in ("fixture-first", "fixture-second"):
+        values["credential"] = value
+        with dispatcher.notify_start(context):
+            assert container.docker_compose is model
+    assert calls == ["fixture-first", "fixture-second"]

@@ -239,3 +239,81 @@ def test_install_uses_image_seed_without_importing_flat_layout(certificate_case)
     assert (base / revision / "live/acme/account.key").read_text() == "existing-account"
     assert (old / "acme/account.key").read_text() == "old-layout-account"
     assert os.readlink(str(base / "live")) == "old"
+
+
+@pytest.mark.parametrize("failure", ("download", "install", "missing-executable", None))
+def test_acme_install_stage_owns_home_and_propagates_failure(certificate_case, tmp_path, failure):
+    container = certificate_case[0]
+    dockerfile = container.docker_file
+    command = dockerfile.split("RUN curl ", 1)[1].split("\nCOPY ", 1)[0]
+    command = "curl " + command.replace("\\\n", "")
+    work = tmp_path / "work"
+    work.mkdir()
+    home = tmp_path / "installed"
+    config = tmp_path / "config"
+    command = command.replace("/tmp/", str(work) + "/").replace("-C /tmp ", "-C " + str(work) + " ")
+    command = command.replace("/opt/acme", str(home)).replace("/root/.acme.sh", str(config))
+    source = tmp_path / "source" / "acme.sh-master"
+    source.mkdir(parents=True)
+    (source / "acme.sh").write_text('''#!/bin/sh
+set -eu
+test "$1" = --install
+shift
+while test "$#" -gt 0; do
+  case "$1" in
+    --home) home=$2; shift 2 ;;
+    --config-home) config=$2; shift 2 ;;
+    --nocron|--noprofile) shift ;;
+    *) exit 91 ;;
+  esac
+done
+test "$MOCK_FAILURE" != install || exit 92
+test "$MOCK_FAILURE" != missing-executable || exit 0
+mkdir -p "$home" "$config"
+printf '#!/bin/sh\\nexit 0\\n' > "$home/acme.sh"
+chmod +x "$home/acme.sh"
+''')
+    archive = tmp_path / "source.tar.gz"
+    with tarfile.open(archive, "w:gz") as package:
+        package.add(source, arcname="acme.sh-master")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "curl").write_text('''#!/bin/sh
+set -eu
+test "$MOCK_FAILURE" != download || exit 93
+test "$1" = -fsSL
+while test "$#" -gt 0; do
+  if test "$1" = -o; then cp "$MOCK_ARCHIVE" "$2"; exit 0; fi
+  shift
+done
+exit 94
+''')
+    (tools / "curl").chmod(0o755)
+    env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"],
+               MOCK_ARCHIVE=str(archive), MOCK_FAILURE=failure or "")
+    result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+    if failure:
+        assert result.returncode != 0
+        assert not (home / "dns-keys").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    assert os.access(home / "acme.sh", os.X_OK)
+    assert config.is_dir()
+    assert not (work / "acme.sh-master").exists()
+    assert not (work / "acme.tar.gz").exists()
+    keys = next(line[4:] for line in dockerfile.splitlines() if line.startswith("RUN printf '%s\\n'"))
+    keys = keys.replace("/opt/acme", str(home))
+    subprocess.run(["sh", "-c", keys], check=True, env=env)
+    assert "CF_Token" in (home / "dns-keys").read_text().splitlines()
+    local_bin = tmp_path / "usr-local-bin"
+    usr_bin = tmp_path / "usr-bin"
+    local_bin.mkdir()
+    usr_bin.mkdir()
+    for name in ("nginx-certificates", "nginx-acme"):
+        shutil.copyfile(container.get_source_path(name), local_bin / name)
+    setup = "chmod +x " + dockerfile.split("RUN chmod +x ", 1)[1].split("\n\nARG ", 1)[0]
+    setup = setup.replace("\\\n", "").replace("/usr/local/bin", str(local_bin))
+    setup = setup.replace("/usr/bin", str(usr_bin)).replace("/opt/acme", str(home))
+    subprocess.run(["sh", "-c", setup], check=True, env=env)
+    assert (usr_bin / "acme.sh").resolve() == home / "acme.sh"
+    assert all(os.access(local_bin / name, os.X_OK) for name in ("nginx-certificates", "nginx-acme"))

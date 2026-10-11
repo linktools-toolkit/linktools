@@ -96,6 +96,23 @@ execution selection compared with a read-only plan. Keep declarative service and
 dependency definitions side-effect free when they need to be visible in plans.
 The existing seven `HookPhase` values are unchanged.
 
+## Template paths and deferred actions
+
+Template getters return data without executing filesystem or runtime changes.
+For a shared directory, the consuming template uses `path | mkdir | chown(docker_user)`.
+These filters register idempotent `BEFORE_START` actions on that consumer, so
+previewing or repeatedly rendering a cached provider's paths does not execute them.
+A partial start prepares the selected consumer's mounts even when the path provider
+has no service of its own. `DOCKER_USER` is the shared project configuration;
+`chown` is non-recursive unless explicitly requested.
+
+The old `start_hooks`/`stop_hooks` list views are removed. Custom deferred actions
+use `add_start_hook(key, callback)` / `add_stop_hook(key, callback)` or the existing
+`hooks.register(...)` API. Register work on the owner whose operation needs it;
+do not append actions to an unrelated provider from a cached data getter.
+Exceptions propagate before application. Persistent shared directories are not
+rollback artifacts and are not deleted if later validation or startup fails.
+
 ## Preparing files
 
 Use `context.write_files(self, files, mode=0o600, group=None)` once during

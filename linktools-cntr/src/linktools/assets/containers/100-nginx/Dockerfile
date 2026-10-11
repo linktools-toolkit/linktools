@@ -3,7 +3,12 @@ FROM nginx:{{ NGINX_TAG }}
 
 # {% if NGINX_HTTPS_ENABLE %}
 RUN apk --no-cache add openssl socat coreutils util-linux
-RUN curl https://get.acme.sh | sh -s -- --home /opt/acme --config-home /root/.acme.sh --nocron
+RUN curl -fsSL https://github.com/acmesh-official/acme.sh/archive/master.tar.gz -o /tmp/acme.tar.gz && \
+    tar -xzf /tmp/acme.tar.gz -C /tmp && \
+    cd /tmp/acme.sh-master && \
+    sh acme.sh --install --home /opt/acme --config-home /root/.acme.sh --nocron --noprofile && \
+    test -x /opt/acme/acme.sh && \
+    cd / && rm -rf /tmp/acme.sh-master /tmp/acme.tar.gz
 COPY nginx-certificates nginx-acme /usr/local/bin/
 LABEL io.linktools.nginx.certificate-revision="{{ container.cert_image_revision }}"
 RUN printf '%s\n' {% for api in container.dnsapi.values() %}{% for key in api.get("env", {}) %}{{ container.shell_quote(key) }} {% endfor %}{% endfor %}| sort -u > /opt/acme/dns-keys
