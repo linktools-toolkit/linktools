@@ -66,27 +66,32 @@ def test_group_co_selection_does_not_inject_runtime_dependency_cycle():
     assert order_services((nginx, provider), ("nginx", "provider")) == ("nginx", "provider")
 
 
-@pytest.mark.parametrize("condition,method", [
-    ("service_healthy", "wait_service_healthy"),
-    ("service_completed_successfully", "wait_service_completed"),
-])
-def test_apply_service_always_waits_for_dependency_before_start(condition, method, monkeypatch):
+@pytest.mark.parametrize("condition", ["service_healthy", "service_completed_successfully"])
+def test_apply_service_always_waits_for_dependency_before_start(condition):
     calls = []
     process = SimpleNamespace(check_call=lambda: calls.append("apply"))
-    manager = SimpleNamespace(runtime=SimpleNamespace(create_docker_process=lambda *a, **kw: process))
+    state = SimpleNamespace(services=(SimpleNamespace(
+        service="provider", state="running" if condition == "service_healthy" else "exited",
+        health="healthy", exit_code=0),))
+
+    def inspect(containers, services=None):
+        calls.append(("inspect", services))
+        return state
+
+    manager = SimpleNamespace(runtime=SimpleNamespace(create_docker_process=lambda *a, **kw: process),
+                              docker_inspector=SimpleNamespace(get_project_state=inspect))
     runner = ComposeRunner(manager)
     runner._model_args = lambda context: nullcontext(["compose"])
     context = SimpleNamespace(project_containers=(), is_full_project=False, compose_model={"services": {
         "app": {"depends_on": {"provider": {"condition": condition}}}}})
-    monkeypatch.setattr(runner, method, lambda ctx, service, timeout=None: calls.append((condition, service)))
     runner.apply_service(context, "app")
-    assert calls == [(condition, "provider"), "apply"]
+    assert calls == [("inspect", ("provider",)), "apply"]
 
 
 @pytest.mark.parametrize("code", [0, 1, None])
 def test_completed_dependency_requires_observed_successful_exit(code):
     state = SimpleNamespace(services=(SimpleNamespace(service="job", state="exited", exit_code=code),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs: state)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs, services=None: state)))
     context = SimpleNamespace(project_containers=())
     if code == 0:
         runner.wait_service_completed(context, "job", timeout=0)
@@ -97,7 +102,7 @@ def test_completed_dependency_requires_observed_successful_exit(code):
 
 def test_running_dependency_is_not_completed():
     state = SimpleNamespace(services=(SimpleNamespace(service="job", state="running", exit_code=0),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs: state)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda cs, services=None: state)))
     with pytest.raises(ContainerError, match="did not complete"):
         runner.wait_service_completed(SimpleNamespace(project_containers=()), "job", timeout=0)
 

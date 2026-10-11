@@ -201,11 +201,16 @@ def stub_generated_runtime(manager, monkeypatch):
     from types import SimpleNamespace
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
-    monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
+    monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers, **kwargs:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
     monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
                         lambda context, service, **kwargs: True)
+    monkeypatch.setattr(manager.compose_runner, "wait_services_ready",
+                        lambda context, services, image_ids: ProjectRuntimeState(manager.project_name, tuple(
+                            SimpleNamespace(service=name, state="running", labels={}) for name in services), "docker"))
     monkeypatch.setattr(manager.compose_runner, "validate_service", lambda *args, **kwargs:
                         SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0))
     monkeypatch.setattr(manager.image_preparer, "image_id", lambda image: "sha256:local-" + image)
-    monkeypatch.setattr(manager.image_preparer, "verify_builds", lambda model, services: None)
+    monkeypatch.setattr(manager.image_preparer, "inspect_images", lambda images: {
+        image: SimpleNamespace(image_id="sha256:local-" + image, revision=None) for image in images})
+    monkeypatch.setattr(manager.image_preparer, "verify_builds", lambda model, services, **kwargs: None)

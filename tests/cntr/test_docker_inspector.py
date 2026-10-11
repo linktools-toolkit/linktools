@@ -662,3 +662,38 @@ def test_validate_compose_uses_config_args_quiet(inspector, fresh_manager, monke
                         lambda *a, **k: CommandResult(args=(), returncode=0, stdout="", stderr="", duration=0.0))
     inspector.validate_compose([nginx])
     assert recorded[0] == ("config", "--quiet")
+
+
+def test_service_filter_limits_ps_and_preserves_all_replicas(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["web", "db"])
+    commands = []
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process",
+                        lambda owners, *args, **kwargs: commands.append(args) or _FakeProcess(args))
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item(name="/web-1", service="web"),
+                                             _item(name="/web-2", service="web")])
+    state = inspector.get_project_state([owner], services=("web", "web"))
+    assert commands == [("ps", "--all", "--quiet", "web")]
+    assert [item.runtime_name for item in state.services] == ["web-1", "web-2"]
+
+
+def test_retained_unknown_service_uses_project_discovery_then_label_filter(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["web"])
+    commands = []
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process",
+                        lambda owners, *args, **kwargs: commands.append(args) or _FakeProcess(args))
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item(service="web"), _item(service="retired")])
+    state = inspector.get_project_state([owner], services=("retired",))
+    assert commands == [("ps", "--all", "--quiet")]
+    assert [item.service for item in state.services] == ["retired"]
+
+
+def test_empty_service_filter_does_not_inspect(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["web"])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("empty selection must not inspect")
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", unexpected)
+    assert inspector.get_project_state([owner], services=()).services == ()

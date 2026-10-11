@@ -266,9 +266,10 @@ class DockerInspector:
             return None
         return result.stdout.strip() or None
 
-    def _list_project_container_ids(self, containers: "Iterable[BaseContainer]") -> "list[str]":
+    def _list_project_container_ids(self, containers: "Iterable[BaseContainer]",
+                                    services: "Iterable[str]" = ()) -> "list[str]":
         process = self.manager.runtime.create_docker_compose_process(
-            containers, "ps", "--all", "--quiet",
+            containers, "ps", "--all", "--quiet", *services,
             capture_output=True,
         )
         result = self.manager.structured_runner.execute_text(process, check=True)
@@ -319,9 +320,12 @@ class DockerInspector:
             items.extend(validate_inspect_payload(payload, expected_non_empty=True))
         return items
 
-    def get_project_state(self, containers: "Iterable[BaseContainer]") -> "ProjectRuntimeState":
+    def get_project_state(self, containers: "Iterable[BaseContainer]",
+                          services: "Iterable[str] | None" = None) -> "ProjectRuntimeState":
+        """Inspect current containers, optionally limiting readiness observations to services."""
         containers = tuple(containers)
-        if not containers:
+        selected = None if services is None else tuple(dict.fromkeys(services))
+        if not containers or selected == ():
             # Nothing to build a --file set from -- there is trivially
             # nothing running, not an unavailable/unqueryable runtime.
             return ProjectRuntimeState(
@@ -336,7 +340,11 @@ class DockerInspector:
                     owners.append(container.name)
 
         try:
-            container_ids = self._list_project_container_ids(containers)
+            # Retained services can outlive their current Compose declaration.
+            # Compose rejects unknown service filters, so discover those by label
+            # from the full project instead of treating them as absent.
+            filters = selected if selected is not None and set(selected) <= set(service_owners) else ()
+            container_ids = self._list_project_container_ids(containers, filters)
         except (StructuredCommandError, OSError) as exc:
             raise RuntimeInspectionUnavailable(str(exc)) from exc
 
@@ -377,6 +385,8 @@ class DockerInspector:
                             identities[identity] = mapped.service
         services = []
         for item, mapped in mapped_items:
+            if selected is not None and mapped.service not in selected:
+                continue
             host = item.get("HostConfig")
             if isinstance(host, dict):
                 bindings = {}

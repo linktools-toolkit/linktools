@@ -87,9 +87,9 @@ class ExecutionPlanner:
             commands.append(self._planned_command("stop", [*file_args, "stop", *stop_services]))
         if not unresolved_selection and action in ("up", "restart"):
             services_to_start = start_selection.services
-            for service in services_to_start:
-                commands.append(self._planned_command(
-                    "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
+            commands.append(self._planned_command(
+                "up", [*file_args, *manager.compose_runner.apply_services_args(
+                    services_to_start, remove_orphans=selection.full)]))
         elif action == "down":
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 

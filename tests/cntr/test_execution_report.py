@@ -6,6 +6,7 @@ import linktools.cntr.commands._shared as cntr_shared
 from linktools.cntr.execution.model import ExecutionRecord, get_records
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
+from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
 
 
@@ -20,7 +21,9 @@ def _record(manager, monkeypatch, build=False):
 
     def fake_plan(model, services=(), force_pull=False, refresh_services=()):
         targets = tuple(services)
-        return ImagePlan(build=targets if build else (), pull=(), targets=targets)
+        return ImagePlan(build=targets if build else (), pull=(), targets=targets,
+                         images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
+                                 for spec in model["services"].values()})
 
     monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
@@ -141,8 +144,9 @@ def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
         fresh_manager.image_preparer,
         "plan",
         lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
-            build=tuple(services), pull=(), targets=tuple(services)
-        ),
+            build=tuple(services), pull=(), targets=tuple(services),
+            images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
+                    for spec in model["services"].values()}),
     )
 
     def fail_build(containers, *args, privilege=None, **kwargs):

@@ -14,6 +14,7 @@ from linktools.cntr.context import OperationContext
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
+from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
 from linktools.cntr.state.running import RuntimeStateUnavailable
 
@@ -39,8 +40,9 @@ def _record(manager, monkeypatch, fail=False):
         manager.image_preparer,
         "plan",
         lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
-            build=(), pull=(), targets=tuple(services)
-        ),
+            build=(), pull=(), targets=tuple(services),
+            images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
+                    for spec in model["services"].values()}),
     )
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)

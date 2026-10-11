@@ -5,19 +5,22 @@ import pytest
 
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookPhase, HookRegistry
+from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
 from linktools.types import MISSING
 
 
 def _neutralize_runtime(manager, monkeypatch):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
     monkeypatch.setattr(manager.compose_operations, "start_selection",
                         lambda selection, **kwargs: selection)
-    monkeypatch.setattr(manager.compose_runner, "apply_service",
-                        lambda context, service, recreate=False: None)
+    monkeypatch.setattr(manager.compose_runner, "apply_services",
+                        lambda context, services: None)
     monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
                         lambda context, service, **kwargs: True)
     monkeypatch.setattr(manager.image_preparer, "image_id",
@@ -29,8 +32,9 @@ def _neutralize_runtime(manager, monkeypatch):
         manager.image_preparer,
         "plan",
         lambda model, services=(), force_pull=False, **kwargs: ImagePlan(
-            build=(), pull=(), targets=tuple(services)
-        ),
+            build=(), pull=(), targets=tuple(services),
+            images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
+                    for spec in model["services"].values()}),
     )
     monkeypatch.setattr(manager.compose_runner, "build", lambda context, options: None)
     monkeypatch.setattr(manager.compose_runner, "pull", lambda context, services: None)
@@ -107,7 +111,7 @@ def test_restart_build_failure_keeps_running_targets(fresh_manager, monkeypatch)
         "plan",
         lambda model, services=(), force_pull=False, **kwargs: ImagePlan(
             build=tuple(services), pull=(), targets=tuple(services)
-        ),
+        , images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"]) for spec in model["services"].values()}),
     )
 
     def broken_build(context, options):
@@ -128,7 +132,7 @@ def test_restart_stop_success_up_failure_still_marks_stopped(fresh_manager, monk
     def broken_up(context, service, recreate=False):
         raise RuntimeError("up boom")
 
-    monkeypatch.setattr(fresh_manager.compose_runner, "apply_service", broken_up)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_services", broken_up)
 
     with pytest.raises(RuntimeError, match="up boom"):
         fresh_manager.compose_operations.restart(names=["portainer"])

@@ -3,6 +3,7 @@
 """Per-container exec up/restart/down/config routing."""
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
+from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -26,9 +27,11 @@ def _record(manager, monkeypatch):
 
     def fake_plan(model, services=(), force_pull=False, refresh_services=()):
         targets = tuple(services)
+        images = {spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
+                  for spec in model["services"].values()}
         if force_pull:
-            return ImagePlan(build=(), pull=targets, targets=targets)
-        return ImagePlan(build=targets, pull=(), targets=targets)
+            return ImagePlan(build=(), pull=targets, targets=targets, images=images)
+        return ImagePlan(build=targets, pull=(), targets=targets, images=images)
 
     monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
@@ -45,7 +48,7 @@ def test_exec_up_prepares_images_then_starts(monkeypatch, fresh_manager):
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_up(pull=False)
     assert any(cmd[0] == "build" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
-    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
+    assert {"portainer", "nginx"} <= {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
 
 
 def test_exec_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_manager):
@@ -54,7 +57,7 @@ def test_exec_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_m
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_up(pull=True)
     assert any(cmd[:2] == ("pull", "--ignore-buildable") and "portainer" in cmd for cmd in recorded)
-    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
+    assert {"portainer", "nginx"} <= {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
 
 
 def test_exec_restart_records_stop_build_then_up(monkeypatch, fresh_manager):
@@ -64,7 +67,7 @@ def test_exec_restart_records_stop_build_then_up(monkeypatch, fresh_manager):
     fresh_manager.containers["portainer"].on_exec_restart(pull=False)
     assert any(cmd[0] == "build" and "portainer" in cmd for cmd in recorded)
     assert ("stop", "portainer") in recorded
-    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
+    assert {"portainer", "nginx"} <= {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
     assert next(i for i, cmd in enumerate(recorded) if cmd[0] == "build") < recorded.index(("stop", "portainer"))
 
 

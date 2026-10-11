@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr.runtime.images import ImagePreparer, ImagePreparationError
+from linktools.cntr.runtime.images import ImagePreparer, ImagePreparationError, LocalImage
 
 
 class Owner:
@@ -42,8 +42,8 @@ def test_auto_label_is_stable_and_normal_up_disables_implicit_build_pull():
 def test_build_decision(exists, matching, refresh, build_expected):
     prep, model = case()
     expected = model["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]
-    prep.image_exists = lambda image: exists
-    prep.image_revision = lambda image: expected if matching else None
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture", expected if matching else None)
+                                           if exists else None for image in images}
     plan = prep.plan(model, ("app",), force_pull=refresh, refresh_services=("app",) if refresh else ())
     assert bool(plan.build) is build_expected
     assert not plan.pull
@@ -52,8 +52,8 @@ def test_build_decision(exists, matching, refresh, build_expected):
 def test_transitive_refresh_does_not_refresh_unrelated_consumer():
     prep, model = case()
     model["services"]["consumer"] = {"image": "consumer:latest"}
-    prep.image_exists = lambda image: True
-    prep.image_revision = lambda image: model["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture",
+        model["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]) for image in images}
     plan = prep.plan(model, ("app", "consumer"), force_pull=True, refresh_services=("app",))
     assert plan.build == ("app",)
     assert plan.pull == ()
@@ -62,15 +62,13 @@ def test_transitive_refresh_does_not_refresh_unrelated_consumer():
 def test_no_revision_keeps_existing_image_rule():
     prep, model = case(None)
     assert "labels" not in model["services"]["app"]["build"]
-    prep.image_exists = lambda image: True
-    prep.image_revision = lambda image: pytest.fail("should not inspect revision")
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture", None) for image in images}
     assert not prep.plan(model, ("app",)).build
 
 
 def test_mismatched_result_cannot_be_accepted():
     prep, model = case()
-    prep.image_exists = lambda image: True
-    prep.image_revision = lambda image: "wrong"
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture", "wrong") for image in images}
     with pytest.raises(ImagePreparationError, match="revision mismatch"):
         prep.verify_builds(model, ("app",))
 

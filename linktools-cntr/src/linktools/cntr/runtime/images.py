@@ -4,6 +4,7 @@
 """Strict image preparation for the final Docker Compose model."""
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -22,10 +23,17 @@ class ImagePreparationError(ContainerError):
 
 
 @dataclass(frozen=True)
+class LocalImage:
+    image_id: str
+    revision: "str | None"
+
+
+@dataclass(frozen=True)
 class ImagePlan:
     build: "tuple[str, ...]"
     pull: "tuple[str, ...]"
     targets: "tuple[str, ...]"
+    images: "dict[str, LocalImage | None]"
 
 
 def _dependencies(services, targets):
@@ -87,48 +95,106 @@ class ImagePreparer:
             services[name] = dict(spec, build=build)
         return dict(model, services=services)
 
-    def image_id(self, image: str) -> str:
-        """Resolve a local image ID before application without querying registries."""
-        process = self.manager.runtime.create_docker_process(
-            "image", "inspect", "--format", "{{.Id}}", image, capture_output=True)
+    def inspect_images(self, images: "Sequence[str]") -> "dict[str, LocalImage | None]":
+        """Read one local batch; absent images are distinct from inspection failures."""
+        images = tuple(dict.fromkeys(images))
+        if not images:
+            return {}
         try:
+            process = self.manager.runtime.create_docker_process(
+                "image", "inspect", *images, capture_output=True)
             result = self.manager.structured_runner.execute_text(process, check=False)
         except (OSError, StructuredCommandError) as exc:
-            raise ImagePreparationError("Cannot inspect image {}: {}".format(image, exc)) from exc
-        if not result.succeeded or not result.stdout.strip():
+            raise ImagePreparationError("Unable to inspect local images: " + str(exc)) from exc
+        missing = set()
+        if not result.succeeded:
+            errors = [line for line in (result.stderr or "").splitlines() if line.strip()]
+            for line in errors:
+                match = re.fullmatch(r"(?:error response from daemon:\s*|error:\s*)?no such image:\s*(\S.*)",
+                                     line.strip(), re.IGNORECASE)
+                if match is None:
+                    raise ImagePreparationError("Unable to inspect local images: " + (result.stderr or "").strip())
+                missing.add(match.group(1))
+            if not errors:
+                raise ImagePreparationError("Unable to inspect local images: " + (result.stderr or "").strip())
+        try:
+            payload = json.loads(result.stdout)
+            if not isinstance(payload, list):
+                raise ValueError("expected an image array")
+            states = []
+            for item in payload:
+                image_id = item["Id"]
+                config = item.get("Config")
+                if config is None:
+                    config = {}
+                if not isinstance(config, dict):
+                    raise ValueError("invalid image configuration")
+                labels = config.get("Labels")
+                if labels is None:
+                    labels = {}
+                if not isinstance(image_id, str) or not image_id or not isinstance(labels, dict):
+                    raise ValueError("invalid image metadata")
+                revision = labels.get(self.BUILD_LABEL)
+                if revision is not None and not isinstance(revision, str):
+                    raise ValueError("invalid build revision")
+                for field in ("RepoTags", "RepoDigests"):
+                    references = item.get(field)
+                    if references is not None and (not isinstance(references, list) or
+                            any(not isinstance(reference, str) or not reference for reference in references)):
+                        raise ValueError("invalid image references")
+                states.append(LocalImage(image_id, revision))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ImagePreparationError("Invalid local image inspection output") from exc
+        if result.succeeded:
+            if len(states) != len(images):
+                raise ImagePreparationError("Incomplete local image inspection output")
+            return dict(zip(images, states))
+        if not states:
+            return dict.fromkeys(images)
+        # Docker emits successful objects in argument order but omits failures.
+        # Exact native references identify partial results; unresolved aliases
+        # are queried alone rather than guessed from shifted array positions.
+        observed = {}
+        for item, state in zip(payload, states):
+            for reference in (state.image_id, *(item.get("RepoTags") or ()), *(item.get("RepoDigests") or ())):
+                observed[reference] = state
+        resolved = {}
+        for image in images:
+            if image in missing:
+                resolved[image] = None
+            elif image in observed:
+                resolved[image] = observed[image]
+            elif len(images) == 1:
+                raise ImagePreparationError("Unexpected partial image inspection output")
+            else:
+                resolved.update(self.inspect_images((image,)))
+        return resolved
+
+    def image_id(self, image: str) -> str:
+        state = self.inspect_images((image,))[image]
+        if state is None:
             raise ImagePreparationError("Cannot resolve local image ID for " + image)
-        return result.stdout.strip()
+        return state.image_id
 
     def image_revision(self, image: str) -> "str | None":
-        """Read a local image label; never resolve or pull from a registry."""
-        command = self.manager.runtime.create_docker_process(
-            "image", "inspect", "--format", "{{json .Config.Labels}}", image,
-            capture_output=True)
-        try:
-            result = self.manager.structured_runner.execute_text(command, check=False)
-        except (OSError, StructuredCommandError) as exc:
-            raise ImagePreparationError("Cannot inspect build metadata for {}: {}".format(
-                image, exc)) from exc
-        if not result.succeeded:
-            raise ImagePreparationError("Cannot inspect build metadata for {}: {}".format(
-                image, result.stderr.strip()))
-        try:
-            labels = json.loads(result.stdout)
-        except (TypeError, ValueError) as exc:
-            raise ImagePreparationError("Invalid image label output for " + image) from exc
-        if labels is not None and not isinstance(labels, dict):
-            raise ImagePreparationError("Invalid image labels for " + image)
-        return (labels or {}).get(self.BUILD_LABEL)
+        state = self.inspect_images((image,))[image]
+        if state is None:
+            raise ImagePreparationError("Cannot inspect build metadata for " + image)
+        return state.revision
 
-    def verify_builds(self, model: "dict[str, Any]", services: "Sequence[str]") -> None:
-        """Do not accept an incomplete or mislabeled build as successful."""
+    def verify_builds(self, model: "dict[str, Any]", services: "Sequence[str]",
+                      images: "dict[str, LocalImage | None] | None" = None) -> None:
+        """Check build results against a freshly observed image batch."""
+        if images is None:
+            images = self.inspect_images(tuple(model["services"][name]["image"] for name in services))
         for name in services:
             spec = model["services"][name]
             image = spec["image"]
-            if not self.image_exists(image):
+            state = images[image]
+            if state is None:
                 raise ImagePreparationError("Built image is missing: " + image)
             expected = (spec.get("build") or {}).get("labels", {}).get(self.BUILD_LABEL)
-            if expected is not None and self.image_revision(image) != expected:
+            if expected is not None and state.revision != expected:
                 raise ImagePreparationError("Built image revision mismatch for " + name)
 
     def plan(self, model: "dict[str, Any]", services: "Sequence[str]" = (),
@@ -139,46 +205,33 @@ class ImagePreparer:
         if not force_pull:
             refreshing.clear()
         build, pull = [], []
-        image_state, pull_images, revisions, build_images = {}, set(), {}, set()
+        requested = tuple(all_services[name].get("image") for name in targets)
+        if any(not isinstance(image, str) or not image.strip() for image in requested):
+            raise ImagePreparationError("Selected service has no valid image")
+        image_state = self.inspect_images(requested)
+        pull_images, revisions, build_images = set(), {}, set()
         for name in targets:
             service = all_services[name]
             image = service.get("image")
             definition = service.get("build")
             has_build = definition is not None
-            if not isinstance(image, str) or not image.strip():
-                raise ImagePreparationError("Service {} has no valid image".format(name))
             expected = (definition.get("labels") or {}).get(self.BUILD_LABEL) if has_build else None
             if has_build and image in revisions and revisions[image] != expected:
                 raise ImagePreparationError("Conflicting build revisions for image " + image)
             if has_build:
                 revisions[image] = expected
-            if image not in image_state:
-                image_state[image] = self.image_exists(image)
-            exists = image_state[image]
+            state = image_state[image]
+            exists = state is not None
             refresh = name in refreshing
             if has_build and (refresh or not exists or
-                              (expected is not None and self.image_revision(image) != expected)):
+                              (expected is not None and state.revision != expected)):
                 if image not in build_images:
                     build.append(name)
                     build_images.add(image)
             elif not has_build and (refresh or not exists) and image not in pull_images:
                 pull.append(name)
                 pull_images.add(image)
-        return ImagePlan(tuple(build), tuple(pull), tuple(targets))
+        return ImagePlan(tuple(build), tuple(pull), tuple(targets), image_state)
 
     def image_exists(self, image: str) -> bool:
-        try:
-            process = self.manager.runtime.create_docker_process(
-                "image", "inspect", image, capture_output=True)
-            result = self.manager.structured_runner.execute_text(process, check=False)
-        except (OSError, StructuredCommandError) as exc:
-            message = str(exc).lower()
-            if "no such image" in message or "not found" in message:
-                return False
-            raise ImagePreparationError(f"Unable to inspect image `{image}`: {exc}") from exc
-        if result.succeeded:
-            return True
-        message = (result.stderr or "").lower()
-        if "no such image" in message or "not found" in message:
-            return False
-        raise ImagePreparationError(f"Unable to inspect image `{image}`: {result.stderr.strip()}")
+        return self.inspect_images((image,))[image] is not None

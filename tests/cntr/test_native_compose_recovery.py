@@ -38,7 +38,7 @@ def test_optional_compose_provider_not_added_to_start_or_build_scope():
     assert order_services(project, ("app",), model) == ("app",)
     manager = SimpleNamespace()
     planner = ImagePreparer(manager)
-    planner.image_exists = lambda image: True
+    planner.inspect_images = lambda images: {image: SimpleNamespace(revision=None) for image in images}
     full_model = {"services": {"app": dict(app.services["app"], image="app:latest"),
                                "metrics": {"image": "metrics:latest"}}}
     assert planner.plan(full_model, ("app",)).targets == ("app",)
@@ -50,52 +50,60 @@ def test_optional_unavailable_dependency_does_not_block_old_model_recovery():
     inspected = []
     manager = SimpleNamespace(
         docker_inspector=SimpleNamespace(
-            get_project_state=lambda selected: inspected.append(True) or SimpleNamespace(services=())),
+            get_project_state=lambda selected, services=None: inspected.append(True) or SimpleNamespace(services=())),
         logger=SimpleNamespace(warning=lambda *args: None))
     runner = ComposeRunner(manager)
     runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
     assert inspected == [True]
 
 
-def test_optional_running_healthy_dependency_still_waits():
+def test_optional_running_healthy_dependency_still_waits(monkeypatch):
     model = {"services": {"app": {"depends_on": {
         "metrics": {"condition": "service_healthy", "required": False}}}}}
-    inspector = SimpleNamespace(get_project_state=lambda selected: SimpleNamespace(services=(
-        SimpleNamespace(service="metrics", state="running", health="starting"),)))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
-    calls = []
-    runner.wait_service_healthy = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
+    observations, sleeps = [], []
+
+    def inspect(containers, services=None):
+        observations.append(services)
+        return SimpleNamespace(services=(SimpleNamespace(service="metrics", state="running",
+            health="starting" if len(observations) == 1 else "healthy"),))
+
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=inspect)))
     runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
-    assert calls == [("metrics", None)]
+    assert observations == [("metrics",), ("metrics",)]
+    assert sleeps == [0.5]
 
 
-def test_optional_selected_but_unavailable_dependency_retains_readiness_requirement():
+def test_optional_selected_but_unavailable_dependency_is_observed_and_warned():
     model = {"services": {"app": {"depends_on": {
         "metrics": {"condition": "service_healthy", "required": False}}}}}
-    runner = ComposeRunner(SimpleNamespace())
-    calls = []
-    runner.wait_service_healthy = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
+    observations, warnings = [], []
+    inspector = SimpleNamespace(get_project_state=lambda containers, services=None:
+                                observations.append(services) or SimpleNamespace(services=()))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector,
+        logger=SimpleNamespace(warning=lambda *args: warnings.append(args))))
     context = SimpleNamespace(project_containers=(), target_services=("app", "metrics"))
     runner.wait_service_dependencies(context, "app", model=model)
-    assert calls == [("metrics", None)]
+    assert observations == [("metrics",)]
+    assert len(warnings) == 1 and warnings[0][0] == "Optional Compose dependency %s is not ready"
 
 
 def test_optional_completed_successfully_is_still_checked():
     model = {"services": {"app": {"depends_on": {
         "seed": {"condition": "service_completed_successfully", "required": False}}}}}
-    inspector = SimpleNamespace(get_project_state=lambda selected: SimpleNamespace(services=(
-        SimpleNamespace(service="seed", state="exited", exit_code=0),)))
+    observations = []
+    inspector = SimpleNamespace(get_project_state=lambda selected, services=None:
+        observations.append(services) or SimpleNamespace(services=(
+            SimpleNamespace(service="seed", state="exited", exit_code=0),)))
     runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
-    calls = []
-    runner.wait_service_completed = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
     runner.wait_service_dependencies(SimpleNamespace(project_containers=()), "app", model=model)
-    assert calls == [("seed", None)]
+    assert observations == [("seed",)]
 
 
 def test_optional_stopped_dependency_is_not_polled_for_health():
     model = {"services": {"app": {"depends_on": {
         "metrics": {"condition": "service_healthy", "required": False}}}}}
-    inspector = SimpleNamespace(get_project_state=lambda selected: SimpleNamespace(services=(
+    inspector = SimpleNamespace(get_project_state=lambda selected, services=None: SimpleNamespace(services=(
         SimpleNamespace(service="metrics", state="exited", health="unhealthy", exit_code=1),)))
     runner = ComposeRunner(SimpleNamespace(
         docker_inspector=inspector, logger=SimpleNamespace(warning=lambda *args: None)))
@@ -135,7 +143,7 @@ def test_optional_terminal_failure_warning_without_blocking(
         services=(SimpleNamespace(service="metrics", state=state,
                                   health=health, exit_code=exit_code),))
     manager = SimpleNamespace(
-        docker_inspector=SimpleNamespace(get_project_state=lambda containers: runtime),
+        docker_inspector=SimpleNamespace(get_project_state=lambda containers, services=None: runtime),
         logger=SimpleNamespace(warning=lambda *args: logs.append(args)))
     model = {"services": {"app": {"depends_on": {
         "metrics": {"condition": condition, "required": False}}}}}
@@ -149,7 +157,7 @@ def test_required_unhealthy_dependency_still_fails():
     runtime = SimpleNamespace(
         services=(SimpleNamespace(service="metrics", state="running", health="unhealthy"),))
     runner = ComposeRunner(SimpleNamespace(
-        docker_inspector=SimpleNamespace(get_project_state=lambda owners: runtime)))
+        docker_inspector=SimpleNamespace(get_project_state=lambda owners, services=None: runtime)))
     with pytest.raises(ContainerError, match="unhealthy"):
         runner.wait_service_dependencies(
             SimpleNamespace(project_containers=()), "app",
@@ -158,7 +166,7 @@ def test_required_unhealthy_dependency_still_fails():
 
 
 def test_optional_dependency_does_not_swallow_runtime_inspection_failures():
-    def fail(_):
+    def fail(_, services=None):
         raise RuntimeError("inspection unavailable")
     runner = ComposeRunner(SimpleNamespace(
         docker_inspector=SimpleNamespace(get_project_state=fail)))

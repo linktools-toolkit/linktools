@@ -294,10 +294,14 @@ def test_restart_interrupt_restores_pending_services_and_reraises_original(tmp_p
     with pytest.raises(KeyboardInterrupt) as caught:
         manager.compose_operations.restart(["app"])
     assert caught.value is interrupt
-    assert [event[1] for event in manager.events if event[0] == "restore"] == [("second",), ("third",)]
+    expected_restore = [("second",), ("third",)] if phase == "apply" else []
+    # A readiness interruption after native up leaves all observed-ready services applied.
+    assert [event[1] for event in manager.events if event[0] == "restore"] == expected_restore
     assert manager.running_state.get_persisted() == ["app"]
     snapshots = AppliedServiceModels(manager, manager.model).previous
-    for name, version in (("first", "new"), ("second", "old"), ("third", "old")):
+    versions = (("first", "new"), ("second", "old"), ("third", "old")) if phase == "apply" else (
+        ("first", "new"), ("second", "new"), ("third", "new"))
+    for name, version in versions:
         assert yaml.safe_load(snapshots[name])["services"][name]["image"] == name + ":" + version
 
 

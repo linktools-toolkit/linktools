@@ -107,6 +107,39 @@ class Runner:
         if self.fail == service:
             raise ContainerError("apply failed " + service)
 
+    def apply_services(self, context, services):
+        self.applied = []
+        updated, recreated = set(), set()
+        initial = context.initial_runtime_state.running_services
+        from linktools.cntr.runtime.compose import namespace_dependencies, service_dependencies
+        for service in services:
+            spec = context.compose_model["services"][service]
+            changed = (service in context.service_models.changed_services or
+                       context.initial_runtime_state.running_images.get(service) !=
+                       self.manager.image_preparer.image_id(spec["image"]) or
+                       bool(set(namespace_dependencies(spec)) & recreated))
+            cascade = any(options.get("restart") and dependency in updated for
+                          dependency, options in service_dependencies(spec).items())
+            if cascade and service in initial and not changed:
+                self.restart_service(context, service)
+            else:
+                self.apply_service(context, service, recreate=changed)
+            self.applied.append(service)
+            if changed or service not in initial:
+                recreated.add(service)
+            if changed or cascade or service not in initial:
+                updated.add(service)
+
+    service_instances = ComposeRunner.service_instances
+
+    def ready_services(self, context, services, state, image_ids):
+        return set(self.applied)
+
+    def wait_services_ready(self, context, services, image_ids):
+        active = {service for service in services if self.wait_service_ready(context, service)}
+        return ProjectRuntimeState("test", tuple(SimpleNamespace(
+            service=service, state="running", labels={}) for service in active), "docker")
+
     def restart_service(self, context, service, model=None):
         self.manager.events.append(("restart", service))
         if self.fail == service:
@@ -118,6 +151,7 @@ class Runner:
 
     def stop(self, context, services):
         self.manager.events.append(("stop", tuple(services)))
+        self.stopped = set(getattr(self, "stopped", ())) | set(services)
 
     def down(self, context, services):
         self.manager.events.append(("down", tuple(services)))
@@ -154,7 +188,16 @@ def setup_case(tmp_path, groups, running=()):
     state = ProjectRuntimeState("test", tuple(
         SimpleNamespace(service=name, state="running", image_id="sha256:old-" + name, labels={}, health=None,
                         exit_code=None) for name in running), "docker")
-    manager.docker_inspector = SimpleNamespace(get_project_state=lambda containers: state)
+    def observed_state(containers, **kwargs):
+        applied = set(getattr(manager.compose_runner, "applied", ()))
+        stopped = set(getattr(manager.compose_runner, "stopped", ())) - applied
+        previous = tuple(SimpleNamespace(**dict(vars(item), state="exited", exit_code=0))
+                         if item.service in stopped else item for item in state.services if item.service not in applied)
+        return ProjectRuntimeState("test", previous + tuple(
+            SimpleNamespace(service=name, state="running", health=None, exit_code=None,
+                            image_id=manager.image_preparer.image_id(manager.model["services"][name]["image"]),
+                            labels={"com.docker.compose.config-hash": "new-" + name}) for name in applied), "docker")
+    manager.docker_inspector = SimpleNamespace(get_project_state=observed_state)
     stored = {owner.name for owner in owners if set(owner.services) & set(running)}
     manager.running_state = SimpleNamespace(
         get_persisted=lambda: sorted(stored), remove=lambda names: stored.difference_update(names),
@@ -164,8 +207,10 @@ def setup_case(tmp_path, groups, running=()):
     manager.image_preparer = SimpleNamespace(
         with_build_revisions=lambda model, containers, services: model,
         plan=lambda model, services, **kwargs: SimpleNamespace(pull=tuple(services), build=()),
-        verify_builds=lambda model, services: None,
+        verify_builds=lambda model, services, **kwargs: None,
         image_id=lambda image: "sha256:old-" + image.split(":")[0])
+    manager.image_preparer.inspect_images = lambda images: {
+        image: SimpleNamespace(image_id=manager.image_preparer.image_id(image), revision=None) for image in images}
     manager.hooks = Hooks(manager.events, "manager")
     manager.lifecycle = LifecycleDispatcher(manager)
     manager.compose_runner = Runner(manager)
@@ -298,7 +343,7 @@ def test_completed_job_not_marked_as_running(tmp_path):
 ])
 def test_effective_health_and_job_readiness(state, health, code, expected):
     actual = SimpleNamespace(services=(SimpleNamespace(service="app", state=state, health=health, exit_code=code),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c: actual)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
     ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {"app": {}}})
     if expected == "error":
         with pytest.raises(ContainerError, match="failed to become ready"):
@@ -309,7 +354,7 @@ def test_effective_health_and_job_readiness(state, health, code, expected):
 
 def test_explicit_completed_dependency_requires_completion():
     actual = SimpleNamespace(services=(SimpleNamespace(service="migrate", state="running", health=None, exit_code=None),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c: actual)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
     ctx = OperationContext(project_containers=[], target_services=("migrate", "web"), compose_model={"services": {
         "migrate": {}, "web": {"depends_on": {"migrate": {"condition": "service_completed_successfully"}}}}})
     with pytest.raises(ContainerError, match="did not complete successfully"):
@@ -318,7 +363,7 @@ def test_explicit_completed_dependency_requires_completion():
 
 def test_unselected_completed_dependency_does_not_change_selected_service_policy():
     actual = SimpleNamespace(services=(SimpleNamespace(service="app", state="running", health=None, exit_code=None),))
-    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c: actual)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=lambda c, services=None: actual)))
     ctx = OperationContext(project_containers=[], target_services=("app",), compose_model={"services": {
         "app": {}, "unrelated": {"depends_on": {"app": {"condition": "service_completed_successfully"}}}}})
     assert runner.wait_service_ready(ctx, "app", timeout=0)

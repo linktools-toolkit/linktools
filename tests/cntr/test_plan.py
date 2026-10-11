@@ -30,6 +30,7 @@ def _no_real_processes(monkeypatch, fresh_manager):
     monkeypatch.setattr(fresh_manager.compose_runner, "build", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "pull", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "apply_service", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_services", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "apply_saved_services", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "stop", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "down", fail)
@@ -368,7 +369,8 @@ def test_plan_text_render_never_contains_raw_proxy_secret(fresh_manager, monkeyp
 def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager):
     plan = fresh_manager.planner.plan("up", names=["portainer"])
     for command in plan.commands:
-        expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
+        services = command.args[command.args.index("--no-deps") + 1:]
+        expected_tail = tuple(fresh_manager.compose_runner.apply_services_args(services))
         assert command.args[-len(expected_tail):] == expected_tail
 
 
@@ -400,7 +402,8 @@ def test_plan_restart_up_command_matches_runtime_builder_exactly(fresh_manager):
     assert plan.commands[0].phase == "stop"
     assert plan.commands[0].args[-2:] == ("stop", "portainer")
     for command in plan.commands[1:]:
-        expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
+        services = command.args[command.args.index("--no-deps") + 1:]
+        expected_tail = tuple(fresh_manager.compose_runner.apply_services_args(services))
         assert command.args[-len(expected_tail):] == expected_tail
 
 
@@ -408,8 +411,10 @@ def test_plan_excludes_unselected_authentication_admin(fresh_manager, monkeypatc
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
     plan = fresh_manager.planner.plan("up", ["portainer"])
     commands = [command.args for command in plan.commands if command.phase == "up"]
-    assert not any(command[-1] == "authelia-admin" for command in commands)
-    assert any(command[-1] == "authelia" for command in commands)
+    assert len(commands) == 1
+    services = commands[0][commands[0].index("--no-deps") + 1:]
+    assert "authelia-admin" not in services
+    assert "authelia" in services
 
 
 def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monkeypatch):
@@ -422,7 +427,9 @@ def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monk
     monkeypatch.setattr(operations, "start_selection", lambda selection, **kwargs: selected)
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
     plan = fresh_manager.planner.plan("up", ["portainer"])
-    assert [command.args[-1] for command in plan.commands if command.phase == "up"] == list(selected.services)
+    commands = [command.args for command in plan.commands if command.phase == "up"]
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("--no-deps") + 1:] == selected.services
 
 
 def test_plan_loads_artifact_index_once_per_call(fresh_manager, monkeypatch):
