@@ -335,31 +335,35 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
     async def stat(self, key: KeyT) -> 'InfoT | None':
         state = await self._state()
-        info = state.entries.get(key)
-        if info is None:
-            return None
-        backend = self._views[state.layer_indexes[key]].backend
-        if isinstance(backend, StorageStatReader):
+        retried = False
+        while True:
+            info = state.entries.get(key)
+            if info is None:
+                return None
+            layer_index = state.layer_indexes[key]
+            view = self._views[layer_index]
+            backend = view.backend
+            if not isinstance(backend, StorageStatReader):
+                return info
             origin = await backend.stat(key)
-            if origin is None:
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "storage metadata points to a missing origin",
-                    safe_details={
-                        "storage_key_digest": canonical_sha256(str(key)),
-                        "layer": self._layer_id(state.layer_indexes[key]),
-                    },
-                )
-            if origin != info:
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "storage metadata and origin disagree",
-                    safe_details={
-                        "storage_key_digest": canonical_sha256(str(key)),
-                        "layer": self._layer_id(state.layer_indexes[key]),
-                    },
-                )
-        return info
+            if origin == info:
+                return info
+            if not retried and view.policy is not LayerRefreshPolicy.STATIC:
+                view.invalidate()
+                refreshed = await self._state()
+                if (refreshed.entries.get(key) != info
+                        or refreshed.layer_indexes.get(key) != layer_index):
+                    state = refreshed
+                    retried = True
+                    continue
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                "storage metadata points to a missing origin" if origin is None else "storage metadata and origin disagree",
+                safe_details={
+                    "storage_key_digest": canonical_sha256(str(key)),
+                    "layer": self._layer_id(layer_index),
+                },
+            )
 
     async def locate(self, key: KeyT) -> 'StorageLocation[KeyT, ValueT, InfoT] | None':
         """Return the effective layer selected by precedence for one key."""

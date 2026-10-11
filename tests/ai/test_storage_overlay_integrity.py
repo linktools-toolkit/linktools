@@ -3,12 +3,13 @@
 """Storage overlay boundary regressions."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 from linktools.ai.asset import AssetInfo, AssetKey, AssetRoot, InMemoryAssetBackend
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import MetadataLoad, StorageChange, StorageOperation, StorageOverlay, StorageRevision
+from linktools.ai.storage import MetadataLoad, StorageChange, StorageLayer, StorageOperation, StorageOverlay, StorageRevision
 
 
 class _PartiallyMissingBatchBackend(InMemoryAssetBackend):
@@ -86,6 +87,111 @@ class _RevisionSource:
 
     async def revision_bumped(self, revision: StorageRevision) -> None:
         self.revision = revision
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("put", "delete", "reset", "reset_fallback"))
+async def test_stat_refreshes_changed_authoritative_metadata(operation: str) -> None:
+    primary, fallback = InMemoryAssetBackend(), InMemoryAssetBackend()
+    source = _RevisionSource()
+    key = AssetKey("resource", "changed")
+    if operation == "reset_fallback":
+        await fallback.put(key, b"fallback")
+    storage = StorageOverlay(primary, writer=primary, revision_source=source,
+                             layers=(StorageLayer("fallback", fallback),))
+    await storage.initialize()
+    try:
+        await storage.put(key, b"old")
+        assert await storage.stat(key) == await primary.stat(key)
+        if operation == "put":
+            await primary.put(key, b"new")
+        elif operation == "delete":
+            await primary.delete(key)
+        else:
+            await primary.reset(key)
+        expected = await primary.stat(key) if operation in {"put", "delete"} else await fallback.stat(key)
+        assert await storage.stat(key) == expected
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("mismatch", "missing", "transport"))
+async def test_stat_preserves_real_origin_failures(failure: str) -> None:
+    class BrokenStatBackend(InMemoryAssetBackend):
+        broken = False
+        async def stat(self, key):
+            info = await super().stat(key)
+            if not self.broken:
+                return info
+            if failure == "transport":
+                raise OSError("origin transport failed")
+            return None if failure == "missing" else replace(info, size=info.size + 1)
+    backend = BrokenStatBackend()
+    storage = StorageOverlay(backend, writer=backend)
+    key = AssetKey("resource", "broken")
+    await storage.initialize()
+    try:
+        await storage.put(key, b"value")
+        assert await storage.stat(key) is not None
+        backend.broken = True
+        if failure == "transport":
+            with pytest.raises(OSError, match="origin transport failed"):
+                await storage.stat(key)
+        else:
+            with pytest.raises(AIError) as caught:
+                await storage.stat(key)
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_stat_does_not_hot_reload_a_static_layer() -> None:
+    primary, fallback = InMemoryAssetBackend(), InMemoryAssetBackend()
+    key = AssetKey("resource", "static")
+    await fallback.put(key, b"old")
+    storage = StorageOverlay(primary, layers=(StorageLayer("fallback", fallback),))
+    await storage.initialize()
+    try:
+        assert await storage.stat(key) == await fallback.stat(key)
+        await fallback.put(key, b"new")
+        with pytest.raises(AIError) as caught:
+            await storage.stat(key)
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("continuous", (False, True))
+async def test_stat_bounds_mutations_between_metadata_and_origin(continuous: bool) -> None:
+    class RacingBackend(InMemoryAssetBackend):
+        armed = False
+        mutations = 0
+        async def stat(self, key):
+            if self.armed:
+                self.mutations += 1
+                await self.put(key, str(self.mutations).encode())
+                self.armed = continuous
+            return await super().stat(key)
+    backend = RacingBackend()
+    storage = StorageOverlay(backend, writer=backend)
+    key = AssetKey("resource", "racing")
+    await storage.initialize()
+    try:
+        await storage.put(key, b"old")
+        assert await storage.stat(key) is not None
+        backend.armed = True
+        if continuous:
+            with pytest.raises(AIError) as caught:
+                await storage.stat(key)
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            assert backend.mutations <= 2
+        else:
+            assert await storage.stat(key) == await backend.stat(key)
+    finally:
+        await storage.close()
 
 
 @pytest.mark.asyncio
