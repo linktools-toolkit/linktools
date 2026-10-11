@@ -527,7 +527,13 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                                 future.set_exception(error)
 
                 loader.add_done_callback(finished)
-        loaded = await asyncio.gather(*(asyncio.shield(task) for task in tasks.values()))
+        if not tasks:
+            return {}
+        # The loader owns these futures; cancelling a reader only stops its wait.
+        done, _ = await asyncio.wait(tasks.values(), return_when=asyncio.FIRST_EXCEPTION)
+        for future in done:
+            future.result()
+        loaded = [future.result() for future in tasks.values()]
         return {key: value if type(value) is bytes or content is None else self.cache_adapter.from_cache(content)
                 for key, (value, content) in zip(tasks, loaded)}
 

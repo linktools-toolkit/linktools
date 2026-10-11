@@ -241,7 +241,8 @@ async def test_shared_origin_does_not_share_mutable_decoded_values() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancelled_only_waiter_does_not_leave_unobserved_origin_error() -> None:
+@pytest.mark.parametrize("active_waiter", (False, True))
+async def test_cancelled_waiter_does_not_leave_unobserved_origin_error(active_waiter: bool) -> None:
     backend, overlay, store, (key, _, _) = await _fixture()
     failure = AIError(ErrorCode.STORAGE_UNAVAILABLE)
     backend.failure = failure
@@ -252,10 +253,18 @@ async def test_cancelled_only_waiter_does_not_leave_unobserved_origin_error() ->
     reader = asyncio.create_task(store.get(key))
     try:
         await backend.started.get()
+        remaining = asyncio.create_task(store.get(key)) if active_waiter else None
+        if remaining is not None:
+            await overlay.entered.get()
+            await overlay.entered.get()
         reader.cancel()
         with pytest.raises(asyncio.CancelledError):
             await reader
         backend.release.set()
+        if remaining is not None:
+            with pytest.raises(AIError) as caught:
+                await remaining
+            assert caught.value is failure
         # Wait without observing the per-key Future's exception, before close.
         await asyncio.wait(tuple(overlay._cache_loaders))
         await asyncio.sleep(0)
@@ -287,6 +296,10 @@ async def test_layer_origin_failure_does_not_poison_or_abandon_other_layer() -> 
     await overlay.entered.get()
     await overlay.entered.get()
     bad.release.set()
+    with pytest.raises(AIError) as caught:
+        await batch
+    assert caught.value is failure
+    assert not scalar.done()
     closing = asyncio.create_task(store.close())
     await asyncio.sleep(0)
     assert not good.closed
