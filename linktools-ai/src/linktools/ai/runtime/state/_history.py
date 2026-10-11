@@ -1733,6 +1733,10 @@ class TranscriptRepository:
                 for message in messages[left:right]:
                     emitted += 1
                     yield message
+            if len(facts) < _TRANSCRIPT_PAGE_SIZE:
+                if emitted != expected:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return
 
     def project_context(
         self,
