@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Lazy native access rules and callbacks for the existing Authelia client."""
+from copy import copy
 from typing import TYPE_CHECKING
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -9,6 +10,7 @@ from urllib.parse import urlsplit
 from linktools.decorator import cached_property
 from linktools.types import MISSING
 from ._base import Integration
+from ._urls import resolve_url_reference
 from ..errors import ContainerError
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ class Authelia(Integration):
         self.site: "Nginx | tuple[Integration, ...] | None" = MISSING
         self._rule = MISSING
         self._redirect_uris = ()
+        self._base_url = MISSING
 
     @classmethod
     def access(cls, rule: "Mapping[str, Any]" = MISSING, *,
@@ -48,6 +51,13 @@ class Authelia(Integration):
         self._redirect_uris = tuple(redirect_uris) if type(redirect_uris) in (tuple, list) else redirect_uris
         return self
 
+    def with_base_url(self, base_url: str) -> "Authelia":
+        """Bind explicitly declared callback references without changing their owner."""
+        result = copy(self)
+        result._base_url = base_url
+        result.__dict__.pop("redirect_uris", None)
+        return result
+
     @cached_property
     def redirect_uris(self) -> "tuple[str, ...]":
         if isinstance(self._redirect_uris, (str, bytes)):
@@ -57,6 +67,11 @@ class Authelia(Integration):
             if not isinstance(value, str):
                 raise ContainerError("Authelia redirect URI must be a string")
             value = str(value)
+            if self._base_url is not MISSING:
+                reference = urlsplit(value)
+                if not reference.scheme and reference.netloc:
+                    raise ContainerError("Authelia redirect URI must use an explicit scheme")
+                value = resolve_url_reference(value, self._base_url)
             if not value:
                 continue
             parsed = urlsplit(value)

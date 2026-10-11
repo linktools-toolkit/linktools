@@ -32,7 +32,7 @@ class Container(BaseContainer):
             proxy="http://portainer:9000",
             auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
             auth_bypass=(r"\.(css|js)$",),
-            extensions=lambda url: [
+            extensions=[
                 Flare.links(
                     Flare.public(),
                     Flare.container(
@@ -42,6 +42,6 @@ class Container(BaseContainer):
                     icon="docker",
                     desc="Docker管理工具",
                 ),
-                Authelia.oidc((url(),)),
+                Authelia.oidc(("{url}",)),
             ],
         )

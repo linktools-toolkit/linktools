@@ -127,7 +127,7 @@ Migrate callers and templates together; there is no compatibility wrapper.
 
 `endpoint` is a pure function returning ordinary declarations for the producer's
 site. Its flat parameters configure the site; it has no identity,
-display metadata, default navigation, or OIDC callback parameters. Native nginx
+display metadata, default navigation, public_url override, or OIDC callback parameters. Native nginx
 options, including templates, headers and capability inheritance, are forwarded
 without changing their semantics.
 
@@ -146,7 +146,7 @@ return endpoint(
         ),
         Authelia.access(policy="one_factor"),
         Authelia.oidc(
-            redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
+            redirect_uris=("/sso/callback",),
         ),
     ],
 )
@@ -171,26 +171,35 @@ and other bookmarks always own their URLs. Without a Flare extension an endpoint
 does not appear in navigation. Display metadata remains entirely within Flare;
 multiple uses copy declarations without modifying the original values.
 
-For custom URLs or OIDC callbacks, `extensions` can be a declaration factory:
+Extension URLs are declarative; `extensions` is a list/tuple, not a callback:
 
 ```python
-extensions=lambda url: [
-    Flare.public("Mihomo", "server", "Dashboard", url=url(
-        "ui", "metacubexd", "#", "setup",
+from linktools import utils
+from linktools.runtime import lazy_load
+
+extensions=[
+    Flare.public("Mihomo", "server", "Dashboard", url=lazy_load(
+        utils.join_url, "/ui/metacubexd/#/setup",
         queries={"hostname": self.get_config_later("MIHOMO_DOMAIN")},
     )),
-    Authelia.oidc((url(), "http://portainer.local:9000")),
+    Authelia.oidc(("{url}", "/callback", "http://portainer.local:9000")),
 ]
 ```
 
-The factory runs once while building declarations. `url` is the existing lazy
-nginx URL builder bound to this site; its path and query arguments retain
-`load_nginx_url` semantics. Store its lazy URLs in declarations rather than
-resolving them in the factory. An unavailable site returns an empty URL without reading query
-values. The example's `#/setup?...` is a fragment route, not an HTTP query.
-OIDC receives only the explicitly listed callbacks and does not follow nginx
-authentication switches. There is no OIDC enable parameter.
-Ordinary extension lists, tuples and generators remain supported.
+The endpoint binds only Flare URL fields and explicitly declared OIDC callbacks.
+Relative references use standard `urljoin` semantics, preserving query/fragment
+structure. A leading `{url}` means the site's exact base URL: `{url}` preserves
+its existing trailing slash, whereas `/` explicitly selects the origin root with
+a trailing slash. Absolute URLs stay unchanged. No other placeholder or ordinary
+configuration field is formatted; nginx regexes and `{{port}}` stay literal.
+
+Values remain lazy until consumed. Constructing a relative URL may resolve its
+query values locally before discovering that its site is disabled; they are not
+logged. Relative URLs from a disabled site become empty. Explicit absolute URLs
+remain independent. Flare None/empty URLs stay disabled; OIDC skips empty strings
+but still rejects non-string values and scheme-relative `//host` callbacks.
+OIDC never follows reverse-proxy authentication switches or adds implicit callbacks.
+Existing extension lists, tuples and top-level generators remain supported.
 
 Multiple endpoints are ordinary array elements. Cache any endpoint referenced
 outside its own extensions, then pass that original object to URL/ACL helpers:
@@ -297,7 +306,10 @@ templates retain only the explicit context described below.
   authentication; bypass and explicit native auth-off preserve client tokens
 - Native access rules belong to `Authelia.access`, independently of request authentication
 - Only a single literal hostname implies a public URL. Pattern/default sites
-  need explicit `public_url`; navigation placeholders such as `{{port}}` remain literal
+  need an explicit absolute extension URL if they should be linked. Low-level
+  `Nginx.site(public_url=...)` remains available for canonical address overrides
+  such as a custom Authelia issuer base path; `endpoint` does not expose it.
+  Navigation placeholders such as `{{port}}` remain literal
 - `cert_domains` declares additional certificate names; `template_vars` owns business
   template variables
 

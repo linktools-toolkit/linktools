@@ -5,7 +5,9 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from linktools.types import MISSING
+from linktools.runtime import lazy_load
 from ._base import Integration
+from ._urls import resolve_url_reference
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -59,11 +61,14 @@ class Flare(Integration):
             return None
         return str(self._url)
 
-    def with_default_url(self, url: "str | None") -> "Flare":
-        """Copy this link, filling an omitted application URL without resolving it."""
+    def with_base_url(self, base_url: str) -> "Flare":
+        """Copy this link with lazily bound default or relative URLs."""
         result = copy(self)
-        if self.display_category.apps and self._url is MISSING:
-            result._url = url
+        if self._url is MISSING:
+            if self.display_category.apps:
+                result._url = base_url
+        elif self._url is not None:
+            result._url = lazy_load(resolve_url_reference, self._url, base_url)
         return result
 
     _public = _FlareCategory("public", "Public", apps=True)

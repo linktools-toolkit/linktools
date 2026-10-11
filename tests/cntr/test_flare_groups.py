@@ -90,7 +90,7 @@ def test_flare_description_is_not_evaluated_until_property_consumption() -> None
     lazy = lazy_load(description)
     original = Flare.public(desc=lazy)
     grouped, = Flare.links(original, name="App", icon="web", desc=lazy_load(fail))
-    filled = grouped.with_default_url(lazy_load(fail))
+    filled = grouped.with_base_url(lazy_load(fail))
     assert reads == []
     assert original._desc is grouped._desc is filled._desc is lazy
     assert filled.desc == "App"
@@ -127,7 +127,7 @@ def test_default_url_fills_only_omitted_application_urls() -> None:
     url = lazy_load(fail)
     for factory in (Flare.public, Flare.category("dashboard", apps=True)):
         original = factory()
-        filled = original.with_default_url(url)
+        filled = original.with_base_url(url)
         assert filled is not original
         assert filled._url is url
         assert original._url is MISSING
@@ -135,7 +135,7 @@ def test_default_url_fills_only_omitted_application_urls() -> None:
         assert filled.display_category is original.display_category
     for factory in (Flare.container, Flare.bookmark, Flare.category("public", "Bookmarks")):
         original = factory()
-        filled = original.with_default_url(url)
+        filled = original.with_base_url(url)
         assert filled is not original
         assert filled._url is original._url is MISSING
 
@@ -144,9 +144,11 @@ def test_default_url_preserves_every_explicit_url_and_all_metadata() -> None:
     value = lazy_load(fail)
     for url in (None, "", "https://own.test", value):
         original = Flare.public(value, value, value, url)
-        filled = original.with_default_url(lazy_load(fail))
+        filled = original.with_base_url(lazy_load(fail))
         assert filled is not original
-        assert filled._url is original._url is url
+        assert original._url is url
+        if url is not value:
+            assert filled.url == (url or None)
         assert filled._name is filled._icon is filled._desc is value
         assert original._name is original._icon is original._desc is value
 
@@ -154,8 +156,8 @@ def test_default_url_preserves_every_explicit_url_and_all_metadata() -> None:
 def test_flare_group_and_url_defaults_compose_in_either_order() -> None:
     original = Flare.public()
     grouped, = Flare.links(original, name="App", icon="web")
-    group_first = grouped.with_default_url("https://app.test")
-    url_first, = Flare.links(original.with_default_url("https://app.test"), name="App", icon="web")
+    group_first = grouped.with_base_url("https://app.test")
+    url_first, = Flare.links(original.with_base_url("https://app.test"), name="App", icon="web")
     for result in (group_first, url_first):
         assert (result.name, result.icon, result.desc, result.url) == ("App", "web", "App", "https://app.test")
     assert original._name is original._icon is original._desc is original._url is MISSING

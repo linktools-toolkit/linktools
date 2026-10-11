@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Lazy URL references exported through the extension package."""
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin, urlsplit
 
 from linktools import utils
 from linktools.runtime import lazy_load
@@ -53,3 +54,17 @@ def load_nginx_url(container: "BaseContainer",
         return utils.join_url(url, *path, queries=queries) if url else ""
 
     return lazy_load(make_url)
+
+
+def resolve_url_reference(value: str, base_url: str) -> str:
+    """Resolve one explicit URL reference without formatting unrelated data."""
+    if not value:
+        return ""
+    value = str(value)
+    if value.startswith("{url}"):
+        base = str(base_url)
+        return base + value[len("{url}"):] if base else ""
+    if urlsplit(value).scheme:
+        return value
+    base = str(base_url)
+    return urljoin(base, value) if base else ""

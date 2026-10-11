@@ -466,7 +466,8 @@ def test_flare_container_factory_preserves_lazy_urls() -> None:
     assert isinstance(link, Flare)
     assert link.display_category is Flare.category("container")
     assert link.desc == "Internal"
-    assert link.with_default_url("https://app.test")._url is link._url
+    bound = link.with_base_url("https://app.test")
+    assert bound is not link
     manager, _ = _site_navigation_manager({}, [link])
     assert reads == []
     result = _render_navigation(manager)
@@ -497,7 +498,7 @@ def test_flare_container_factory_requires_explicit_site_urls() -> None:
     ]
     assert reads == ["NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
     assert omitted.url is empty.url is disabled.url is None
-    assert omitted.with_default_url("https://app.test").url is None
+    assert omitted.with_base_url("https://app.test").url is None
 
 
 def test_flare_bookmark_factories_preserve_category_description_and_url_contract() -> None:
@@ -619,7 +620,7 @@ def test_flare_display_category_does_not_shadow_factory():
     link = category("Docs", "web", "Docs")
     assert link.display_category is category
     assert callable(link.category)
-    assert link.with_default_url("https://app.test")._url is link._url
+    assert link.with_base_url("https://app.test")._url is link._url
     assert category("Docs", "web", "Docs", "https://docs.test").display_category is category
 
 
