@@ -3,6 +3,7 @@
 """Flare container definition."""
 import os
 from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -142,9 +143,9 @@ class Container(BaseContainer):
                     if getattr(existing[0], field) != getattr(category, field):
                         raise ContainerError(
                             f"Conflicting {label} for Flare category {category.name!r}")
-            value = {"name": link.name, "icon": link.icon, "link": url}
+            value = deepcopy({"name": link.name, "icon": link.icon, "link": url})
             if category.apps:
-                apps["links"].append(dict(value, desc=link.desc))
+                apps["links"].append(dict(value, desc=deepcopy(link.desc)))
             else:
                 existing[1].append(dict(value, category=category.name))
 

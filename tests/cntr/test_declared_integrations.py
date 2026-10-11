@@ -642,6 +642,51 @@ def test_unbound_partial_flare_metadata_is_not_consumed_without_a_url() -> None:
     assert reads == []
 
 
+def test_flare_group_lazy_metadata_resolves_only_when_rendered() -> None:
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+    from linktools.types import MISSING
+
+    for name, icon, desc in (("App", "web", "Details"), (None, "", None)):
+        reads = []
+
+        def later(field, value):
+            def resolve():
+                reads.append(field)
+                return value
+            return lazy_load(resolve)
+
+        original = Flare.public(url="https://app.test")
+        links = Flare.links(original, Flare.container(url="http://app.test:8000"),
+                            name=later("name", name), icon=later("icon", icon),
+                            desc=later("desc", desc))
+        assert reads == []
+        manager, _ = _site_navigation_manager({}, links)
+        result = _render_navigation(manager)
+        assert result["apps.yml"]["links"] == [dict(
+            name=name, icon=icon, desc=desc or name, link="https://app.test")]
+        assert result["bookmarks.yml"]["links"] == [dict(
+            name=name, icon=icon, link="http://app.test:8000", category="container")]
+        assert sorted(reads) == ["desc", "icon", "name"]
+        assert _render_navigation(manager) == result
+        assert sorted(reads) == ["desc", "icon", "name"]
+        assert original._name is original._icon is original._desc is MISSING
+
+
+def test_disabled_flare_group_does_not_resolve_metadata() -> None:
+    from linktools.cntr.ext import Flare
+    from linktools.runtime import lazy_load
+
+    def fail():
+        raise AssertionError("Disabled links must not resolve display metadata")
+
+    links = Flare.links(Flare.public(url=None), Flare.container(url=""),
+                        name=lazy_load(fail), icon=lazy_load(fail), desc=lazy_load(fail))
+    manager, _ = _site_navigation_manager({}, links)
+    assert _render_navigation(manager) == {"apps.yml": {"links": []},
+                                          "bookmarks.yml": {"categories": [], "links": []}}
+
+
 def test_builtin_primary_sites_use_direct_endpoint_compositions(fresh_manager) -> None:
     for name in ("authelia", "safeline", "portainer", "flare"):
         producer = fresh_manager.containers[name]
