@@ -362,12 +362,20 @@ from linktools.ai.evaluation import GraphTargetSpec, TaskCaseInput
 from linktools.ai.task import TaskGraphTemplate, TaskNode, TaskNodeResultRef
 
 
-async def prepare(context: TaskNodeContext[None]) -> JsonValue:
-    return context.input["question"].strip().lower()
+async def prepare(context: TaskNodeContext[None]) -> str:
+    question = context.input["question"]
+    if not isinstance(question, str):
+        raise ValueError("question must be text")
+    return question.strip().lower()
 
 
-async def finish(context: TaskNodeContext[None]) -> JsonValue:
-    return await context.read_dependency("prepared")
+prepare_task = Task("example.prepare", prepare, effect_policy="none")
+prepare_node = TaskNode("prepare", task=prepare_task)
+prepared = TaskNodeResultRef(prepare_node)
+
+
+async def finish(context: TaskNodeContext[None]) -> str:
+    return await context.read_dependency(prepared)
 
 
 async def score_graph(context: TaskNodeContext[None]) -> JsonValue:
@@ -378,13 +386,11 @@ async def score_graph(context: TaskNodeContext[None]) -> JsonValue:
     )}).to_mapping()
 
 
-prepare_task = Task("example.prepare", prepare, effect_policy="none")
 finish_task = Task("example.finish", finish, effect_policy="none")
 graph_judge = Task("example.graph-exact", score_graph, effect_policy="none")
 template = TaskGraphTemplate(nodes=(
-    TaskNode("prepare", task=prepare_task),
-    TaskNode("finish", ("prepare",), task=finish_task,
-             input_refs={"prepared": TaskNodeResultRef("prepare")}),
+    prepare_node,
+    TaskNode("finish", (prepare_node.node_id,), task=finish_task),
 ))
 candidate = CandidateSpec("workflow", graph_template=GraphTargetSpec(
     template=template, outputs={"answer": "finish"},
@@ -393,6 +399,10 @@ case = CaseSpec.graph(CaseRef("graph-cases", "hello", 1),
     inputs={"prepare": TaskCaseInput(input={"question": " HELLO "})},
     expected="hello")
 ```
+
+For conditional branches and dynamic batch collection, see
+[Task graph authoring](task-graphs.md). The typed reference above carries the
+producer's JSON result type without changing the candidate's stored template.
 
 Each trial gets a new native graph. Template input and case input may combine
 when fields do not conflict; conflicting values are rejected. A node and case

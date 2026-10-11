@@ -6,7 +6,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Generic, Literal, Protocol, TypeVar
+from typing import Generic, Literal, Protocol, TypeVar, overload
 
 from ..core import (
     ImmutableJsonMapping,
@@ -20,9 +20,10 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._capture import TaskInvocationInputRef
-from ._graph import TaskResultRef, normalize_retry_delay_seconds, normalize_timeout_seconds
+from ._graph import TaskNodeResultRef, TaskResultRef, normalize_retry_delay_seconds, normalize_timeout_seconds
 
 AppT = TypeVar("AppT")
+_ResultT = TypeVar("_ResultT", bound=JsonValue)
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -241,8 +242,16 @@ class TaskNodeContext(Generic[AppT]):
         )
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
-    async def read_dependency(self, name: str) -> JsonValue:
+    @overload
+    async def read_dependency(self, name: TaskNodeResultRef[_ResultT]) -> _ResultT: ...
+
+    @overload
+    async def read_dependency(self, name: str) -> JsonValue: ...
+
+    async def read_dependency(self, name: str | TaskNodeResultRef) -> JsonValue:
         """Read one dependency body through its authorized Execution owner."""
+        if isinstance(name, TaskNodeResultRef):
+            name = name.node_id
         if not isinstance(name, str) or not name:
             raise KeyError(name)
         state = self.dependency_states.get(name)

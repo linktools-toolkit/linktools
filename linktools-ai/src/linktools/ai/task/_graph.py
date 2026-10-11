@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
+from typing import Generic
+
+from typing_extensions import TypeVar
 
 from ..core import (
     RunBudget,
@@ -31,6 +34,9 @@ from ..errors import AIError, ErrorCode
 from ..errors import ErrorDiagnostics
 from ._capture import TaskInvocationInputRef
 from ._definitions import Task, TaskExpander, TaskExpanderRef, TaskRef
+
+_AppT = TypeVar("_AppT")
+_ResultT = TypeVar("_ResultT", bound=JsonValue, covariant=True, default=JsonValue)
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -109,8 +115,8 @@ _TERMINAL_TASK_STATUSES = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class TaskResultRef:
+@dataclass(frozen=True)
+class TaskResultRef(Generic[_ResultT]):
     """Stable reference to a retained successful Task result."""
 
     namespace: str
@@ -132,24 +138,30 @@ class TaskResultRef:
             raise ValueError("task result reference is invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class TaskNodeResultRef:
+@dataclass(frozen=True, init=False)
+class TaskNodeResultRef(Generic[_ResultT]):
     """An explicit result input from a scheduling dependency in this graph."""
 
     node_id: str
+
+    def __init__(self, node_id: "str | TaskNode[_ResultT]") -> None:
+        object.__setattr__(
+            self, "node_id", node_id.node_id if isinstance(node_id, TaskNode) else node_id,
+        )
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("task node result reference is invalid")
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class TaskNode:
+@dataclass(frozen=True, init=False)
+class TaskNode(Generic[_ResultT]):
     """One invocation with frozen input and explicit scheduling dependencies."""
 
     node_id: str
     dependencies: tuple[str, ...]
-    task: "TaskRef | None"
+    task: "TaskRef[_ResultT] | None"
     budget_cost: int
     expander: "TaskExpanderRef | None"
     input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
@@ -171,7 +183,7 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]" = (),
         *,
-        task: "Task | TaskRef | None" = None,
+        task: "Task[_AppT, _ResultT] | TaskRef[_ResultT] | None" = None,
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpander | TaskExpanderRef | None" = None,
@@ -211,7 +223,7 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]" = (),
         *,
-        task: "TaskRef | None",
+        task: "TaskRef[_ResultT] | None",
         input: "Mapping[str, JsonValue] | None" = None,
         original_input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
@@ -226,7 +238,7 @@ class TaskNode:
         reconcile: bool = False,
         dependency_policy: str = "all_succeeded",
         failure_policy: str = "propagate",
-    ) -> "TaskNode":
+    ) -> "TaskNode[_ResultT]":
         """Build a node whose execution contract has already been resolved."""
         value = cls.__new__(cls)
         value._initialize(
@@ -256,7 +268,7 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]",
         *,
-        task: "Task | TaskRef | None",
+        task: "Task[_AppT, _ResultT] | TaskRef[_ResultT] | None",
         input: "Mapping[str, JsonValue] | None",
         original_input: "Mapping[str, JsonValue] | None",
         budget_cost: int,
@@ -483,7 +495,7 @@ class TaskNode:
 
     @classmethod
     def wait(
-        cls,
+        cls: "type[TaskNode]",
         node_id: str,
         *,
         dependencies: "tuple[str, ...]" = (),

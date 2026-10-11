@@ -1220,21 +1220,38 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         except (AIError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-        handler_output_type = getattr(handler, "output_type", None)
-        if (
-            handler_output_type is not None
-            and node.output_type is not None
-            and _output_contract(handler, None)
-            != _output_contract(None, node.output_type)
-        ):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        output_contract = _output_contract(handler, node.output_type)
-        if node.output_contract is not None:
-            _restore_output_contract(node.output_contract)
-            if output_contract is not None and node.output_contract != output_contract:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={
+                    "graph_id": graph_id, "node_id": node.node_id,
+                    "reason": "task_input_invalid",
+                },
+            ) from error
+        try:
+            handler_output_type = getattr(handler, "output_type", None)
+            if (
+                handler_output_type is not None
+                and node.output_type is not None
+                and _output_contract(handler, None)
+                != _output_contract(None, node.output_type)
+            ):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            output_contract = dict(node.output_contract)
+            output_contract = _output_contract(handler, node.output_type)
+            if node.output_contract is not None:
+                _restore_output_contract(node.output_contract)
+                if output_contract is not None and node.output_contract != output_contract:
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                output_contract = dict(node.output_contract)
+        except AIError as error:
+            if error.code is not ErrorCode.OUTPUT_CONTRACT_INVALID:
+                raise
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                safe_details={
+                    "graph_id": graph_id, "node_id": node.node_id,
+                    "reason": "task_output_contract_invalid",
+                },
+            ) from error
         return TaskNode.from_resolved(
             node.node_id,
             node.dependencies,
