@@ -18,7 +18,14 @@ def test_web_client_preserves_identity_and_reads_fragmented_streams() -> None:
 import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
 const source=readFileSync(process.argv[1], 'utf8');
-const {modelKey,historyKey,eventKey,upsertModel,mergePage,parseSSE,readSSE,metricValue,duration,modelLabel,usageLabel,promptLayers}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {modelKey,historyKey,eventKey,upsertModel,mergePage,parseSSE,readSSE,metricValue,duration,modelLabel,usageLabel,promptLayers,clientBodyBytes,clientBodyText,clientAttemptKey}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+assert.deepEqual([...clientBodyBytes({body:'/w==',body_encoding:'base64'})],[255]);
+assert.throws(()=>clientBodyText({body:'/w==',body_encoding:'base64'}));
+assert.equal(clientBodyText({body:'',body_encoding:'base64'}),'');
+assert.equal(clientBodyText({body:null,body_encoding:'base64'}),null);
+assert.throws(()=>clientBodyText({body:'YQ==',body_encoding:'base64',content_encoding:'br',decode_error:'content_encoding_unavailable'}));
+assert.equal(clientBodyText({body:'YQ==',body_encoding:'base64',content_encoding:'gzip',decoded_text:'decoded display'}),'decoded display');
+assert.notEqual(clientAttemptKey({execution_id:'root',agent_run_seq:1,model_request_seq:1},0),clientAttemptKey({execution_id:'root',agent_run_seq:1,model_request_seq:1},1));
 const items=new Map();
 const base={execution_id:'root',agent_run_seq:1,model_request_seq:1};
 upsertModel(items,{...base,status:'SUCCEEDED',usage:{input_tokens:2}});
@@ -88,6 +95,16 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
         assert result.returncode == 0, result.stderr
+
+
+def test_web_messages_render_safe_markdown_and_stored_input() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    assets = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets"
+    script = Path(__file__).with_name("web_console_messages.mjs")
+    result = subprocess.run([node, str(script), str(assets)], capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr

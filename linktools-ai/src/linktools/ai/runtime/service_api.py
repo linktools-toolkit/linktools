@@ -34,6 +34,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..model import ModelClientRequest
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent, TaskGraphInfo
 from ._execution_context import ExecutionInputContext
 from ._input_contract import (
@@ -358,6 +359,12 @@ class ExecutionHistoryItem:
 
 @dataclass(frozen=True, slots=True)
 class ModelInteractionItem:
+    """SDK projections and independently selected original client attempts.
+
+    With client_requests_included set, None means no capture was recorded;
+    an empty tuple means the scope observed no supported client dispatch.
+    """
+
     execution_id: str
     agent_run_seq: int
     depth: int
@@ -375,6 +382,8 @@ class ModelInteractionItem:
     content_included: bool = True
     started_at: "datetime | None" = None
     finished_at: "datetime | None" = None
+    client_requests: tuple[ModelClientRequest, ...] | None = None
+    client_requests_included: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -391,6 +400,15 @@ class ModelInteractionItem:
             raise TypeError("model interaction content flag must be bool")
         if not self.content_included and (self.request or self.response is not None):
             raise ValueError("omitted model interaction content must be empty")
+        if not isinstance(self.client_requests_included, bool):
+            raise TypeError("client request content flag must be bool")
+        if not self.client_requests_included and self.client_requests is not None:
+            raise ValueError("omitted client request content must be empty")
+        if self.client_requests is not None and (
+            not isinstance(self.client_requests, tuple)
+            or any(not isinstance(value, ModelClientRequest) for value in self.client_requests)
+        ):
+            raise TypeError("client request content is invalid")
         if self.status in {"RUNNING", "INTERRUPTED"} and (
             self.started_at is None
             or self.response is not None
@@ -692,6 +710,9 @@ class ExecutionHistoryReader(Protocol):
         limit: int,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
         include_content: bool = True,
+        include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
     ) -> Page[ModelInteractionItem]: ...
 
     async def attachment_facts(
@@ -1216,6 +1237,9 @@ class ExecutionHistoryService(Protocol):
         principal: Principal,
         cursor: "str | None" = None,
         include_content: bool = False,
+        include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...
@@ -1482,6 +1506,9 @@ class ExecutionService(Protocol):
         principal: Principal,
         cursor: "str | None" = None,
         include_content: bool = False,
+        include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...

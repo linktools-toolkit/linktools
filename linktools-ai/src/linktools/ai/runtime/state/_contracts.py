@@ -547,8 +547,81 @@ class ContextProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelClientBodyRef:
+    """Original client bytes with decoded integrity and stored payload ownership."""
+
+    codec: str
+    raw_digest: str
+    raw_size: int
+    content: RuntimePayloadRef
+
+    def __post_init__(self) -> None:
+        if (
+            self.codec not in {"raw", "zlib"}
+            or not isinstance(self.raw_digest, str)
+            or len(self.raw_digest) != 64
+            or any(value not in "0123456789abcdef" for value in self.raw_digest)
+            or isinstance(self.raw_size, bool)
+            or not isinstance(self.raw_size, int)
+            or self.raw_size < 0
+            or not isinstance(self.content, RuntimePayloadRef)
+        ):
+            raise ValueError("model client body reference is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelClientResponseRef:
+    body: ModelClientBodyRef | None
+    status_code: int
+    format: str
+    content_encoding: str | None
+    complete: bool
+    capture_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.body is None and self.capture_error is None
+            or self.body is not None and not isinstance(self.body, ModelClientBodyRef)
+            or isinstance(self.status_code, bool)
+            or not isinstance(self.status_code, int)
+            or self.format not in {"json", "sse", "unknown"}
+            or self.content_encoding is not None and not isinstance(self.content_encoding, str)
+            or self.capture_error is not None and not isinstance(self.capture_error, str)
+            or not isinstance(self.complete, bool)
+            or self.complete and self.capture_error is not None
+        ):
+            raise ValueError("model client response reference is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelClientRequestRef:
+    """One observed HTTP attempt within its owning logical model request."""
+
+    api: str
+    body: ModelClientBodyRef | None
+    capture_error: str | None = None
+    response: ModelClientResponseRef | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.api, str)
+            or not self.api
+            or self.capture_error is not None and not isinstance(self.capture_error, str)
+            or (self.body is None) != (self.capture_error is not None)
+            or self.body is not None and not isinstance(self.body, ModelClientBodyRef)
+            or self.response is not None and not isinstance(self.response, ModelClientResponseRef)
+        ):
+            raise ValueError("model client request reference is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ModelInteractionRecord:
-    """Canonical lifecycle of one admitted logical model request."""
+    """Canonical lifecycle of one admitted logical model request.
+
+    client_requests is absent for uncaptured history; an empty tuple means the
+    completed observation scope saw no client dispatch. Array positions belong
+    only to actual attempts within this logical request.
+    """
 
     agent_run_id: str
     step_index: int
@@ -566,6 +639,9 @@ class ModelInteractionRecord:
     started_at: datetime
     finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
+    client_requests: tuple[ModelClientRequestRef, ...] | None = field(
+        default=None, metadata={"wire_optional": True},
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -588,8 +664,14 @@ class ModelInteractionRecord:
             or (self.request_context is None) != (self.request_envelope is None)
             or self.response_context is not None
             and not isinstance(self.response_context, ContextProjection)
+            or self.client_requests is not None and (
+                not isinstance(self.client_requests, tuple)
+                or any(not isinstance(value, ModelClientRequestRef) for value in self.client_requests)
+            )
         ):
             raise ValueError("model interaction record is invalid")
+        if self.status == "RUNNING" and self.client_requests is not None:
+            raise ValueError("unfinished model interaction cannot have client requests")
         if self.status in {"RUNNING", "INTERRUPTED"} and (
             self.response_context is not None
             or self.error_code is not None
@@ -2624,6 +2706,9 @@ __all__ = [
     "ExecutionRecord",
     "ExecutionRepository",
     "ExecutionRunSealHead",
+    "ModelClientBodyRef",
+    "ModelClientRequestRef",
+    "ModelClientResponseRef",
     "ModelInteractionRecord",
     "ExecutionStartClaim",
     "ExecutionStartReservation",

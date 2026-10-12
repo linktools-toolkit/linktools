@@ -21,6 +21,7 @@ from ..core import (
     canonical_json_bytes,
     normalize_json_value,
 )
+from ..model import ModelClientRequest
 from ..storage import StoredPayload
 from ._message import encode_model_messages
 from .state._contracts import (
@@ -96,6 +97,7 @@ class StagedModelInteraction:
     started_at: datetime
     finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
+    client_requests: tuple[ModelClientRequest, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -151,6 +153,13 @@ class StagedModelInteraction:
             StagedContextProjection,
         ):
             raise TypeError("staged response context is invalid")
+        if self.status == "RUNNING" and self.client_requests is not None:
+            raise ValueError("unfinished model interaction cannot have client requests")
+        if self.client_requests is not None and (
+            not isinstance(self.client_requests, tuple)
+            or any(not isinstance(value, ModelClientRequest) for value in self.client_requests)
+        ):
+            raise TypeError("staged client requests are invalid")
         object.__setattr__(self, "model", dict(self.model))
         normalized_attachments: list[Mapping[str, JsonValue]] = []
         for attachment in self.attachments:

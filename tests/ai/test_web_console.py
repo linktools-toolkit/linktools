@@ -88,6 +88,9 @@ async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding()
         assert (await http.options("/api/sessions", headers={"Origin": "https://evil.example", "Access-Control-Request-Headers": "x-linktools-console"})).status_code == 403
         assert (await http.post("/api/sessions", json={}, headers=_HEADERS)).status_code == 503
         assert (await http.get("/assets/missing.js")).status_code == 404
+        for asset in ("message.js", "markdown-it.js"):
+            resource = await http.get(f"/assets/{asset}")
+            assert resource.status_code == 200 and "javascript" in resource.headers["content-type"]
         assert (await http.get("/api/config", headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})).status_code == 200
 
 
@@ -201,6 +204,76 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
             assert accepted.status_code == 202
             await (await runtime.executions.get(accepted.json()["execution_id"])).wait()
             assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_independent_clients_serialize_session_admission_and_cancel_exact_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.models.function import AgentInfo
+
+    from . import _runtime_test_helpers as helpers
+
+    entered = (asyncio.Event(), asyncio.Event())
+    release = (asyncio.Event(), asyncio.Event())
+    calls = 0
+    original = helpers._runtime_usage_model
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        index = calls
+        calls += 1
+        entered[index].set()
+        await release[index].wait()
+        return await original(messages, info)
+
+    monkeypatch.setattr(helpers, "_runtime_usage_model", model)
+    async with Runtime.open("web-clients", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+        app = create_app(runtime=runtime)
+        async with client(app) as first, client(app) as second:
+            clients = (first, second)
+            created = await first.post("/api/sessions", json={"session_id": "shared", "request_id": "create"}, headers=_HEADERS)
+            assert created.status_code == 201
+            path = "/api/session/messages?session_id=shared"
+            requests = ({"prompt": "first page", "request_id": "first-page"}, {"prompt": "second page", "request_id": "second-page"})
+            try:
+                responses = await asyncio.gather(*(http.post(path, json=request, headers=_HEADERS) for http, request in zip(clients, requests)))
+                assert sorted(response.status_code for response in responses) == [202, 409]
+                winner = next(index for index, response in enumerate(responses) if response.status_code == 202)
+                loser = 1 - winner
+                assert responses[loser].json()["code"] in {"SESSION_BUSY", "SESSION_CONFLICT"}
+                owner_id = responses[winner].json()["execution_id"]
+                await asyncio.wait_for(entered[0].wait(), 10)
+                for http in clients:
+                    session = await http.get("/api/session?session_id=shared&include_timeline=false")
+                    assert session.json()["session"]["active_execution_id"] == owner_id
+                assert calls == 1
+                release[0].set()
+                await (await runtime.executions.get(owner_id)).wait()
+                rejected = await clients[loser].post(path, json=requests[loser], headers=_HEADERS)
+                assert rejected.status_code == 409 and rejected.json()["code"] == responses[loser].json()["code"]
+                admitted = await clients[loser].post(path, json={**requests[loser], "request_id": "explicit-next-attempt"}, headers=_HEADERS)
+                assert admitted.status_code == 202
+                next_id = admitted.json()["execution_id"]
+                assert next_id != owner_id
+                await asyncio.wait_for(entered[1].wait(), 10)
+                stale_stop = await clients[winner].post(f"/api/executions/{owner_id}/cancel", json={"request_id": "old-page-stop"}, headers=_HEADERS)
+                assert stale_stop.status_code == 200
+                for http in clients:
+                    session = await http.get("/api/session?session_id=shared&include_timeline=false")
+                    assert session.json()["session"]["active_execution_id"] == next_id
+                stopped = await clients[loser].post(f"/api/executions/{next_id}/cancel", json={"request_id": "current-page-stop"}, headers=_HEADERS)
+                assert stopped.status_code == 200
+                result = (await (await runtime.executions.get(next_id)).wait()).result
+                assert result.status.value == "CANCELLED"
+                for http in clients:
+                    session = await http.get("/api/session?session_id=shared&include_timeline=false")
+                    assert session.json()["session"]["active_execution_id"] is None
+                assert calls == 2
+            finally:
+                for gate in release:
+                    gate.set()
 
 
 @pytest.mark.asyncio
@@ -495,3 +568,54 @@ async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
             await (await runtime.executions.get(started.json()["execution_id"])).wait()
             closed = await http.post("/api/session/close", params={"session_id": identity}, json={"request_id": "opaque-close"}, headers=_HEADERS)
             assert closed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_recovery(
+    tmp_path: Path,
+) -> None:
+    from ._session_tool_test_helpers import _ToolModels, _application
+
+    calls: list[str] = []
+    started, release = asyncio.Event(), asyncio.Event()
+    application = _application(
+        calls, effect_policy="non_replay_safe", effect_log=tmp_path / "effects.txt",
+        started=started, release=release,
+    )
+    try:
+        async with Runtime.open(
+            "web-end-recovery", models=_ToolModels(), storage=RuntimeStorage.in_memory(),
+            capabilities=(application,),
+        ) as runtime, client(create_app(runtime=runtime)) as http:
+            session = await runtime.agents.get("default").create_session("session")
+            execution = await session.start("inspect", idempotency_key="turn")
+            await asyncio.wait_for(started.wait(), 10)
+            path = f"/api/executions/{execution.execution_id}"
+            stopped = await http.post(path + "/cancel", json={"request_id": "stop"}, headers=_HEADERS)
+            assert stopped.status_code == 200 and stopped.json()["cancelled"] is False
+            release.set()
+            assert (await http.get(path)).json()["status"] == "RECOVERY_REQUIRED"
+            before = await execution.model_interactions(include_content=True)
+            for _ in range(2):
+                accepted = await http.post(path + "/cancel", json={"request_id": "end-cancel"}, headers=_HEADERS)
+                assert accepted.status_code == 200 and accepted.json()["cancelled"] is False
+                assert (await http.get(path)).json()["status"] == "RECOVERY_REQUIRED"
+            blocked = await http.post(path + "/recover", json={"request_id": "end-recover"}, headers=_HEADERS)
+            assert blocked.status_code == 503 and blocked.json()["code"] == "TOOL_EFFECT_UNKNOWN", blocked.text
+            assert (await http.get("/api/session?session_id=session&include_timeline=false")).json()["session"]["active_execution_id"] == execution.execution_id
+            effects = (await http.get(path + "/recovery")).json()
+            resolved = await http.post(path + "/resolve", json={
+                "request_id": "resolve", "operation_id": effects[0]["operation_id"],
+                "expected_fence": effects[0]["fence"], "resolution": "applied", "result": {"confirmed": True},
+            }, headers=_HEADERS)
+            assert resolved.status_code == 200
+            for _ in range(2):
+                ended = await http.post(path + "/recover", json={"request_id": "end-recover"}, headers=_HEADERS)
+                assert ended.status_code == 202, ended.text
+                assert (await http.get(path)).json()["status"] == "CANCELLED"
+                owner = (await http.get("/api/session?session_id=session&include_timeline=false")).json()["session"]
+                assert owner["active_execution_id"] is None
+            assert calls == ["lookup"]
+            assert (await execution.model_interactions(include_content=True)).items == before.items
+    finally:
+        release.set()

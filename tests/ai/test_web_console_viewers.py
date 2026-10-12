@@ -3,6 +3,10 @@
 """HTTP inspection parity for persisted executions, sessions and metrics."""
 
 from dataclasses import replace
+import base64
+import gzip
+import json
+import zlib
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -15,12 +19,69 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.observe import MetricMeasurement, Metrics, Observation
 from linktools.ai.runtime import (
     ExecutionHistoryItem, ExecutionInfo, ExecutionTraceItem, ListExecutionRequest,
     ModelInteractionItem, SessionView, TranscriptItem, UsageSummary,
 )
 from linktools.ai.web import create_app
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", (None, "gzip", "gzip-partial", "deflate", "br", "unknown", "invalid-gzip"))
+async def test_original_client_http_view_preserves_bytes_and_decode_provenance(encoding: str | None) -> None:
+    request_body = b'{ "messages":[{"role":"developer","content":"<script>x</script>","unknown":null},{"role":"assistant","content":"","tool_calls":[{"id":"c","function":{"arguments":"{}"}}]},{"role":"tool","tool_call_id":"c","content":"result"}],"instructions":"do not invent system" }'
+    text = b'data: {"choices":[{"delta":{"content":"<img src=x onerror=alert(1)>"}}]}\n\n'
+    response_body = gzip.compress(text) if encoding == "gzip" else zlib.compress(text) if encoding == "deflate" else text
+    if encoding == "gzip-partial":
+        response_body = gzip.compress(text)[:-8]
+    content_encoding = "gzip" if encoding in {"invalid-gzip", "gzip-partial"} else encoding
+    original = ModelClientRequest("openai.chat.completions", request_body, response=ModelClientResponse(
+        response_body, 200, "sse", content_encoding, False,
+    ))
+    calls = []
+
+    class History:
+        tenant_id = "default"
+
+        async def model_interactions(self, execution_id, *, principal, cursor, limit, include_content=False, include_client_requests=False):
+            calls.append((execution_id, principal.tenant_id, include_content, include_client_requests))
+            assert not include_content and include_client_requests
+            return Page((replace(_model(1), request={}, response=None, content_included=False,
+                                 client_requests=(original,), client_requests_included=True),))
+
+    async with _client(create_app(history=History())) as http:
+        response = await http.get("/api/executions/execution/models?include_client_requests=true")
+        assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "private, no-store"
+        item, = response.json()["items"]
+        assert item["request"] == {} and item["response"] is None
+        attempt, = item["client_requests"]
+        assert attempt["body_encoding"] == "base64"
+        assert base64.b64decode(attempt["body"]) == request_body
+        assert json.loads(base64.b64decode(attempt["body"]))["messages"][1]["content"] == ""
+        observed = attempt["response"]
+        assert base64.b64decode(observed["body"]) == response_body
+        assert observed["content_encoding"] == content_encoding and not observed["complete"]
+        if encoding in {"gzip", "gzip-partial", "deflate"}:
+            assert observed["decoded_text"] == text.decode() and observed["decode_error"] is None
+        elif encoding is not None:
+            assert observed["decoded_text"] is None and observed["decode_error"]
+        else:
+            assert "decoded_text" not in observed
+        before = len(calls)
+        invalid = await http.get("/api/executions/execution/models?include_client_requests=yes")
+        assert invalid.status_code == 400 and len(calls) == before
+
+
+def test_original_empty_and_unavailable_bodies_stay_distinct_in_http_values() -> None:
+    from linktools.ai.web._app import _wire
+
+    for body, error in ((b"", None), (None, "body_unavailable")):
+        value = _wire(ModelClientRequest("openai.chat.completions", body, error))
+        assert value["body"] == (None if body is None else "")
+        assert value["capture_error"] == error
 
 
 def _client(app: object) -> httpx.AsyncClient:
@@ -444,3 +505,24 @@ async def test_metrics_summary_preserves_empty_values_and_cache_metrics() -> Non
     assert results["linktools.execution.failure_ratio"]["points"][0]["value"] is None
     assert "linktools.model.cache_read_tokens" in results
     assert "linktools.model.cache_write_tokens" in results
+
+
+@pytest.mark.asyncio
+async def test_original_client_selectors_use_existing_model_endpoint() -> None:
+    calls = []
+
+    class History:
+        tenant_id = "default"
+
+        async def model_interactions(self, execution_id, *, principal, cursor, limit, include_content=False,
+                                     include_client_requests=False, agent_run_seq=None, model_request_seq=None):
+            calls.append((execution_id, principal.tenant_id, include_content, include_client_requests,
+                          agent_run_seq, model_request_seq, limit))
+            return Page(())
+
+    async with _client(create_app(history=History())) as http:
+        response = await http.get("/api/executions/child/models?include_client_requests=true&agent_run_seq=2&model_request_seq=11&limit=1")
+        assert response.status_code == 200
+        assert calls == [("child", "default", False, True, 2, 11, 1)]
+        invalid = await http.get("/api/executions/child/models?agent_run_seq=not-a-number")
+        assert invalid.status_code == 400 and len(calls) == 1

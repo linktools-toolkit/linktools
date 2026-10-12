@@ -12,7 +12,9 @@ from .state._step_contracts import AgentRunHistoryCapture, AgentRunRecord, StepE
 
 
 class _InteractionResolver(Protocol):
-    async def resolve_model_interactions(self, interactions: Sequence[object]) -> Sequence[object]: ...
+    async def resolve_model_interactions(
+        self, interactions: Sequence[object], *, include_client_requests: bool = False, include_content: bool = True,
+    ) -> Sequence[object]: ...
 
 
 class TransientExecutionHistoryStore:
@@ -101,8 +103,12 @@ class TransientExecutionHistoryStore:
             agent_run_id=agent_run_id, after_model_request_seq=after_model_request_seq, limit=limit,
         )
 
-    async def resolve_model_interactions(self, interactions: Sequence[object]) -> Sequence[object]:
-        return await self._resolver.resolve_model_interactions(interactions)
+    async def resolve_model_interactions(
+        self, interactions: Sequence[object], *, include_client_requests: bool = False, include_content: bool = True,
+    ) -> Sequence[object]:
+        return await self._resolver.resolve_model_interactions(
+            interactions, include_client_requests=include_client_requests, include_content=include_content,
+        )
 
 
 __all__ = ["TransientExecutionHistoryStore"]
