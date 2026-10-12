@@ -204,7 +204,7 @@ if(process.argv[3]==='details') {
   assert.equal(node('inspector-active-stop').hidden,false);assert.equal(node('stop-run').hidden,true);assert.match(node('detail-attention-text').textContent,/Failed.*MODEL_ERROR/);assert.equal(node('detail-recovery').hidden,true);assert.equal(node('retry').disabled,false);
   node('run-actions').open=true;await select('#session=b');assert.equal(node('run-actions').open,false,'Changing selected run closes its actions menu');assert.equal(node('detail-attention').hidden,true);
   node('run-actions').open=true;await select('#session=a&execution=a-run');assert.equal(node('run-actions').open,false,'Explicit session/execution navigation closes the previous target actions menu');
-  await select('#view=executions&execution=a-run');await detail('overview',/Execution metadata/);assert.equal(node('session-details').hidden,true,'Standalone execution inspection cannot expose the previous conversation metadata');
+  node('run-actions').open=true;await select('#view=executions&execution=a-run');assert.equal(node('run-actions').open,false,'Same execution navigation into the independent browser closes the prior view action menu');await detail('overview',/Execution metadata/);assert.equal(node('session-details').hidden,true,'Standalone execution inspection cannot expose the previous conversation metadata');
   await select('#session=b&execution=a-run');assert.equal(node('session-details').hidden,true,'Another execution session is not the surrounding conversation');
   console.log('Details contracts passed: compact default source, summary, metadata, explicit recovery, confirmations, selected/active actions and menu focus');process.exit(0);
 }

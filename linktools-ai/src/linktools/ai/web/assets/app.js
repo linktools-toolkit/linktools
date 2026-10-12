@@ -178,7 +178,7 @@ function closeSidebar(focus=false) {
   if(focus)$('menu').focus();
 }
 function setView(view, refreshSelection=true) {
-  closeSidebar();
+  $('run-actions').open=false;closeSidebar();
   if(view!==state.view){saveDraft();++state.generation;state.nativeTimeline=null;state.filters.set(state.view,$('filter').value);$('filter').value=state.filters.get(view) || '';state.list=[];clear('list');}
   state.view=view;
   $('workspace-tools').open=false;
