@@ -32,7 +32,7 @@ from linktools.ai.task import Task, TaskGraphState
 from .test_evaluation_consumers import (
     CONTEXT, EVALUATION_COMPLETION_TIMEOUT_SECONDS, PRINCIPAL, echo, exact, rule_scorer,
 )
-from .test_evaluation_evidence_read_reuse import completed, report_count
+from .test_evaluation_evidence_read_reuse import Policy, completed, report_count
 from .test_evaluation_retention import Offline
 
 
@@ -467,11 +467,17 @@ async def test_current_window_rechecks_sources_before_returning_after_concurrent
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ("owner", "expired", "missing", "anonymous_input"))
 async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: Path, fault: str) -> None:
-    async with completed(tmp_path) as (runtime, storage, run, _scorer, policy):
+    storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
+    policy = Policy()
+    async with Runtime.open("case-read", storage=storage, models=ModelRegistry(),
+                            context=CONTEXT, authorization=policy) as runtime:
+        ref = CaseRef("dataset", "case", 1)
+        await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), (
+            CaseSpec.task(ref, input={"answer": "yes"}, expected="yes"),)),
+            principal=PRINCIPAL, idempotency_key="dataset")
         await runtime.evaluations.close()
+        policy.calls.clear()
         repository = storage.evaluation.records
-        record = await repository.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
-        ref = record.manifest.trials[0].case_ref
         principal = PRINCIPAL
         if fault == "owner":
             principal = service_principal(PRINCIPAL.tenant_id, "another-owner")
