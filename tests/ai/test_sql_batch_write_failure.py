@@ -194,7 +194,7 @@ async def test_mysql_large_replacements_preserve_individual_record_capacity(
 
     _name, command = _server
     socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
-    url = URL.create("mysql+asyncmy", username="root", database="metrics_test",
+    url = URL.create("mysql+asyncmy", username="root", database=command[-1],
                      query={"unix_socket": socket, "charset": "utf8mb4"})
     admin = create_async_engine(url, hide_parameters=True)
     engine = None
