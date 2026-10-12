@@ -9,24 +9,32 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.errors import AIError
 from linktools.ai.migrate import provision_database
+from linktools.ai.storage import SQLiteDialect, SqlStorageContext
 from linktools.ai.runtime.state._sql import SqlStateStore, _SqlTransaction
 from linktools.ai.runtime.state._store import RecordReplacement
 from tests.ai.test_state_batch_delete_backends import _digest, _record, _seed
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("executemany", (False, True))
 @pytest.mark.parametrize("failure,size", (("conflict", 2), ("conflict", 65),
                                          ("cancel", 65), ("database", 65)))
 async def test_caught_replace_failure_rolls_back_group(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, size: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, size: int, executemany: bool,
 ) -> None:
+    class Dialect(SQLiteDialect):
+        @property
+        def prefer_update_executemany(self) -> bool:
+            return executemany
+
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'replace.db'}")
     await provision_database(engine)
-    store = SqlStateStore(engine)
+    context = SqlStorageContext(engine, async_sessionmaker(engine), Dialect())
+    store = SqlStateStore(engine, context=context)
     other = SqlStateStore(engine, group=store._storage_group, store_digest=_digest("other"))
     await store.initialize()
     await other.initialize()
@@ -97,6 +105,7 @@ async def test_caught_replace_failure_rolls_back_group(
     finally:
         await other.close()
         await store.close()
+        await context.close()
         await engine.dispose()
 
 

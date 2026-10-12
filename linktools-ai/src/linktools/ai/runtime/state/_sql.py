@@ -731,38 +731,54 @@ class _SqlTransaction:
                 raise ValueError(
                     "replacement must increment storage_version exactly once"
                 )
-        from sqlalchemy import case, func, literal, tuple_, update
+        from sqlalchemy import bindparam, case, func, literal, tuple_, update
 
         table = self._table("ai_state_records")
         prepared = tuple(_record_values(value.record) for value in ordered)
+        columns = ("state", "storage_version", "lease_owner", "lease_fence",
+                   "lease_expires_at", "payload_json")
+        executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
             batch = ordered[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
             rows = prepared[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
-            versions = [(row["key_digest"], value.expected_storage_version)
-                        for row, value in zip(rows, batch)]
-            updates = {
-                column: rows[0][column] if len(rows) == 1 else case(
-                    {row["key_digest"]: literal(row[column], type_=table.c[column].type)
-                     for row in rows},
-                    value=table.c.key_digest,
-                    else_=table.c[column],
-                )
-                for column in ("state", "storage_version", "lease_owner", "lease_fence",
-                               "lease_expires_at", "payload_json")
-            }
+            parameters = None
+            if executemany:
+                statement = update(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.key_digest == bindparam("_replacement_key"),
+                    table.c.storage_version == bindparam("_replacement_expected_version"),
+                ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
+                         updated_at=func.current_timestamp())
+                parameters = [
+                    {"_replacement_key": row["key_digest"],
+                     "_replacement_expected_version": value.expected_storage_version,
+                     **{f"_replacement_{column}": row[column] for column in columns}}
+                    for row, value in zip(rows, batch)
+                ]
+            else:
+                versions = [(row["key_digest"], value.expected_storage_version)
+                            for row, value in zip(rows, batch)]
+                updates = {
+                    column: rows[0][column] if len(rows) == 1 else case(
+                        {row["key_digest"]: literal(row[column], type_=table.c[column].type)
+                         for row in rows},
+                        value=table.c.key_digest,
+                        else_=table.c[column],
+                    )
+                    for column in columns
+                }
+                statement = update(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.key_digest.in_([row["key_digest"] for row in rows]),
+                    tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                ).values(**updates, updated_at=func.current_timestamp())
             try:
-                result = await self._execute(
-                    update(table).where(
-                        table.c.store_digest == self._store_hex,
-                        table.c.key_digest.in_([row["key_digest"] for row in rows]),
-                        tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
-                    ).values(**updates, updated_at=func.current_timestamp())
-                )
+                result = await self._execute(statement, parameters)
             except BaseException as error:
                 self._abort_mutation(error)
                 raise
-            statement_count += 1
+            statement_count += len(batch) if executemany else 1
             if result.rowcount != len(batch):
                 error = AIError(ErrorCode.STORAGE_CONFLICT)
                 # A single failed CAS has not changed any record and can be retried.

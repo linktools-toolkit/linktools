@@ -33,15 +33,18 @@ async def _assert_writes(engine: AsyncEngine) -> None:
     await state.initialize(namespace="write-io", tenant_id="tenant")
     await peer.initialize(namespace="write-io", tenant_id="tenant")
     await metrics.get_observation("warmup")
-    statements: list[tuple[str, bool]] = []
+    statements: list[str] = []
 
     def capture(conn, cursor, sql, params, context, many):
         if sql.split()[0] in {"SELECT", "INSERT", "UPDATE", "DELETE"}:
-            statements.append((sql, many))
+            if many:
+                assert engine.dialect.name == "mysql" and sql.startswith("UPDATE ai_state_records")
+                statements.extend([sql] * len(params))
+            else:
+                statements.append(sql)
 
     def counted() -> Counter[str]:
-        assert not any(many for _, many in statements)
-        return Counter(sql.split()[0] for sql, _ in statements)
+        return Counter(sql.split()[0] for sql in statements)
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
@@ -85,7 +88,8 @@ async def _assert_writes(engine: AsyncEngine) -> None:
         assert counted() == {"SELECT": 1, "INSERT": 1, "UPDATE": 1}
         statements.clear()
         settled = await budgets.settle_model("scope", "request", 7)
-        assert counted() == {"SELECT": 1, "UPDATE": 1}
+        settlement_updates = 2 if engine.dialect.name == "mysql" else 1
+        assert counted() == {"SELECT": 1, "UPDATE": settlement_updates}
         statements.clear()
         assert await budgets.settle_model("scope", "request", 7) == settled
         assert counted() == {"SELECT": 1}
@@ -97,7 +101,7 @@ async def _assert_writes(engine: AsyncEngine) -> None:
         await budgets.admit_model("scope", "unknown")
         statements.clear()
         unknown = await budgets.settle_model("scope", "unknown", None)
-        assert counted() == {"SELECT": 1, "UPDATE": 1}
+        assert counted() == {"SELECT": 1, "UPDATE": settlement_updates}
         assert (unknown.total_tokens, unknown.unknown_model_requests,
                 unknown.in_flight_model_requests) == (7, 1, 0)
         with pytest.raises(AIError) as blocked:
@@ -136,18 +140,22 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
         lease_expires_at=datetime(2026, 10, 11, tzinfo=timezone.utc) if index % 2 else None,
         data={"index": index, "updated": True},
     ), 0) for index, record in enumerate(records))
-    updates: list[bool] = []
+    updates: list[int] = []
     def capture_updates(conn, cursor, sql, params, context, many):
         if sql.startswith("UPDATE ai_state_records"):
-            updates.append(many)
+            if many:
+                assert engine.dialect.name == "mysql"
+            updates.append(len(params) if many else 1)
     try:
         event.listen(engine.sync_engine, "before_cursor_execute", capture_updates)
         try:
             await store.mutate(lambda transaction: transaction.replace_records(replacements))
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture_updates)
-        assert 1 < len(updates) < len(replacements)
-        assert not any(updates), "a batch must issue set-based SQL, not per-row executemany"
+        if engine.dialect.name == "mysql":
+            assert sum(updates) == len(replacements)
+        else:
+            assert 1 < sum(updates) < len(replacements)
         actual = await store.read(lambda transaction: transaction.get_records([r.key_digest for r in records]))
         assert tuple(actual[r.key_digest] for r in records) == tuple(r.record for r in replacements)
 
