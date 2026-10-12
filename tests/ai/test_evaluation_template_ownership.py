@@ -312,14 +312,14 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["input", "graph"])
-async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: Path, route: str) -> None:
+async def test_function_task_capture_keeps_agent_shaped_business_json(route: str) -> None:
     payload = {"kind": "agent-task-input", "prompt": "business literal", "session_id": "business-session",
                "memory_scope": "business-memory", "capture_context": {"business": True}, "files": ["business-file"]}
 
     async def target(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
-    async with Runtime.open("business-json", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("business-json", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         task, scorer = Task("business.target", target, effect_policy="none"), Task("business.score", score, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input=payload),)),
@@ -338,7 +338,7 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: 
             principal=PRINCIPAL, idempotency_key="dataset")
         for mode in ("fixed_input", "reproject_input"):
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,),
-                (ScorerSpec("score", scorer.ref, (DIMENSION,)),), input_mode=mode), PRINCIPAL, mode), engine=engine)
+                (ScorerSpec("score", scorer.ref, (DIMENSION,)),), input_mode=mode, policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, mode), engine=engine)
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             trial = (await run.trials()).items[0]
             evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
@@ -352,7 +352,7 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: 
     ("template_graph", "fixed_input"), ("template_input", "fixed_input"),
 ))
 async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
-    tmp_path: Path, capture_owner: str, input_mode: str,
+    capture_owner: str, input_mode: str,
 ) -> None:
     def normalize(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         return {**value, "number": value["number"] + 1}
@@ -363,7 +363,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
     target = Task("merge.capture", echo, normalize=normalize, effect_policy="none")
     judge = Task("merge.score", score, effect_policy="none")
     scorer = ScorerSpec("score", judge.ref, (DIMENSION,))
-    async with Runtime.open("captured-case", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("captured-case", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(target, judge)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=target, input={"number": 1}),)),
             principal=PRINCIPAL, idempotency_key="source")
@@ -388,7 +388,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
         )), principal=PRINCIPAL, idempotency_key="dataset")
         candidate = CandidateSpec("candidate", graph_template=graph_target)
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,), (scorer,),
-            input_mode=input_mode), PRINCIPAL, "evaluate"), engine=engine)
+            input_mode=input_mode, policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "evaluate"), engine=engine)
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         trial = (await run.trials()).items[0]
         graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
@@ -399,7 +399,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
             CaseSpec.from_capture(CaseRef("replay", "one", 1), capture=replay_capture),
         )), principal=PRINCIPAL, idempotency_key="replay-dataset")
         replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(replay_dataset,
-            (CandidateSpec("candidate", task=target.ref),), (scorer,), input_mode="reproject_input"),
+            (CandidateSpec("candidate", task=target.ref),), (scorer,), input_mode="reproject_input", policy=EvaluationPolicy(allow_volatile=True)),
             PRINCIPAL, "reproject"), engine=engine)
         assert (await replay.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         evidence = await runtime.evaluations.read_evidence((await replay.trials()).items[0].evidence_ref, principal=PRINCIPAL)
@@ -408,7 +408,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
             template=TaskGraphTemplate((TaskNode("target", task=target, input={"number": 3}),)), outputs={"answer": "target"}))
         with pytest.raises(AIError) as rejected:
             await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (conflicting,), (scorer,),
-                input_mode=input_mode), PRINCIPAL, "conflict"), engine=engine)
+                input_mode=input_mode, policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "conflict"), engine=engine)
         assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
 
 
