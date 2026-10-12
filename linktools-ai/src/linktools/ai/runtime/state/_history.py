@@ -41,6 +41,7 @@ from ._contracts import (
 from ._history_index import (
     resolve_history_range_lazy,
 )
+from ._conversation_repositories import ConversationHistoryRepositoryImpl
 from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
@@ -1585,6 +1586,8 @@ class TranscriptRepository:
     ) -> int | None:
         if message_index < 0:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if message_index == 0:
+            return None
         block = (message_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
         record = await transaction.get_record(self._seek_key(owner_id, block))
         if record is None:
@@ -1662,26 +1665,35 @@ class TranscriptRepository:
         async def read(
             transaction: StateTransaction,
         ) -> _HistoryResolution:
-            record = await self._history_repository.get_in_transaction(
-                transaction,
-                history_id,
-                tenant_id=tenant_id,
-            )
-            if record is None:
-                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            local_messages = await self._history_repository.local_head_in_transaction(
-                transaction,
-                history_id,
-            )
-            transcript_entry = await self.get_head_in_transaction(
-                transaction,
-                history_id,
-            )
-            if transcript_entry is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            transcript_head, _transcript_record = transcript_entry
-            if transcript_head.message_count != local_messages:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                type(self._history_repository) is ConversationHistoryRepositoryImpl
+                and self._history_repository.namespace == self._namespace
+                and self._history_repository.tenant_id == self._tenant_id
+            ):
+                captured = await self._history_repository.get_with_head_in_transaction(
+                    transaction, history_id, tenant_id=tenant_id,
+                )
+                if captured is None:
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+                record, captured_head = captured
+                transcript_head = self._validate_observed_head(history_id, captured_head)
+                local_messages = transcript_head.message_count
+            else:
+                # Custom adapters and subclasses retain their scalar read semantics.
+                record = await self._history_repository.get_in_transaction(
+                    transaction, history_id, tenant_id=tenant_id,
+                )
+                if record is None:
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+                local_messages = await self._history_repository.local_head_in_transaction(
+                    transaction, history_id,
+                )
+                transcript_entry = await self.get_head_in_transaction(transaction, history_id)
+                if transcript_entry is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                transcript_head, _transcript_record = transcript_entry
+                if transcript_head.message_count != local_messages:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             inherited = record.inherited_message_count
             total = inherited + transcript_head.message_count
             if end > total:

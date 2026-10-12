@@ -69,8 +69,8 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
             assert [message.parts[0].content for message in messages] == [
                 "one", "answer:one", "two", "answer:two",
             ]
-            # One captured owner head plus its seek index; a session also resolves its history.
-            assert len(_record_selects(statements)) <= (2 if reader in {"owner", "spans"} else 3)
+            # A range from zero needs no seek; session descriptor/head share one batch.
+            assert len(_record_selects(statements)) <= 1
             # Bounded metadata, seek, and the first fact page share one checkout/transaction.
             assert len(begins) <= 1
             assert sum("FROM ai_state_facts" in statement for statement, _ in statements) <= 1
@@ -375,4 +375,202 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
         assert active_state_scope() is None
     finally:
         await other.close()
+        await state.close()
+
+
+@pytest.mark.parametrize("adapter", ("independent", "subclass"))
+@pytest.mark.parametrize("result", ("valid", "missing", "mismatched_head"))
+async def test_session_range_retains_custom_history_scalar_contract(
+    adapter: str, result: str,
+) -> None:
+    from linktools.ai.runtime.state._conversation_repositories import ConversationHistoryRepositoryImpl
+
+    state = RuntimeStorage.in_memory()
+    namespace = "transcript-custom-history"
+    await state.initialize(namespace=namespace, tenant_id="tenant")
+    try:
+        session = await state.conversation.sessions.create(_session())
+        assert session.history_id is not None
+        await _materialize(state, "first", ("one",))
+        original = state.conversation.histories
+        calls: list[str] = []
+
+        class ScalarReads:
+            async def get_in_transaction(self, transaction, history_id, *, tenant_id):
+                calls.append("get")
+                if result == "missing":
+                    return None
+                return await original.get_in_transaction(transaction, history_id, tenant_id=tenant_id)
+
+            async def local_head_in_transaction(self, transaction, history_id):
+                calls.append("head")
+                count = await original.local_head_in_transaction(transaction, history_id)
+                return count + (result == "mismatched_head")
+
+            async def get_forest_roots_in_transaction(self, transaction, head_id, *, max_roots):
+                calls.append("roots")
+                return await original.get_forest_roots_in_transaction(transaction, head_id, max_roots=max_roots)
+
+        class IndependentHistory(ScalarReads):
+            state_store = original.state_store
+
+        class CustomizedHistory(ScalarReads, ConversationHistoryRepositoryImpl):
+            pass
+
+        custom = (
+            IndependentHistory() if adapter == "independent"
+            else CustomizedHistory(original.state_store, namespace=namespace, tenant_id="tenant")
+        )
+        repository = _history.TranscriptRepository(
+            original.state_store, object_store=None, namespace=namespace,
+            tenant_id="tenant", runtime_domain=RuntimeDomain.CONVERSATION,
+            history_repository=custom,
+        )
+        stream = repository.iter_session_message_range(
+            session.history_id, tenant_id="tenant", start=0, end=2,
+        )
+        if result == "valid":
+            messages = [message async for message in stream]
+            assert [message.parts[0].content for message in messages] == ["one", "answer:one"]
+            assert calls == ["get", "head", "roots"]
+        else:
+            with pytest.raises(AIError) as error:
+                _ = [message async for message in stream]
+            assert error.value.code is (
+                ErrorCode.SESSION_HISTORY_UNAVAILABLE if result == "missing"
+                else ErrorCode.STORAGE_INTEGRITY_ERROR
+            )
+            assert calls == (["get"] if result == "missing" else ["get", "head"])
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("corruption", ("descriptor", "head", "owner", "domain", "tenant"))
+@pytest.mark.parametrize("end", (0, 2))
+async def test_batched_history_range_validates_descriptor_and_head(
+    corruption: str, end: int,
+) -> None:
+    from linktools.ai.runtime.state._contracts import TranscriptOwnerDomain
+
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="transcript-batch-integrity", tenant_id="tenant")
+    try:
+        session = await state.conversation.sessions.create(_session())
+        assert session.history_id is not None
+        await _materialize(state, "first", ("one",))
+        histories = state.conversation.histories
+        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        history_id = session.history_id
+
+        async def corrupt(transaction):
+            kind = "conversation_history" if corruption == "descriptor" else "transcript_head"
+            key = histories._key(kind, history_id)
+            stored = await transaction.get_record(key)
+            assert stored is not None
+            if corruption in {"descriptor", "head"}:
+                assert await transaction.delete_record(key, expected_storage_version=stored.storage_version)
+            else:
+                head = repository.decode_head(stored)
+                head = (
+                    replace(head, owner_id="another-history") if corruption == "owner"
+                    else replace(head, owner_domain=TranscriptOwnerDomain.EXECUTION)
+                )
+                changed = histories._stored("transcript_head", history_id, head)
+                assert await transaction.replace_record(
+                    replace(stored, data=changed.data, storage_version=stored.storage_version + 1),
+                    expected_storage_version=stored.storage_version,
+                )
+
+        if corruption != "tenant":
+            await histories.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as error:
+            _ = [message async for message in repository.iter_session_message_range(
+                history_id, tenant_id="other" if corruption == "tenant" else "tenant", start=0, end=end,
+            )]
+        assert error.value.code is (
+            ErrorCode.SESSION_HISTORY_UNAVAILABLE if corruption == "descriptor"
+            else ErrorCode.STORAGE_OWNER_MISMATCH if corruption == "tenant"
+            else ErrorCode.STORAGE_INTEGRITY_ERROR
+        )
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("start", (0, 1))
+async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="transcript-seek-hint", tenant_id="tenant")
+    try:
+        session = await state.conversation.sessions.create(_session())
+        assert session.history_id is not None
+        await _materialize(state, "first", ("one",))
+        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+
+        async def corrupt_hint(transaction):
+            key = repository._seek_key(session.history_id, 0)
+            stored = await transaction.get_record(key)
+            assert stored is not None
+            assert await transaction.replace_record(
+                replace(stored, data={"invalid_hint": True}, storage_version=stored.storage_version + 1),
+                expected_storage_version=stored.storage_version,
+            )
+
+        await repository._store.mutate(corrupt_hint)
+        messages = [message async for message in repository.iter_session_message_range(
+            session.history_id, tenant_id="tenant", start=start, end=2,
+        )]
+        assert [message.parts[0].content for message in messages] == ["one", "answer:one"][start:]
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("mismatch", ("namespace", "tenant"))
+async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="transcript-original", tenant_id="tenant")
+    try:
+        session = await state.conversation.sessions.create(_session())
+        assert session.history_id is not None
+        histories = state.conversation.histories
+        repository = _history.TranscriptRepository(
+            histories.state_store, object_store=None,
+            namespace="transcript-other" if mismatch == "namespace" else "transcript-original",
+            tenant_id="tenant-other" if mismatch == "tenant" else "tenant",
+            runtime_domain=RuntimeDomain.CONVERSATION, history_repository=histories,
+        )
+        with pytest.raises(AIError) as error:
+            _ = [message async for message in repository.iter_session_message_range(
+                session.history_id, tenant_id="tenant", start=0, end=0,
+            )]
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+async def test_history_batch_preserves_head_decode_error_priority() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="transcript-error-priority", tenant_id="tenant")
+    try:
+        session = await state.conversation.sessions.create(_session())
+        assert session.history_id is not None
+        histories = state.conversation.histories
+        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+
+        async def corrupt(transaction):
+            stored = await transaction.get_record(histories._key("transcript_head", session.history_id))
+            assert stored is not None
+            assert await transaction.delete_record(
+                stored.key_digest, expected_storage_version=stored.storage_version,
+            )
+            await transaction.insert_record(replace(
+                stored, kind="other-kind", data={**stored.data, "v": 999},
+            ))
+
+        await histories.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as error:
+            _ = [message async for message in repository.iter_session_message_range(
+                session.history_id, tenant_id="tenant", start=0, end=0,
+            )]
+        assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    finally:
         await state.close()
