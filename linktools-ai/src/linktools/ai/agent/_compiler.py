@@ -85,7 +85,14 @@ class AgentCompiler:
             raise TypeError("spec must be AgentSpec")
         model = self._models.resolve(spec.model)
         selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(spec)
-        selected_skills = self._select_exact_kind("skill", spec.allow_skills)
+        skills = {
+            candidate.id: candidate for candidate in self._candidates
+            if candidate.kind == "skill"
+        }
+        selected_skills = tuple(
+            skills[skill.id]
+            for skill in spec.select_skills(tuple(item.value.spec for item in skills.values()))
+        )
         selected_subagents = self._select_subagents(spec)
         selected_capabilities = self._select_exact_kind(
             "capability",

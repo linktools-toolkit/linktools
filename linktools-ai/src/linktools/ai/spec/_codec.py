@@ -59,6 +59,8 @@ class AgentSpecCodec:
             "tool_retries": value.tool_retries,
             "output_retries": value.output_retries,
         }
+        if "agent_type" in value.metadata:
+            payload["metadata"] = {"agent_type": value.metadata["agent_type"]}
         if value.preload_skills:
             payload["preload_skills"] = list(value.preload_skills)
         return payload
@@ -181,6 +183,8 @@ class SkillSpecCodec:
         }
         if value.description is not None:
             payload["description"] = value.description
+        if "agent_types" in value.metadata:
+            payload["metadata"] = {"agent_types": sorted(set(value.metadata["agent_types"]))}
         return payload
 
     def to_wire_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":

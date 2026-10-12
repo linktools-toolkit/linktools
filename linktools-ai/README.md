@@ -30,6 +30,26 @@ The main ownership rules are:
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
 
+## Skill applicability
+
+Agent declarations may set `metadata.agent_type` to an explicit business role.
+Skills may set `metadata.agent_types` to a non-empty array of permitted roles.
+Types match exactly; they are not inferred from Agent IDs, directories or classes.
+There is no type registry or wildcard matching. Omit Skill scope for a general
+Skill; existing declarations without these keys retain their behavior.
+
+`AgentSpec.select_skills()` resolves `allow_skills` and scope together. The compiler
+and host discovery views use this selection; runtime instructions, `list_skills`
+and `load_skill` receive the same compiled set. `allow_skills: ["*"]` omits Skills
+outside the declared type. Explicit selections and preloads outside it fail
+compilation. Agents without a declared type can select only unscoped Skills.
+
+These two metadata keys are execution semantics; changing them requires the named
+declaration's revision to change. Ordinary metadata remains non-semantic. Runtime
+recovery keeps the exact historical selected Skills and Asset version references;
+it does not reapply the current scope. New compilations use current declarations.
+Skill applicability does not restrict independent filesystem or shell access.
+
 ## Shared run budgets
 
 Use `RunBudget` at Agent, Session, or TaskGraph admission to share request/tool
