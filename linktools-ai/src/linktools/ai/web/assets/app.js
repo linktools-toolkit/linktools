@@ -1,9 +1,9 @@
 import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText} from './console.js';
-import {renderMarkdown, inputPresentation} from './message.js';
+import {renderMarkdown, inputPresentation, capturedRequest} from './message.js';
 
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
-  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, expandedRequests:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
+  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, readerSelection:null, readerRaw:false, readerCache:null, readerExpanded:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
@@ -64,13 +64,15 @@ function showError(error) {
 }
 function connection(label, failed=false) { $('connection').textContent=label==='Read-only'?label:`Observation: ${label}`; $('connection').hidden=!failed && label!=='Read-only'; $('connection').classList.toggle('error', failed); }
 function showInspector(open, focus=false) {
-  if(open && state.view==='sessions' && state.conversationMode==='original'){state.conversationMode='chat';renderConversation();}
+  const closingActivity=!open && state.view==='sessions' && state.conversationMode==='activity';
+  if(closingActivity){state.conversationMode='chat';renderPage();}
+  if(open && state.view==='sessions' && state.conversationMode==='original'){state.conversationMode='chat';renderPage();renderConversation();}
   if(state.view==='sessions')state.conversationInspectorOpen=open;
   if(state.view==='executions')open=true;
   if(!open)++state.detailGeneration;
   $('inspector').hidden=!open;$('inspector-toggle').setAttribute('aria-expanded',String(open));
   if(!open)$('run-actions').open=false;
-  if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$('inspector-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
+  if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$(closingActivity?'activity-mode':'actions-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
 function renderCurrentState() {
   const owner=state.view==='sessions'?state.session?.active_execution_id:null,info=owner===state.observedExecution?state.observedInfo:state.execution;
@@ -132,7 +134,7 @@ function setDisabled() {
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   $('run-recovery').disabled=!state.execution;
   $('detail-view').disabled=!state.execution;
-  $('native-mode').hidden=state.view!=='sessions';$('native-mode').disabled=!state.selectedExecution;
+  $('native-mode').disabled=!state.selectedExecution;$('activity-mode').disabled=!state.selectedExecution;
   $('detail-turn-picker').hidden=state.view!=='sessions';
   const needsRecovery=['RECOVERY_REQUIRED','START_UNKNOWN','CANCELLING'].includes(state.execution?.status);
   $('detail-attention').hidden=!needsRecovery && state.execution?.status!=='FAILED';
@@ -160,16 +162,20 @@ function renderPage() {
   $('page-heading').hidden=sessions && Boolean(state.selectedSession);
   $('conversations-home').hidden=sessions;
   $('conversation-view').hidden=metrics || sessions && !state.selectedSession;
-  $('conversation-column').hidden=!sessions;
+  $('conversation-column').hidden=!sessions || state.conversationMode==='activity';
+  $('conversation-nav').hidden=!sessions || !state.selectedSession;
+  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
   $('welcome').hidden=!sessions || Boolean(state.selectedSession);
   $('execution-list').hidden=!executions;
   $('browse-panel').hidden=metrics;
   (executions?$('execution-list'):$('sidebar-browse')).append($('browse-panel'));
-  $('composer').hidden=!sessions || !state.selectedSession;
+  $('composer').hidden=!sessions || !state.selectedSession || state.conversationMode!=='chat';
+  $('conversation-column').classList.toggle('reading',state.conversationMode==='original');
+  const cancelHome=$(sessions && state.conversationMode!=='chat'?'reader-actions':'composer-actions');if($('cancel').parentElement!==cancelHome)cancelHome.append($('cancel'));
   $('session-details').hidden=!sessions;
   $('inspector-close').hidden=executions;
-  $('inspector').classList.toggle('execution-page',executions);
-  if(executions)showInspector(true);
+  $('inspector').classList.toggle('execution-page',executions || sessions && state.conversationMode==='activity');
+  if(executions || sessions && state.conversationMode==='activity')showInspector(true);
   $('execution-live').hidden=!executions;
   if($('live'))clear('live');clear('execution-live');renderLive();
 }
@@ -324,7 +330,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;$('run-actions').open=false;
   closeSidebar();renderPage();
   if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
-  $('composer').hidden=!sessionId; $('conversation-title').textContent='Loading…';
+  $('conversation-title').textContent='Loading…';
   $('conversation-meta').textContent=''; clear('session-details'); if(!preserveObservation)clear('conversation'); clear('inspector-content');
   setDisabled(); renderList(); notice(state.config?.read_only ? 'Read-only mode. Start ai web with a configured model to run agents.':'');
   if (!sessionId && !executionId) return;
@@ -366,7 +372,7 @@ function renderTurnPickers() {
   for(const id of ['detail-turn','request-turn']) {
     const select=$(id);
     if(select.dataset.options!==signature){
-      select.replaceChildren();options.forEach(({id,label})=>{const option=element('option','',label);option.value=id;select.append(option);});select.dataset.options=signature;
+      select.replaceChildren();options.forEach(({id:executionId,label})=>{const option=element('option','',id==='request-turn'?label.replace(/ · (?:SUCCEEDED|FAILED|CANCELLED|STARTED|PENDING_START|START_UNKNOWN|CANCELLING|RECOVERY_REQUIRED)/,''):label);option.value=executionId;select.append(option);});select.dataset.options=signature;
     }
     select.value=state.selectedExecution || '';select.disabled=!options.length;
   }
@@ -376,7 +382,8 @@ function renderConversation({prepend=false}={}) {
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
   const follows=previousTop+container.clientHeight>=previousHeight-40, original=state.conversationMode==='original';
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
-  $('request-navigation').hidden=!original;renderTurnPickers();
+  renderTurnPickers();
+  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
   $('request-context').hidden=!original;
   if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
   if(original) {
@@ -402,7 +409,7 @@ function renderConversation({prepend=false}={}) {
   const live=element('section','turn');live.id='live';
   if(original){const preview=element('details','live-preview');preview.append(element('summary','','Live conversation preview · not the original response'),live);container.append(preview);}else container.append(live);
   renderLive(liveFocus);restoreRequestFocus(container,requestFocus);
-  container.scrollTop=prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
+  container.scrollTop=original?previousTop:prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
 }
 
 let liveRenderTimer=null;
@@ -446,7 +453,7 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
 async function selectExecution(id, generation=state.generation) {
   const executionGeneration=++state.executionGeneration,selectionChanged=id!==state.selectedExecution;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
-  if(state.nativeTimeline?.id!==id)state.nativeTimeline=null;
+  if(state.nativeTimeline?.id!==id){state.nativeTimeline=null;state.readerSelection=null;state.readerRaw=false;state.readerCache=null;state.readerExpanded.clear();}
   if(selectionChanged){$('run-actions').open=false;state.traceSelection=null;}
   state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;renderTurnPickers();setDisabled();clear('inspector-content');renderLive();
   $('execution-meta').textContent=`Loading ${id}…`;
@@ -505,37 +512,134 @@ function nativeBody(value,name,{request=false}={}) {
   full.append(summary,element('pre','json',source));
   container.append(full);return container;
 }
-function nativeInteraction(item,scope='conversation') {
-  const key=modelKey(item),expandedKey=scope+':'+key,card=element('details','detail-card model-request'),summary=element('summary');
-  card.open=state.expandedRequests.has(expandedKey);card.ontoggle=()=>{if(!card.isConnected)return;if(card.open)state.expandedRequests.add(expandedKey);else state.expandedRequests.delete(expandedKey);};
-  summary.dataset.requestFocus=key+':request';summary.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`));card.append(summary);
-  card.append(element('p','request-identity',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose} · ${modelLabel(item.model)}`));
-  if(item.usage)card.append(element('p','',usageLabel(item.usage)));
-  card.append(rawDetail({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code},'Logical request timing and identity'));
-  if(!item.client_requests_included)card.append(element('p','muted','Original client content was not requested.'));
-  else if(item.client_requests===null)card.append(element('p','muted',item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':'Original client messages were not recorded. SDK snapshots are not used to backfill them. Only the supported OpenAI Chat binding is captured; other provider APIs may be unavailable here.'));
-  else if(!item.client_requests.length)card.append(element('p','muted','No supported client dispatch was observed in this request scope. Only the OpenAI Chat binding is currently captured; SDK snapshots are not substituted.'));
-  else item.client_requests.forEach((attempt,index)=>{
-    const row=element('details','detail-card client-attempt'),key=clientAttemptKey(item,index),expandedKey=scope+':attempt:'+key;row.dataset.clientAttempt=key;
-    row.open=state.expandedRequests.has(expandedKey);row.ontoggle=()=>{if(!row.isConnected)return;if(row.open)state.expandedRequests.add(expandedKey);else state.expandedRequests.delete(expandedKey);};
-    const summary=element('summary','',`Client attempt ${index+1} · ${attempt.api}${attempt.response?' · HTTP '+attempt.response.status_code:''}`);summary.dataset.requestFocus=key+':attempt';
-    row.append(summary,element('p','muted','SDK client outbound request. Provider-server receipt is not observable here.'),nativeBody(attempt,`${key}-request.bin`,{request:true}));
-    if(attempt.response){
-      const response=attempt.response;
-      row.append(element('h4','',`Observed response · HTTP ${response.status_code} · ${response.complete?'complete':'incomplete'}`),element('p','muted',`${response.format} · ${response.content_encoding || 'identity'} · Only bytes pulled by the SDK were captured; received SSE data is not reconstructed assistant text.`),nativeBody(response,`${key}-response.bin`));
-    } else row.append(element('p','muted','No response was observed for this attempt.'));
-    card.append(row);
+function literalSource(raw, label='') {
+  const node=element('div','native-field');if(label)node.append(element('span','native-field-label',label));node.append(element('pre','native-literal',raw));return node;
+}
+function fieldCounts(node) {
+  const counts=new Map();for(const field of node.fields())counts.set(field.name,(counts.get(field.name)||0)+1);return counts;
+}
+function nativeContent(container,node) {
+  if(node.kind==='string'){container.append(element('pre',node.text?'native-text':'native-empty',node.text || 'content: empty string'));return;}
+  if(node.kind!=='array'){container.append(literalSource(node.raw,'content'));return;}
+  if(!node.items().length){container.append(element('p','native-empty','content: empty array'));return;}
+  node.items().forEach((block,index)=>{
+    const row=element('div','native-block'),types=block.fields().filter(field=>field.name==='type');
+    const type=types.length===1 && types[0].value.kind==='string'?types[0].value.text:null;
+    row.append(element('span','native-field-label',`content[${index}]${type?' · '+type:''}`));
+    if(type==='text'){
+      const counts=fieldCounts(block);
+      for(const field of block.fields()){
+        if(field.name==='type')continue;
+        if(field.name==='text' && counts.get('text')===1 && field.value.kind==='string')row.append(element('pre','native-text',field.value.text));
+        else row.append(literalSource(field.raw));
+      }
+    } else row.append(element('pre','native-literal',block.raw));
+    container.append(row);
   });
-  if(item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
-  return card;
+}
+function nativeToolCalls(container,node) {
+  if(node.kind!=='array'){container.append(literalSource(node.raw,'tool_calls'));return;}
+  if(!node.items().length){container.append(element('p','native-empty','tool_calls: empty array'));return;}
+  node.items().forEach((call,index)=>{
+    const row=element('div','native-tool'),fields=call.fields(),counts=fieldCounts(call);
+    const unique=name=>counts.get(name)===1?fields.find(field=>field.name===name)?.value:null;
+    const fn=unique('function'),id=unique('id'),type=unique('type'),members=fn?.fields() || [];
+    const member=name=>members.filter(field=>field.name===name);
+    const names=member('name'),argumentsFields=member('arguments');
+    const compact=fn?.kind==='object' && names.length===1 && names[0].value.kind==='string' && argumentsFields.length===1 && argumentsFields[0].value.kind==='string' && (!counts.has('id') || id?.kind==='string') && (!counts.has('type') || type?.kind==='string' && type.text==='function');
+    const heading=element('div','native-tool-heading');heading.append(element('span','native-field-label',`tool_calls[${index}]`));row.append(heading);
+    if(compact){
+      heading.append(element('strong','',names[0].value.text || 'name: empty string'));
+      if(id)heading.append(element('span','native-call-id',` · ${id.text || 'id: empty string'}`));
+      if(type)heading.append(element('span','native-field-label',` · ${type.text}`));
+      row.append(element('pre',argumentsFields[0].value.text?'native-literal':'native-empty',argumentsFields[0].value.text || 'arguments: empty string'));
+      for(const field of fields){
+        if(field.name==='function'){for(const extra of members.filter(value=>!['name','arguments'].includes(value.name)))row.append(literalSource(extra.raw,'function'));}
+        else if(!['id','type'].includes(field.name))row.append(literalSource(field.raw));
+      }
+    } else row.append(element('pre','native-literal',call.raw));
+    container.append(row);
+  });
+}
+
+function nativeMessages(container,projection) {
+  if(projection.root.kind!=='object' || !projection.messages.length){container.append(element('p','muted','This captured body has no messages field. Its original source is shown without inventing messages.'),element('pre','native-literal',projection.source));return;}
+  if(projection.messages.length>1)container.append(element('p','source-warning','Multiple messages fields were captured. Each field is shown separately in source order; no effective field is guessed.'));
+  projection.messages.forEach((field,group)=>{
+    if(projection.messages.length>1)container.append(element('h3','',`messages field ${group+1}`));
+    if(field.value.kind!=='array'){container.append(literalSource(field.raw,'messages is not an array'));return;}
+    if(!field.value.items().length)container.append(element('p','native-empty','messages: empty array'));
+    field.value.items().forEach((message,index)=>{
+      const row=element('article','native-message'),heading=element('div','native-role'),body=element('div','native-message-body'),fields=message.fields(),counts=fieldCounts(message),roles=fields.filter(item=>item.name==='role');
+      const role=roles.length===1 && roles[0].value.kind==='string'?roles[0].value.text:roles.length>1?'ambiguous role':roles.length?'non-string role':'role absent';
+      heading.append(element('span','',index),element('strong','',role));row.append(heading,body);
+      if(message.kind!=='object')body.append(element('pre','native-literal',message.raw));
+      else {
+        if([...counts.values()].some(count=>count>1))body.append(element('p','source-warning','Repeated field names are preserved below; no last value is selected.'));
+        if(!counts.has('content'))body.append(element('p','native-empty','content field absent'));
+        for(const item of fields){
+          if(item.name==='role' && roles.length===1 && item.value.kind==='string')continue;
+          if(counts.get(item.name)>1){body.append(literalSource(item.raw));continue;}
+          if(item.name==='content')nativeContent(body,item.value);
+          else if(item.name==='tool_calls')nativeToolCalls(body,item.value);
+          else body.append(literalSource(item.raw));
+        }
+      }
+      container.append(row);
+    });
+  });
+}
+function readerDetail(key,label,className) {
+  const detail=element('details',className),summary=element('summary','',label);
+  detail.open=state.readerExpanded.has(key);summary.dataset.requestFocus=key;
+  detail.ontoggle=()=>{if(!detail.isConnected)return;if(detail.open)state.readerExpanded.add(key);else state.readerExpanded.delete(key);};
+  detail.append(summary);return detail;
 }
 function renderNativeTimeline(container) {
   const view=state.nativeTimeline;
-  container.append(element('h3','','Original request timeline'),element('p','muted','Grouped by logical request and actual client attempt. Each input array is a complete request, not a new conversation turn.'));
+  container.classList.add('native-reader');
   if(!view || view.id!==state.selectedExecution){container.append(element('p','muted','Loading original client records…'));return;}
-  view.items.forEach(item=>container.append(nativeInteraction(item)));
-  if(view.error)container.append(element('p','muted',view.error));
-  else if(!view.items.length)container.append(element('p','muted',view.loading?'Loading original client records…':'No model request records are available.'));
+  const choices=[];
+  for(const item of view.items){
+    const attempts=item.client_requests || [];
+    if(!attempts.length)choices.push({key:modelKey(item)+':unavailable',item,attempt:null,index:0});
+    else attempts.forEach((attempt,index)=>choices.push({key:clientAttemptKey(item,index),item,attempt,index}));
+  }
+  let selected=choices.find(choice=>choice.key===state.readerSelection);
+  if(!selected && state.readerSelection?.endsWith(':unavailable'))selected=choices.find(choice=>modelKey(choice.item)+':unavailable'===state.readerSelection);
+  if(selected)state.readerSelection=selected.key;
+  if(!selected){selected=choices[0];state.readerSelection=selected?.key || null;}
+  const toolbar=element('div','native-toolbar'),label=element('label','','Request'),select=element('select');select.setAttribute('aria-label','Select model request and attempt');select.dataset.requestFocus='reader:selection';
+  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${choice.item.status} · ${choice.attempt?'Attempt '+(choice.index+1):'not captured'} · ${choice.attempt?.response?'HTTP '+choice.attempt.response.status_code:'no response'} · run ${choice.item.agent_run_seq}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
+  select.value=state.readerSelection || '';select.disabled=!selected;select.onchange=()=>{state.readerSelection=select.value;state.readerCache=null;renderNativeViews();};label.append(select);toolbar.append(label);
+  const raw=button(state.readerRaw?'Readable messages':'Raw request',async()=>{state.readerRaw=!state.readerRaw;renderNativeViews();});raw.dataset.requestFocus='reader:raw';raw.disabled=!selected?.attempt;toolbar.append(raw);
+  if(selected?.attempt?.body!=null){const download=button('Download bytes',async()=>downloadClientBody(selected.attempt,`${selected.key}-request.bin`));download.dataset.requestFocus='reader:download';toolbar.append(download);}
+  container.append(toolbar);
+  if(view.error)container.append(element('p','source-warning',view.error));
+  if(!selected)container.append(element('p','empty',view.loading?'Loading original client records…':'No records for this selection.'));
+  else {
+    const {item,attempt}=selected;
+    container.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`));
+    if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':item.client_requests===null?'Original client messages were not recorded. Only the supported OpenAI Chat binding is captured; SDK history is not used to backfill them.':'No supported client dispatch was observed. SDK snapshots are not substituted.'));
+    else {
+      try {
+        const source=clientBodyText(attempt);
+        if(source===null)throw new Error(attempt.capture_error || 'Original body unavailable');
+        if(state.readerRaw)container.append(element('pre','native-literal native-raw',source));
+        else {
+          if(state.readerCache?.source!==source){state.readerCache={source,projection:capturedRequest(source)};}
+          nativeMessages(container,state.readerCache.projection);
+          const envelope=state.readerCache.projection.fields.filter(field=>field.name!=='messages');
+          if(envelope.length){const detail=readerDetail(selected.key+':envelope','Request envelope fields','native-envelope');envelope.forEach(field=>detail.append(literalSource(field.raw)));container.append(detail);}
+        }
+      } catch(error){container.append(element('p','source-warning',`Readable messages unavailable: ${error.message}. The original request remains authoritative.`));try {const source=clientBodyText(attempt);if(source!==null)container.append(element('pre','native-literal',source));}catch{}}
+      const response=readerDetail(selected.key+':response',attempt.response?`Observed response · HTTP ${attempt.response.status_code} · ${attempt.response.complete?'complete':'incomplete'}`:'No response observed','native-response');
+      if(attempt.response)response.append(element('p','muted',`${attempt.response.format} · ${attempt.response.content_encoding || 'identity'} · Separate from this request’s input messages. Only bytes pulled by the SDK were captured.`),nativeBody(attempt.response,`${selected.key}-response.bin`));container.append(response);
+    }
+    const metadata=readerDetail(modelKey(item)+':metadata','Request timing and identity','native-envelope');metadata.append(element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    if(item.execution_id!==state.selectedExecution)container.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
+  }
+  container.append(element('p','source-note','Captured SDK-client input in original array order. Plain text preserves decoded strings; Raw request and Download bytes retain the source. Provider-server receipt is not observable here.'));
   const refresh=button('Refresh original requests',async()=>loadNativeTimeline(false,true));refresh.dataset.requestFocus='refresh';refresh.setAttribute('aria-busy',String(view.loading));container.append(refresh);
   if(view.cursor){const more=button('Load more model requests',async()=>loadNativeTimeline(true));more.dataset.requestFocus='more';more.setAttribute('aria-busy',String(view.loading));container.append(more);}
 }
@@ -631,7 +735,7 @@ async function refreshNativeRequests(view,generation) {
 async function loadDetail(more=false, selectors={}, reuseNative=false) {
   if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
-  if (!more) { state.details=[]; state.detailCursor=null; clear('inspector-content'); }
+  if (!more) { state.details=[]; state.detailCursor=null; $('inspector-content').classList.remove('native-reader');clear('inspector-content'); }
   $('detail-more').hidden=true;
   $('detail-view').value=tab;setDisabled();
   if (tab==='overview') { renderOverview(); return; }
@@ -655,7 +759,7 @@ async function loadDetail(more=false, selectors={}, reuseNative=false) {
   } catch(error) { if(generation===state.detailGeneration && selection===state.generation && id===state.selectedExecution && tab===state.tab) showError(error); }
 }
 function renderOverview() {
-  clear('inspector-content'); const info=state.execution; if (!info) return;
+  $('inspector-content').classList.remove('native-reader');clear('inspector-content'); const info=state.execution; if (!info) return;
   $('inspector-content').append(properties({Agent:info.agent_id,Kind:info.binding_kind,Session:info.session_id,Lineage:info.lineage_kind,Created:date(info.created_at),Started:date(info.started_at),Finished:date(info.terminal_at),Error:info.error_code}));
   if(info.usage) { const card=element('div','detail-card'); card.append(element('h3','','Usage'),properties({Requests:info.usage.logical_requests,'Input tokens':info.usage.input_tokens,'Output tokens':info.usage.output_tokens,'Unknown usage':info.usage.unknown_usage_requests}),rawDetail(info.usage)); $('inspector-content').append(card); }
   $('inspector-content').append(rawDetail(info,'Execution metadata'));
@@ -688,6 +792,7 @@ function traceItem(item) {
   const raw=rawDetail(item,'Original event record');raw.children[0].dataset.requestFocus=`trace:${key}:raw`;detail.append(raw);node.append(detail);return node;
 }
 function renderDetails() {
+  $('inspector-content').classList.remove('native-reader');
   const requestFocus=requestFocusWithin($('inspector-content'));
   clear('inspector-content');
   if(['history','transcript','sdkmodels'].includes(state.tab)) {
@@ -699,13 +804,11 @@ function renderDetails() {
     const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
   }
-  if(state.tab==='models' && state.nativeTimeline?.error)$('inspector-content').append(element('p','muted',state.nativeTimeline.error));
+  if(state.tab==='models'){renderNativeTimeline($('inspector-content'));restoreRequestFocus($('inspector-content'),requestFocus);return;}
   if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No durable detail is available yet. Live progress can precede committed history; refresh to check again.'));
   state.details.forEach(item=>{
     const card=element('div','detail-card');
-    if(state.tab==='models') {
-      $('inspector-content').append(nativeInteraction(item,'inspector'));return;
-    } else if(state.tab==='sdkmodels') {
+    if(state.tab==='sdkmodels') {
       card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`),element('p','muted','Framework preparation snapshot. This is not the final client message array.'));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
       if(item.request && Object.keys(item.request).length && item.content_included!==false){const layers=element('details');layers.append(element('summary','','SDK prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
@@ -1107,7 +1210,7 @@ async function openRecovery(active=false) {
 $('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
 $('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
 $('options-toggle').onclick=()=>{const open=$('composer-options').hidden;$('composer-options').hidden=!open;$('options-toggle').setAttribute('aria-expanded',String(open));};
-$('inspector-toggle').onclick=()=>{const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';showInspector(open,true);if(open)return loadDetail(false,{},reuseNative).catch(showError);};
+$('inspector-toggle').onclick=()=>{$('action-menu').open=false;const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';showInspector(open,true);if(open)return loadDetail(false,{},reuseNative).catch(showError);};
 $('inspector-close').onclick=()=>showInspector(false,true);
 $('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
 $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
@@ -1118,8 +1221,9 @@ $('detail-recovery').onclick=()=>openRecovery().catch(showError);
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
-$('native-mode').onclick=()=>{closeRunActions();showInspector(false);state.conversationMode='original';renderConversation();$('chat-mode').focus();return loadNativeTimeline().catch(showError);};
-$('chat-mode').onclick=()=>{state.conversationMode='chat';renderConversation();$('inspector-toggle').focus();};
+$('native-mode').onclick=()=>{closeRunActions();$('action-menu').open=false;state.conversationMode='original';showInspector(false);renderPage();renderConversation();$('conversation').scrollTop=0;$('native-mode').focus();return loadNativeTimeline().catch(showError);};
+$('chat-mode').onclick=()=>{$('action-menu').open=false;state.conversationMode='chat';showInspector(false);renderPage();renderConversation();($('prompt').disabled?$('chat-mode'):$('prompt')).focus();};
+$('activity-mode').onclick=()=>{closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};

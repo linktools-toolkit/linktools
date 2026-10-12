@@ -46,15 +46,22 @@ and working directory are under an optional disclosure. Successful turns do not
 repeat technical status badges or expanded diagnostics. Failures, incomplete
 responses, occupied sessions and unconfirmed cancellation remain visible.
 
-**Details** is the single entry point for the selected turn. Its **Conversation
-turn** picker names each loaded turn with time, status and execution ID, so any
-earlier turn remains inspectable. The selected identity stays explicit even when
-it differs from the active conversation owner. **Actions → Read original requests
-full width** opens a separate reading view with **Back to conversation**. Expand a logical request to inspect its ordered client
-attempts, unchanged outbound body, separately observed response and byte
-downloads. The conversation display and repeated full model input arrays are
-never interleaved as if they were one message history. Its optional live preview
-is explicitly a conversation display, not the original response bytes.
+The primary views are **Conversation**, **Model messages** and **Activity**.
+Model messages opens the selected turn's actual captured input directly: indexed
+role and content rows follow the native `messages` array order. A single request
+and attempt selector switches among loaded captures, without nested request
+cards. The turn picker names time, status and execution ID; older turns remain
+accessible and distinct from the active conversation owner. **Raw request** and
+**Download bytes** sit beside the selector. The observed response is separate
+from input messages. Repeated full input arrays are never interleaved as new
+conversation turns. The optional live preview is explicitly a conversation
+display, not the original response bytes.
+
+**Activity** opens the existing recorded event timeline in the main reading
+area. **More → Run details** contains selected-turn diagnostics and actions.
+Their turn picker shares the same explicit execution selection. Reading modes
+hide the composer; the same active Stop control remains beside the primary views.
+Returning to Conversation restores the existing draft and focuses the composer.
 
 Session occupancy comes from the active execution identity. Inspecting an older
 turn never redirects active Stop to that turn. **View active execution** returns
@@ -63,7 +70,7 @@ inspecting a different execution. Opening a diagnostic panel does not stop the
 conversation observer. Metrics is a separate page; Executions has its own run
 browser. Browser Back/Forward restores the corresponding page.
 
-- **Details** is centered on the selected turn: compact status, elapsed time and
+- **Run details** is centered on the selected turn: compact status, elapsed time and
   request/token usage stay visible, and the default body shows original model
   requests directly. A single **Inspect** selector replaces stacked tab bars.
   **All run metadata** keeps full execution/session fields and detailed usage;
@@ -86,7 +93,7 @@ browser. Browser Back/Forward restores the corresponding page.
   projection order are unchanged. Text excerpts contain only user/assistant text
   and omit other parts. Each debug view links to captured original requests
   instead of implying that its display order is the client message order.
-- **More** groups conversation rename/fork/close and recovery entry points.
+- **More** groups run details, conversation rename/fork/close and recovery entry points.
   Running work has a direct **Stop** beside Send. Recovery needs and pending
   cancellation expose **Recovery options**; explicit Resume/End choices remain
   available after confirming the previous executor has stopped. They never
@@ -125,7 +132,7 @@ released session owner. It does not resume model or tool work. Unknown outcomes
 are not reported as complete; another explicit attempt reads the current state
 before continuing. Resolve unknown external effects in **Recovery** if needed.
 
-To continue the original work instead, **Details → Inspect → Recovery & stopped work → Resume stopped execution**
+To continue the original work instead, **More → Run details → Inspect → Recovery & stopped work → Resume stopped execution**
 retains the explicit stopped-executor confirmation and may call models or tools.
 **Stop execution** remains available for a running executor. A cancellation
 request may remain `CANCELLING` until the owner finishes or the stopped-execution
@@ -181,7 +188,7 @@ original system/developer message.
 
 ### Original client sources
 
-**Model requests** in the main view and Details share the selected
+**Model messages** in the main view and Run details share the selected
 execution's paged original records. A repeated full input array belongs to its
 request; it is not presented as additional user turns. Each logical request
 retains its execution/run/request identity, purpose, step, output-retry index,
@@ -191,11 +198,25 @@ keep their original identities.
 
 The current built-in capture supports OpenAI Chat completions. It records the
 SDK client's final outbound body after adapter conversion and extra-body merging,
-not proof of provider-server receipt. The request view shows the original UTF-8
-source without JSON parsing or reserialization, retaining native roles, order,
-empty content, tool calls/results, unknown fields, large numbers and duplicate
-keys. It does not reconstruct a provider array from SDK snapshots. The OpenAI
-Responses API and other provider APIs are not claimed as captured by this binding.
+not proof of provider-server receipt. Readable rows preserve decoded string
+content as plain text, including whitespace, without Markdown or HTML rendering.
+Content blocks keep their array order; text blocks are readable, while media and
+unknown structures retain their original source fields without loading external
+resources. Standard tool calls show the captured function name/call ID and unchanged
+arguments compactly; unknown or repeated members stay literal. Tool calls stay
+under their assistant item; tool results keep their
+own array position and call ID. Empty strings, empty arrays, null and absent
+content remain distinguishable. Unknown roles and fields remain visible.
+
+The reader validates JSON syntax and locates source ranges; displayed numbers
+and unknown structures come from those ranges, never parsed-number reserialization.
+Duplicate message fields are shown separately in source order rather than merged;
+repeated member names remain literal instead of guessing an effective value.
+Malformed or unrecognized envelopes show original source with an explicit limit.
+**Raw request** preserves the complete UTF-8 source, including escapes, large
+numbers and duplicate keys. Byte downloads bypass this reading projection.
+No provider array is reconstructed from SDK snapshots. The OpenAI Responses API
+and other provider APIs are not claimed as captured by this binding.
 
 The separately labeled response is the original body observed as the SDK consumed
 it, with HTTP status, format/encoding hints and completeness. Received SSE data is
