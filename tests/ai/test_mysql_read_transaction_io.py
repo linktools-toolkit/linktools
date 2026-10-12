@@ -27,7 +27,7 @@ async def test_mysql_consistent_reads_preserve_caller_transactions(
 ) -> None:
     _, command = _server
     socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
-    url = URL.create("mysql+asyncmy", username="root", database="metrics_test", query={"unix_socket": socket})
+    url = URL.create("mysql+asyncmy", username="root", database=command[-1], query={"unix_socket": socket})
     reader = create_async_engine(url, isolation_level=isolation, skip_autocommit_rollback=skip_rollback,
                                  pool_size=1, max_overflow=0, pool_pre_ping=True)
     writer = create_async_engine(url, isolation_level="READ COMMITTED")

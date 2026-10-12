@@ -138,7 +138,7 @@ async def test_mysql_sequence_execution_preserves_batch_rollback_and_concurrency
     _, command = _server
     socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
     engine = create_async_engine(URL.create(
-        "mysql+asyncmy", username="root", database="metrics_test", query={"unix_socket": socket},
+        "mysql+asyncmy", username="root", database=command[-1], query={"unix_socket": socket},
     ))
     await provision_database(engine)
     store = SqlStateStore(engine)

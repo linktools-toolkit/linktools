@@ -152,11 +152,11 @@ async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, ba
 async def test_server_publication_batches_preserve_sql_and_replay(_server: tuple[str, list[str]]) -> None:
     name, command = _server
     if name == "postgresql":
-        url = URL.create("postgresql+asyncpg", username=getpass.getuser(), database="postgres",
+        url = URL.create("postgresql+asyncpg", username=getpass.getuser(), database=command[-1],
                          query={"host": command[command.index("-h") + 1]})
     else:
         socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
-        url = URL.create("mysql+asyncmy", username="root", database="metrics_test",
+        url = URL.create("mysql+asyncmy", username="root", database=command[-1],
                          query={"unix_socket": socket})
     engine = create_async_engine(url, isolation_level="READ COMMITTED")
     try:

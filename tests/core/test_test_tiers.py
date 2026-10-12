@@ -91,7 +91,7 @@ def test_ci_matrix_retains_new_packages_and_partitions_ai(tmp_path: Path, monkey
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
     checks = package_checks(("linktools", "linktools-ai", "linktools-new"))
     assert [(check["package"], check["group"]) for check in checks] == [
-        ("linktools", "all"), ("linktools-ai", "evaluation"),
+        ("linktools", "all"), ("linktools-ai", "evaluation-recovery"),
         ("linktools-ai", "runtime"), ("linktools-new", "all"),
     ]
     assert len({check["name"] for check in checks}) == len(checks)
@@ -102,7 +102,7 @@ def test_ci_matrix_retains_new_packages_and_partitions_ai(tmp_path: Path, monkey
 
 
 @pytest.mark.parametrize("tier", ("daily", "merge", "all"))
-@pytest.mark.parametrize("group", ("all", "evaluation", "runtime"))
+@pytest.mark.parametrize("group", ("all", "evaluation-recovery", "runtime"))
 def test_ai_groups_partition_file_families_without_changing_tiers(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, tier: str, group: str,
 ) -> None:
@@ -114,12 +114,16 @@ def test_ai_groups_partition_file_families_without_changing_tiers(
     check["paths"] = [str(pytester.path / "tests/ai"), str(pytester.path / "linktools-ai/tests")]
     monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
     families = {
-        "tests/ai/test_evaluation_new.py": "evaluation",
+        "tests/ai/test_evaluation_new.py": "evaluation-recovery",
         "tests/ai/test_new_capture.py": "runtime",
-        "tests/ai/test_captured_new.py": "evaluation",
-        "tests/ai/test_graph_capture_new.py": "evaluation",
+        "tests/ai/test_captured_new.py": "evaluation-recovery",
+        "tests/ai/test_graph_capture_new.py": "evaluation-recovery",
+        "tests/ai/test_runtime_recovery_ownership.py": "evaluation-recovery",
+        "tests/ai/test_runtime_process_recovery.py": "evaluation-recovery",
+        "tests/ai/test_keyed_execution_recovery.py": "evaluation-recovery",
+        "tests/ai/test_runtime_other.py": "runtime",
         "tests/ai/test_new_feature.py": "runtime",
-        "linktools-ai/tests/test_evaluation_local.py": "evaluation",
+        "linktools-ai/tests/test_evaluation_local.py": "evaluation-recovery",
         "linktools-ai/tests/test_local_capture.py": "runtime",
         "linktools-ai/tests/test_local_feature.py": "runtime",
         "tests/core/test_evaluation_other.py": "all",
@@ -162,7 +166,7 @@ def test_empty_ai_group_fails_instead_of_reporting_coverage(
     path = pytester.path / "tests" / "ai" / "test_runtime.py"
     path.parent.mkdir(parents=True)
     path.write_text("def test_runtime(): pass\n", encoding="utf-8")
-    result = pytester.runpytest("-q", "-p", "no:asyncio", "--test-group", "evaluation")
+    result = pytester.runpytest("-q", "-p", "no:asyncio", "--test-group", "evaluation-recovery")
     assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
 
 
@@ -184,6 +188,54 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"
     assert jobs["python"]["strategy"]["fail-fast"] is False
     assert jobs["coverage"]["name"] == "Python checks passed"
+
+
+def test_ci_pip_cache_distinguishes_installation_sets(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    steps = workflow["jobs"]["python"]["steps"]
+    setup_index = next(index for index, step in enumerate(steps) if step.get("with", {}).get("cache") == "pip")
+    patterns = steps[setup_index]["with"]["cache-dependency-path"].splitlines()
+    assert {"requirements.txt", "linktools*/linktools.yml"}.issubset(patterns)
+    (tmp_path / ".github").mkdir()
+    original_inputs = set()
+    for pattern in patterns:
+        for source in root.glob(pattern):
+            if source.is_file():
+                target = tmp_path / source.relative_to(root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+                original_inputs.add(target)
+
+    def cache_inputs() -> tuple:
+        paths = {path for pattern in patterns for path in tmp_path.glob(pattern) if path.is_file()}
+        return tuple((str(path.relative_to(tmp_path)), path.read_bytes()) for path in sorted(paths))
+
+    preparations = [step for step in steps[:setup_index]
+                    if step.get("env", {}).get("INSTALL_PACKAGES") == "${{ matrix.check.install }}"]
+    original_snapshot = cache_inputs()
+    snapshots = []
+    for packages in ("first second", "  second\tfirst first  ", "", "first"):
+        environment = dict(os.environ, INSTALL_PACKAGES=packages)
+        for step in preparations:
+            subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]],
+                           cwd=tmp_path, env=environment, check=True)
+        snapshots.append(cache_inputs())
+    assert snapshots[0] == snapshots[1]
+    assert len({snapshots[0], snapshots[2], snapshots[3]}) == 3
+
+    install = next(step for step in steps[setup_index + 1:]
+                   if step.get("env", {}).get("INSTALL_PACKAGES") == "${{ matrix.check.install }}")
+    generated_inputs = {tmp_path / path for path, _ in cache_inputs()} - original_inputs
+    stub = tmp_path / "python"
+    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    environment = dict(os.environ, INSTALL_PACKAGES="first",
+                       PATH=str(tmp_path) + os.pathsep + os.environ["PATH"])
+    subprocess.run(["bash", "-eo", "pipefail", "-c", install["run"]],
+                   cwd=tmp_path, env=environment, check=True)
+    assert not any(path.exists() for path in generated_inputs)
+    assert cache_inputs() == original_snapshot
 
 
 def test_ci_coverage_rejects_every_incomplete_dependency(tmp_path: Path) -> None:

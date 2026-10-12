@@ -1506,6 +1506,15 @@ class _LocalStdioProcess:
         await asyncio.gather(self._stderr_task, return_exceptions=True)
         try:
             await _terminate_unregistered_process(self._process, self._job)
+            stdin = self._process.stdin
+            if stdin is not None:
+                # Discard buffered input even if a detached reader retained the pipe.
+                if stdin.transport.get_write_buffer_size():
+                    stdin.transport.abort()
+                try:
+                    await stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
         except BaseException as error:
             if isinstance(error, AIError):
                 raise

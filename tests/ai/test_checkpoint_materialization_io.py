@@ -62,7 +62,7 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
 ) -> None:
     _, command = _server
     engine = create_async_engine(URL.create(
-        "postgresql+asyncpg", username=getpass.getuser(), database="postgres",
+        "postgresql+asyncpg", username=getpass.getuser(), database=command[-1],
         query={"host": command[command.index("-h") + 1]},
     ), isolation_level="READ COMMITTED")
     await provision_database(engine)

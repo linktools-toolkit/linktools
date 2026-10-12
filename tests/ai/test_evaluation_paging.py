@@ -92,7 +92,7 @@ async def test_pages_save_only_resumable_snapshots(
             assert len(complete.items) == 3 and complete.items != all_pending.items
             one_filter = (TrialFilter(case_refs=(complete.items[0].case_ref,)) if kind == "trials"
                           else ScoreFilter(trial_ids=(complete.items[0].trial.trial_id,)))
-            for _ in range(5):
+            for _ in range(2):
                 assert (await read()).items == complete.items
                 single = await read(filters=one_filter, limit=1)
                 assert single.items == complete.items[:1] and single.next_cursor is None

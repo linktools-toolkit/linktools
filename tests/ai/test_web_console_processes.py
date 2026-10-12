@@ -18,7 +18,7 @@ from linktools.ai.web import create_app
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_live_history_readback_integration import _Models
-from .test_runtime_recovery_ownership import _NAMESPACE, _RuntimeProcess, _capabilities
+from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
 from .test_web_console import _HEADERS, client
 
 

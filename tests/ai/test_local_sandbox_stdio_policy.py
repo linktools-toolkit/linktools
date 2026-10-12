@@ -292,14 +292,17 @@ async def test_host_stdio_permission_does_not_leak_between_sessions(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ("terminate", "stdin_close"))
 async def test_failed_host_stdio_process_close_retains_ownership_until_retry(
     tmp_path: Path,
     subprocess_double: tuple[MagicMock, AsyncMock, AsyncMock],
+    failure_stage: str,
 ) -> None:
     process, _spawn, stop = subprocess_double
-    terminate = stop.side_effect
+    cleanup = stop if failure_stage == "terminate" else process.stdin.wait_closed
+    original_cleanup = cleanup.side_effect
     failure = RuntimeError("process cleanup failed")
-    stop.side_effect = failure
+    cleanup.side_effect = failure
     session = await LocalSandbox(
         read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
         allow_host_stdio_with_read_policy=True,
@@ -310,12 +313,18 @@ async def test_failed_host_stdio_process_close_retains_ownership_until_retry(
             await handle.close()
         assert raised.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
         assert raised.value.__cause__ is failure
-        assert session.managed_process_ids() == frozenset({process.pid})
+        assert handle in session._stdio_processes
+        if failure_stage == "terminate":
+            assert session.managed_process_ids() == frozenset({process.pid})
+        else:
+            assert process.returncode is not None
+            assert session.managed_process_ids() == frozenset()
     finally:
-        stop.side_effect = terminate
+        cleanup.side_effect = original_cleanup
         await session.close()
     assert process.returncode is not None
     assert session.managed_process_ids() == frozenset()
+    assert not session._stdio_processes
 
 
 @pytest.mark.asyncio

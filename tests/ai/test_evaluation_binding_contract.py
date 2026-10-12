@@ -117,7 +117,7 @@ async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rerun", (False, True), ids=("frozen", "rerun"))
-async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(tmp_path: Path, rerun: bool) -> None:
+async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(rerun: bool) -> None:
     async def source(context: TaskNodeContext[None]) -> JsonValue:
         return context.input["value"]
 
@@ -131,7 +131,7 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(t
     producer = Task("consumer.captured-source", source, effect_policy="none")
     consumer = Task("consumer.captured-answer", answer, effect_policy="none")
     scorer = Task("consumer.captured-graph-score", score, effect_policy="none")
-    async with Runtime.open("captured-graph-consumers", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+    async with Runtime.open("captured-graph-consumers", models=FixtureModels(), storage=RuntimeStorage.in_memory(), context=CONTEXT) as runtime:
         engine = runtime.tasks.bind(producer, consumer, scorer)
         cases = []
         for name in ("first", "second"):
@@ -154,7 +154,7 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(t
         ))
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=template, outputs={"answer": "B"})),),
-            (rule_scorer(scorer),)), PRINCIPAL, "start-captured-graphs"), engine=engine)
+            (rule_scorer(scorer),), policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start-captured-graphs"), engine=engine)
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         trials = (await run.trials()).items

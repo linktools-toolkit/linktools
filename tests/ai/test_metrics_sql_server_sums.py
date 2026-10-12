@@ -3,16 +3,9 @@
 """Exercise database-owned chronological sums against the scan contract."""
 
 import json
-import os
-import shlex
-import shutil
 import subprocess
-import time
-from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 from linktools.ai.observe import MetricAggregation, MetricSourceKind, MetricType
@@ -23,78 +16,49 @@ from linktools.ai.observe._store import _MetricQueryPushdownPlan
 from sqlalchemy import text
 from sqlalchemy.dialects import mysql, postgresql
 
+from ._metrics_server_test_helpers import _server_database
 
-@pytest.fixture(scope="module", params=("postgresql", "mysql"))
-def _server(request: pytest.FixtureRequest) -> Iterator[tuple[str, list[str]]]:
-    name = request.param
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        pytest.skip("Server fixtures require an unprivileged local user")
-    with TemporaryDirectory(prefix="metrics-sum-") as directory:
-        root = Path(directory)
-        data = root / "data"
-        if name == "postgresql":
-            candidates = sorted(Path("/usr/lib/postgresql").glob("*/bin"), reverse=True)
-            initdb = shutil.which("initdb")
-            if initdb:
-                candidates.insert(0, Path(initdb).parent)
-            candidates = [p for p in candidates if all((p / n).is_file() for n in ("initdb", "pg_ctl", "psql"))]
-            if not candidates:
-                pytest.skip("PostgreSQL server tools are not installed")
-            binaries = candidates[0]
-            subprocess.run(
-                [str(binaries / "initdb"), "-D", str(data), "--auth=trust", "--no-locale", "--encoding=UTF8"],
-                check=True, capture_output=True, text=True, timeout=30,
-            )
-            subprocess.run(
-                [str(binaries / "pg_ctl"), "-D", str(data), "-l", str(root / "server.log"),
-                 "-w", "-t", "20", "-o", shlex.join(["-F", "-h", "", "-k", str(root)]), "start"],
-                check=True, capture_output=True, text=True, timeout=30,
-            )
-            try:
-                yield name, [str(binaries / "psql"), "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1", "-h", str(root), "-d", "postgres"]
-            finally:
-                subprocess.run(
-                    [str(binaries / "pg_ctl"), "-D", str(data), "-w", "-t", "20", "-m", "fast", "stop"],
-                    check=True, capture_output=True, text=True, timeout=30,
-                )
-        else:
-            server = shutil.which("mysqld")
-            client = shutil.which("mysql")
-            if not server or not client:
-                pytest.skip("MySQL server tools are not installed")
-            version = subprocess.run([server, "--version"], check=True, capture_output=True, text=True).stdout
-            if "MariaDB" in version:
-                pytest.skip("The MySQL query contract does not target MariaDB")
-            subprocess.run(
-                [server, "--no-defaults", "--initialize-insecure", f"--datadir={data}", f"--log-error={root / 'init.log'}"],
-                check=True, capture_output=True, text=True, timeout=60,
-            )
-            command = [client, "--no-defaults", f"--socket={root / 'mysql.sock'}", "-uroot", "--batch", "--raw", "--skip-column-names"]
-            with (root / "server-output.log").open("w") as log:
-                process = subprocess.Popen(
-                    [server, "--no-defaults", f"--datadir={data}", f"--socket={root / 'mysql.sock'}",
-                     f"--pid-file={root / 'server.pid'}", f"--log-error={root / 'server.log'}", "--skip-networking",
-                     "--mysqlx=OFF", "--innodb-buffer-pool-size=32M"],
-                    stdout=log, stderr=subprocess.STDOUT,
-                )
-                try:
-                    deadline = time.monotonic() + 30
-                    while True:
-                        ready = subprocess.run(command, input="SELECT 1;", capture_output=True, text=True, timeout=3)
-                        if ready.returncode == 0:
-                            break
-                        if process.poll() is not None or time.monotonic() >= deadline:
-                            pytest.fail((root / "server.log").read_text())
-                        time.sleep(0.1)
-                    subprocess.run(command, input="CREATE DATABASE metrics_test;", check=True, capture_output=True, text=True, timeout=5)
-                    yield name, [*command, "metrics_test"]
-                finally:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=20)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+
+def test_database_fixtures_isolate_tables_on_one_server(_server: tuple[str, list[str]]) -> None:
+    with _server_database(_server) as first, _server_database(_server) as second:
+        for (_, command), value in ((first, 1), (second, 2)):
+            subprocess.run(command, input=f"CREATE TABLE fixture_value (value INT); INSERT INTO fixture_value VALUES ({value});",
+                           check=True, capture_output=True, text=True, timeout=5)
+        for (_, command), value in ((first, 1), (second, 2)):
+            result = subprocess.run(command, input="SELECT value FROM fixture_value;",
+                                    check=True, capture_output=True, text=True, timeout=5)
+            assert result.stdout.strip() == str(value)
+
+
+@pytest.mark.parametrize("failure", ("create_ack", "body"))
+def test_database_fixture_drops_database_after_setup_failure(
+    _server: tuple[str, list[str]], monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    name, command = _server
+    run = subprocess.run
+    created: list[str] = []
+
+    def create_then_fail(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        result = run(command, **kwargs)
+        statement = kwargs.get("input", "")
+        if statement.startswith("CREATE DATABASE "):
+            created.append(statement.removeprefix("CREATE DATABASE ").removesuffix(";"))
+            if failure == "create_ack":
+                raise RuntimeError("fixture setup failed")
+        return result
+
+    monkeypatch.setattr(subprocess, "run", create_then_fail)
+    with pytest.raises(RuntimeError, match="fixture setup failed"):
+        with _server_database(_server):
+            raise RuntimeError("fixture setup failed")
+    assert created
+    query = (
+        f"SELECT COUNT(*) FROM pg_database WHERE datname = '{created[0]}';"
+        if name == "postgresql" else
+        f"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '{created[0]}';"
+    )
+    result = run(command, input=query, check=True, capture_output=True, text=True, timeout=5)
+    assert result.stdout.strip() == "0"
 
 
 def _plan() -> _MetricQueryPushdownPlan:
@@ -260,7 +224,7 @@ def test_server_sum_large_window_uses_one_source_scan(
         script += (
             "SELECT '__SOURCE_READS__';\n"
             "SELECT COUNT_FETCH FROM performance_schema.table_io_waits_summary_by_table "
-            "WHERE OBJECT_SCHEMA = 'metrics_test' AND OBJECT_NAME = 'ai_metric_observations';\n"
+            "WHERE OBJECT_SCHEMA = DATABASE() AND OBJECT_NAME = 'ai_metric_observations';\n"
         )
     script += "SELECT '__METRIC_RESULT__';\n" + result_query
     completed = subprocess.run(command, input=script, capture_output=True, text=True, timeout=45)

@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 """Captured conversation input uses the selected candidate's Agent behavior."""
 
-from pathlib import Path
-
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
 
@@ -32,7 +30,7 @@ from .test_evaluation_consumers import (
     ("task-reference", "fixed_input", "captured-graph"),
 ))
 async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
-    tmp_path: Path, source_kind: str, input_mode: str, target_kind: str,
+    source_kind: str, input_mode: str, target_kind: str,
 ) -> None:
     models = FixtureModels()
     group = CapabilityGroup("fork-candidate")
@@ -42,7 +40,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
         group.agent(name, model="default", system_prompt=prompt,
                     allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("fork-candidate", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.in_memory(), capabilities=(group,)) as runtime:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -84,7 +82,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
         )), principal=PRINCIPAL, idempotency_key="publish-fork")
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             candidates,
-            (rule_scorer(scorer),), input_mode=input_mode, policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+            (rule_scorer(scorer),), input_mode=input_mode, policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
             PRINCIPAL, "evaluate-fork"), engine=engine)
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention

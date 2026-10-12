@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
@@ -12,37 +12,10 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import AgentContext, CapabilityGroup
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page
+from linktools.ai.core import ExecutionEventType, ExecutionStatus, Page
 from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
 
-from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
-
-
-class _Models:
-    route_id = "default"
-    provider = "test"
-    model_identity = "test:live-history"
-    vision = False
-    model_digest = "a" * 64
-    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history"}
-
-    def __init__(self, model: FunctionModel) -> None:
-        self.model = model
-
-    def capture(self) -> "_Models":
-        return self
-
-    def resolve(self, route_id: str) -> "_Models":
-        assert route_id == "default"
-        return self
-
-    def restore(self, payload: Mapping[str, JsonValue], *, route_id: str | None = None) -> "_Models":
-        assert route_id in {None, "default"}
-        assert dict(payload) == self.contract
-        return self
-
-    def materialize(self) -> FunctionModel:
-        return self.model
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 
 
 def _contents(items: tuple[ExecutionHistoryItem, ...]) -> list[tuple[object, ...]]:
