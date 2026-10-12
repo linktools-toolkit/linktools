@@ -42,6 +42,7 @@ from .service_api import (
     ModelInteractionItem,
     Page,
     RetryExecutionRequest,
+    SessionDetail,
     SessionHistoryItem,
     SessionTurn,
     SessionView,
@@ -293,6 +294,11 @@ class RuntimeSessions(Generic[AppT]):
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         self._ensure_open()
         return await self._service.reconcile(session_id, principal=principal)
+
+    async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> SessionDetail:
+        """Reconcile admission and refresh the session with its timeline page."""
+        self._ensure_open()
+        return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         return await self._service.list(request)

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared read-only Session timeline projection."""
+"""Session timeline capture, coordinated refresh, and read-only projection."""
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
@@ -217,11 +217,17 @@ _TimelineBlocks = tuple[tuple[SessionRecord, tuple[SessionTurnRef, ...]], ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _TimelineState:
+class SessionTimelineCapture:
+    root: SessionRecord
     blocks: _TimelineBlocks
     next_coordinate: tuple[str, int] | None
     executions: Mapping[str, ExecutionRecord]
     commits: dict[tuple[str, int], SessionTurnCommitRef]
+
+
+class _ActiveSessionAdmission(Exception):
+    def __init__(self, record: SessionRecord) -> None:
+        self.record = record
 
 
 async def _capture_timeline_state(
@@ -233,29 +239,39 @@ async def _capture_timeline_state(
     cursor: str | None,
     cursor_signer: CursorSigner,
     limit: int,
-) -> _TimelineState:
+    refresh_phase: Literal["initial", "final"] | None = None,
+    transcript_store: SessionTimelineTranscriptStore | None = None,
+) -> SessionTimelineCapture:
     session_store = conversation.sessions.state_store
     execution_store = executions.state_store
 
     async def blocks_in_transaction(
         _transaction: StateTransaction,
-    ) -> tuple[_TimelineBlocks, tuple[str, int] | None]:
+    ) -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
         root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
         if root is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if refresh_phase == "initial" and root.active_execution_id is not None:
+            # Admission coordination must leave this scope before validation or I/O.
+            raise _ActiveSessionAdmission(root)
+        if refresh_phase is not None and transcript_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        page_limit = validate_page_limit(limit)
         coordinate = _decode_timeline_cursor(
             cursor, tenant_id=tenant_id, session_id=session_id, signer=cursor_signer,
         )
-        return await _timeline_blocks(
-            conversation, root, coordinate=coordinate, limit=limit,
+        blocks, next_coordinate = await _timeline_blocks(
+            conversation, root, coordinate=coordinate, limit=page_limit,
         )
+        return root, blocks, next_coordinate
 
     async def execution_records(
-        blocks: _TimelineBlocks,
+        root: SessionRecord, blocks: _TimelineBlocks,
     ) -> Mapping[str, ExecutionRecord]:
-        ids = tuple(dict.fromkeys(
-            ref.execution_id for _record, refs in blocks for ref in refs
-        ))
+        ids = tuple(ref.execution_id for _record, refs in blocks for ref in refs)
+        if refresh_phase is not None and root.active_execution_id is not None:
+            ids += (root.active_execution_id,)
+        ids = tuple(dict.fromkeys(ids))
         if not ids:
             return {}
         records = await executions.get_many(ids, tenant_id=tenant_id)
@@ -280,23 +296,51 @@ async def _capture_timeline_state(
         return commits
 
     if session_store.storage_group is execution_store.storage_group:
-        async def read(group: StateGroupTransaction) -> _TimelineState:
-            blocks, next_coordinate = await blocks_in_transaction(
+        async def read(group: StateGroupTransaction) -> SessionTimelineCapture:
+            root, blocks, next_coordinate = await blocks_in_transaction(
                 group.transaction(session_store)
             )
-            records = await execution_records(blocks)
+            records = await execution_records(root, blocks)
             commits = await commit_records(blocks)
-            return _TimelineState(blocks, next_coordinate, records, commits)
+            return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
 
         return await session_store.storage_group.read_many(
             (session_store, execution_store), read,
         )
 
     # Separate routes keep their own snapshots; no cross-database scope is implied.
-    blocks, next_coordinate = await session_store.read(blocks_in_transaction)
-    records = await execution_records(blocks)
+    root, blocks, next_coordinate = await session_store.read(blocks_in_transaction)
+    records = await execution_records(root, blocks)
     commits = await session_store.read(lambda _transaction: commit_records(blocks))
-    return _TimelineState(blocks, next_coordinate, records, commits)
+    return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+
+
+async def capture_session_refresh(
+    conversation: ConversationRepositories,
+    executions: ExecutionRepository,
+    session_id: str,
+    *,
+    tenant_id: str,
+    cursor: str | None,
+    cursor_signer: CursorSigner,
+    limit: int,
+    reconcile: Callable[[SessionRecord], Awaitable[SessionRecord]],
+    transcript_store: SessionTimelineTranscriptStore | None,
+) -> SessionTimelineCapture:
+    """Capture authorized metadata, reconciling admission once outside read scopes."""
+    try:
+        return await _capture_timeline_state(
+            conversation, executions, session_id, tenant_id=tenant_id,
+            cursor=cursor, cursor_signer=cursor_signer, limit=limit,
+            refresh_phase="initial", transcript_store=transcript_store,
+        )
+    except _ActiveSessionAdmission as admission:
+        await reconcile(admission.record)
+    return await _capture_timeline_state(
+        conversation, executions, session_id, tenant_id=tenant_id,
+        cursor=cursor, cursor_signer=cursor_signer, limit=limit,
+        refresh_phase="final", transcript_store=transcript_store,
+    )
 
 
 async def project_session_timeline(
@@ -324,6 +368,22 @@ async def project_session_timeline(
         tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
         limit=limit,
     )
+    return await project_captured_session_timeline(
+        state, transcript_store, cursor_signer, session_id=session_id,
+        tenant_id=principal.tenant_id, transcript_tenant_id=conversation.sessions.tenant_id,
+    )
+
+
+async def project_captured_session_timeline(
+    state: SessionTimelineCapture,
+    transcript_store: SessionTimelineTranscriptStore,
+    cursor_signer: CursorSigner,
+    *,
+    session_id: str,
+    tenant_id: str,
+    transcript_tenant_id: str,
+) -> Page[SessionTurn]:
+    """Load transcript bodies after the captured metadata scope has closed."""
     blocks = state.blocks
     next_coordinate = state.next_coordinate
     refs = tuple(ref for _record, values in blocks for ref in values)
@@ -354,7 +414,7 @@ async def project_session_timeline(
                     async for item in transcript_store.iter_conversation_message_range(
                         history_id=record.history_id,
                         agent_run_id=record.continuation.agent_run_id,
-                        tenant_id=conversation.sessions.tenant_id,
+                        tenant_id=transcript_tenant_id,
                         start=range_start,
                         end=range_end,
                     )
@@ -405,7 +465,7 @@ async def project_session_timeline(
         None
         if next_coordinate is None
         else _timeline_cursor(
-            tenant_id=principal.tenant_id,
+            tenant_id=tenant_id,
             session_id=session_id,
             source_session_id=next_coordinate[0],
             before_turn_seq=next_coordinate[1],
@@ -415,4 +475,10 @@ async def project_session_timeline(
     return Page(tuple(turns), next_cursor)
 
 
-__all__ = ["SessionTimelineTranscriptStore", "project_session_timeline"]
+__all__ = [
+    "SessionTimelineCapture",
+    "SessionTimelineTranscriptStore",
+    "capture_session_refresh",
+    "project_captured_session_timeline",
+    "project_session_timeline",
+]
