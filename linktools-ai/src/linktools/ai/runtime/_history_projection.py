@@ -67,6 +67,10 @@ from .state._contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
+from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._model_interaction_store import ModelInteractionStateStepArchive
+from .state._step_archive import StateStepArchive
+from .state._store import StateGroupTransaction
 from .state._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunHistoryCapture,
@@ -503,6 +507,36 @@ class StepExecutionHistoryReader:
         )
         return Page(selected, next_cursor)
 
+    async def capture_authorized_model_interaction_cutoffs(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+    ) -> ModelInteractionReadBoundary:
+        """Read the service's post-authorization record with its model metadata."""
+        async def read() -> ModelInteractionReadBoundary:
+            record = await executions.get(execution_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+                return await self.capture_model_interaction_cutoffs(
+                    execution_id, tenant_id=tenant_id,
+                )
+            return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+
+        # Only known metadata-only owners can safely share the read callback.
+        if (executions is self._executions
+                and type(executions) is ExecutionRepositoryImpl
+                and type(self._store) in (StateStepArchive, ModelInteractionStateStepArchive)):
+            execution_store = executions.state_store
+            history_store = self._store.state_store
+            if execution_store.storage_group is history_store.storage_group:
+                async def capture(_group: StateGroupTransaction) -> ModelInteractionReadBoundary:
+                    return await read()
+
+                return await execution_store.storage_group.read_many(
+                    (execution_store, history_store), capture,
+                )
+        # Separate routes and custom owners retain independent reads.
+        return await read()
+
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionReadBoundary:
@@ -510,6 +544,11 @@ class StepExecutionHistoryReader:
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+
+    async def _capture_model_interaction_cutoffs(
+        self, execution_id: str, record: ExecutionRecord, *, tenant_id: str,
+    ) -> ModelInteractionReadBoundary:
         if record.agent_run_seq < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         run_ids = tuple(make_agent_run_id(
