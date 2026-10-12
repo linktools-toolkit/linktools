@@ -1395,14 +1395,14 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             def __call__(self, parser, namespace, values, option_string=None):
                 if option_string in self.option_strings:
                     value = not option_string.startswith("--no-")
-                    self.command.environ.logging.set_show_time(value)
+                    environ.logging.set_show_time(value)
 
         class LogLevelAction(BooleanOptionalAction):
 
             def __call__(self, parser, namespace, values, option_string=None):
                 if option_string in self.option_strings:
                     value = not option_string.startswith("--no-")
-                    self.command.environ.logging.set_show_level(value)
+                    environ.logging.set_show_level(value)
 
         group = parser.add_argument_group(title="log options")
         group.add_argument(f"{prefix}{prefix}verbose", action=VerboseAction, nargs=0, const=True, dest=SUPPRESS,

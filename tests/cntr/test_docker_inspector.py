@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DockerInspector: Compose project container-id listing (``compose ps
+"""DockerInspector: Compose project container-id listing (``docker container ls
 --quiet``) followed by a batch ``docker inspect``, service -> logical-
 container mapping, disappearance-race recovery, and version probes. Uses
 fake CommandResult/process stand-ins for `docker`/`docker compose` output
@@ -28,7 +28,7 @@ def inspector(fresh_manager, monkeypatch):
 
 
 def _stub_ids(monkeypatch, manager, stdout, returncode=0):
-    result = CommandResult(args=("docker", "compose", "ps"), returncode=returncode,
+    result = CommandResult(args=("docker", "container", "ls"), returncode=returncode,
                            stdout=stdout, stderr="", duration=0.01)
     monkeypatch.setattr(manager.structured_runner, "execute_text", lambda *a, **k: result)
 
@@ -75,16 +75,24 @@ def _stub_dispatched(monkeypatch, manager, ps_stdout, dispatch):
     monkeypatch.setattr(manager.structured_runner, "execute_json", fake_execute_json)
 
 
-# -- container id parsing (`compose ps --quiet`) ------------------------------
+# -- container id parsing (`docker container ls --quiet`) ------------------------------
 
-def test_empty_containers_returns_empty_state_without_touching_process(inspector, monkeypatch):
+def test_explicit_empty_services_returns_empty_state_without_touching_process(inspector, monkeypatch):
     def fail(*a, **k):
-        raise AssertionError("must not attempt to create a process for an empty container list")
+        raise AssertionError("must not attempt to create a process for an empty service selection")
 
-    monkeypatch.setattr(inspector.manager.runtime, "create_docker_compose_process", fail)
-    state = inspector.get_project_state([])
+    monkeypatch.setattr(inspector.manager.runtime, "create_docker_process", fail)
+    state = inspector.get_project_state([], services=())
     assert state.services == ()
     assert state.running_container_names == []
+
+
+def test_empty_installed_containers_still_inspects_project_orphans(inspector, fresh_manager, monkeypatch):
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item(service="retired")])
+    state = inspector.get_project_state([])
+    assert state.running_services == {"retired"}
+    assert state.services[0].logical_containers == ()
 
 
 def test_empty_id_output_is_empty_project(inspector, fresh_manager, monkeypatch):
@@ -114,15 +122,109 @@ def test_multiple_ids_are_inspected(inspector, fresh_manager, monkeypatch):
     assert {s.service for s in state.services} == {"nginx", "extra"}
 
 
+@pytest.mark.parametrize("host_key,compose_key", [
+    ("NetworkMode", "network_mode"), ("IpcMode", "ipc"), ("PidMode", "pid"),
+])
+@pytest.mark.parametrize("reference", ["id", "runtime_name"])
+def test_namespace_bindings_use_exact_same_project_runtime_identity(
+        inspector, fresh_manager, monkeypatch, host_key, compose_key, reference):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    provider = dict(_item(name="/aio-db-1", service="db"), Id="a" * 64, HostConfig={})
+    identity = provider["Id"] if reference == "id" else "aio-db-1"
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={host_key: "container:" + identity})
+    calls = []
+    _stub_dispatched(monkeypatch, fresh_manager, provider["Id"] + "\n" + consumer["Id"],
+                     lambda ids: calls.append(ids) or [consumer, provider])
+
+    state = inspector.get_project_state([owner])
+
+    services = {item.service: item for item in state.services}
+    assert services["worker"].namespace_bindings == {compose_key: "service:db"}
+    assert services["db"].namespace_bindings == {}
+    assert calls == [[provider["Id"], consumer["Id"]]]
+
+
+def test_volume_bindings_preserve_access_mode_and_resolve_runtime_names(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    provider = dict(_item(name="/aio-db-1", service="db"), Id="a" * 64, HostConfig={})
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={"VolumesFrom": [provider["Id"] + ":ro", "aio-db-1:rw", "external-owner:ro"]})
+    _stub_ids(monkeypatch, fresh_manager, provider["Id"] + "\n" + consumer["Id"])
+    _stub_inspect(monkeypatch, fresh_manager, [provider, consumer])
+
+    state = inspector.get_project_state([owner])
+
+    assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
+        "volumes_from": ["db:ro", "db:rw", "container:external-owner:ro"],
+    }
+
+
+def test_oneoff_namespace_identity_is_not_rebound_to_regular_service(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    maintenance = dict(_item(name="/aio-db-run", service="db"), Id="a" * 64)
+    maintenance["Config"]["Labels"]["com.docker.compose.oneoff"] = "True"
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={"NetworkMode": "container:" + maintenance["Id"],
+                                "VolumesFrom": ["aio-db-run:ro"]})
+    _stub_ids(monkeypatch, fresh_manager, maintenance["Id"] + "\n" + consumer["Id"])
+    _stub_inspect(monkeypatch, fresh_manager, [maintenance, consumer])
+    state = inspector.get_project_state([owner])
+    assert len(state.services) == 2
+    assert state.existing_services == {"worker"}
+    assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
+        "network_mode": "container:" + maintenance["Id"],
+        "volumes_from": ["container:aio-db-run:ro"],
+    }
+
+
+@pytest.mark.parametrize("reference", ["foreign_id", "foreign_name", "removed_id", "id_prefix", "service_name"])
+def test_namespace_bindings_never_guess_foreign_or_unknown_providers(
+        inspector, fresh_manager, monkeypatch, reference):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    provider = dict(_item(name="/aio-db-1", service="db"), Id="a" * 64)
+    foreign = dict(_item(name="/foreign-db-1", project="foreign", service="db"), Id="c" * 64)
+    identity = {"foreign_id": foreign["Id"], "foreign_name": "foreign-db-1", "removed_id": "d" * 64,
+                "id_prefix": provider["Id"][:12], "service_name": "db"}[reference]
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={"NetworkMode": "container:" + identity, "IpcMode": "container:" + identity,
+                                "PidMode": "container:" + identity, "VolumesFrom": [identity + ":ro"]})
+    calls = []
+    ids = [provider["Id"], consumer["Id"], foreign["Id"]]
+    _stub_dispatched(monkeypatch, fresh_manager, "\n".join(ids),
+                     lambda batch: calls.append(batch) or [provider, consumer, foreign])
+
+    state = inspector.get_project_state([owner])
+
+    assert {item.service for item in state.services} == {"db", "worker"}
+    assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
+        "network_mode": "container:" + identity,
+        "ipc": "container:" + identity,
+        "pid": "container:" + identity,
+        "volumes_from": ["container:" + identity + ":ro"],
+    }
+    assert calls == [ids]
+
+
+def test_absent_host_config_does_not_claim_observed_empty_namespaces(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["nginx", "extra"])
+    _stub_ids(monkeypatch, fresh_manager, "a" * 64 + "\n" + "b" * 64)
+    _stub_inspect(monkeypatch, fresh_manager, [dict(_item(), Id="a" * 64),
+        dict(_item(name="/aio-extra", service="extra"), Id="b" * 64, HostConfig={})])
+
+    services = {item.service: item for item in inspector.get_project_state([owner]).services}
+
+    assert services["nginx"].namespace_bindings is None
+    assert services["extra"].namespace_bindings == {}
+
+
 def test_duplicate_ids_are_deduped_stably(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])
     seen_ids = []
     real_create_docker_process = fresh_manager.runtime.create_docker_process
 
     def fake_create_docker_process(*args, **kwargs):
-        # create_docker_compose_process() itself routes through
-        # create_docker_process("compose", ...) to build the ps --quiet
-        # process -- only the "inspect" invocation is under test here.
+        # Listing and inspection share the Docker process builder.
         if args and args[0] == "inspect":
             seen_ids.append([a for a in args if a not in ("inspect", "--type", "container")])
             return _FakeProcess(args)
@@ -154,9 +256,9 @@ def test_inspector_builds_real_commands_without_launching_processes(inspector, f
     monkeypatch.setattr("linktools.cntr.runtime.process.popen", fail)
     inspector.get_project_state([nginx])
 
-    assert commands[0][:2] == ("docker", "compose")
-    assert "--file" in commands[0]
-    assert commands[0][-3:] == ("ps", "--all", "--quiet")
+    assert commands[0] == ("docker", "container", "ls", "--all", "--quiet", "--no-trunc",
+                           "--filter", "label=com.docker.compose.project=aio",
+                           "--filter", "label=com.docker.compose.config-hash")
     assert commands[1] == ("docker", "inspect", "--type", "container", "abc123abc123")
 
 
@@ -178,11 +280,11 @@ def test_invalid_id_line_raises_output_error(inspector, fresh_manager, monkeypat
         inspector.get_project_state([nginx])
 
 
-def test_ps_quiet_failure_raises_unavailable(inspector, fresh_manager, monkeypatch):
+def test_container_listing_failure_raises_unavailable(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])
 
     def raise_error(*a, **k):
-        raise StructuredCommandError("compose ps failed")
+        raise StructuredCommandError("container listing failed")
 
     monkeypatch.setattr(fresh_manager.structured_runner, "execute_text", raise_error)
     with pytest.raises(RuntimeInspectionUnavailable):
@@ -460,6 +562,23 @@ def test_running_container_names_excludes_fully_stopped_container(inspector, fre
     assert state.running_container_names == []
 
 
+def test_initial_service_views_use_actual_running_replicas_and_return_separate_maps(inspector, fresh_manager, monkeypatch):
+    nginx = _service_container(fresh_manager, "nginx", ["nginx", "stopped"])
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n012345abcdef\n")
+    live = dict(_item(status="RUNNING"), Image="sha256:live")
+    stopped_replica = dict(_item(status="exited"), Image="sha256:stopped-replica")
+    stopped_service = dict(_item(service="stopped", status="exited"), Image="sha256:stopped")
+    _stub_inspect(monkeypatch, fresh_manager, [live, stopped_replica, stopped_service])
+    state = inspector.get_project_state([nginx])
+    assert state.existing_services == {"nginx", "stopped"}
+    assert state.running_services == {"nginx"}
+    assert state.running_images == {"nginx": "sha256:live"}
+    assert state.image_ids["stopped"] == "sha256:stopped"
+    changed = state.running_images
+    changed["nginx"] = "mutated"
+    assert state.running_images == {"nginx": "sha256:live"}
+
+
 def test_project_and_backend_are_from_manager(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])
     _stub_ids(monkeypatch, fresh_manager, "")
@@ -567,3 +686,107 @@ def test_validate_compose_uses_config_args_quiet(inspector, fresh_manager, monke
                         lambda *a, **k: CommandResult(args=(), returncode=0, stdout="", stderr="", duration=0.0))
     inspector.validate_compose([nginx])
     assert recorded[0] == ("config", "--quiet")
+
+
+def test_service_filter_limits_listing_and_preserves_all_replicas(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["web", "db"])
+    commands = []
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process",
+                        lambda *args, **kwargs: commands.append(args) or _FakeProcess(args))
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item(name="/web-1", service="web"),
+                                             _item(name="/web-2", service="web")])
+    state = inspector.get_project_state([owner], services=("web", "web"))
+    assert commands[:1] == [("container", "ls", "--all", "--quiet", "--no-trunc",
+                         "--filter", "label=com.docker.compose.project=aio",
+                         "--filter", "label=com.docker.compose.config-hash",
+                         "--filter", "label=com.docker.compose.service=web")]
+    assert [item.runtime_name for item in state.services] == ["web-1", "web-2"]
+
+
+def test_retained_unknown_service_uses_project_discovery_then_label_filter(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["web"])
+    commands = []
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process",
+                        lambda *args, **kwargs: commands.append(args) or _FakeProcess(args))
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item(service="web"), _item(service="retired")])
+    state = inspector.get_project_state([owner], services=("retired",))
+    assert commands[:1] == [("container", "ls", "--all", "--quiet", "--no-trunc",
+                         "--filter", "label=com.docker.compose.project=aio",
+                         "--filter", "label=com.docker.compose.config-hash")]
+    assert [item.service for item in state.services] == ["retired"]
+
+
+def test_empty_service_filter_does_not_inspect(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["web"])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("empty selection must not inspect")
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", unexpected)
+    assert inspector.get_project_state([owner], services=()).services == ()
+
+
+def test_multiple_services_filter_union_without_compose_render(inspector, fresh_manager, monkeypatch):
+    statuses = ("running", "exited", "created", "dead")
+    owner = _service_container(fresh_manager, "nginx", ["web", "db"])
+    commands = []
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process",
+                        lambda *args, **kwargs: commands.append(args) or _FakeProcess(args))
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process",
+                        lambda *a, **k: pytest.fail("Runtime discovery must not render Compose"))
+    _stub_ids(monkeypatch, fresh_manager, "\n".join(letter * 64 for letter in "abcd"))
+    items = [_item(name="/" + name, service=name, status=status)
+             for name, status in zip(("web", "retired", "db", "job"), statuses)]
+    items[1]["Config"]["Labels"]["com.docker.compose.oneoff"] = "True"
+    _stub_inspect(monkeypatch, fresh_manager, items)
+
+    state = inspector.get_project_state([owner], services=("web", "retired", "job"))
+
+    assert [item.service for item in state.services] == ["web", "retired", "job"]
+    assert [item.state for item in state.services] == ["running", "exited", "dead"]
+    assert state.services[1].labels["com.docker.compose.oneoff"] == "True"
+    assert commands[0] == ("container", "ls", "--all", "--quiet", "--no-trunc",
+                           "--filter", "label=com.docker.compose.project=aio",
+                           "--filter", "label=com.docker.compose.config-hash")
+    assert len(commands) == 2
+
+
+@pytest.mark.parametrize("count", [1, 20])
+def test_up_discovers_runtime_without_compose_ps(tmp_path, count):
+    from types import SimpleNamespace
+    from test_lifecycle_rebuild import setup_case
+    from linktools.cntr.runtime.compose import ComposeRunner
+
+    names = tuple("app" + str(index) for index in range(count))
+    manager = setup_case(tmp_path, [("app", {name: {"image": name + ":old"} for name in names})],
+                         running=names)
+    manager.container_type = "docker"
+    commands = []
+    manager.runtime = SimpleNamespace(create_docker_process=lambda *args, **kwargs: args)
+    ids = tuple(format(index + 1, "064x") for index in range(count))
+    items = [dict(_item(name="/" + name, project="test", service=name), Id=identity,
+                  Image="sha256:old-" + name) for name, identity in zip(names, ids)]
+
+    def execute_text(args, **kwargs):
+        commands.append(args)
+        assert args[:2] == ("container", "ls")
+        return CommandResult(args=args, returncode=0, stdout="\n".join(ids), stderr="", duration=0.0)
+
+    def execute_json(args, **kwargs):
+        commands.append(args)
+        assert args[:3] == ("inspect", "--type", "container")
+        return items
+
+    manager.structured_runner = SimpleNamespace(execute_text=execute_text, execute_json=execute_json)
+    manager.docker_inspector = DockerInspector(manager)
+    manager.compose_runner.wait_services_ready = ComposeRunner(manager).wait_services_ready
+
+    manager.compose_operations.up(["app"])
+
+    assert [args[:2] for args in commands] == [
+        ("container", "ls"), ("inspect", "--type"),
+        ("container", "ls"), ("inspect", "--type"),
+    ]
+    assert all("compose" not in args for args in commands)

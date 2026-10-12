@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Plan and Doctor are documented read-only (review P1-11): they must never
 write a Dockerfile/compose file, mutate the Artifact Index, run a
-container's on_prepare(), or touch any other persistent/generated state --
+container's startup callbacks, or touch any other persistent/generated state --
 regardless of scan/render order. Every real write entry point is stubbed to
 fail loudly if called at all.
 """
@@ -48,11 +48,9 @@ def _install_write_guards(manager, monkeypatch):
     from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", guard("lifecycle callback"))
 
-    def container_on_prepare_guard(self, *a, **k):
-        raise _WriteAttempted("BaseContainer.on_prepare must not be called by a read-only Plan/Doctor pass")
-
     from linktools.cntr.container import BaseContainer
-    monkeypatch.setattr(BaseContainer, "on_prepare", container_on_prepare_guard)
+    monkeypatch.setattr(BaseContainer, "on_starting", guard("on_starting"))
+    monkeypatch.setattr(BaseContainer, "on_check", guard("on_check"))
 
 
 def test_plan_up_triggers_zero_write_calls(fresh_manager, monkeypatch):
@@ -82,11 +80,11 @@ def test_plan_does_not_write_artifact_index(fresh_manager):
     assert fresh_manager.artifact_index.load() == {}
 
 
-def test_plan_does_not_call_on_prepare(fresh_manager, monkeypatch):
+def test_plan_never_runs_startup_callbacks(fresh_manager, monkeypatch):
     _install_write_guards(fresh_manager, monkeypatch)
     planner = ExecutionPlanner(fresh_manager)
 
-    # Must not raise -- if on_prepare were called, the guard would fire.
+    # Must not run any startup or validation callback.
     planner.plan("down", names=["nginx"])
     planner.plan("restart", names=["nginx"])
 

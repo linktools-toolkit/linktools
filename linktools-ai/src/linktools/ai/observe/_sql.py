@@ -300,12 +300,14 @@ class SqlMetricStore:
         }
 
         async def write_and_read(session: "AsyncSession") -> Mapping[str, object]:
-            await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
+            result = await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
                 session,
                 table=self._definitions,
                 values=cast("Mapping[str, SqlValue]", values),
                 index_elements=("namespace_digest", "metric_name", "revision"),
             ))
+            if result.inserted:
+                return values
             row = (
                 await self._context.run_statement(session.execute(
                     select(self._definitions).where(
@@ -428,12 +430,14 @@ class SqlMetricStore:
         identities = tuple(collapsed)
 
         async def write_and_validate(session: "AsyncSession") -> None:
-            await self._context.run_statement(self._context.dialect.insert_ignore_conflict_many(
+            inserted = await self._context.run_statement(self._context.dialect.insert_ignore_conflict_many(
                 session,
                 table=self._observations,
                 rows=cast("list[Mapping[str, SqlValue]]", rows),
                 index_elements=("observation_digest",),
             ))
+            if inserted == len(rows):
+                return
             result = (
                 await self._context.run_statement(session.execute(
                     select(

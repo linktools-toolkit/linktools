@@ -129,8 +129,10 @@ class _FilesystemTransaction:
             return
         if await self.get_records(keys):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        for record in sorted(values, key=lambda value: value.key_digest):
+        ordered = tuple(sorted(values, key=lambda value: value.key_digest))
+        for record in ordered:
             validate_record_identity(record)
+        for record in ordered:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)
             self._write(_record_path(record), encode_record(record))
@@ -258,8 +260,8 @@ class _FilesystemTransaction:
         current = await self.get_records(keys)
         if not current:
             return
-        await self._delete_fact_streams(set(current))
         aliases = dict(await asyncio.to_thread(self._cache.list_aliases))
+        await self._delete_fact_streams(set(current))
         aliases.update(self.aliases.changes())
         for alias in self.aliases.deleted():
             aliases.pop(alias, None)
@@ -296,8 +298,8 @@ class _FilesystemTransaction:
         )
         if await self.guard_record(key, expected_storage_version=expected) is None:
             return False
-        await self.delete_fact_streams(key)
         aliases = dict(await asyncio.to_thread(self._cache.list_aliases))
+        await self.delete_fact_streams(key)
         aliases.update(self.aliases.changes())
         for alias, record_key in tuple(aliases.items()):
             if record_key == key:
@@ -815,10 +817,12 @@ class _FilesystemTransaction:
         sources.update(self.fact_streams.changes())
         for stream in self.fact_streams.deleted():
             sources.pop(stream, None)
-        for stream, source in sources.items():
-            if source.owner_key_digest not in owner_keys:
-                continue
+        selected = tuple((stream, source) for stream, source in sources.items()
+                         if source.owner_key_digest in owner_keys)
+        # Finish cancellable reads before staging any part of the deletion.
+        for _stream, source in selected:
             await self._load_fact_subjects(source)
+        for stream, source in selected:
             for sequence in range(1, source.last_sequence + 1):
                 self._deleted_facts.add((stream, sequence))
                 self._delete(_fact_item_path(self._root, stream, sequence))

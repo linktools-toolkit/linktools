@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
+from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_port_url
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any
-    from collections.abc import Iterable
-    from linktools.cntr import ExposeLink
 
 
 class Container(BaseContainer):
@@ -19,25 +19,29 @@ class Container(BaseContainer):
     def configs(self) -> "dict[str, Any]":
         return dict(
             PORTAINER_TAG="alpine",
-            PORTAINER_DOMAIN=self.get_nginx_domain(),
+            PORTAINER_DOMAIN=Nginx.domain(self),
             PORTAINER_AUTH_ENABLE=ConfigField(cast=bool, default=True),
             PORTAINER_PORT=ConfigField(cast=int, default=9000),
         )
 
     @cached_property
-    def exposes(self) -> "Iterable[ExposeLink]":
-        return [
-            self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
-                "PORTAINER_DOMAIN",
-                proxy_url="http://portainer:9000",
-                auth_enable=self.get_config("PORTAINER_AUTH_ENABLE"),
-                auth_extra={
-                    "acl_bypass": ["\\.(css|js)$"],
-                    "oidc_redirect_uris": ["{base_url}"]
-                }
-            )),
-            self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                "PORTAINER_PORT",
-                https=False
-            )),
-        ]
+    def integrations(self) -> "Integrations":
+        return endpoint(
+            self,
+            domain=self.get_config_later("PORTAINER_DOMAIN"),
+            proxy="http://portainer:9000",
+            auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
+            auth_bypass=(r"\.(css|js)$",),
+            extensions=[
+                Flare.links(
+                    Flare.public(),
+                    Flare.container(
+                        url=load_port_url(self, "PORTAINER_PORT", https=False),
+                    ),
+                    name="Portainer",
+                    icon="docker",
+                    desc="Docker管理工具",
+                ),
+                Authelia.oidc(("{url}",)),
+            ],
+        )

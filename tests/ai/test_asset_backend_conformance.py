@@ -86,6 +86,23 @@ async def test_asset_metadata_reads_cannot_mutate_stored_versions(asset_store: A
 
 
 @pytest.mark.asyncio
+async def test_asset_stat_refreshes_an_outdated_revision_source(asset_store: AssetStore) -> None:
+    key = AssetKey("resource", "external-change")
+    await asset_store.put(key, b"old")
+    assert await asset_store.stat(key) is not None
+    backend = asset_store._storage.primary
+    revision = await backend.head_revision()
+    class StaleRevisionSource:
+        async def head_revision(self):
+            return revision
+        async def revision_bumped(self, value):
+            pass
+    asset_store._storage.primary_view.revision_source = StaleRevisionSource()
+    await backend.put(key, b"new")
+    assert await asset_store.stat(key) == await backend.stat(key)
+
+
+@pytest.mark.asyncio
 async def test_asset_mixed_batch_only_records_changed_entries(asset_store: AssetStore) -> None:
     stable = AssetKey("resource", "stable")
     changed = AssetKey("resource", "changed")

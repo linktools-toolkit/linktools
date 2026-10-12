@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Read-only Docker/Compose state inspection.
 
-Wraps ``docker version``/``docker compose version``/``docker compose ps
+Wraps ``docker version``/``docker compose version``/``docker container ls
 --quiet``/``docker inspect`` through StructuredCommandRunner; never mutates
 state, never a second runtime. Actual project state is built from a
 Compose-project container id list plus a batch ``docker inspect``, since
@@ -12,7 +12,7 @@ Compose-project container id list plus a batch ``docker inspect``, since
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..container import ContainerError
@@ -32,7 +32,7 @@ class RuntimeInspectionError(ContainerError):
 
 class RuntimeInspectionUnavailable(RuntimeInspectionError):
     """Docker/Compose could not be queried at all: missing binary, a denied
-    sudo policy, no compose file for these containers, a timeout, or an
+    sudo policy, a timeout, or an
     unparsable container-id list. Callers treat this as "state unknown" and
     may fall back to persisted state."""
 
@@ -61,9 +61,15 @@ class ServiceRuntimeState:
     image: "str | None"
     exit_code: "int | None"
     labels: "dict[str, str]"
+    image_id: "str | None" = None
+    namespace_bindings: "dict[str, str | list[str]] | None" = None
 
 
 _RUNNING_STATES = ("running", "restarting")
+
+
+def _is_oneoff(item: "ServiceRuntimeState") -> bool:
+    return item.labels.get("com.docker.compose.oneoff", "").lower() == "true"
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,29 @@ class ProjectRuntimeState:
     backend: str
     source: str = "docker-inspect"
 
+    def service_instances(self, service: "str | None" = None) -> "tuple[ServiceRuntimeState, ...]":
+        """Regular service replicas; keep maintenance oneoffs only in raw diagnostics."""
+        return tuple(item for item in self.services
+                     if (service is None or item.service == service) and not _is_oneoff(item))
+
+    @property
+    def existing_services(self) -> "frozenset[str]":
+        return frozenset(item.service for item in self.service_instances() if item.service)
+
+    @property
+    def running_services(self) -> "frozenset[str]":
+        return frozenset(item.service for item in self.service_instances()
+                         if item.service and item.state in _RUNNING_STATES)
+
+    @property
+    def image_ids(self) -> "dict[str, str]":
+        return {item.service: item.image_id for item in self.service_instances() if item.service and item.image_id}
+
+    @property
+    def running_images(self) -> "dict[str, str]":
+        return {item.service: item.image_id for item in self.service_instances()
+                if item.service and item.image_id and item.state in _RUNNING_STATES}
+
     @property
     def running_container_names(self) -> "list[str]":
         """Logical container names with >=1 service running/restarting.
@@ -80,7 +109,7 @@ class ProjectRuntimeState:
         A shared service contributes all of its owners to the running set.
         """
         names = set()
-        for service in self.services:
+        for service in self.service_instances():
             if service.state.lower() in _RUNNING_STATES:
                 for owner in service.logical_containers:
                     names.add(owner)
@@ -91,7 +120,7 @@ _CONTAINER_ID_RE = re.compile(r"^[0-9a-fA-F]{12,64}$")
 
 
 def _parse_container_ids(text: str) -> "list[str]":
-    """Stably deduped, order-preserving container ids from ``compose ps
+    """Stably deduped, order-preserving container ids from ``docker container ls
     --quiet`` output. An empty result is a legitimate "nothing here" -- only
     a non-empty line that isn't a plausible hex id is an error."""
     ids: "list[str]" = []
@@ -101,7 +130,7 @@ def _parse_container_ids(text: str) -> "list[str]":
         if not line:
             continue
         if not _CONTAINER_ID_RE.match(line):
-            raise RuntimeInspectionOutputError(f"Unexpected `compose ps --quiet` output line: {line!r}")
+            raise RuntimeInspectionOutputError(f"Unexpected `docker container ls --quiet` output line: {line!r}")
         if line not in seen:
             seen.add(line)
             ids.append(line)
@@ -204,6 +233,7 @@ def _map_inspect_item(
         image=config.get("Image"),
         exit_code=_normalize_exit_code(state_data.get("ExitCode")),
         labels={str(k): str(v) for k, v in labels.items()},
+        image_id=item.get("Image"),
     )
 
 
@@ -245,11 +275,13 @@ class DockerInspector:
             return None
         return result.stdout.strip() or None
 
-    def _list_project_container_ids(self, containers: "Iterable[BaseContainer]") -> "list[str]":
-        process = self.manager.runtime.create_docker_compose_process(
-            containers, "ps", "--all", "--quiet",
-            capture_output=True,
-        )
+    def _list_project_container_ids(self, services: "tuple[str, ...]" = ()) -> "list[str]":
+        args = ["container", "ls", "--all", "--quiet", "--no-trunc",
+                "--filter", "label=com.docker.compose.project=" + self.manager.project_name,
+                "--filter", "label=com.docker.compose.config-hash"]
+        if len(services) == 1:
+            args.extend(["--filter", "label=com.docker.compose.service=" + services[0]])
+        process = self.manager.runtime.create_docker_process(*args, capture_output=True)
         result = self.manager.structured_runner.execute_text(process, check=True)
         return _parse_container_ids(result.stdout)
 
@@ -298,11 +330,13 @@ class DockerInspector:
             items.extend(validate_inspect_payload(payload, expected_non_empty=True))
         return items
 
-    def get_project_state(self, containers: "Iterable[BaseContainer]") -> "ProjectRuntimeState":
+    def get_project_state(self, containers: "Iterable[BaseContainer]",
+                          services: "Iterable[str] | None" = None) -> "ProjectRuntimeState":
+        """Inspect current containers, optionally limiting readiness observations to services."""
         containers = tuple(containers)
-        if not containers:
-            # Nothing to build a --file set from -- there is trivially
-            # nothing running, not an unavailable/unqueryable runtime.
+        selected = None if services is None else tuple(dict.fromkeys(services))
+        if selected == ():
+            # An empty requested scope needs no runtime observation.
             return ProjectRuntimeState(
                 project=self.manager.project_name, services=(), backend=self.manager.container_type,
             )
@@ -315,7 +349,10 @@ class DockerInspector:
                     owners.append(container.name)
 
         try:
-            container_ids = self._list_project_container_ids(containers)
+            # Multiple service labels would be AND filters; filter that union
+            # after inspection, retaining orphan services and namespace identities.
+            filters = selected if selected is not None and set(selected) <= set(service_owners) else ()
+            container_ids = self._list_project_container_ids(filters)
         except (StructuredCommandError, OSError) as exc:
             raise RuntimeInspectionUnavailable(str(exc)) from exc
 
@@ -335,7 +372,7 @@ class DockerInspector:
             # already turned an invalid-JSON response into
             # RuntimeInspectionOutputError before it could reach here, so
             # this branch is never entered for corrupted output). Every id
-            # just came from `compose ps`, so an empty recovery result here
+            # just came from `docker container ls`, so an empty recovery result here
             # means every one of them disappeared in the meantime -- a
             # legitimate empty project state, not an error.
             items = self._inspect_containers_recovering(container_ids)
@@ -344,11 +381,41 @@ class DockerInspector:
                 raise RuntimeInspectionOutputError(
                     "`docker inspect` returned no results for known container ids")
 
-        services = []
+        mapped_items = []
+        identities = {}
         for item in items:
             mapped = _map_inspect_item(item, service_owners, self.manager.project_name)
             if mapped is not None:
-                services.append(mapped)
+                mapped_items.append((item, mapped))
+                if mapped.service and not _is_oneoff(mapped):
+                    for identity in (item.get("Id"), mapped.runtime_name):
+                        if identity:
+                            identities[identity] = mapped.service
+        services = []
+        for item, mapped in mapped_items:
+            if selected is not None and mapped.service not in selected:
+                continue
+            host = item.get("HostConfig")
+            if isinstance(host, dict):
+                bindings = {}
+                for key, field in (("NetworkMode", "network_mode"), ("IpcMode", "ipc"), ("PidMode", "pid")):
+                    if key not in host:
+                        continue
+                    mode = host.get(key) or ""
+                    if isinstance(mode, str) and mode.startswith("container:"):
+                        service = identities.get(mode[len("container:"):].lstrip("/"))
+                        bindings[field] = "service:" + service if service else mode
+                    elif isinstance(mode, str):
+                        bindings[field] = mode
+                if "VolumesFrom" in host:
+                    bindings["volumes_from"] = []
+                for volume in host.get("VolumesFrom") or ():
+                    reference, separator, mode = str(volume).partition(":")
+                    service = identities.get(reference.lstrip("/"))
+                    binding = service + (":" + mode if separator else "") if service else "container:" + str(volume)
+                    bindings.setdefault("volumes_from", []).append(binding)
+                mapped = replace(mapped, namespace_bindings=bindings)
+            services.append(mapped)
 
         return ProjectRuntimeState(
             project=self.manager.project_name,

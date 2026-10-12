@@ -51,7 +51,7 @@ class ProjectProfile(object):
         with the user-level global file when ``global_`` is True -- the
         local file takes precedence on a conflicting key.
         """
-        paths = [cls.local_path(root)]
+        paths = [cls.local_path("." if root is None else root)]
         if global_:
             paths.append(cls.global_path())
         return cls(*paths)

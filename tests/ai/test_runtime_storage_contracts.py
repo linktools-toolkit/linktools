@@ -175,8 +175,7 @@ async def test_sql_cancelled_read_releases_cursor_before_followup_write(
         if (
             not fetching.is_set()
             and cursor.description
-            and {"key_digest", "value"}
-            <= {column[0] for column in cursor.description}
+            and "value" in {column[0] for column in cursor.description}
         ):
             fetching.set()
             await release.wait()

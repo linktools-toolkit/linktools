@@ -55,6 +55,10 @@ async def test_cancelled_statement_failure_does_not_retry_or_commit_mutation(
         return await transaction.reserve_sequence(key, 1)
 
     monkeypatch.setattr(Cursor, "execute", fail_statement)
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors: list[dict[str, object]] = []
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
     mutation = asyncio.create_task(store.mutate(mutate))
     try:
         await asyncio.wait_for(executing.wait(), 5)
@@ -73,8 +77,10 @@ async def test_cancelled_statement_failure_does_not_retry_or_commit_mutation(
         assert await store.mutate(
             lambda transaction: transaction.reserve_sequence(key, 1)
         ) == 1
+        assert errors == []
     finally:
         release.set()
         await asyncio.gather(mutation, return_exceptions=True)
         await store.close()
         await engine.dispose()
+        loop.set_exception_handler(previous)

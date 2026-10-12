@@ -3,11 +3,11 @@
 """Container lifecycle dispatch."""
 from .dispatcher import LifecycleDispatcher, LifecycleStep
 from .hooks import (
-    Hook, HookCycleError, HookError, HookListView, HookOrderError, HookPhase, HookRegistry, HookValidationError,
+    Hook, HookCycleError, HookError, HookOrderError, HookPhase, HookRegistry, HookValidationError,
 )
 
 __all__ = [
     "LifecycleDispatcher", "LifecycleStep",
-    "Hook", "HookPhase", "HookRegistry", "HookListView",
+    "Hook", "HookPhase", "HookRegistry",
     "HookError", "HookValidationError", "HookOrderError", "HookCycleError",
 ]

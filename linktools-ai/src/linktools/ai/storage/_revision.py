@@ -92,18 +92,24 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
     async def refresh(self) -> 'MetadataState[KeyT, InfoT]':
         if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
             return self._state
-        if self.policy is not LayerRefreshPolicy.ALWAYS and self._state is not None:
+        while self.policy is not LayerRefreshPolicy.ALWAYS and self._state is not None:
+            observed = self._state
+            generation = self._generation
             source = self.revision_source
             current = (
                 await source.head_revision()
                 if source is not None
                 else await self.backend.head_revision()
             )
-            if current == self._state.revision:
-                return self._state
+            if generation != self._generation:
+                continue
+            if current == observed.revision:
+                return observed
             if source is not None and current is not None:
                 head = await self.backend.head_revision()
-                if head == self._state.revision:
+                if generation != self._generation:
+                    continue
+                if head == observed.revision:
                     try:
                         await source.revision_bumped(head)
                     except Exception:
@@ -111,10 +117,25 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
                             "storage revision source correction failed",
                             exc_info=True,
                         )
-                    return self._state
+                    if generation != self._generation:
+                        continue
+                    return observed
+            break
+        state, shared = await self._load_shared()
+        if shared and self.policy is LayerRefreshPolicy.REVISIONED:
+            generation = self._generation
+            current = await self.backend.head_revision()
+            if generation != self._generation or current != state.revision:
+                # The shared snapshot may predate this reader. A subsequent
+                # load starts after this read, without chasing later writes.
+                state, _ = await self._load_shared()
+        return state
+
+    async def _load_shared(self) -> 'tuple[MetadataState[KeyT, InfoT], bool]':
         async with self._lock:
             if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
-                return self._state
+                return self._state, False
+            shared = self._refresh_task is not None
             if self._refresh_task is None:
                 task = asyncio.create_task(self._load())
                 self._refresh_task = task
@@ -122,11 +143,14 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
                 def discard(done: "asyncio.Task[MetadataState[KeyT, InfoT]]") -> None:
                     if self._refresh_task is done:
                         self._refresh_task = None
+                    if not done.cancelled():
+                        done.exception()
 
                 task.add_done_callback(discard)
             task = self._refresh_task
         try:
-            return await asyncio.shield(task)
+            await asyncio.wait((task,))
+            return task.result(), shared
         finally:
             if task.done():
                 async with self._lock:
