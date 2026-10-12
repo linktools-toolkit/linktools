@@ -32,6 +32,7 @@ convert:
     dest: src/linktools/capabilities/cntr.py
 
 checks:
+  ci-pool: linktools
   ruff:
     select:
       - E9
