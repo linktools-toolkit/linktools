@@ -1076,6 +1076,10 @@ async function executionAction(action, {active=false}={}) {
       await refreshSelected();
       if(active && current())await refreshObservation(id,state.observationGeneration);
     }
+    else if(action==='recover') {
+      await refreshSelected();
+      if(current())await syncObservation({refresh:true});
+    }
     else {
       const info=await api(`/api/executions/${enc(result.execution_id)}`);
       if(current())navigate(info.session_id,result.execution_id);

@@ -204,6 +204,19 @@ if(process.argv[3]==='details') {
   node('run-actions').open=true;await select('#session=a&execution=a-run');assert.equal(node('run-actions').open,false,'Explicit session/execution navigation closes the previous target actions menu');
   node('run-actions').open=true;await select('#view=executions&execution=a-run');assert.equal(node('run-actions').open,false,'Same execution navigation into the independent browser closes the prior view action menu');await detail('overview',/Execution metadata/);assert.equal(node('session-details').hidden,true,'Standalone execution inspection cannot expose the previous conversation metadata');
   await select('#session=b&execution=a-run');assert.equal(node('session-details').hidden,true,'Another execution session is not the surrounding conversation');
+  await select('#session=a&execution=orphan');await tab('recovery').click();
+  const recoveryReply=deferred('POST /api/executions/orphan/recover'),recovering=node('resume-run').click();await recoveryReply.requested;
+  node('inspector-close').click();assert.equal(node('inspector').hidden,true,'Close takes effect while Resume is pending');
+  executions.get('orphan').status='STARTED';recoveryReply({execution_id:'orphan'},202);await recovering;await hashChanged;
+  assert.equal(node('inspector').hidden,true,'Completing same-execution Resume must not reopen closed details');
+  streamBlocks.get('orphan').controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'orphan',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'resumed after close'}}}})+'\n\n'));
+  await until('resumed output with details closed',()=>node('live').textContent.includes('resumed after close'));assert.equal(node('cancel').hidden,false);
+  await tab('recovery').click();const lateRecovery=deferred('POST /api/executions/orphan/recover'),lateRecovering=node('resume-run').click();await lateRecovery.requested;
+  await select('#session=b');const beforeLate=calls.length;lateRecovery({execution_id:'orphan'},202);await lateRecovering;
+  assert.equal(node('conversation-title').textContent,'Beta');assert.ok(!calls.slice(beforeLate).some(call=>call.key.includes('/orphan')),'Late Resume does not refresh a newer conversation selection');
+  await select('#view=executions&execution=orphan');await tab('recovery').click();const standaloneHash=location.hash;
+  const standaloneReply=deferred('POST /api/executions/orphan/recover'),standaloneRecovering=node('resume-run').click();await standaloneReply.requested;standaloneReply({execution_id:'orphan'},202);await standaloneRecovering;await hashChanged;
+  assert.equal(location.hash,standaloneHash,'Same-execution Resume preserves standalone execution browsing');assert.equal(node('conversation-column').hidden,true);assert.equal(node('inspector').hidden,false);assert.match(node('execution-meta').textContent,/orphan/);
   console.log('Details contracts passed: compact default source, summary, metadata, explicit recovery, confirmations, selected/active actions and menu focus');process.exit(0);
 }
 if(process.argv[3]==='guided') {
