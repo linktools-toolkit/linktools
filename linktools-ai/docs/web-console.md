@@ -50,12 +50,57 @@ The primary views are **Conversation**, **Model messages** and **Activity**.
 Model messages opens the selected turn's actual captured input directly: indexed
 role and content rows follow the native `messages` array order. A single request
 and attempt selector switches among loaded captures, without nested request
-cards. The turn picker names time, status and execution ID; older turns remain
-accessible and distinct from the active conversation owner. **Raw request** and
-**Download bytes** sit beside the selector. The observed response is separate
-from input messages. Repeated full input arrays are never interleaved as new
-conversation turns. The optional live preview is explicitly a conversation
+cards. Turn and request selectors share one light toolbar; compact turn labels keep
+their full time, status and execution identity in the control's hover/accessibility
+description and the Run details picker. Older turns remain accessible and distinct
+from the active conversation owner. **Request tools (···)** groups **View raw**,
+**Download bytes** and **Inspect request** in one menu. The request details keep model,
+purpose, timing, usage, API identity and the client-capture boundary out of the
+main reading path. HTTP failures remain visible beside the selectors.
+
+Interface titles name their content, buttons name their action, and routine status
+uses one short message. Repeated technical explanations expand on demand; errors,
+read-only limits and recovery confirmations remain explicit. This applies only to
+console-authored text: captured messages, source bytes and tool arguments are
+never rewritten or summarized.
+
+The body is the primary surface: indexed roles align with unchanged message
+content; compact function names and call IDs connect tool calls with their
+separate result items visually, without moving or merging either array item.
+**Fields** beside an item retains structural annotations and additional original
+members. Empty, null, missing, repeated and unknown values stay inspectable;
+Fields expansion and keyboard focus survive capture refresh. The observed
+response remains separate from input. Repeated input arrays are never interleaved
+as new conversation turns. The optional live preview is explicitly a conversation
 display, not the original response bytes.
+
+### Visual reference and implementation status
+
+The following approved layout studies use synthetic captured-request-shaped data.
+They show the current design direction, not a deployed console or a claim that
+these requests reached a provider. The [DeepSeek Harness trajectory reference](https://www.deepseek.com/harness/images/feat-trace-en.webp)
+informs alignment and direct role/content reading only; its session event ledger
+is not substituted for this console's captured HTTP input.
+
+Desktop: a single selection toolbar, aligned role column, body-first typography,
+and contextual details rather than stacked request cards.
+
+![Desktop model-message layout study with two tool calls and HTTP 429](assets/web-console/model-messages-desktop.jpg)
+
+At 500 px, roles sit above their contents while the same selection and request
+tools remain on one row. Message order and content do not change with width.
+
+![500-pixel model-message layout study with original role order](assets/web-console/model-messages-500.jpg)
+
+Implementation status (2026-10-12): the direct reader and recovery behavior passed
+their preceding automated and real-browser checks. The visual hierarchy shown
+here is being applied to production assets in [PR #167](https://github.com/linktools-toolkit/linktools/pull/167),
+which remains Draft during its focused regression, independent review, actual
+browser and exact-head CI checks. These prototype screenshots do not replace
+those production checks. The layout introduces no new message protocol, renderer
+owner, Runtime behavior or source reconstruction.
+
+### Conversation, activity and diagnostics
 
 **Activity** opens the existing recorded event timeline in the main reading
 area. **More → Run details** contains selected-turn diagnostics and actions.
@@ -203,17 +248,19 @@ content as plain text, including whitespace, without Markdown or HTML rendering.
 Content blocks keep their array order; text blocks are readable, while media and
 unknown structures retain their original source fields without loading external
 resources. Standard tool calls show the captured function name/call ID and unchanged
-arguments compactly; unknown or repeated members stay literal. Tool calls stay
+arguments compactly; additional members remain literal under Fields, and repeated
+members remain explicitly literal rather than choosing an effective value. Tool calls stay
 under their assistant item; tool results keep their
 own array position and call ID. Empty strings, empty arrays, null and absent
-content remain distinguishable. Unknown roles and fields remain visible.
+content remain distinguishable. Unknown roles remain labeled, and original
+additional fields stay available in the same item’s Fields disclosure.
 
 The reader validates JSON syntax and locates source ranges; displayed numbers
 and unknown structures come from those ranges, never parsed-number reserialization.
 Duplicate message fields are shown separately in source order rather than merged;
 repeated member names remain literal instead of guessing an effective value.
 Malformed or unrecognized envelopes show original source with an explicit limit.
-**Raw request** preserves the complete UTF-8 source, including escapes, large
+**View raw** preserves the complete UTF-8 source, including escapes, large
 numbers and duplicate keys. Byte downloads bypass this reading projection.
 No provider array is reconstructed from SDK snapshots. The OpenAI Responses API
 and other provider APIs are not claimed as captured by this binding.
