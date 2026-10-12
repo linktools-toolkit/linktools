@@ -96,6 +96,9 @@ class SqlAlchemyDialect(Protocol):
     @property
     def single_writer(self) -> bool: ...
 
+    @property
+    def prefer_update_executemany(self) -> bool: ...
+
     async def configure_engine(self, engine: "AsyncEngine") -> None: ...
 
     async def begin_consistent_read(self, session: "AsyncSession") -> None: ...
@@ -194,6 +197,10 @@ class SQLiteDialect:
     @property
     def single_writer(self) -> bool:
         return self.name == "sqlite"
+
+    @property
+    def prefer_update_executemany(self) -> bool:
+        return False
 
     async def configure_engine(self, engine: "AsyncEngine") -> None:
         if self.single_writer:
@@ -420,6 +427,11 @@ class MySQLDialect(SQLiteDialect):
     @property
     def name(self) -> str:
         return "mysql"
+
+    @property
+    def prefer_update_executemany(self) -> bool:
+        # Row-wise driver execution preserves each value's max_allowed_packet boundary.
+        return True
 
     def _database_now_expression(self) -> "ColumnElement[datetime]":
         from sqlalchemy import func

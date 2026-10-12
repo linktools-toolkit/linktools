@@ -7,7 +7,7 @@ import gc
 
 import pytest
 
-from linktools.ai.asset import AssetInfo, AssetKey, InMemoryAssetBackend
+from linktools.ai.asset import AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.storage import (
     LayerMetadataView,
     LayerRefreshPolicy,
@@ -213,3 +213,49 @@ async def test_revision_check_started_after_external_write_observes_it() -> None
         release.set()
         await asyncio.gather(first, *(() if second is None else (second,)), return_exceptions=True)
         await backend.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warm", (False, True))
+async def test_shared_metadata_snapshot_observes_writes_before_new_reader(warm: bool) -> None:
+    captured, release, reader_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    pause = False
+
+    class Backend(InMemoryAssetBackend):
+        async def load_metadata(
+            self, after_revision: StorageRevision | None = None,
+        ) -> MetadataLoad[AssetKey, AssetInfo]:
+            result = await super().load_metadata(after_revision)
+            if pause:
+                captured.set()
+                await release.wait()
+            return result
+
+    backend = Backend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    existing, new = AssetKey("test", "existing"), AssetKey("test", "new")
+    await store.initialize()
+    first = second = None
+    try:
+        await backend.put(existing, b"old")
+        if warm:
+            await store.list_info()
+            await backend.put(existing, b"changed")
+        pause = True
+        first = asyncio.create_task(store.list_info())
+        await captured.wait()
+        await backend.put(new, b"committed before read")
+
+        async def read_new() -> bytes | None:
+            reader_started.set()
+            return await store.get(new)
+
+        second = asyncio.create_task(read_new())
+        await reader_started.wait()
+        release.set()
+        await first
+        assert await second == b"committed before read"
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
+        await store.close()

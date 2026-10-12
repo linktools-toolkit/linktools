@@ -410,6 +410,32 @@ if(process.argv[3]==='races'){
   executions.get('owner-five').status='RECOVERY_REQUIRED';snapshot(controller,'owner-five');await settle();
   const watches=calls.filter(item=>item.key==='/api/executions/owner-five/events').length;await new Promise(resolve=>setTimeout(resolve,650));
   assert.equal(calls.filter(item=>item.key==='/api/executions/owner-five/events').length,watches);assert.match(node('connection').textContent,/Recovery required/);
+  // Successful competing readbacks must not turn a final snapshot into a reconnect.
+  const partialId='partial-cancel',partialText='Received partial content stays incomplete';
+  const previousTurn=timeline('a').items[0];
+  sessions.get('a').active_execution_id=partialId;
+  executions.set(partialId,{...info(partialId,'a'),status:'STARTED'});
+  timelineOverrides.set('a',{items:[previousTurn,{execution_id:partialId,status:'STARTED',created_at:'2026-01-02T00:00:00Z',user_input:'slow',conversation_committed:false,items:[]}],next_cursor:null});
+  streamBlocks.set(partialId,{});location.hash='#session=a&execution=a-run';await settle();
+  node('chat-mode').click();await settle();controller=streamBlocks.get(partialId).controller;
+  for(const [event_type,payload] of [['ASSISTANT_TEXT_DELTA',{text:partialText}],['ASSISTANT_THINKING_DELTA',{text:'Partial thinking'}]]){
+    controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:partialId,depth:0,event:{event_type,payload}}})+'\n\n'));
+  }
+  await settle();assert.match(node('live').textContent,/Received partial content stays incomplete/);
+  const stop=deferred(`POST /api/executions/${partialId}/cancel`);
+  node('cancel').click();await tick();
+  executions.get(partialId).status='CANCELLED';sessions.get('a').active_execution_id=null;
+  timelineOverrides.get('a').items[1].status='CANCELLED';
+  const finishFinalRead=deferred('GET /api/sessions/a');
+  snapshot(controller,partialId);await settle();delays.delete('GET /api/sessions/a');
+  stop({execution_id:partialId,cancelled:true});await settle();
+  finishFinalRead({session:sessions.get('a'),timeline:timeline('a')});await settle();
+  assert.match(node('live').textContent,/Received partial content stays incomplete/);
+  assert.match(node('live').textContent,/Partial thinking/);
+  assert.match(node('live').textContent,/incomplete/);
+  assert.equal(node('current-status').textContent,'Session available');
+  assert.match(node('notice').textContent,/Cancellation confirmed.*Session released/);
+  assert.equal(calls.filter(item=>item.key===`/api/executions/${partialId}/events`).length,1);
   console.log('Observation and End notice race contracts passed');process.exit(0);
 }
 

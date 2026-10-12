@@ -26,6 +26,7 @@ from ..task import (
     TaskEffectResolutionRequest,
     RecoverGraphRequest,
     TaskNodeResult,
+    TaskNodeResultRef,
     TaskResultRef,
     TaskResultRecord,
     TaskInputSupplyRequest,
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     from ._tasks import TaskEngine
 
 AppT = TypeVar("AppT")
+_ResultT = TypeVar("_ResultT")
 _logger = environ.get_logger("ai.runtime.task")
 
 
@@ -197,14 +199,30 @@ class TaskGraphRun(Generic[AppT]):
             )
         )
 
-    async def result(self, node_id: str) -> JsonValue:
+    @overload
+    async def result(self, node_id: TaskNodeResultRef[_ResultT]) -> _ResultT: ...
+
+    @overload
+    async def result(self, node_id: str) -> JsonValue: ...
+
+    async def result(self, node_id: str | TaskNodeResultRef[object]) -> object:
+        if isinstance(node_id, TaskNodeResultRef):
+            node_id = node_id.node_id
         record = await self._result_record(node_id)
         return await self._runtime._require_task_node_runtime().read_result_record(
             record,
             principal=self._principal,
         )
 
-    async def result_ref(self, node_id: str) -> TaskResultRef:
+    @overload
+    async def result_ref(self, node_id: TaskNodeResultRef[_ResultT]) -> TaskResultRef[_ResultT]: ...
+
+    @overload
+    async def result_ref(self, node_id: str) -> TaskResultRef: ...
+
+    async def result_ref(self, node_id: str | TaskNodeResultRef[object]) -> TaskResultRef[object]:
+        if isinstance(node_id, TaskNodeResultRef):
+            node_id = node_id.node_id
         record = await self._result_record(node_id)
         return TaskResultRef(
             self._runtime.namespace,

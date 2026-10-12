@@ -325,7 +325,7 @@ class RuntimeEvaluations:
             PriceTable.from_mapping(await self._value(spec.policy.price_table), currency=spec.policy.currency)
         dataset = await self.get_dataset(spec.dataset, principal=principal)
         source_expires_at = await self._state.dataset_expiry(spec.dataset)
-        cases = tuple([await self._case(ref) for ref in dataset.ordered_case_refs])
+        cases = await self._state.get_cases(dataset.ordered_case_refs)
         total = len(cases) * len(spec.candidates) * spec.repetitions
         if total > spec.policy.max_trials:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial limit exceeded")
@@ -776,8 +776,8 @@ class RuntimeEvaluations:
                 for scorer in record.manifest.scorers for dimension in scorer.dimensions),
             source_evidence_refs=tuple(item.evidence_ref for item in record.evidence),
             target_usage_complete=target_usage, scorer_usage_complete=scorer_usage)
-        cases = tuple([await self._case(ref) for ref in
-                       (await self.get_dataset(record.manifest.dataset, principal=principal)).ordered_case_refs])
+        cases = await self._state.get_cases(
+            (await self.get_dataset(record.manifest.dataset, principal=principal)).ordered_case_refs)
         report = build_evaluation_report(record.manifest, cases, trials, scores, cutoff=cutoff,
                                          report_id=uuid.uuid4().hex, created_at=_now())
         report = replace(report, completion=_completion(record, trials, scores, blocked=blocked))
@@ -829,8 +829,8 @@ class RuntimeEvaluations:
         left_dataset = await self.get_dataset(left.manifest.dataset, principal=principal)
         right_dataset = await self.get_dataset(right.manifest.dataset, principal=principal)
         report = build_comparison_report(spec, left.manifest, right.manifest,
-            tuple([await self._case(ref) for ref in left_dataset.ordered_case_refs]),
-            tuple([await self._case(ref) for ref in right_dataset.ordered_case_refs]),
+            await self._state.get_cases(left_dataset.ordered_case_refs),
+            await self._state.get_cases(right_dataset.ordered_case_refs),
             tuple(item for _, snapshot in snapshots.values() for item in snapshot.trials),
             tuple(item for _, snapshot in snapshots.values() for item in snapshot.score_attempts),
             baseline_dataset=left_dataset, candidate_dataset=right_dataset, cutoff=cutoff,
@@ -975,7 +975,8 @@ class RuntimeEvaluations:
         trials, _ = await self._trials(record, principal)
         dispositions = {item.slot_id: item.disposition for item in record.dispositions}
         intents = {item.slot_id: item for item in record.intents}
-        cases = {ref: await self._case(ref) for ref in dict.fromkeys(trial.case_ref for trial in trials)}
+        case_refs = tuple(dict.fromkeys(trial.case_ref for trial in trials))
+        cases = dict(zip(case_refs, await self._state.get_cases(case_refs)))
         candidates = {candidate.slot_id: candidate for candidate in record.manifest.candidates}
         for trial in trials:
             slot = _target_slot(trial.trial)

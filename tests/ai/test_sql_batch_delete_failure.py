@@ -182,8 +182,9 @@ async def test_caught_delete_failures_retain_first_error(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_caught_scalar_delete_cancel_before_children_preserves_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("cancel_before", ("ai_state_aliases", "ai_state_facts"))
+async def test_caught_scalar_delete_cancel_preserves_owner_and_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancel_before: str,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scalar.db'}")
     await provision_database(engine)
@@ -195,7 +196,7 @@ async def test_caught_scalar_delete_cancel_before_children_preserves_owner(
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def pause(transaction, statement, parameters=None):
-        if getattr(statement, "is_delete", False) and statement.table.name == "ai_state_aliases":
+        if getattr(statement, "is_delete", False) and statement.table.name == cancel_before:
             entered.set()
             await release.wait()
         return await execute(transaction, statement, parameters)
@@ -213,11 +214,17 @@ async def test_caught_scalar_delete_cancel_before_children_preserves_owner(
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 task.cancel()
-                await task
+                if cancel_before == "ai_state_aliases":
+                    await task
+                else:
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
             finally:
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
-        assert len(await store.read(lambda tx: tx.scan_records())) == 2
+        assert len(await store.read(lambda tx: tx.scan_records())) == (
+            2 if cancel_before == "ai_state_aliases" else 1
+        )
         assert len(await store.read(lambda tx: tx.scan_aliases())) == 1
         assert len(await store.read(lambda tx: tx.scan_facts())) == 1
         await store.validate_integrity()

@@ -5,7 +5,9 @@
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol
+
+from typing_extensions import TypeVar
 
 from pydantic import BaseModel
 
@@ -19,12 +21,13 @@ if TYPE_CHECKING:
     from ._runner import TaskNodeRunner
 
 AppT = TypeVar("AppT")
+_ResultT = TypeVar("_ResultT", covariant=True, default=JsonValue)
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _TASK_TYPE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
 
-@dataclass(frozen=True, slots=True)
-class TaskRef:
+@dataclass(frozen=True)
+class TaskRef(Generic[_ResultT]):
     id: str
     revision: int
 
@@ -39,7 +42,7 @@ class TaskRef:
             raise ValueError("task reference is invalid")
 
     @classmethod
-    def deferred_input(cls) -> "TaskRef":
+    def deferred_input(cls: "type[TaskRef[JsonValue]]") -> "TaskRef":
         return cls("linktools.ai.input", 1)
 
 
@@ -77,7 +80,7 @@ class TaskExpansionContext(Protocol):
 class TaskExpander:
     id: str
     revision: int
-    expand: Callable[[TaskExpansionContext], Sequence["TaskNode"]] = field(
+    expand: Callable[[TaskExpansionContext], Sequence["TaskNode[object]"]] = field(
         repr=False,
         compare=False,
     )
@@ -85,7 +88,7 @@ class TaskExpander:
     def __init__(
         self,
         id: str,
-        expand: Callable[[TaskExpansionContext], Sequence["TaskNode"]],
+        expand: Callable[[TaskExpansionContext], Sequence["TaskNode[object]"]],
         *,
         revision: int = 1,
     ) -> None:
@@ -103,7 +106,7 @@ class TaskExpander:
         return TaskExpanderRef(self.id, self.revision)
 
 
-class Task(Generic[AppT]):
+class Task(Generic[AppT, _ResultT]):
     """One named execution definition; graph nodes retain only its reference."""
 
     __slots__ = (
@@ -120,7 +123,7 @@ class Task(Generic[AppT]):
     def __init__(
         self,
         id: str,
-        run: Callable[["TaskNodeContext[AppT]"], Awaitable[JsonValue]],
+        run: Callable[["TaskNodeContext[AppT]"], Awaitable[_ResultT]],
         *,
         revision: int = 1,
         effect_policy: str = "non_replay_safe",
@@ -166,7 +169,7 @@ class Task(Generic[AppT]):
 
     @classmethod
     def from_runner(
-        cls,
+        cls: "type[Task[AppT, JsonValue]]",
         id: str,
         runner: "TaskNodeRunner[AppT]",
         *,
@@ -193,7 +196,7 @@ class Task(Generic[AppT]):
     def _initialize(
         self,
         reference: TaskRef,
-        function: Callable[["TaskNodeContext[AppT]"], Awaitable[JsonValue]] | None,
+        function: Callable[["TaskNodeContext[AppT]"], Awaitable[_ResultT]] | None,
         runner: "TaskNodeRunner[AppT] | None",
         normalizer: Callable[
             [Mapping[str, JsonValue]], Mapping[str, JsonValue]
@@ -232,13 +235,13 @@ class Task(Generic[AppT]):
         return self._ref.revision
 
     @property
-    def ref(self) -> TaskRef:
+    def ref(self) -> TaskRef[_ResultT]:
         return self._ref
 
     @property
     def function(
         self,
-    ) -> Callable[["TaskNodeContext[AppT]"], Awaitable[JsonValue]] | None:
+    ) -> Callable[["TaskNodeContext[AppT]"], Awaitable[_ResultT]] | None:
         return self._function
 
     @property

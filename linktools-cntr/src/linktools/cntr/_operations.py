@@ -520,6 +520,15 @@ class ComposeOperations:
                 publish_prepared_files(context, selection.services)
             except Exception as error:
                 raise ContainerError("Services were applied; publishing file references failed: {}".format(error)) from error
+        # Configuration-only containers have no Docker instance to observe.
+        # Record their application only after publication and lifecycle callbacks succeed.
+        from copy import copy
+        applied = copy(context)
+        applied.target_containers = [container for container in selection.target_containers
+                                     if not container.services]
+        applied.is_full_project = False
+        if applied.target_containers:
+            manager.running_state.mark_started(applied)
         manager.lifecycle.reconcile_removed(context)
         try:
             prune_prepared_files(context, model_store)
@@ -692,6 +701,8 @@ class ComposeOperations:
     def _update_running_state(self, context, running, containers):
         from copy import copy
         for container in containers:
+            if not container.services:
+                continue
             state = copy(context)
             state.target_containers = [container]
             state.is_full_project = False

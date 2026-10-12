@@ -196,8 +196,8 @@ class SqlStateStorageGroup:
             try:
                 result = await fn(group_transaction)
                 for transaction in transactions.values():
-                    if transaction._delete_error is not None:
-                        raise transaction._delete_error
+                    if transaction._mutation_error is not None:
+                        raise transaction._mutation_error
                 return result
             finally:
                 reset_state_transaction(token)
@@ -542,16 +542,26 @@ class _SqlTransaction:
         self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
         self._now: datetime | None = None
-        self._delete_error: BaseException | None = None
+        self._mutation_error: BaseException | None = None
+
+    def _abort_mutation(self, error: BaseException) -> None:
+        if self._mutation_error is None:
+            self._mutation_error = error
 
     async def _execute(
         self,
         statement: "Executable",
         parameters: Mapping[str, object] | Sequence[Mapping[str, object]] | None = None,
     ) -> "Result[tuple[object, ...]]":
-        return await self._context.run_statement(
-            self._session.execute(statement, parameters)
-        )
+        try:
+            return await self._context.run_statement(
+                self._session.execute(statement, parameters)
+            )
+        except asyncio.CancelledError as error:
+            # Statement cancellation can arrive after the database applied the write.
+            if getattr(statement, "is_dml", False):
+                self._abort_mutation(error)
+            raise
 
     async def now(self) -> datetime:
         if self._now is None:
@@ -721,35 +731,60 @@ class _SqlTransaction:
                 raise ValueError(
                     "replacement must increment storage_version exactly once"
                 )
-        from sqlalchemy import case, func, literal, tuple_, update
+        from sqlalchemy import bindparam, case, func, literal, tuple_, update
 
         table = self._table("ai_state_records")
+        prepared = tuple(_record_values(value.record) for value in ordered)
+        columns = ("state", "storage_version", "lease_owner", "lease_fence",
+                   "lease_expires_at", "payload_json")
+        executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
         for offset in range(0, len(ordered), _RECORD_REPLACE_BATCH_SIZE):
             batch = ordered[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
-            rows = [_record_values(value.record) for value in batch]
-            versions = [(row["key_digest"], value.expected_storage_version)
-                        for row, value in zip(rows, batch)]
-            updates = {
-                column: rows[0][column] if len(rows) == 1 else case(
-                    {row["key_digest"]: literal(row[column], type_=table.c[column].type)
-                     for row in rows},
-                    value=table.c.key_digest,
-                    else_=table.c[column],
-                )
-                for column in ("state", "storage_version", "lease_owner", "lease_fence",
-                               "lease_expires_at", "payload_json")
-            }
-            result = await self._execute(
-                update(table).where(
+            rows = prepared[offset:offset + _RECORD_REPLACE_BATCH_SIZE]
+            parameters = None
+            if executemany:
+                statement = update(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.key_digest == bindparam("_replacement_key"),
+                    table.c.storage_version == bindparam("_replacement_expected_version"),
+                ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
+                         updated_at=func.current_timestamp())
+                parameters = [
+                    {"_replacement_key": row["key_digest"],
+                     "_replacement_expected_version": value.expected_storage_version,
+                     **{f"_replacement_{column}": row[column] for column in columns}}
+                    for row, value in zip(rows, batch)
+                ]
+            else:
+                versions = [(row["key_digest"], value.expected_storage_version)
+                            for row, value in zip(rows, batch)]
+                updates = {
+                    column: rows[0][column] if len(rows) == 1 else case(
+                        {row["key_digest"]: literal(row[column], type_=table.c[column].type)
+                         for row in rows},
+                        value=table.c.key_digest,
+                        else_=table.c[column],
+                    )
+                    for column in columns
+                }
+                statement = update(table).where(
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest.in_([row["key_digest"] for row in rows]),
                     tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
                 ).values(**updates, updated_at=func.current_timestamp())
-            )
-            statement_count += 1
+            try:
+                result = await self._execute(statement, parameters)
+            except BaseException as error:
+                self._abort_mutation(error)
+                raise
+            statement_count += len(batch) if executemany else 1
             if result.rowcount != len(batch):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                error = AIError(ErrorCode.STORAGE_CONFLICT)
+                # A single failed CAS has not changed any record and can be retried.
+                if len(ordered) > 1 or result.rowcount != 0:
+                    self._abort_mutation(error)
+                raise error
         self._log_batch("replace_records", len(ordered), statement_count)
         for replacement in ordered:
             self._guarded_record_keys.add(replacement.record.key_digest)
@@ -856,8 +891,7 @@ class _SqlTransaction:
                 statement_count += 3
         except BaseException as error:
             # A caught partial deletion must still abort the owning transaction.
-            if self._delete_error is None:
-                self._delete_error = error
+            self._abort_mutation(error)
             raise
         for key in deleted_keys:
             self._guarded_record_keys.discard(key)
@@ -897,19 +931,28 @@ class _SqlTransaction:
             table.c.key_digest == _hex(key),
             table.c.storage_version == guarded.storage_version,
         )
-        await self._execute(
-            delete(self._table("ai_state_aliases")).where(
-                self._table("ai_state_aliases").c.store_digest == self._store_hex,
-                self._table("ai_state_aliases").c.record_key_digest == _hex(key),
+        children_changed = False
+        try:
+            await self._execute(
+                delete(self._table("ai_state_aliases")).where(
+                    self._table("ai_state_aliases").c.store_digest == self._store_hex,
+                    self._table("ai_state_aliases").c.record_key_digest == _hex(key),
+                )
             )
-        )
-        await self._execute(
-            delete(self._table("ai_state_facts")).where(
-                self._table("ai_state_facts").c.store_digest == self._store_hex,
-                self._table("ai_state_facts").c.owner_key_digest == _hex(key),
+            children_changed = True
+            await self._execute(
+                delete(self._table("ai_state_facts")).where(
+                    self._table("ai_state_facts").c.store_digest == self._store_hex,
+                    self._table("ai_state_facts").c.owner_key_digest == _hex(key),
+                )
             )
-        )
-        result = await self._execute(statement)
+            result = await self._execute(statement)
+        except BaseException as error:
+            if children_changed:
+                self._abort_mutation(error)
+            raise
+        if result.rowcount != 1:
+            self._abort_mutation(AIError(ErrorCode.STORAGE_CONFLICT))
         if result.rowcount == 1:
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None

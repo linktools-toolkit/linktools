@@ -776,9 +776,10 @@ async function watchExecution(id,generation) {
       },controller.signal);
       if(!current())return;
       if(ended) {
-        const refreshed=await refreshObservation(id,generation);
+        // A competing readback is not a broken stream; retain incomplete live content.
+        let refreshed=false;
+        while(current() && !refreshed)refreshed=await refreshObservation(id,generation);
         if(!current())return;
-        if(!refreshed)throw new Error('Canonical observation read was superseded');
         if(state.view==='sessions' && state.session?.active_execution_id && state.session.active_execution_id!==id){await syncObservation();if(!current())return;}
         const status=state.observedInfo?.status;
         if(terminal(status)){connection('Complete');return;}

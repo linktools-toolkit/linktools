@@ -117,7 +117,7 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
                 await runtime.evaluations.list_cases(spec.ref, principal=service_principal("tenant", "other"))
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
             assert await repository.get_cases(()) == ()
-            reversed_refs = tuple(reversed(seen))
+            reversed_refs = (*reversed(seen), seen[0], seen[-1])
             statements.clear()
             assert tuple(case.ref for case in await repository.get_cases(reversed_refs)) == reversed_refs
             if sql_store is not None:
@@ -162,3 +162,76 @@ async def test_required_case_batch_preserves_first_unavailable_position(
         assert await repository.state_store.read(lambda tx: tx.scan_records())
     finally:
         await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_consumers_bound_case_queries_and_reload_missing_content(tmp_path: Path) -> None:
+    from linktools.ai.evaluation import (
+        CandidateSlotRef, CandidateSpec, CaseSpec, ComparisonSpec, DatasetSpec, EvaluationSpec,
+        ScoreComparisonSelection, ScoreSelection, StartEvaluationRequest,
+    )
+    from linktools.ai.model import ModelRegistry
+    from linktools.ai.runtime import Runtime
+    from linktools.ai.runtime._evaluation import _target_slot
+    from linktools.ai.evaluation import TargetTrialRef
+    from linktools.ai.task import Task
+    from .test_evaluation_consumers import CONTEXT, PRINCIPAL, echo, exact, rule_scorer
+
+    storage = storage_for("sqlite", tmp_path)
+    target = Task("case-reads.target", echo, effect_policy="none")
+    scorer = Task("case-reads.scorer", exact, effect_policy="none")
+    async with Runtime.open("case-consumers", models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
+        owner = runtime.evaluations
+        spec = DatasetSpec(DatasetRef("ordered", 1), tuple(CaseSpec.task(
+            CaseRef("ordered", name, 1), input={"answer": name}, expected=name,
+        ) for name in ("third", "first", "second")))
+        dataset = await owner.publish_dataset(spec, principal=PRINCIPAL, idempotency_key="dataset")
+        repository = storage.evaluation.records
+        keys = {repository._key("evaluation_case", [case.ref.dataset_id, case.ref.case_id,
+                                                   case.ref.revision]).hex() for case in spec.cases}
+        statements = []
+
+        def capture(_connection, _cursor, sql, parameters, _context, _many):
+            if sql.startswith("SELECT") and any(isinstance(value, str) and value in keys for value in parameters):
+                statements.append(sql)
+
+        sql_engine = repository.state_store.context.engine.sync_engine
+        event.listen(sql_engine, "before_cursor_execute", capture)
+        try:
+            bound = runtime.tasks.bind(target, scorer)
+            request = StartEvaluationRequest(EvaluationSpec(dataset, (CandidateSpec("current", task=target.ref),),
+                                                            (rule_scorer(scorer),)), PRINCIPAL, "run")
+            record = await owner._reserve_start(request, engine=bound)
+            assert tuple(plan.case_ref for plan in record.manifest.trials) == tuple(case.ref for case in spec.cases)
+            assert len(statements) <= 2, "start reads case deadlines and required content in bounded batches"
+            run = await owner.get(record.experiment_id, principal=PRINCIPAL)
+            statements.clear()
+            report = await run.preview_report()
+            assert tuple(trial.case_ref for trial in report.trials) == tuple(case.ref for case in spec.cases)
+            assert len(statements) <= 1, "a snapshot must not fetch each immutable case separately"
+            comparison_spec = ComparisonSpec(
+                CandidateSlotRef(run.experiment_id, "current"), CandidateSlotRef(run.experiment_id, "current"),
+                (ScoreComparisonSelection(ScoreSelection("exact", "exact_match"),
+                                          ScoreSelection("exact", "exact_match")),),
+            )
+            statements.clear()
+            comparison = await owner.create_comparison_report(comparison_spec, principal=PRINCIPAL)
+            assert comparison.baseline.experiment_id == comparison.candidate.experiment_id == run.experiment_id
+            assert len(statements) <= 3, "comparison batches its snapshot and both dataset selections"
+            for plan in record.manifest.trials:
+                await owner._disposition(record.experiment_id, _target_slot(TargetTrialRef(
+                    record.experiment_id, plan.trial_id)), "not_admitted", cancelled=True)
+            statements.clear()
+            await owner._tick(record.experiment_id, bound, PRINCIPAL)
+            assert len(statements) <= 1, "one tick reads its distinct cases in a bounded batch"
+            first = spec.cases[0].ref
+            await repository.state_store.mutate(lambda tx: tx.delete_records((repository._key(
+                "evaluation_case", [first.dataset_id, first.case_id, first.revision]),)))
+            for read in (run.preview_report,
+                         lambda: owner.create_comparison_report(comparison_spec, principal=PRINCIPAL),
+                         lambda: owner._tick(record.experiment_id, bound, PRINCIPAL)):
+                with pytest.raises(AIError) as raised:
+                    await read()
+                assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+        finally:
+            event.remove(sql_engine, "before_cursor_execute", capture)
