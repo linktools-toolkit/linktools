@@ -116,10 +116,12 @@ class _MemoryTransaction:
         keys = [record.key_digest for record in values]
         if len(keys) != len(set(keys)):
             raise ValueError("insert_records contains duplicate keys")
-        for record in sorted(values, key=lambda value: value.key_digest):
+        ordered = tuple(sorted(values, key=lambda value: value.key_digest))
+        for record in ordered:
             validate_record_identity(record)
             if record.key_digest in self.records:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+        for record in ordered:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)
 
