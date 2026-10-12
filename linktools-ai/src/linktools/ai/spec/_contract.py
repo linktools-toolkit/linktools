@@ -271,38 +271,6 @@ class AgentSpec:
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "preload_skills", preload_skills)
         object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
-        if "agent_type" in self.metadata:
-            _validate_agent_type(self.metadata["agent_type"])
-
-    def select_skills(self, skills: Sequence["SkillSpec"]) -> "tuple[SkillSpec, ...]":
-        """Resolve selectors and declared types for a new Agent compilation.
-
-        Undeclared Skill scope is unrestricted. Explicit unavailable selections
-        are configuration errors; wildcard selection omits inapplicable Skills.
-        Historical bindings retain their already selected Skill contracts.
-        """
-        available: dict[str, SkillSpec] = {}
-        for skill in skills:
-            if not isinstance(skill, SkillSpec):
-                raise TypeError("skills must contain SkillSpec values")
-            if skill.id in available:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            available[skill.id] = skill
-        available = {
-            identity: skill for identity, skill in available.items()
-            if "agent_types" not in skill.metadata
-            or self.metadata.get("agent_type") in skill.metadata["agent_types"]
-        }
-        explicit = set(self.allow_skills).difference({"*"})
-        if not explicit.issubset(available):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        selected = tuple(
-            skill for identity, skill in sorted(available.items())
-            if "*" in self.allow_skills or identity in explicit
-        )
-        if not set(self.preload_skills).issubset(skill.id for skill in selected):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return selected
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,17 +291,6 @@ class SkillSpec:
         ):
             raise ValueError("skill description must contain 1..1024 characters")
         object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
-        if "agent_types" in self.metadata:
-            types = self.metadata["agent_types"]
-            if not isinstance(types, Sequence) or isinstance(types, str) or not types:
-                raise ValueError("agent_types must be a non-empty array of strings")
-            for value in types:
-                _validate_agent_type(value)
-
-
-def _validate_agent_type(value: object) -> None:
-    if not isinstance(value, str) or not value or value != value.strip() or value == "*":
-        raise ValueError("agent type must be a non-empty exact string")
 
 
 def _validate_revision(value: object) -> int:

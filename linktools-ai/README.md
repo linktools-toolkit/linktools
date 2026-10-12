@@ -30,25 +30,51 @@ The main ownership rules are:
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
 
-## Skill applicability
+## Application capability filtering
 
-Agent declarations may set `metadata.agent_type` to an explicit business role.
-Skills may set `metadata.agent_types` to a non-empty array of permitted roles.
-Types match exactly; they are not inferred from Agent IDs, directories or classes.
-There is no type registry or wildcard matching. Omit Skill scope for a general
-Skill; existing declarations without these keys retain their behavior.
+`Runtime.open(..., capability_filter=...)` accepts an optional synchronous
+`Callable[[AgentSpec, CapabilityContribution], bool]`. The compiler invokes it on
+captured `agent` (delegation target), `tool`, `skill`, `mcp` and generic `capability`
+contributions before resolving existing Agent selectors. The root Agent itself is
+not a delegation candidate. A child is compiled against its own Agent declaration.
+The callback may inspect public declaration metadata; the SDK does not reserve
+business metadata keys, prescribe a type/tag system or serialize the callback.
 
-`AgentSpec.select_skills()` resolves `allow_skills` and scope together. The compiler
-and host discovery views use this selection; runtime instructions, `list_skills`
-and `load_skill` receive the same compiled set. `allow_skills: ["*"]` omits Skills
-outside the declared type. Explicit selections and preloads outside it fail
-compilation. Agents without a declared type can select only unscoped Skills.
+```python
+def available(agent, contribution):
+    if contribution.kind != "skill":
+        return True
+    required = contribution.contract.get("metadata", {}).get("applies_to")
+    return required is None or bool(set(required) & set(agent.metadata.get("tags", [])))
 
-These two metadata keys are execution semantics; changing them requires the named
-declaration's revision to change. Ordinary metadata remains non-semantic. Runtime
-recovery keeps the exact historical selected Skills and Asset version references;
-it does not reapply the current scope. New compilations use current declarations.
-Skill applicability does not restrict independent filesystem or shell access.
+async with Runtime.open(
+    "application", models=models, storage=storage, capabilities=(group,),
+    capability_filter=available,
+) as runtime:
+    ...
+```
+
+`AgentCompiler.filter_capabilities(spec, capture.contributions,
+capability_filter=available)` exposes the same candidate filtering for host
+inspection without constructing a model or Runtime. It returns visible declarations,
+not a fully resolved executable toolset; a management catalog need not materialize
+Workspace tools. Keep the unfiltered capture for global asset administration.
+
+With no callback, existing selection behavior is unchanged. Wildcard selectors
+expand the remaining candidates; explicit unavailable selections and preloads fail.
+Callback exceptions propagate and non-boolean results are rejected. Use a pure,
+deterministic callback over the captured declarations and stable application inputs.
+This is applicability filtering, not an authorization or OS isolation boundary.
+MCP filtering is per server; existing tool selectors still restrict its dynamic
+tools. Generic capabilities are filtered as whole contributions. Repository rules,
+Task definitions and DAG nodes are separate domains, not capability candidates.
+
+The final compiled selection feeds instructions, toolsets, Skill loading and
+Subagent delegation. Binding pins and Asset version references retain that exact
+selection. Historical restoration does not execute the current callback; new
+compilations do. An asset-only snapshot freezes declarations, not application
+callback code. Reuse captured execution bindings when historical selection must
+remain fixed. Ordinary metadata and binding digest projections are unchanged.
 
 ## Shared run budgets
 
