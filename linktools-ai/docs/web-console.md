@@ -40,22 +40,32 @@ shown as empty/unavailable, without provisioning them through a history read.
 
 ### Finding details and controls
 
-The default conversation view keeps messages and the session's current state
-in focus. Session occupancy comes from its active execution identity; inspecting
+The default **Original request timeline** groups the selected execution's original
+client exchanges by logical request and actual HTTP attempt. Submitted user input
+and live Markdown responses remain visible. **Conversation responses** opens the
+SDK response display. Session state stays visible in both views. Session occupancy comes from its active execution identity; inspecting
 an older turn does not substitute that turn's status for the session's owner.
-**View active execution** returns to the owner when a different turn is selected.
+**View active execution** opens its details when a different turn is selected.
+Inspecting an older turn or subagent leaves the active conversation observer and
+its Stop/End controls attached to the current owner. Metrics is a separate page
+and does not interrupt that observer. Executions has its own browser and detail
+page; selecting a run there deliberately observes that run. Browser Back/Forward
+restores the corresponding page.
 
 - **Details** opens session metadata and the selected execution's Overview,
-  History, Transcript, Models & prompt, Trace, and Recovery panels. Usage,
+  SDK history, SDK transcript, Original model requests, SDK prompts, Trace, and
+  Recovery panels. Usage,
   full JSON, result export, parent/subagent links, and detail paging stay here.
   Inspecting a turn or opening an exact execution reveals the panel. Closing it
   returns focus to Details without stopping observation or changing selection.
-- **Actions** groups conversation rename/fork/close and execution retry/fork/end.
-  Stop remains directly available outside the collapsed panel. Resume and
+- **Actions** groups conversation rename/fork/close; execution retry/fork remain
+  beside the selected execution in Details.
+  Stop and **End previous execution and free session** remain directly available
+  outside the collapsed panel. Resume and
   external-effect decisions remain in Recovery; read-only mode disables writes.
 - **Message options** contains planning, thinking, memory scope and attachments.
   The send shortcut and earlier-turn paging remain available in the main view.
-- **Execution filters** and **Open exact ID** expand in the sidebar; applied
+- **Execution filters** and **Open exact ID** expand in the execution browser; applied
   filters, explicit newest-20 scans and list paging retain their original scope.
   Metrics and Runtime settings keep their sidebar entries.
 - Tool/thinking content and ordinary live activity expand on demand. Failure,
@@ -74,9 +84,13 @@ can run concurrently; a second execution in the same session is rejected with
 SQL startup does not infer that an unfinished execution is abandoned. A stopped
 process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and
 observation never take ownership. After confirming the previous executor has
-stopped, use **End stopped execution** to cancel the old work and release its
-session in one action. The console reads the durable cancellation state before
-finishing it through Runtime recovery, then verifies a terminal execution and
+stopped, use **End previous execution and free session** beside the session
+status to cancel the old work and release its session in one action. Standalone
+executions label this action **End stopped execution**. The console requires
+durable `CANCELLING` state or a successful cancellation receipt for the same
+execution before finishing it through Runtime recovery. Unknown external effects
+may keep `RECOVERY_REQUIRED` visible even after cancellation is recorded. The
+console then verifies a terminal execution and
 released session owner. It does not resume model or tool work. Unknown outcomes
 are not reported as complete; another explicit attempt reads the current state
 before continuing. Resolve unknown external effects in **Recovery** if needed.
@@ -85,7 +99,11 @@ To continue the original work instead, **Recovery → Resume stopped execution**
 retains the explicit stopped-executor confirmation and may call models or tools.
 **Stop execution** remains available for a running executor. A cancellation
 request may remain `CANCELLING` until the owner finishes or the stopped-execution
-action completes its cancellation.
+action completes its cancellation. Its pending notice updates after terminal and
+session-owner readback, without replacing an unrelated error. Cancellation is
+shown as a normal turn outcome. Recovery uses the existing Runtime idempotency
+key so a repeated request cannot start another recovery attempt; ending and
+resuming work keep separate request identities.
 
 Runtime owns producer fencing, terminal handoff, and local staging release.
 The console does not introduce a private lock, heartbeat, background result
@@ -100,7 +118,7 @@ their `lt ai` / `python -m linktools ai` forms, are intentionally removed. There
 are no compatibility aliases. Start `ai-web --read-only` to inspect an existing
 workspace, then choose Session or Execution in **Open exact ID** to open a known
 identity. `ai-run` and `ai-acp` remain available for terminal execution and ACP
-stdio clients. Runtime library APIs are unchanged.
+stdio clients. The console uses the same public Runtime domains.
 
 The former viewers had no filter or export flags. Their optional session or
 execution IDs, required trace execution ID, and optional metric name map to the
@@ -112,7 +130,7 @@ place; diagnostic exception messages remain redacted to protect credentials.
 | --- | --- | --- |
 | `ai-run` | New conversation, composer, planning/thinking/memory/files, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, RuntimeHistory `result` |
 | Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and RuntimeHistory session APIs |
-| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, complete paged history/transcript, seven-layer prompt architecture, model request/response/duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
+| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | RuntimeHistory `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
 | Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, vision, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
@@ -125,10 +143,52 @@ was applied. Selecting a child execution preserves its identity rather than
 treating its events as a root model call. Full JSON details preserve public
 fields that do not fit the compact presentation.
 
-The **Models & prompt** tab summarizes system/fixed/dynamic instructions,
+The secondary **SDK prompts** tab summarizes system/fixed/dynamic instructions,
 conversation context, attachment media types, tools and output contracts from
-the selected recorded request. It does not duplicate the instruction mirror or
-fetch trace content in the background. Full prompts/responses remain expandable.
+the framework request snapshot. These are SDK projections, not final native
+client messages. The console never turns these instructions into a purported
+original system/developer message.
+
+### Original client sources
+
+**Original request timeline** and **Original model requests** share the selected
+execution's paged original records. A repeated full input array belongs to its
+request; it is not presented as additional user turns. Each logical request
+retains its execution/run/request identity, purpose, step, output-retry index,
+usage and recorded timing. Actual HTTP attempts are ordered within that request;
+no individual attempt timestamps are invented. Compaction and child executions
+keep their original identities.
+
+The current built-in capture supports OpenAI Chat completions. It records the
+SDK client's final outbound body after adapter conversion and extra-body merging,
+not proof of provider-server receipt. The request view shows the original UTF-8
+source without JSON parsing or reserialization, retaining native roles, order,
+empty content, tool calls/results, unknown fields, large numbers and duplicate
+keys. It does not reconstruct a provider array from SDK snapshots. The OpenAI
+Responses API and other provider APIs are not claimed as captured by this binding.
+
+The separately labeled response is the original body observed as the SDK consumed
+it, with HTTP status, format/encoding hints and completeness. Received SSE data is
+not reassembled into purported final assistant text. For Chat SSE, complete means
+an observed complete `[DONE]` event; other bodies require observed EOF. Bytes
+received in a chunk can include data the SDK did not process, while later unread
+chunks are absent. Failures and cancellation can retain explicitly incomplete
+output. The format is only an encoding hint, not evidence of valid JSON or success.
+
+HTTP carries original bodies reversibly as base64. **Download original bytes**
+returns those same bytes, including compressed response bytes. Supported HTTP
+content encodings may also have a clearly labeled decoded-text display. That
+view is derived for reading; it does not replace the original download or change
+completeness. Unsupported encodings or invalid UTF-8 keep the byte download and
+report that text display is unavailable. Original content is escaped text, never
+HTML or parsed Markdown. **LIVE RESPONSE** remains a separate, visibly incomplete
+SDK display with safe Markdown rendering.
+
+Historical missing capture is shown as **not recorded** and is never backfilled.
+An observed empty request scope, unavailable body and actual zero-byte body remain
+distinct. Body content is unredacted and may include application data or secrets,
+including values in `extra_body`. Capture does not read connection headers, URLs
+or credential settings; this is not a guarantee that bodies contain no secrets.
 
 List filters follow public API semantics. Execution queries support session,
 agent and parent identity filters. The text search filters only loaded rows;
@@ -174,9 +234,24 @@ rather than appended twice. A finished stream is followed by an authoritative
 execution read. Cursor/authorization/integrity failures do not silently become
 success or restart an execution.
 
-History, trace and model requests load only for the selected execution/tab.
-Tool arguments/results and model prompt/response bodies are not stored in a
-second Web cache or sent through Redis. Retained live progress can precede
+SDK history/trace/prompt bodies load only for the visible selected Details tab.
+Original client bodies load when the main original timeline or its inspector tab
+is visible; those views share one page cache. Closing or switching views fences
+pending display work. `include_client_requests=true` selects original client
+bodies independently of SDK `include_content=true`, with existing execution
+permissions checked before body reads. Metadata-only model reads load neither.
+
+A completed model projection triggers an exact read using its real execution ID,
+`agent_run_seq` and `model_request_seq`. Replayed completed records reuse loaded
+originals; token deltas never poll or reload request bodies. Completion reads merge
+without clearing earlier pages, and stale RUNNING rows cannot replace an already
+loaded terminal request. Load-more and refresh failures preserve loaded content
+and their retry cursor. Explicit refresh updates the loaded depth through normal
+cursor pages. The durable completion notification follows the existing Runtime
+commit boundary, so no extra persistence or flush timer is introduced.
+
+Tool arguments/results and model bodies are not copied into another persistent
+Web store or sent through Redis. Retained live progress can precede
 committed history; the UI explicitly shows incomplete or pending content. Independently opened readers see the committed
 prefix after Runtime publishes its observation batch, including RUNNING model
 identities without request/response bodies. Completed requests and controlled
@@ -184,6 +259,12 @@ abnormal ends publish their available content. Refresh the same exact identity
 to see newer facts. A live notification or empty page is not evidence of a
 provider outcome. Publication, cross-process visibility, and recovery remain
 Runtime responsibilities.
+
+Observation follows a known execution, not the session as a whole. After that
+execution finishes, an idle page needs **Refresh** to discover a new turn started
+in another page. Admission still rejects concurrent work in the same session,
+and cancellation targets an exact execution ID. No session-level broadcast or
+automatic recovery is implied by keeping a page open.
 
 ## Local trust boundary
 
@@ -197,7 +278,7 @@ Runtime responsibilities.
 - Credentials are represented only as configured/missing; exception messages
   are omitted from HTTP diagnostics because they can contain provider secrets;
   error code, safe details, exception type and cause digest remain available
-- Model/user/tool content is rendered as text, not executable HTML; static assets
+- Message Markdown is rendered with raw HTML disabled; tool content stays text. Static assets
   are bundled locally, and CSP disallows external scripts, frames and plugins
 
 An HTTP JSON request is bounded at 8 MiB, including envelope/escaping. Runtime
@@ -221,6 +302,15 @@ exposes history and execution, cancellation, and recovery controls.
 Cross-site fetch rejection, the mutation request header, and the absence of
 permissive CORS remain in force. The default mode retains local Host/Origin
 validation. Serve the UI and API at the same external origin.
+
+Keep proxy response buffering and caching disabled for the existing
+`/api/executions/{id}/events` SSE route, and allow long-lived responses. The
+server already sends `X-Accel-Buffering: no`; a proxy must not override it or
+cache the stream. See the [NGINX response buffering contract](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering).
+A dropped stream reattaches with the Runtime cursor using
+bounded backoff, even if an intervening canonical read also fails. A terminal
+read or explicit recovery boundary ends observation; neither transport failure
+nor proxy silence permits taking over the executor.
 
 ## Verification
 
@@ -259,3 +349,30 @@ HTML text; create/send/repeated submit; switching sessions/tabs during pending
 requests; reload/reconnect while running; Stop; model failures; child/tool/model
 detail navigation; cursor Load more; read-only empty stores; JSON export; and
 closing/reopening dialogs. Use fake models and an isolated fixture store.
+
+### Message formatting and drafts
+
+User and assistant message text supports Markdown headings, lists, tables, links
+and fenced code. The composer edits the original Markdown; **Copy Markdown** and
+**Markdown source** preserve its exact source. Incomplete streaming code fences
+are rendered safely as text/code until more content arrives. Tool structures and
+unknown input formats stay inspectable under their original details. Stored
+version-1 inputs display prompt text and attachment descriptions rather than a
+JSON chat bubble. No input or output storage contract is changed.
+
+Raw HTML is escaped. Unsafe link schemes are rejected by the bundled parser;
+links open with `noopener noreferrer`. Markdown images become click-only links,
+and attachment descriptions do not fetch external resources. Rendering uses the
+locally bundled [markdown-it 15.0.2](https://github.com/markdown-it/markdown-it)
+browser ESM distribution, with HTML disabled. The original distribution and
+bundled dependency license notices are retained beside the asset. Its npm tarball
+integrity is `sha512-q4IGxMv56jCqT4OCRCADBoDP3LO4MhmTXjFbphHPXs4g3j9Xg5RDnxqN8IF/3vIWEU+VCnUq+7JUg/cfy2E6Qw==`.
+No CDN request or browser package installation is needed. Live rendering batches
+received updates and leaves historical turns unchanged between canonical reads.
+
+Unsent prompts, file paths, planning/thinking options and memory scope are kept
+per conversation in this page's memory. Switching pages or conversations does
+not submit them. An admission conflict preserves the draft for an explicit next
+Send; an uncertain response reuses its request identity. A confirmed admission
+clears only the accepted prompt, preserving newer edits. Reloading or closing the
+page clears these drafts; they are not written to browser persistent storage.

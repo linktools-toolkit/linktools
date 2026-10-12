@@ -5,6 +5,7 @@ dependencies:
   - typing-extensions>=4.12.0
   - filelock>=3.4.0
   - jsonschema>=4.23.0,<5.0.0
+  - httpx2>=2.12
   - pydantic-ai-slim[mcp,openai]>=2.53.0,<3.0.0
   - pydantic-ai-harness>=0.29.0
 

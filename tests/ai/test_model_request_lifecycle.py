@@ -89,8 +89,9 @@ class _LifecycleRecorder:
         error_code: str | None,
         duration_ns: int,
         usage: object | None,
+        client_requests: object = None,
     ) -> None:
-        del model, response, duration_ns
+        del model, response, duration_ns, client_requests
         self.finish_calls[fact.model_request_seq] = (
             self.finish_calls.get(fact.model_request_seq, 0) + 1
         )
@@ -885,6 +886,7 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
             _parameters: object,
             _streaming: bool,
             _source_messages: object,
+            _client_requests: object = None,
         ) -> None:
             facts.append((phase, fact))
             if phase in {"completed", "failed"}:
@@ -1573,12 +1575,13 @@ async def test_provider_dispatch_waits_for_prepared_input_commit(streaming: bool
     provider_calls: list[bool] = []
     committed = False
 
-    async def prepare(messages, settings, parameters, request_streaming) -> None:
+    async def prepare(messages, settings, parameters, request_streaming) -> Model:
         nonlocal committed
         assert request_streaming is streaming
         entered.set()
         await release.wait()
         committed = True
+        return model.wrapped
 
     async def respond(messages, info) -> ModelResponse:
         assert committed

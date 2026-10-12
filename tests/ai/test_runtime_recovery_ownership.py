@@ -3,17 +3,21 @@
 """Shared SQL startup observes live producers; explicit recovery owns takeover."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.messages import ModelMessage
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import (
+    Execution, ExecutionStreamEvent, ExecutionTreeEvent, Runtime, RuntimeStorage,
+)
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
 from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
@@ -466,3 +470,62 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         assert finished.result.status is ExecutionStatus.SUCCEEDED
         current = await states[0].execution.executions.get(execution.execution_id, tenant_id=tenant)
         assert current.agent_run_seq == waiting.agent_run_seq + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_model_interactions", (False, True))
+async def test_observer_attached_before_recovery_receives_resumed_live_deltas(
+    tmp_path: Path, include_model_interactions: bool,
+) -> None:
+    database = tmp_path / "observe-recovery.db"
+    owner = await asyncio.to_thread(_RuntimeProcess, database)
+    execution_id = str(owner.initial["execution_id"])
+    release = asyncio.Event()
+    attached = asyncio.Event()
+    received_delta = asyncio.Event()
+    observed: list[ExecutionStreamEvent] = []
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        del messages, info
+        yield "resumed live delta"
+        await release.wait()
+        yield " completed"
+
+    async def observe(execution: Execution[None]) -> None:
+        async for item in execution.watch(
+            include_content=True, include_model_interactions=include_model_interactions,
+        ):
+            tree = item if isinstance(item, ExecutionTreeEvent) else item.event
+            if not isinstance(tree, ExecutionTreeEvent):
+                continue
+            event = tree.event
+            observed.append(event)
+            attached.set()
+            if event.event_type == "ASSISTANT_TEXT_DELTA":
+                received_delta.set()
+
+    try:
+        await asyncio.to_thread(owner.crash)
+        async with Runtime.open(
+            _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
+            storage=RuntimeStorage.sqlite(database), capabilities=(_capabilities(),),
+        ) as runtime:
+            execution = await runtime.executions.get(execution_id)
+            watching = asyncio.create_task(observe(execution))
+            try:
+                await asyncio.wait_for(attached.wait(), 10)
+                await execution.recover(idempotency_key="resume-with-existing-observer")
+                await asyncio.wait_for(received_delta.wait(), 5)
+                assert any("resumed live delta" in event.payload.get("text", "") for event in observed)
+                assert (await runtime.executions.inspect(
+                    execution_id, principal=runtime.default_principal,
+                )).status is ExecutionStatus.STARTED
+            finally:
+                release.set()
+                await execution.wait(timeout_seconds=10)
+                await asyncio.wait_for(watching, 10)
+            durable = [event.durable_seq for event in observed if event.durable_seq is not None]
+            assert durable == sorted(set(durable))
+    finally:
+        release.set()
+        await asyncio.to_thread(owner.close)

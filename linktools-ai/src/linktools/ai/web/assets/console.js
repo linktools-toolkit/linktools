@@ -1,5 +1,19 @@
 export const terminal = status => ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(status);
 export const modelKey = item => `${item.execution_id}:${item.agent_run_seq}:${item.model_request_seq}`;
+export const clientAttemptKey = (item,index) => `${modelKey(item)}:${index}`;
+export function clientBodyBytes(value) {
+  if(value.body==null)return null;
+  if(value.body_encoding!=='base64' || typeof value.body!=='string')throw new Error('Original body encoding is unavailable');
+  return Uint8Array.from(atob(value.body),char=>char.charCodeAt(0));
+}
+export function clientBodyText(value) {
+  if(value.body==null)return null;
+  if(value.content_encoding){
+    if(value.decode_error || typeof value.decoded_text!=='string')throw new Error(value.decode_error || 'Content decoding unavailable');
+    return value.decoded_text;
+  }
+  return new TextDecoder('utf-8',{fatal:true}).decode(clientBodyBytes(value));
+}
 export const historyKey = item => `${item.execution_id}:${item.agent_run_seq}:${item.message_seq}:${item.part_index}:${item.item_kind}:${item.tool_call_id || ''}`;
 export function eventKey(item) {
   const event=item.event, payload=event.payload || {};

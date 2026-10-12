@@ -36,6 +36,7 @@ from pydantic_ai_harness.compaction import (
 
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
+from ..model import ModelClientRequest, ModelClientRequestRecorder
 from ..workspace import validate_workspace_path
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
@@ -80,6 +81,7 @@ class ExternalModelRequestRecorder(Protocol):
         parameters: ModelRequestParameters,
         streaming: bool,
         source_messages: Sequence[ModelMessage] | None,
+        client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None: ...
 
 
@@ -121,75 +123,81 @@ class _ObservedCompactionModel(WrapperModel):
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         model_request_seq = fact.model_request_seq
-        try:
-            await self._notify(
-                fact,
-                phase="started",
-                response=None,
-                error=None,
-                messages=messages,
-                model_settings=model_settings,
-                parameters=model_request_parameters,
-            )
+        with ModelClientRequestRecorder() as client_recorder:
             try:
-                async def request() -> ModelResponse:
-                    return await self.wrapped.request(messages, model_settings, model_request_parameters)
-
-                response = (await request() if self._budget is None else
-                            await self._budget.run_model(fact.observation_id, request))
-            except asyncio.CancelledError as error:
-                await self._finish(
-                    model_request_seq,
-                    status="CANCELLED",
-                    phase="cancelled",
+                await self._notify(
+                    fact,
+                    phase="started",
                     response=None,
-                    error=error,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=model_request_parameters,
-                )
-                raise
-            except RunCancelled as error:
-                await self._finish(
-                    model_request_seq,
-                    status="CANCELLED",
-                    phase="cancelled",
-                    response=None,
-                    error=error,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=model_request_parameters,
-                )
-                raise
-            except Exception as error:
-                await self._finish(
-                    model_request_seq,
-                    status="FAILED",
-                    phase="failed",
-                    response=None,
-                    error=error,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=model_request_parameters,
-                )
-                raise
-            finished = self._journal.finish(model_request_seq, status="SUCCEEDED")
-            interrupted = await _await_request_handoff(
-                self._notify(
-                    finished,
-                    phase="completed",
-                    response=response,
                     error=None,
                     messages=messages,
                     model_settings=model_settings,
                     parameters=model_request_parameters,
+                    client_requests=client_recorder.requests,
                 )
-            )
-            if interrupted:
-                raise asyncio.CancelledError
-            return response
-        finally:
-            self._journal.consume(model_request_seq)
+                try:
+                    async def request() -> ModelResponse:
+                        return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+                    response = (await request() if self._budget is None else
+                                await self._budget.run_model(fact.observation_id, request))
+                except asyncio.CancelledError as error:
+                    await self._finish(
+                        model_request_seq,
+                        status="CANCELLED",
+                        phase="cancelled",
+                        response=None,
+                        error=error,
+                        messages=messages,
+                        model_settings=model_settings,
+                        parameters=model_request_parameters,
+                        client_requests=client_recorder.requests,
+                    )
+                    raise
+                except RunCancelled as error:
+                    await self._finish(
+                        model_request_seq,
+                        status="CANCELLED",
+                        phase="cancelled",
+                        response=None,
+                        error=error,
+                        messages=messages,
+                        model_settings=model_settings,
+                        parameters=model_request_parameters,
+                        client_requests=client_recorder.requests,
+                    )
+                    raise
+                except Exception as error:
+                    await self._finish(
+                        model_request_seq,
+                        status="FAILED",
+                        phase="failed",
+                        response=None,
+                        error=error,
+                        messages=messages,
+                        model_settings=model_settings,
+                        parameters=model_request_parameters,
+                        client_requests=client_recorder.requests,
+                    )
+                    raise
+                finished = self._journal.finish(model_request_seq, status="SUCCEEDED")
+                interrupted = await _await_request_handoff(
+                    self._notify(
+                        finished,
+                        phase="completed",
+                        response=response,
+                        error=None,
+                        messages=messages,
+                        model_settings=model_settings,
+                        parameters=model_request_parameters,
+                        client_requests=client_recorder.requests,
+                    )
+                )
+                if interrupted:
+                    raise asyncio.CancelledError
+                return response
+            finally:
+                self._journal.consume(model_request_seq)
 
     async def _finish(
         self,
@@ -202,6 +210,7 @@ class _ObservedCompactionModel(WrapperModel):
         messages: Sequence[ModelMessage],
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
+        client_requests: tuple[ModelClientRequest, ...],
     ) -> None:
         finished = self._journal.finish(model_request_seq, status=status)
         interrupted = await _await_request_handoff(
@@ -213,6 +222,7 @@ class _ObservedCompactionModel(WrapperModel):
                 messages=messages,
                 model_settings=model_settings,
                 parameters=parameters,
+                client_requests=client_requests,
             )
         )
         if interrupted:
@@ -228,6 +238,7 @@ class _ObservedCompactionModel(WrapperModel):
         messages: Sequence[ModelMessage],
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
+        client_requests: tuple[ModelClientRequest, ...],
     ) -> None:
         if self._observer is not None:
             await self._observer(
@@ -251,6 +262,7 @@ class _ObservedCompactionModel(WrapperModel):
                 parameters,
                 False,
                 self._source_messages,
+                client_requests,
             )
 
 

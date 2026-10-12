@@ -353,12 +353,25 @@ class DefaultExecutionHistoryService:
         principal: Principal,
         cursor: "str | None" = None,
         include_content: bool = False,
+        include_client_requests: bool = False,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> Page[ModelInteractionItem]:
         await self._authorize(execution_id, principal)
+        if not isinstance(include_client_requests, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        selectors = {
+            "agent_run_seq": agent_run_seq,
+            "model_request_seq": model_request_seq,
+        }
+        _validate_history_filters(selectors)
+        filters = {name: value for name, value in selectors.items() if value is not None}
+        if include_client_requests:
+            filters["include_client_requests"] = True
         filter_digest = self._content_filter_digest(
-            execution_id, "model_interactions", include_content,
+            execution_id, "model_interactions", include_content, filters or None,
         )
         inner_cursor = self._decode_query_cursor(
             cursor,
@@ -373,6 +386,9 @@ class DefaultExecutionHistoryService:
             limit=limit,
             cutoffs=cutoffs,
             include_content=include_content,
+            **({"include_client_requests": include_client_requests} if include_client_requests is not False else {}),
+            **({"agent_run_seq": agent_run_seq} if agent_run_seq is not None else {}),
+            **({"model_request_seq": model_request_seq} if model_request_seq is not None else {}),
         )
         return Page(
             page.items,

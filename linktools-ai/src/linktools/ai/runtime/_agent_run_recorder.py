@@ -27,6 +27,7 @@ from pydantic_ai.settings import ModelSettings
 
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
+from ..model import ModelClientRequest
 from ._attachment import request_attachment_facts
 from ._transcript_staging import StagedTranscript
 from ._journal import (
@@ -767,6 +768,7 @@ class AgentRunRecorder:
         error_code: str | None,
         duration_ns: int,
         usage: object | None,
+        client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None:
         del model
         model_request_seq = fact.model_request_seq
@@ -816,6 +818,7 @@ class AgentRunRecorder:
                 attachments=attachments,
                 started_at=fact.started_at,
                 finished_at=fact.finished_at,
+                client_requests=client_requests,
             )
         )
 

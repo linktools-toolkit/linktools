@@ -252,6 +252,7 @@ class LiveExecutionEventBroker:
         self._last_type: dict[str, ExecutionDeltaType] = {}
         self._subscriptions: dict[str, set[_LiveSubscription]] = {}
         self._activity: dict[str, asyncio.Event] = {}
+        self._activity_waiters: dict[asyncio.Event, int] = {}
         self._completed: set[str] = set()
         self._base_event_seqs: dict[str, int] = {}
         self._prepared: dict[str, _PreparedStreamLease] = {}
@@ -496,8 +497,18 @@ class LiveExecutionEventBroker:
 
     async def wait_for_activity(self, execution_id: str) -> None:
         event = self._activity.setdefault(execution_id, asyncio.Event())
-        await event.wait()
-        event.clear()
+        self._activity_waiters[event] = self._activity_waiters.get(event, 0) + 1
+        try:
+            await event.wait()
+            event.clear()
+        finally:
+            remaining = self._activity_waiters[event] - 1
+            if remaining:
+                self._activity_waiters[event] = remaining
+            else:
+                self._activity_waiters.pop(event)
+                if not self.is_local_producer(execution_id) and self._activity.get(execution_id) is event:
+                    self._activity.pop(execution_id)
 
     def complete(self, execution_id: str) -> None:
         self._completed.add(execution_id)
@@ -578,7 +589,9 @@ class LiveExecutionEventBroker:
         self._last_type.pop(execution_id, None)
         self._completed.discard(execution_id)
         self._base_event_seqs.pop(execution_id, None)
-        self._activity.pop(execution_id, None)
+        activity = self._activity.pop(execution_id, None)
+        if activity is not None:
+            activity.set()
         self._prepared.pop(execution_id, None)
         self._replay_required.discard(execution_id)
         self._pending_event_counts.pop(execution_id, None)
@@ -733,12 +746,14 @@ class DefaultEventService:
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
         if not is_local_producer:
-            async for event in self._stream_durable(
+            async with aclosing(self._stream_durable(
                 execution_id,
                 tenant_id=principal.tenant_id,
                 after_event_seq=after_event_seq,
-            ):
-                yield event
+                principal=principal,
+            )) as stream:
+                async for event in stream:
+                    yield event
             return
 
         try:
@@ -985,9 +1000,11 @@ class DefaultEventService:
         *,
         tenant_id: str,
         after_event_seq: int,
+        principal: Principal | None = None,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         cursor = after_event_seq
         poll_backoff = 1.0
+        terminal_high_water: int | None = None
         while True:
             page = await self._read_durable(
                 execution_id,
@@ -1010,6 +1027,8 @@ class DefaultEventService:
                     if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                         return
                 continue
+            if terminal_high_water is not None and cursor < terminal_high_water:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             failure = self._worker_failure(execution_id, tenant_id=tenant_id)
             if failure is not None:
                 raise failure
@@ -1019,14 +1038,27 @@ class DefaultEventService:
             if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
                 if cursor >= execution.event_seq:
                     return
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                # The terminal commit may have followed the preceding empty
+                # page read. Re-read once before treating its tail as missing.
+                terminal_high_water = execution.event_seq
+                continue
             try:
                 is_local_producer = self._live.is_local_producer(execution_id)
             except AIError:
                 raise
             except Exception as error:
                 raise _ExecutionStreamFailure(error) from error
-            if is_local_producer:
+            if is_local_producer and principal is not None:
+                # Only an initially durable observer may attach to a later local
+                # producer. Overflow and handoff replay must stay durable-only.
+                async with aclosing(self._stream_with_live(
+                    execution_id, principal=principal, after_event_seq=cursor,
+                    authorized=True,
+                )) as stream:
+                    async for event in stream:
+                        yield event
+                return
+            if is_local_producer or principal is not None:
                 try:
                     await _wait_live_activity(
                         self._live,
