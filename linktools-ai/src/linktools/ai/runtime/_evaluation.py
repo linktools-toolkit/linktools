@@ -1015,7 +1015,9 @@ class RuntimeEvaluations:
                         await self._value(scorer.rubric), scorer.config, evidence.ref,
                         canonical_sha256({"candidate": trial.candidate_slot_id})[:16],
                         rubric_present=scorer.rubric is not None,
-                        target_input=None if evidence.input is None else evidence.input.value)
+                        target_input=None if evidence.input is None else evidence.input.value,
+                        case_ref=cases[trial.case_ref].ref,
+                        label_provenance=cases[trial.case_ref].label_provenance)
                     graph = self._scoring_graph(record, trial.trial, scorer, sample)
                     await self._launch(record, trial.trial, scorer, graph,
                                        record.manifest.policy.scorer_graph_limits, engine, trial_scope=trial_scope)
@@ -1286,6 +1288,10 @@ class RuntimeEvaluations:
     ) -> TaskGraph:
         slot = _score_slot(trial, scorer.slot_id)
         data = sample.to_mapping()
+        if scorer.input_projection["kind"] in {"agent_projected", "agent_literal"}:
+            # Authoritative case context is for programmatic scoring, not model input.
+            data.pop("case_ref", None)
+            data.pop("label_provenance", None)
         if scorer.input_projection["kind"] == "agent_projected":
             data = dict(AgentTaskInput("Evaluate the supplied scoring input.", parameters=data))
         elif scorer.input_projection["kind"] == "agent_literal":

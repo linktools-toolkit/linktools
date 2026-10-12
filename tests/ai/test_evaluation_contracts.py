@@ -27,6 +27,7 @@ from linktools.ai.evaluation import (
     GraphOutputItem,
     HumanScoreRequest,
     InlineValue,
+    LabelProvenance,
     RescoreRequest,
     ScoreBundle,
     ScoreNotApplicable,
@@ -108,12 +109,16 @@ def test_score_schema_checks_ranges_and_na_without_zero_filling() -> None:
         ScoreNotApplicable(reason=" ")
 
 
-def test_scoring_input_exposes_raw_json_and_round_trips() -> None:
+def _scoring_input() -> ScoringInput:
     target = ExecutionTargetEvidence(ExecutionSubjectRef("namespace", "tenant", "execution"),
                                      "succeeded", InlineValue.from_value({"answer": None}))
-    sample = ScoringInput(TargetTrialRef("experiment", "trial"), target,
-                          {"answer": None}, True, {"rule": "exact"}, {},
-                          EvidenceRef("namespace", "tenant", "evidence", "a" * 64), "candidate")
+    return ScoringInput(TargetTrialRef("experiment", "trial"), target,
+                        {"answer": None}, True, {"rule": "exact"}, {},
+                        EvidenceRef("namespace", "tenant", "evidence", "a" * 64), "candidate")
+
+
+def test_scoring_input_exposes_raw_json_and_round_trips() -> None:
+    sample = _scoring_input()
     assert sample.expected == sample.target_output
     assert sample.rubric == {"rule": "exact"}
     sample.expected["answer"] = "changed"
@@ -121,6 +126,72 @@ def test_scoring_input_exposes_raw_json_and_round_trips() -> None:
     restored = ScoringInput.from_mapping(sample.to_mapping())
     assert restored.to_mapping() == sample.to_mapping()
     assert restored.expected_present and restored.target_status == "succeeded"
+    assert sample.case_ref is restored.case_ref is None
+    assert sample.label_provenance is restored.label_provenance is None
+    assert set(sample.to_mapping()) == {
+        "kind", "trial", "target", "expected", "expected_present", "rubric", "rubric_present",
+        "config", "evidence_ref", "candidate_label", "target_input",
+    }
+
+
+@pytest.mark.parametrize("case_ref", (None, CaseRef("dataset", "case", 2)))
+@pytest.mark.parametrize("label_provenance", (
+    None, LabelProvenance(), LabelProvenance("assessment:42", "reviewer", "human-confirmed", "3"),
+))
+def test_scoring_input_optional_context_round_trips(
+    case_ref: CaseRef | None, label_provenance: LabelProvenance | None,
+) -> None:
+    original = _scoring_input()
+    sample = ScoringInput(original.trial, original.target, original.expected, original.expected_present,
+                          original.rubric, original.config, original.evidence_ref, original.candidate_label,
+                          case_ref=case_ref, label_provenance=label_provenance)
+    payload = sample.to_mapping()
+    assert ("case_ref" in payload) is (case_ref is not None)
+    assert ("label_provenance" in payload) is (label_provenance is not None)
+    restored = ScoringInput.from_mapping(payload)
+    assert restored.case_ref == case_ref and restored.label_provenance == label_provenance
+    assert restored.to_mapping() == payload
+    assert {key: value for key, value in payload.items() if key not in {"case_ref", "label_provenance"}} == original.to_mapping()
+    if case_ref is not None:
+        payload["case_ref"]["case_id"] = "changed"
+        assert sample.case_ref == case_ref
+    if label_provenance is not None:
+        payload["label_provenance"]["actor"] = "changed"
+        assert sample.label_provenance == label_provenance
+
+
+def test_scoring_input_context_is_keyword_only_and_explicit_null_is_absent() -> None:
+    original = _scoring_input()
+    args = (original.trial, original.target, original.expected, original.expected_present,
+            original.rubric, original.config, original.evidence_ref, original.candidate_label)
+    with pytest.raises(TypeError):
+        ScoringInput(*args, CaseRef("dataset", "case", 1))
+    with pytest.raises(TypeError):
+        ScoringInput(*args, case_ref={"dataset_id": "dataset", "case_id": "case", "revision": 1})
+    with pytest.raises(TypeError):
+        ScoringInput(*args, label_provenance={"source": "assessment:42"})
+    restored = ScoringInput.from_mapping({**original.to_mapping(), "case_ref": None, "label_provenance": None})
+    assert restored.to_mapping() == original.to_mapping()
+
+
+@pytest.mark.parametrize("context", (
+    {"unknown_context": None},
+    {"case_ref": "case"},
+    {"case_ref": {"dataset_id": "dataset", "case_id": "case"}},
+    {"case_ref": {"dataset_id": "dataset", "case_id": "case", "revision": 1, "unknown": None}},
+    {"case_ref": {"dataset_id": 1, "case_id": "case", "revision": 1}},
+    {"case_ref": {"dataset_id": "dataset", "case_id": "case", "revision": True}},
+    {"case_ref": {"dataset_id": "dataset", "case_id": "case", "revision": "1"}},
+    {"label_provenance": "human-confirmed"},
+    {"label_provenance": {"source": "assessment:42"}},
+    {"label_provenance": {**LabelProvenance().to_mapping(), "unknown": None}},
+    {"label_provenance": {**LabelProvenance().to_mapping(), "source": None}},
+    *({"label_provenance": {**LabelProvenance().to_mapping(), key: 1}}
+      for key in ("actor", "procedure", "revision")),
+))
+def test_scoring_input_rejects_unknown_or_malformed_context(context: dict) -> None:
+    with pytest.raises(ValueError):
+        ScoringInput.from_mapping({**_scoring_input().to_mapping(), **context})
 
 
 def test_graph_successful_null_and_failure_remain_distinct() -> None:
