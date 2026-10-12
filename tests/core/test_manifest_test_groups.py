@@ -519,15 +519,15 @@ def test_repository_pool_preserves_all_discovered_package_coverage() -> None:
     modules = manage.get_modules()
     rows = package_checks(modules)
     core = next(row for row in rows if "linktools" in row["packages"].split())
-    assert {"linktools", "linktools-common", "linktools-mobile"} <= set(core["packages"].split())
+    assert {"linktools", "linktools-common", "linktools-mobile", "linktools-cntr"} <= set(core["packages"].split())
     assert core["name"] == " + ".join(core["packages"].split()) + " checks"
     assert core["install"] == ""
     ai = [row for row in rows if row["packages"] == "linktools-ai"]
     assert {"evaluation-recovery", "runtime"} <= {row["group"] for row in ai}
     assert all(row["install"] == "linktools-ai" for row in ai)
     assert all(row["name"] == "linktools-ai checks (%s)" % row["group"] for row in ai)
-    cntr = next(row for row in rows if row["name"] == "linktools-cntr checks")
-    assert cntr["packages"] == cntr["install"] == "linktools-cntr"
+    assert core["group"] == "all"
+    assert not any(row["packages"] == "linktools-cntr" for row in rows)
     expected = {
         package: len(manage.load_project_checks(package, module["path"]).get("pytest", {}).get("groups", {"all": ()}))
         for package, module in modules.items()
