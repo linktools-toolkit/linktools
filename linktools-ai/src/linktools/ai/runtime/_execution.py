@@ -101,6 +101,7 @@ from .service_api import (
     project_execution_view as _project_execution_view,
 )
 from .state import RuntimeDomain
+from .state._execution_repositories import ExecutionRepositoryImpl
 from .state._contracts import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -2745,9 +2746,9 @@ class DefaultExecutionService:
             ExecutionStatus.CANCELLED,
         }:
             raise AIError(ErrorCode.EXECUTION_NOT_READY)
-        result = await self._state.executions.get_result(
-            execution_id, tenant_id=principal.tenant_id
-        )
+        repository = self._state.executions
+        result = (execution.result if type(repository) is ExecutionRepositoryImpl else
+                  await repository.get_result(execution_id, tenant_id=principal.tenant_id))
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         error_code, safe_details = _terminal_error(execution)
@@ -2816,10 +2817,9 @@ class DefaultExecutionService:
             raise _execution_recovery_error(execution)
         if execution.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = await self._state.executions.get_result(
-            execution_id,
-            tenant_id=principal.tenant_id,
-        )
+        repository = self._state.executions
+        result = (execution.result if type(repository) is ExecutionRepositoryImpl else
+                  await repository.get_result(execution_id, tenant_id=principal.tenant_id))
         if result is None or result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result.output.size

@@ -340,6 +340,13 @@ class DefaultExecutionHistoryService:
         self, execution_id: str, *, principal: Principal, agent_run_seq: int,
         after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
     ) -> tuple[ModelInteractionItem, ...]:
+        if type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.read_authorized_model_interaction_metadata(
+                execution_id, tenant_id=principal.tenant_id, executions=self._executions,
+                agent_run_seq=agent_run_seq, after_model_request_seq=after_model_request_seq,
+                through_model_request_seq=through_model_request_seq, limit=limit,
+            )
         await self._authorize(execution_id, principal)
         return await self._reader.read_model_interaction_metadata(
             execution_id, tenant_id=principal.tenant_id, agent_run_seq=agent_run_seq,
