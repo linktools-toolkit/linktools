@@ -120,7 +120,7 @@ def _durable_runtime_type(
     schema: Mapping[str, JsonValue],
 ) -> "type[object]":
     normalized = _normalize_schema(schema)
-    validator = _schema_validator(normalized)
+    validator = Draft202012Validator(dict(normalized))
     try:
         structured_type = StructuredDict(cast(object, normalized))
     except Exception as error:

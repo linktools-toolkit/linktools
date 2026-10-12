@@ -113,13 +113,6 @@ from .state._steps import RuntimeAgentRunStore
 from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._mcp import (
-    _MCPBinding,
-    _MCPProjection,
-    close_mcp_resources,
-    materialize_mcp_capabilities,
-    prepare_mcp_projections,
-)
 from ._memory import MemoryStore
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
@@ -143,6 +136,9 @@ from ._tool_return_codec import (
 )
 from .state._contracts import LoadedModelContext
 from .state._step_contracts import AgentRunCheckpoint, AgentRunStore
+
+if TYPE_CHECKING:
+    from ._mcp import _MCPBinding, _MCPProjection
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
@@ -479,13 +475,17 @@ class AgentExecutor:
                     scope.binding.compiled_agent,
                     self._asset_sources,
                 )
-            mcp_projections = await prepare_mcp_projections(
-                live_mcp_servers,
-                mcp_bindings,
-                asset_readers=self._asset_sources,
-                sandboxed=backend is not None,
-                materializer=materializer,
-            )
+            mcp_projections: dict[str, _MCPProjection] = {}
+            if live_mcp_servers:
+                from ._mcp import prepare_mcp_projections
+
+                mcp_projections = await prepare_mcp_projections(
+                    live_mcp_servers,
+                    mcp_bindings,
+                    asset_readers=self._asset_sources,
+                    sandboxed=backend is not None,
+                    materializer=materializer,
+                )
 
             if backend is None and selected:
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
@@ -688,16 +688,19 @@ class AgentExecutor:
             primary_error = error
             raise
         finally:
-            await _close_mcp_resources(
-                capabilities,
-                primary_error,
-            )
+            if compiled_agent.mcp_servers:
+                await _close_mcp_resources(
+                    capabilities,
+                    primary_error,
+                )
 
 
 async def _close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
     primary_error: BaseException | None,
 ) -> None:
+    from ._mcp import close_mcp_resources
+
     try:
         await close_mcp_resources(capabilities)
     except BaseException as cleanup_error:
@@ -740,6 +743,8 @@ def _mcp_bindings(
         policy = pin.contract.get("execution_policy")
         if not isinstance(policy, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        from ._mcp import _MCPBinding
+
         result[server.id] = _MCPBinding(
             versions,
             asset_source_id,
@@ -1046,6 +1051,8 @@ async def _materialize_agent(
             )
         )
     if compiled_agent.mcp_servers:
+        from ._mcp import materialize_mcp_capabilities
+
         capabilities.extend(
             await materialize_mcp_capabilities(
                 compiled_agent.mcp_servers,

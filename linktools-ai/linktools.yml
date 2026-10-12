@@ -61,8 +61,11 @@ checks:
     paths:
       - ../tests/ai
     groups:
-      evaluation:
+      evaluation-recovery:
         - test_evaluation*
         - test_captured*
         - test_graph_capture*
+        - test_runtime_recovery_ownership.py
+        - test_runtime_process_recovery.py
+        - test_keyed_execution_recovery.py
       runtime: []

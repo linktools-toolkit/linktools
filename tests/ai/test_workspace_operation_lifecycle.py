@@ -142,6 +142,7 @@ async def test_close_waits_for_process_start_cleanup_not_caller_lifetime(
 @pytest.mark.parametrize("unread_output", (False, True))
 async def test_stdio_close_terminates_child_with_full_unread_input(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     unread_output: bool,
 ) -> None:
     session = await LocalSandbox().open(root=tmp_path)
@@ -155,23 +156,103 @@ async def test_stdio_close_terminates_child_with_full_unread_input(
              + "time.sleep(60)"),
         )
         assert await asyncio.wait_for(process.read_stdout(1), 5) == b"r"
+        stdin = process._process.stdin
+        assert stdin is not None
+        drain = stdin.drain
+        wait_closed = stdin.wait_closed
+        draining = asyncio.Event()
+        stdin_closed = asyncio.Event()
+
+        async def observe_drain() -> None:
+            draining.set()
+            await drain()
+
+        async def observe_closed() -> None:
+            assert process._process.returncode is not None
+            try:
+                await wait_closed()
+            finally:
+                stdin_closed.set()
+
+        monkeypatch.setattr(stdin, "drain", observe_drain)
+        monkeypatch.setattr(stdin, "wait_closed", observe_closed)
         if unread_output:
             async def wait_for_backpressure() -> None:
                 while not process._process.stdout._paused:
                     await asyncio.sleep(0)
             await asyncio.wait_for(wait_for_backpressure(), 5)
         writing = asyncio.create_task(process.write_stdin(b"x" * (2 * 1024 * 1024)))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(draining.wait(), 5)
+        assert not writing.done()
         closing = asyncio.create_task(process.close())
         try:
             done, _ = await asyncio.wait((closing,), timeout=5)
             assert closing in done
             closing.result()
+            assert stdin_closed.is_set()
         finally:
             if not closing.done():
                 process._process.kill()
             await asyncio.gather(writing, closing, return_exceptions=True)
     finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process sessions are required")
+async def test_stdio_close_does_not_wait_for_detached_stdin_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = await LocalSandbox().open(root=tmp_path)
+    assert isinstance(session, StdioSandboxSession)
+    reader_pid: int | None = None
+    writing: asyncio.Task[None] | None = None
+    closing: asyncio.Task[None] | None = None
+    try:
+        process = await session.open_stdio_process(
+            sys.executable,
+            ("-c", "import subprocess,sys; "
+             "reader = subprocess.Popen([sys.executable, '-c', "
+             "'import time; time.sleep(60)'], "
+             "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+             "start_new_session=True); "
+             "print(reader.pid, flush=True); sys.stdin.buffer.read(1)"),
+        )
+        reader_pid = int(await asyncio.wait_for(process._process.stdout.readline(), 5))
+        stdin = process._process.stdin
+        assert stdin is not None
+        drain = stdin.drain
+        draining = asyncio.Event()
+
+        async def observe_drain() -> None:
+            draining.set()
+            await drain()
+
+        async def wait_for_child_exit() -> None:
+            while process._process.returncode is None:
+                await asyncio.sleep(0)
+
+        monkeypatch.setattr(stdin, "drain", observe_drain)
+        writing = asyncio.create_task(process.write_stdin(b"x" * (2 * 1024 * 1024)))
+        await asyncio.wait_for(draining.wait(), 5)
+        await asyncio.wait_for(wait_for_child_exit(), 5)
+        assert not writing.done()
+        closing = asyncio.create_task(process.close())
+        done, _ = await asyncio.wait((closing,), timeout=5)
+        assert closing in done
+        closing.result()
+        os.kill(reader_pid, 0)
+    finally:
+        if reader_pid is not None:
+            try:
+                os.kill(reader_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await asyncio.gather(
+            *(task for task in (writing, closing) if task is not None),
+            return_exceptions=True,
+        )
         await session.close()
 
 
@@ -285,6 +366,7 @@ async def test_repeated_cancel_during_guardian_start_waits_for_child_cleanup(
     ((False, False), (True, False), (False, True)),
 )
 async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
+    monkeypatch: pytest.MonkeyPatch,
     ignore_term: bool,
     unread_output: bool,
 ) -> None:
@@ -298,6 +380,7 @@ async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
     guardian_source = (
         "import os,subprocess,sys\n"
         "from linktools.ai.workspace import sandbox_guardian as g\n"
+        "g._CLOSE_SECONDS = 0.5\n"
         "def start(arguments):\n"
         "    reader, writer = os.pipe()\n"
         "    child = subprocess.Popen(\n"
@@ -343,6 +426,26 @@ async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
         process = _bubblewrap._BubblewrapStdioProcess(
             guardian, control_fd=control_read, on_close=lambda value: None
         )
+        stdin = guardian.stdin
+        assert stdin is not None
+        drain = stdin.drain
+        wait_closed = stdin.wait_closed
+        draining = asyncio.Event()
+        stdin_closed = asyncio.Event()
+
+        async def observe_drain() -> None:
+            draining.set()
+            await drain()
+
+        async def observe_closed() -> None:
+            assert guardian.returncode is not None
+            try:
+                await wait_closed()
+            finally:
+                stdin_closed.set()
+
+        monkeypatch.setattr(stdin, "drain", observe_drain)
+        monkeypatch.setattr(stdin, "wait_closed", observe_closed)
         assert guardian.stdout is not None
         child_pid = int(await asyncio.wait_for(guardian.stdout.readline(), 5))
         if unread_output:
@@ -353,10 +456,11 @@ async def test_guardian_close_bypasses_buffered_stdin_and_proves_child_exit(
         else:
             reading = asyncio.create_task(process.read_stdout())
         writing = asyncio.create_task(process.write_stdin(b"x" * (20 * 1024 * 1024)))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(draining.wait(), 5)
         assert not writing.done()
         await process.close()
         assert guardian.returncode == 0
+        assert stdin_closed.is_set()
         if reading is not None:
             assert await reading == b""
         with pytest.raises(ProcessLookupError):

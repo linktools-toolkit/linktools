@@ -1256,6 +1256,15 @@ class _BubblewrapStdioProcess:
                 raise AIError(ErrorCode.SANDBOX_SESSION_LOST)
             await drain_task
             await self._stderr_task
+            # Collect the close result only after the guardian proves child exit.
+            stdin = self._process.stdin
+            if stdin is not None:
+                if stdin.transport.get_write_buffer_size():
+                    stdin.transport.abort()
+                try:
+                    await stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
         except BaseException as error:
             if isinstance(error, AIError):
                 raise

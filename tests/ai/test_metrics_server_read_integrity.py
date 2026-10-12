@@ -3,24 +3,17 @@
 """Verify real server reads and aggregation share one canonical snapshot."""
 
 import asyncio
-import getpass
 import json
-from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_metrics_database
 from linktools.ai.observe import (
     MetricAggregation,
-    MetricDefinition,
     MetricMeasurement,
     MetricQuery,
-    MetricSource,
-    MetricType,
     MetricWindow,
     Metrics,
     Observation,
@@ -29,17 +22,13 @@ from linktools.ai.observe import (
 from linktools.ai.observe import _query
 from linktools.ai.observe._sql import SqlMetricStore
 from sqlalchemy import delete, event, select, text, update
-from sqlalchemy.engine import URL
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from ._metrics_server_test_helpers import _COUNT, _NAMESPACE, _RATIO, _VALUE, _ServerMetrics
 
 
 _START = datetime(2026, 9, 7, tzinfo=timezone.utc)
 _WINDOW = MetricWindow.between(_START, _START + timedelta(seconds=2))
-_NAMESPACE = "server-integrity"
-_COUNT = "business.integrity.count"
-_RATIO = "business.integrity.ratio"
-_VALUE = "business.integrity.value"
-_ServerMetrics = tuple[Metrics, AsyncEngine, AsyncEngine]
 
 
 def _observation(index: int = 0) -> Observation:
@@ -50,44 +39,6 @@ def _observation(index: int = 0) -> Observation:
         correlation={"attempt": 2**53 + 1}, dimensions={"group": "中文"},
         measurements=(MetricMeasurement("value", 1, index + 1),),
     )
-
-
-@pytest_asyncio.fixture
-async def server_metrics(_server: tuple[str, list[str]]) -> AsyncIterator[_ServerMetrics]:
-    name, command = _server
-    if name == "postgresql":
-        url = URL.create(
-            "postgresql+asyncpg", username=getpass.getuser(), database="postgres",
-            query={"host": command[command.index("-h") + 1]},
-        )
-    else:
-        socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
-        url = URL.create(
-            "mysql+asyncmy", username="root", database="metrics_test",
-            query={"unix_socket": socket, "charset": "utf8mb4"},
-        )
-    engine = create_async_engine(url, isolation_level="READ COMMITTED", pool_size=1, max_overflow=0)
-    writer = create_async_engine(url, isolation_level="READ COMMITTED", pool_size=1, max_overflow=0)
-    metadata = build_metrics_sql_metadata()
-    try:
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.drop_all)
-        await provision_metrics_database(engine)
-        metrics = Metrics.sql(engine, namespace=_NAMESPACE)
-        for name, source, metric_type in (
-            (_COUNT, MetricSource.observation_count(), MetricType.COUNTER),
-            (_RATIO, MetricSource.indicator("status", ("FAILED",)), MetricType.RATIO),
-            (_VALUE, MetricSource.measurement("value"), MetricType.GAUGE),
-        ):
-            await metrics.define(MetricDefinition(
-                name=name, revision=1, observation_kind="business.integrity", source=source,
-                metric_type=metric_type, unit="1", default_aggregation=MetricAggregation.COUNT,
-                query_fields=("group", "status"),
-            ))
-        yield metrics, engine, writer
-    finally:
-        await writer.dispose()
-        await engine.dispose()
 
 
 async def _payload(engine: AsyncEngine) -> dict[str, object]:

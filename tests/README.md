@@ -87,10 +87,13 @@ checks:
     paths:
       - ../tests/ai
     groups:
-      evaluation:
+      evaluation-recovery:
         - test_evaluation*
         - test_captured*
         - test_graph_capture*
+        - test_runtime_recovery_ownership.py
+        - test_runtime_process_recovery.py
+        - test_keyed_execution_recovery.py
       runtime: []
 ```
 
@@ -112,7 +115,7 @@ the selected package's manifest, and unknown groups fail clearly. Tier selection
 remains independent:
 
 ```bash
-PYTEST_ADDOPTS='--test-group=evaluation' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=evaluation-recovery' python manage.py check linktools-ai --test-tier daily
 PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
 ```
 
@@ -147,7 +150,9 @@ and open dependency-update policy are unchanged.
 | Inline workspace captures | Four adapter scenarios, each running fixed input then reprojection against one accepted source (8 evaluation runs) | Four complementary adapter/projected/file-change scenarios, completing the original 16 evaluation runs | None |
 | Scorer request usage | Initial scoring with known usage; rescoring with unknown usage; complete inexpensive report-gate truth table | Initial scoring with unknown usage and rescoring with known usage; all four retain actual usage, saved cutoff and report assertions | None |
 | Recovery bootstrap | Activated-before-first-response and unconfirmed-effect process exits; existing cancellation, live-claim and split-handoff regressions | Request-checkpoint exit and a second crash during recovered terminal completion | None |
+| Explicit and keyed recovery | Active-phase orphan recovery, contender-revision fencing and keyed replay; pending-start orphan recovery; all four live-startup mode/phase cases | Admitted-phase orphan recovery, contender-revision fencing and keyed replay | None |
 | Captured graph inputs | Eight pairwise-balanced combinations across declaration/materialized, clean/captured, changed/deleted and fixed/reproject | Remaining eight combinations, completing all 16 | None |
+| Capture context authority | Five combinations across fixed/reproject, clean/captured and agent/graph sources, including direct-agent clean reprojection | Remaining three combinations, completing all eight | None |
 | Process-crash recovery | All five local SQLite boundaries; tool-completed boundary on SQLAlchemy SQLite and split storage; dedicated failure regressions | Checkpoint, projection and terminal boundaries on SQLAlchemy SQLite and split storage, completing 3 backends × 5 boundaries | None |
 | Server percentile compatibility | Empty/singleton inputs and existing small native-dialect aggregate/selection contracts | All original 100-sample nearest-rank floating-point boundaries, grouped and ungrouped | None |
 | Server aggregate query plan | 100-row real PostgreSQL/MySQL result and EXPLAIN/source-read checks | None | Original 100,000-row plan/source-read checks |
@@ -159,7 +164,19 @@ and open dependency-update policy are unchanged.
 
 Pagination, scan/group limits, numeric-order edge cases, and corruption semantics
 are not moved merely because they contain large counts. Native database fixtures
-remain isolated; daemon scope is unchanged.
+remain isolated: each worker owns a session-scoped server, and modules use separate
+databases. Server startup, shutdown and protocol-error checks remain in place.
+
+In automatic CI, explicit/keyed recovery and capture-context sampling reduce
+only draft-PR execution. Ready PRs, `master` and release checks still run every
+combination; explicit `all` runs include them too. Active and pending-start recovery
+representatives remain daily, as do all live-startup cases, including standalone
+execution.
+The five daily capture-context cases cover all value combinations for each pair
+of the three binary axes and retain direct-agent clean reprojection, where input
+resolution must remove captured context. Daily does not cover every three-way
+interaction; the full eight-case matrix stays automatic in merge. These finite
+regression matrices are not manual stress probes.
 
 ## Shared preparation
 

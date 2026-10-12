@@ -1847,6 +1847,16 @@ def _decode_domain(
     *,
     persisted: bool = False,
 ) -> object:
+    if target is str or target is bool or target is int or target is float:
+        if value is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not isinstance(value, target) or (
+            target is int and isinstance(value, bool)
+        ):
+            raise TypeError("scalar value has the wrong type")
+        if target is float:
+            return _require_finite_wire_float(value)
+        return value
     if target is Any or target is object:
         return _decode_any(value, codec, persisted=persisted)
     if target == "JsonValue":
@@ -1998,16 +2008,6 @@ def _decode_domain(
         )
     if isinstance(target, type) and is_dataclass(target):
         return _decode_dataclass(value, target, codec, persisted=persisted)
-    if target is float:
-        if not isinstance(value, float):
-            raise TypeError("scalar value has the wrong type")
-        return _require_finite_wire_float(value)
-    if target in (str, bool, int):
-        if not isinstance(value, target) or (
-            target is int and isinstance(value, bool)
-        ):
-            raise TypeError("scalar value has the wrong type")
-        return value
     return _decode_any(value, codec, persisted=persisted)
 
 

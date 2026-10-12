@@ -20,7 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 
 from .test_live_history_readback_integration import _Models
-from .test_runtime_recovery_ownership import _NAMESPACE, _RuntimeProcess, _capabilities
+from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabilities
 
 
 @asynccontextmanager
@@ -79,7 +79,9 @@ async def _recover(runtime: Runtime, execution_id: str, key: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ("active", "admitted"))
+@pytest.mark.parametrize("phase", (
+    "active", pytest.param("admitted", marks=pytest.mark.merge),
+))
 async def test_keyed_recovery_replays_across_runtimes_and_after_completion(tmp_path: Path, phase: str) -> None:
     async with _recoverable(tmp_path, phase=phase) as (runtime, other, state, execution_id, calls, release):
         original = await _head(state, execution_id)

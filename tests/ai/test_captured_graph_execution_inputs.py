@@ -67,7 +67,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
     async def project(context: AgentTaskInputContext) -> str:
         return f"Prepared in {context.graph_id}: {context.input['question']}"
 
-    async with Runtime.open("captured-projection", models=models, storage=RuntimeStorage.filesystem(tmp_path / "state"),
+    async with Runtime.open("captured-projection", models=models, storage=RuntimeStorage.in_memory(),
             context=CONTEXT, capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
@@ -89,7 +89,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"})),),
             (rule_scorer(scorer),), input_mode=input_mode,
-            policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+            policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))),
             PRINCIPAL, "evaluate"), engine=engine)
         assert (await run.wait(timeout_seconds=20)).result.completion == "complete"
         report = await run.create_report()

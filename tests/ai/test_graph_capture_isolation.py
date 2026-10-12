@@ -109,9 +109,16 @@ async def test_graph_capture_applies_context_policy_to_all_agent_input_forms(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_kind", ["agent", "graph"])
-@pytest.mark.parametrize("context_policy", ["clean", "captured"])
-@pytest.mark.parametrize("input_mode", ["fixed_input", "reproject_input"])
+@pytest.mark.parametrize(("input_mode", "context_policy", "source_kind"), (
+    ("fixed_input", "clean", "agent"),
+    pytest.param("fixed_input", "clean", "graph", marks=pytest.mark.merge),
+    pytest.param("fixed_input", "captured", "agent", marks=pytest.mark.merge),
+    ("fixed_input", "captured", "graph"),
+    ("reproject_input", "clean", "agent"),
+    ("reproject_input", "clean", "graph"),
+    ("reproject_input", "captured", "agent"),
+    pytest.param("reproject_input", "captured", "graph", marks=pytest.mark.merge),
+))
 async def test_capture_context_policy_remains_authoritative_when_reprojecting(
     tmp_path: Path, source_kind: str, context_policy: str, input_mode: str,
 ) -> None:

@@ -31,6 +31,33 @@ from linktools.ai.storage import StoredPayload
 _ReadT = TypeVar("_ReadT")
 
 
+class _Models:
+    route_id = "default"
+    provider = "test"
+    model_identity = "test:live-history"
+    vision = False
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history"}
+
+    def __init__(self, model: FunctionModel) -> None:
+        self.model = model
+
+    def capture(self) -> "_Models":
+        return self
+
+    def resolve(self, route_id: str) -> "_Models":
+        assert route_id == "default"
+        return self
+
+    def restore(self, payload: Mapping[str, JsonValue], *, route_id: str | None = None) -> "_Models":
+        assert route_id in {None, "default"}
+        assert dict(payload) == self.contract
+        return self
+
+    def materialize(self) -> FunctionModel:
+        return self.model
+
+
 async def _wait_for_committed(
     read: Callable[[], Awaitable[_ReadT]],
     ready: Callable[[_ReadT], bool],

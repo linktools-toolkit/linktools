@@ -3,14 +3,9 @@
 """Exercise PostgreSQL native order statistics when local server tools exist."""
 
 import json
-import os
-import shlex
-import shutil
 import subprocess
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 from linktools.ai.observe import MetricAggregation, MetricSourceKind, MetricType
@@ -22,36 +17,13 @@ from linktools.ai.observe._store import _MetricQueryPushdownPlan
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
+from ._metrics_server_test_helpers import _server_database
+
 
 @pytest.fixture(scope="module")
-def _postgresql() -> Iterator[tuple[Path, Path]]:
-    candidates = sorted(Path("/usr/lib/postgresql").glob("*/bin"), reverse=True)
-    initdb = shutil.which("initdb")
-    if initdb:
-        candidates.insert(0, Path(initdb).parent)
-    directories = [p for p in candidates if all((p / name).is_file() for name in ("initdb", "pg_ctl", "psql"))]
-    if not directories or (hasattr(os, "geteuid") and os.geteuid() == 0):
-        pytest.skip("PostgreSQL server tools require an unprivileged local user")
-    binaries = directories[0]
-    with TemporaryDirectory(prefix="metrics-pg-") as name:
-        root = Path(name)
-        data = root / "data"
-        subprocess.run(
-            [str(binaries / "initdb"), "-D", str(data), "--auth=trust", "--no-locale", "--encoding=UTF8"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        subprocess.run(
-            [str(binaries / "pg_ctl"), "-D", str(data), "-l", str(root / "server.log"),
-             "-w", "-t", "20", "-o", shlex.join(["-F", "-h", "", "-k", str(root)]), "start"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        try:
-            yield binaries, root
-        finally:
-            subprocess.run(
-                [str(binaries / "pg_ctl"), "-D", str(data), "-w", "-t", "20", "-m", "fast", "stop"],
-                check=True, capture_output=True, text=True, timeout=30,
-            )
+def _postgresql(_postgresql_server: tuple[str, list[str]]) -> Iterator[tuple[str, list[str]]]:
+    with _server_database(_postgresql_server) as server:
+        yield server
 
 
 def _plan(aggregation: MetricAggregation, percentile: float | None) -> _MetricQueryPushdownPlan:
@@ -68,10 +40,10 @@ def _plan(aggregation: MetricAggregation, percentile: float | None) -> _MetricQu
 
 
 def _query(
-    connection: tuple[Path, Path], values: tuple[int | float, ...],
+    connection: tuple[str, list[str]], values: tuple[int | float, ...],
     aggregation: MetricAggregation, percentile: float | None = None,
 ) -> int | float | None:
-    binaries, root = connection
+    _name, command = connection
     plan = _plan(aggregation, percentile)
     statement, params = _measurement_sql("postgresql", plan, _base_params("ns", "postgresql", plan))
     dialect = postgresql.dialect()
@@ -92,7 +64,7 @@ CREATE TEMP TABLE ai_metric_observations (
 );
 """ + "\n".join(inserts) + "\nSELECT COALESCE(json_agg(q), '[]') FROM (" + sql + ") AS q;\nROLLBACK;"
     result = subprocess.run(
-        [str(binaries / "psql"), "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1", "-h", str(root), "-d", "postgres"],
+        command,
         input=script, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -113,7 +85,7 @@ CREATE TEMP TABLE ai_metric_observations (
     (),
 ))
 def test_postgresql_selected_values_are_original_samples(
-    _postgresql: tuple[Path, Path], aggregation: MetricAggregation, values: tuple[int | float, ...],
+    _postgresql: tuple[str, list[str]], aggregation: MetricAggregation, values: tuple[int | float, ...],
 ) -> None:
     p = 0.5 if aggregation is MetricAggregation.PERCENTILE else None
     actual = _query(_postgresql, values, aggregation, p)

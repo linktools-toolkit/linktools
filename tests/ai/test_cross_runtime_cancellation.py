@@ -27,22 +27,30 @@ async def test_remote_cancel_releases_revoked_producer_staging(
     entered = asyncio.Event()
     release = asyncio.Event()
     watchers: list[asyncio.Task[None]] = []
+    model_exited = asyncio.Event()
+    success_exited = asyncio.Event()
 
     async def model(messages, info):
         del messages, info
-        if cancel_at == "provider":
-            yield "received "
-            entered.set()
-            await release.wait()
-        yield "late answer"
+        try:
+            if cancel_at == "provider":
+                yield "received "
+                entered.set()
+                await release.wait()
+            yield "late answer"
+        finally:
+            model_exited.set()
 
     if cancel_at == "success":
         original_success = LocalExecutionBackend._commit_success
 
         async def pause_success(backend, *args, **kwargs):
-            entered.set()
-            await release.wait()
-            return await original_success(backend, *args, **kwargs)
+            try:
+                entered.set()
+                await release.wait()
+                return await original_success(backend, *args, **kwargs)
+            finally:
+                success_exited.set()
 
         monkeypatch.setattr(LocalExecutionBackend, "_commit_success", pause_success)
 
@@ -63,6 +71,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
             for turn in range(3):
                 entered.clear()
                 release.clear()
+                model_exited.clear()
+                success_exited.clear()
                 execution = await session.start("Wait", idempotency_key=f"turn-{turn}")
                 await asyncio.wait_for(entered.wait(), 10)
                 observed = []
@@ -96,11 +106,17 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 assert owner_storage.run_store._staging._runs
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
+                run_stores = (owner_storage.run_store, remote_storage.run_store)
+                observation_tasks = {store._observation_task for store in run_stores
+                                     if store._observation_task is not None}
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
                     asyncio.gather(asyncio.shield(worker), return_exceptions=True), 10,
                 )
                 assert worker_outcomes[0] is None or isinstance(worker_outcomes[0], asyncio.CancelledError)
+                await asyncio.wait_for(model_exited.wait(), 10)
+                if cancel_at == "success":
+                    await asyncio.wait_for(success_exited.wait(), 10)
                 if watched is not None:
                     from linktools.ai.core import ExecutionEventType
 
@@ -122,7 +138,21 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 ]
                 assert result.status is ExecutionStatus.CANCELLED
                 assert result.output is None
-                await asyncio.sleep(1.1)
+                async def settled() -> None:
+                    joined = set()
+                    while True:
+                        tasks = observation_tasks | backend._checkpoint_tasks
+                        for store in run_stores:
+                            tasks.update(store._background_tasks)
+                            if store._observation_task is not None:
+                                tasks.add(store._observation_task)
+                        tasks.difference_update(joined)
+                        if not tasks:
+                            return
+                        await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+                        joined.update(tasks)
+
+                await asyncio.wait_for(settled(), 10)
                 assert await owner_storage.execution.executions.get_history_head(
                     execution.execution_id, tenant_id=tenant,
                 ) == sealed
