@@ -206,9 +206,53 @@ async def test_saved_rescore_reports_expire_with_the_source_and_are_purged(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", (
+    ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, ErrorCode.STORAGE_INTEGRITY_ERROR,
+))
+async def test_coordinator_does_not_retry_unexpired_read_failures(
+    monkeypatch: pytest.MonkeyPatch, code: ErrorCode,
+) -> None:
+    target = Task("source.target", echo, effect_policy="none")
+    storage = RuntimeStorage.in_memory()
+    async with Runtime.open("unavailable-source", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("source", 1), (
+            CaseSpec.task(CaseRef("source", "one", 1), input={"answer": "yes"}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        attempts = 0
+
+        async def unavailable(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise AIError(code)
+
+        monkeypatch.setattr(runtime.evaluations, "_tick", unavailable)
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(
+            dataset, (CandidateSpec("candidate", task=target.ref),),
+            (ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,)),),
+            policy=EvaluationPolicy(allow_volatile=True, metadata_retention_seconds=60),
+        ), PRINCIPAL, "run"), engine=runtime.tasks.bind(target))
+
+        async def stopped():
+            while True:
+                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                if record.dispositions and run.experiment_id not in runtime.evaluations._watchers:
+                    return record
+                await asyncio.sleep(0.01)
+
+        record = await asyncio.wait_for(stopped(), 2)
+        assert attempts == 1
+        assert record.gate == "open"
+        assert not record.intents
+        assert record.dispositions[0].slot_id == "coordinator"
+        assert record.dispositions[0].disposition.reason_code == str(code)
+        assert record.dispositions[0].disposition.retryable
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("deadline", ("metadata", "content"))
+@pytest.mark.parametrize("boundary", (None, "tick", "projection"))
 async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
-    monkeypatch: pytest.MonkeyPatch, deadline: str,
+    monkeypatch: pytest.MonkeyPatch, deadline: str, boundary: str | None,
 ) -> None:
     clock = Clock()
     monkeypatch.setattr(evaluation_module, "_now", clock.now)
@@ -236,8 +280,27 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
                 await asyncio.sleep(0.01)
 
         graph = await asyncio.wait_for(ready(), 10)
+        paused, release = asyncio.Event(), asyncio.Event()
+        if boundary is not None:
+            method = "_require_content" if boundary == "tick" else "_inspect"
+            original = getattr(runtime.evaluations, method)
+
+            async def cross_deadline(*args, **kwargs):
+                coordinator = runtime.evaluations._watchers.get(rescored.experiment_id)
+                if asyncio.current_task() is coordinator and not paused.is_set():
+                    if boundary == "tick":
+                        await original(*args, **kwargs)
+                    paused.set()
+                    await release.wait()
+                    if boundary == "tick":
+                        return None
+                return await original(*args, **kwargs)
+
+            monkeypatch.setattr(runtime.evaluations, method, cross_deadline)
+            await asyncio.wait_for(paused.wait(), 2)
         saved = await rescored.create_report()
         clock.advance(31)
+        release.set()
 
         async def settled():
             while True:
@@ -249,6 +312,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
 
         record = await asyncio.wait_for(settled(), 2)
         assert not record.scores
+        assert not any(item.slot_id == "coordinator" for item in record.dispositions)
         assert (await graph.state()).status is TaskStatus.CANCELLED
         with pytest.raises(AIError) as unavailable:
             await runtime.evaluations.get_report(saved.report_id, principal=PRINCIPAL)
