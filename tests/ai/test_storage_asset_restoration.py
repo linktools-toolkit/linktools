@@ -41,7 +41,7 @@ from linktools.ai.storage import (
 
 class _DialectSession:
     def __init__(self, name: str) -> None:
-        self.bind = SimpleNamespace(dialect=SimpleNamespace(name=name))
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name=name, skip_autocommit_rollback=False))
         self.statements = []
         self.connection_options = []
 
@@ -247,11 +247,21 @@ async def test_sql_dialect_owns_consistent_read_setup() -> None:
     for dialect in (PostgreSQLDialect(), MySQLDialect()):
         assert dialect.single_writer is False
         session = _DialectSession(dialect.name)
+        if dialect.name == "mysql":
+            session.bind.dialect.skip_autocommit_rollback = True
         await dialect.begin_consistent_read(session)
         assert session.statements == []
         assert session.connection_options == [
             {"isolation_level": "REPEATABLE READ"}
         ]
+
+    mysql_session = _DialectSession("mysql")
+    await MySQLDialect().begin_consistent_read(mysql_session)
+    assert [str(statement) for statement in mysql_session.statements] == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        "START TRANSACTION",
+    ]
+    assert mysql_session.connection_options == []
 
 
 @pytest.mark.asyncio
