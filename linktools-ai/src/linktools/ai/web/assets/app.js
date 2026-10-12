@@ -3,7 +3,7 @@ import {renderMarkdown, inputPresentation} from './message.js';
 
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
-  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', conversationMode:'chat', nativeTimeline:null, expandedRequests:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
+  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, expandedRequests:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
@@ -64,10 +64,12 @@ function showError(error) {
 }
 function connection(label, failed=false) { $('connection').textContent=label==='Read-only'?label:`Observation: ${label}`; $('connection').hidden=!failed && label!=='Read-only'; $('connection').classList.toggle('error', failed); }
 function showInspector(open, focus=false) {
+  if(open && state.view==='sessions' && state.conversationMode==='original'){state.conversationMode='chat';renderConversation();}
   if(state.view==='sessions')state.conversationInspectorOpen=open;
   if(state.view==='executions')open=true;
   if(!open)++state.detailGeneration;
   $('inspector').hidden=!open;$('inspector-toggle').setAttribute('aria-expanded',String(open));
+  if(!open)$('run-actions').open=false;
   if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$('inspector-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
 function renderCurrentState() {
@@ -128,6 +130,16 @@ function setDisabled() {
   $('end-stopped').textContent=state.execution?.session_id ? 'End previous execution and free session' : 'End stopped execution';
   if($('resume-run'))$('resume-run').disabled=readonly || !recoverable || ending || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
   $('export').disabled=!state.execution || !terminal(state.execution.status);
+  $('run-recovery').disabled=!state.execution;
+  $('detail-view').disabled=!state.execution;
+  $('native-mode').hidden=state.view!=='sessions';$('native-mode').disabled=!state.selectedExecution;
+  $('detail-turn-picker').hidden=state.view!=='sessions';
+  const needsRecovery=['RECOVERY_REQUIRED','START_UNKNOWN','CANCELLING'].includes(state.execution?.status);
+  $('detail-attention').hidden=!needsRecovery && state.execution?.status!=='FAILED';
+  $('detail-attention-text').textContent=state.execution?.status==='FAILED'?`Failed${state.execution.error_code?' · '+state.execution.error_code:''}. Actions offers retry or fork.`:needsRecovery?`${state.execution.status.replaceAll('_',' ')}${state.execution.error_code?' · '+state.execution.error_code:''}. Review the recorded state before continuing.`:'';
+  $('detail-recovery').hidden=!needsRecovery;
+  $('recovery-controls').hidden=state.tab!=='recovery';
+  $('session-details').hidden=state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
   const active=state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
   $('end-active').hidden=readonly || !active || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(active.status) && state.endReadbackId!==active.execution_id;
   $('end-active').disabled=Boolean(active && [...state.actionsPending].some(key=>key.startsWith(`${active.execution_id}:`)));
@@ -309,7 +321,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
   restoreDraft(state.selectedSession);
   state.nativeTimeline=null;
   state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
-  const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;
+  const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;$('run-actions').open=false;
   closeSidebar();renderPage();
   if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
   $('composer').hidden=!sessionId; $('conversation-title').textContent='Loading…';
@@ -347,20 +359,27 @@ async function moreTurns() {
     if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
   } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
 }
+function renderTurnPickers() {
+  const options=state.turns.map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
+  if(state.selectedExecution && !options.some(option=>option.id===state.selectedExecution))options.push({id:state.selectedExecution,label:`Execution ${short(state.selectedExecution)}`});
+  const signature=json(options);
+  for(const id of ['detail-turn','request-turn']) {
+    const select=$(id);
+    if(select.dataset.options!==signature){
+      select.replaceChildren();options.forEach(({id,label})=>{const option=element('option','',label);option.value=id;select.append(option);});select.dataset.options=signature;
+    }
+    select.value=state.selectedExecution || '';select.disabled=!options.length;
+  }
+}
 function renderConversation({prepend=false}={}) {
   const liveFocus=document.activeElement?.dataset?.liveFocus,requestFocus=requestFocusWithin($('conversation'));
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
   const follows=previousTop+container.clientHeight>=previousHeight-40, original=state.conversationMode==='original';
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
-  $('native-mode').classList.toggle('active',original);$('native-mode').setAttribute('aria-pressed',String(original));
-  $('chat-mode').classList.toggle('active',!original);$('chat-mode').setAttribute('aria-pressed',String(!original));
+  $('request-navigation').hidden=!original;renderTurnPickers();
   $('request-context').hidden=!original;
   if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
   if(original) {
-    const select=$('request-turn');select.replaceChildren();
-    state.turns.forEach((turn,index)=>{const option=element('option','',`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status}`);option.value=turn.execution_id;select.append(option);});
-    if(state.selectedExecution && !state.turns.some(turn=>turn.execution_id===state.selectedExecution)){const option=element('option','',`Execution ${short(state.selectedExecution)}`);option.value=state.selectedExecution;select.append(option);}
-    select.value=state.selectedExecution || '';select.disabled=!select.children.length;
     const section=element('section','model-requests');renderNativeTimeline(section);container.append(section);
   } else state.turns.forEach(turn => {
     const section=element('article','turn');
@@ -377,7 +396,6 @@ function renderConversation({prepend=false}={}) {
     if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
     const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
     if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
-    heading.append(button('Model requests',async()=>{state.conversationMode='original';await selectExecution(turn.execution_id,state.generation);renderConversation();}),button('Details',async()=>{showInspector(true,true);await selectExecution(turn.execution_id,state.generation);}));
     section.append(heading);container.append(section);
   });
   if (!state.turns.length && !state.timelineError && !original)container.append(element('p','empty',state.selectedSession ? 'Send a message to get started.':'Choose an execution to inspect.'));
@@ -429,7 +447,8 @@ async function selectExecution(id, generation=state.generation) {
   const executionGeneration=++state.executionGeneration,selectionChanged=id!==state.selectedExecution;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
   if(state.nativeTimeline?.id!==id)state.nativeTimeline=null;
-  state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;setDisabled();clear('inspector-content');renderLive();
+  if(selectionChanged){$('run-actions').open=false;state.traceSelection=null;}
+  state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;renderTurnPickers();setDisabled();clear('inspector-content');renderLive();
   $('execution-meta').textContent=`Loading ${id}…`;
   if(selectionChanged && state.view==='sessions' && state.conversationMode==='original')renderConversation();
   try {
@@ -452,8 +471,12 @@ async function selectExecution(id, generation=state.generation) {
 }
 function renderExecution() {
   const info=state.execution; if (!info) return;
-  renderCurrentState();
-  $('execution-meta').replaceChildren(element('strong','',`${info.agent_id || info.task_id || 'Execution'} · ${info.status}`),element('div','mono',info.execution_id));
+  renderCurrentState();renderTurnPickers();
+  $('detail-title').textContent=info.session_id?'Turn details':'Execution details';
+  const elapsed=info.started_at && info.terminal_at?duration(Math.max(0,new Date(info.terminal_at)-new Date(info.started_at))*1000000):'Duration unavailable';
+  $('execution-meta').replaceChildren(element('strong','',`${info.agent_id || info.task_id || 'Execution'} · ${info.status}`),element('span','run-duration',elapsed));
+  const identity=element('div','mono run-identity',short(info.execution_id));identity.title=info.execution_id;$('execution-meta').append(identity);
+  if(info.usage)$('execution-meta').append(element('p','run-usage',`${info.usage.logical_requests} requests · ${usageLabel(info.usage)}${info.usage.unknown_usage_requests?' · '+info.usage.unknown_usage_requests+' usage unknown':''}`));
   if (info.parent_execution_id) $('execution-meta').append(button('↑ Parent execution',async()=>state.view==='sessions'?selectExecution(info.parent_execution_id):navigate(null,info.parent_execution_id)));
   if(info.session_id && state.view==='executions')$('execution-meta').append(button('Open conversation',async()=>navigate(info.session_id,null)));
 }
@@ -493,8 +516,10 @@ function nativeInteraction(item,scope='conversation') {
   else if(item.client_requests===null)card.append(element('p','muted',item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':'Original client messages were not recorded. SDK snapshots are not used to backfill them. Only the supported OpenAI Chat binding is captured; other provider APIs may be unavailable here.'));
   else if(!item.client_requests.length)card.append(element('p','muted','No supported client dispatch was observed in this request scope. Only the OpenAI Chat binding is currently captured; SDK snapshots are not substituted.'));
   else item.client_requests.forEach((attempt,index)=>{
-    const row=element('section','detail-card'),key=clientAttemptKey(item,index);row.dataset.clientAttempt=key;
-    row.append(element('h4','',`Client attempt ${index+1} · ${attempt.api}`),element('p','muted','SDK client outbound request. Provider-server receipt is not observable here.'),nativeBody(attempt,`${key}-request.bin`,{request:true}));
+    const row=element('details','detail-card client-attempt'),key=clientAttemptKey(item,index),expandedKey=scope+':attempt:'+key;row.dataset.clientAttempt=key;
+    row.open=state.expandedRequests.has(expandedKey);row.ontoggle=()=>{if(!row.isConnected)return;if(row.open)state.expandedRequests.add(expandedKey);else state.expandedRequests.delete(expandedKey);};
+    const summary=element('summary','',`Client attempt ${index+1} · ${attempt.api}${attempt.response?' · HTTP '+attempt.response.status_code:''}`);summary.dataset.requestFocus=key+':attempt';
+    row.append(summary,element('p','muted','SDK client outbound request. Provider-server receipt is not observable here.'),nativeBody(attempt,`${key}-request.bin`,{request:true}));
     if(attempt.response){
       const response=attempt.response;
       row.append(element('h4','',`Observed response · HTTP ${response.status_code} · ${response.complete?'complete':'incomplete'}`),element('p','muted',`${response.format} · ${response.content_encoding || 'identity'} · Only bytes pulled by the SDK were captured; received SSE data is not reconstructed assistant text.`),nativeBody(response,`${key}-response.bin`));
@@ -603,16 +628,15 @@ async function refreshNativeRequests(view,generation) {
     }
   }
 }
-async function loadDetail(more=false, selectors={}) {
+async function loadDetail(more=false, selectors={}, reuseNative=false) {
   if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
   if (!more) { state.details=[]; state.detailCursor=null; clear('inspector-content'); }
   $('detail-more').hidden=true;
-  document.querySelectorAll('[data-tab]').forEach(node=>node.classList.toggle('active',node.dataset.tab===tab));
-  if(['history','transcript','sdkmodels'].includes(tab))$('sdk-debugging').open=true;
+  $('detail-view').value=tab;setDisabled();
   if (tab==='overview') { renderOverview(); return; }
   if (tab==='models') {
-    await loadNativeTimeline(more,!more && !(state.view==='sessions' && state.conversationMode==='original'));
+    await loadNativeTimeline(more,!more && !reuseNative && !(state.view==='sessions' && state.conversationMode==='original'));
     if(generation!==state.detailGeneration || selection!==state.generation || id!==state.selectedExecution || tab!==state.tab)return;
     renderNativeViews();
     if(state.nativeTimeline?.error)showError(new Error(state.nativeTimeline.error));
@@ -640,6 +664,29 @@ function renderOverview() {
     state.models.forEach(item=>{const card=element('div','detail-card');card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose}`),rawDetail(item));$('inspector-content').append(card);});
   }
 }
+function traceItem(item) {
+  const row=item.payload || {},key=`${item.execution_id}:${item.step_event_seq}`,selected=state.traceSelection===key;
+  const node=element('section','trace-item'),toggle=button('',async()=>{state.traceSelection=selected?null:key;renderDetails();});
+  toggle.className='trace-row';toggle.dataset.requestFocus=`trace:${key}`;toggle.setAttribute('aria-expanded',String(selected));
+  toggle.append(element('span','trace-seq',`#${item.step_event_seq}`),element('span','trace-label',`${(row.kind || 'Step').replaceAll('_',' ').toLowerCase()}${row.tool_name?' · '+row.tool_name:''}`));
+  if(row.status)toggle.append(element('span','trace-status',row.status));
+  toggle.append(element('span','trace-duration',duration(row.duration_ns)));node.append(toggle);
+  if(!selected)return node;
+  const detail=element('div','trace-detail');
+  detail.append(element('p','mono',`${item.execution_id} · ${row.scope || '—'} · run ${row.agent_run_seq ?? '—'} · step ${row.step_index ?? '—'} · request #${row.model_request_seq ?? '—'}`),element('p','muted',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`));
+  const selectors={};['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
+  if(row.call_id)selectors.tool_call_id=row.call_id;
+  const content=button('Read SDK content',async()=>{
+    if(item.execution_id!==state.selectedExecution){
+      const generation=state.generation,selection=selectExecution(item.execution_id),executionGeneration=state.executionGeneration;
+      await selection;
+      if(generation!==state.generation || executionGeneration!==state.executionGeneration || item.execution_id!==state.selectedExecution || state.tab!=='trace')return;
+    }
+    state.tab='history';await loadDetail(false,selectors);
+  });content.dataset.requestFocus=`trace:${key}:content`;detail.append(content);
+  if(row.child_execution_id){const child=button('Open subagent',async()=>state.view==='sessions'?selectExecution(row.child_execution_id):navigate(null,row.child_execution_id));child.dataset.requestFocus=`trace:${key}:child`;detail.append(child);}
+  const raw=rawDetail(item,'Original event record');raw.children[0].dataset.requestFocus=`trace:${key}:raw`;detail.append(raw);node.append(detail);return node;
+}
 function renderDetails() {
   const requestFocus=requestFocusWithin($('inspector-content'));
   clear('inspector-content');
@@ -657,7 +704,7 @@ function renderDetails() {
   state.details.forEach(item=>{
     const card=element('div','detail-card');
     if(state.tab==='models') {
-      card.append(nativeInteraction(item,'inspector'));
+      $('inspector-content').append(nativeInteraction(item,'inspector'));return;
     } else if(state.tab==='sdkmodels') {
       card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`),element('p','muted','Framework preparation snapshot. This is not the final client message array.'));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
@@ -665,18 +712,7 @@ function renderDetails() {
       else card.append(element('p','muted','SDK Prompt content is not available yet.'));
       card.append(rawDetail(item,'SDK prompt, response projection & metadata'));
     } else if(state.tab==='trace') {
-      const row=item.payload || {}; card.append(element('h3','',`#${item.step_event_seq} · ${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request #'+(row.model_request_seq ?? '—')}`),element('p','',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`),rawDetail(item));
-      const selectors={}; ['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
-      if(row.call_id)selectors.tool_call_id=row.call_id;
-      card.append(button('Read SDK content',async()=>{
-        if(item.execution_id!==state.selectedExecution){
-          const generation=state.generation,selection=selectExecution(item.execution_id),executionGeneration=state.executionGeneration;
-          await selection;
-          if(generation!==state.generation || executionGeneration!==state.executionGeneration || item.execution_id!==state.selectedExecution || state.tab!=='trace')return;
-        }
-        state.tab='history';await loadDetail(false,selectors);
-      }));
-      if(row.child_execution_id)card.append(button('Open subagent',async()=>state.view==='sessions'?selectExecution(row.child_execution_id):navigate(null,row.child_execution_id)));
+      $('inspector-content').append(traceItem(item));return;
     } else if(state.tab==='recovery') {
       card.append(element('h3','',item.tool_name),element('p','',`Effect outcome unknown · ${item.tool_call_id}`),rawDetail(item));
       ['not_applied','applied','failed'].forEach(resolution=>card.append(button(resolution.replaceAll('_',' '),async()=>{
@@ -1063,7 +1099,7 @@ $('menu').onclick=()=>{const open=$('menu').getAttribute('aria-expanded')!=='tru
 $('sidebar-close').onclick=()=>closeSidebar(true);
 window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open)closeSidebar(true);});
 $('new-title').oninvalid=()=>$('new-options').open=true;
-$('request-turn').onchange=()=>selectExecution($('request-turn').value).catch(showError);
+for(const id of ['request-turn','detail-turn'])$(id).onchange=()=>selectExecution($(id).value).catch(showError);
 async function openRecovery(active=false) {
   const id=active?state.session?.active_execution_id:state.selectedExecution;if(!id)return;
   showInspector(true,true);state.tab='recovery';await selectExecution(id);
@@ -1071,25 +1107,29 @@ async function openRecovery(active=false) {
 $('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
 $('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
 $('options-toggle').onclick=()=>{const open=$('composer-options').hidden;$('composer-options').hidden=!open;$('options-toggle').setAttribute('aria-expanded',String(open));};
-$('inspector-toggle').onclick=()=>{const open=$('inspector').hidden;showInspector(open,true);if(open)loadDetail().catch(showError);};
+$('inspector-toggle').onclick=()=>{const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';showInspector(open,true);if(open)return loadDetail(false,{},reuseNative).catch(showError);};
 $('inspector-close').onclick=()=>showInspector(false,true);
 $('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
 $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
+function closeRunActions(){if($('run-actions').open){$('run-actions').open=false;$('run-actions-toggle').focus();}}
+$('run-actions').onkeydown=event=>{if(event.key==='Escape')closeRunActions();};
+$('run-recovery').onclick=()=>{closeRunActions();return openRecovery().catch(showError);};
+$('detail-recovery').onclick=()=>openRecovery().catch(showError);
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
-$('native-mode').onclick=()=>{state.conversationMode='original';renderConversation();return loadNativeTimeline().catch(showError);};
-$('chat-mode').onclick=()=>{state.conversationMode='chat';renderConversation();};
+$('native-mode').onclick=()=>{closeRunActions();showInspector(false);state.conversationMode='original';renderConversation();$('chat-mode').focus();return loadNativeTimeline().catch(showError);};
+$('chat-mode').onclick=()=>{state.conversationMode='chat';renderConversation();$('inspector-toggle').focus();};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
-$('settings').onclick=showSettings;$('export').onclick=()=>exportResult().catch(showError);
+$('settings').onclick=showSettings;$('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
-$('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>executionAction('retry').catch(showError);$('fork-run').onclick=()=>executionAction('fork').catch(showError);$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
+$('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));
-document.querySelectorAll('[data-tab]').forEach(node=>node.onclick=()=>{state.tab=node.dataset.tab;loadDetail().catch(showError);});
+$('detail-view').onchange=()=>{state.tab=$('detail-view').value;return loadDetail().catch(showError);};
 document.querySelectorAll('[data-close]').forEach(node=>node.onclick=()=>$(node.dataset.close).close());
 setDisabled();
 bootstrap().catch(showError);

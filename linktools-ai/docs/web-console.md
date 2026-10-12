@@ -46,8 +46,11 @@ and working directory are under an optional disclosure. Successful turns do not
 repeat technical status badges or expanded diagnostics. Failures, incomplete
 responses, occupied sessions and unconfirmed cancellation remain visible.
 
-**Model requests** is a separate view, not a reconstructed conversation. Choose a
-conversation turn, then expand a logical request to inspect its ordered client
+**Details** is the single entry point for the selected turn. Its **Conversation
+turn** picker names each loaded turn with time, status and execution ID, so any
+earlier turn remains inspectable. The selected identity stays explicit even when
+it differs from the active conversation owner. **Actions → Read original requests
+full width** opens a separate reading view with **Back to conversation**. Expand a logical request to inspect its ordered client
 attempts, unchanged outbound body, separately observed response and byte
 downloads. The conversation display and repeated full model input arrays are
 never interleaved as if they were one message history. Its optional live preview
@@ -60,24 +63,36 @@ inspecting a different execution. Opening a diagnostic panel does not stop the
 conversation observer. Metrics is a separate page; Executions has its own run
 browser. Browser Back/Forward restores the corresponding page.
 
-- **Details** opens Summary, Model requests, Trace and Recovery. Usage, complete
-  metadata, result export, parent/subagent links and detail paging remain here.
-  Retry and fork apply to the selected execution. Closing Details returns focus
-  without stopping observation or changing the selection.
-- **SDK debugging** inside Details contains Structured records, Text transcript
-  and Prompt snapshot. They are SDK projections, not final outbound messages.
-  Instructions is labeled as a separate SDK request field rather than another
-  message before a system part; the original data and projection order are not
-  changed. Text transcript contains only user/assistant text excerpts and omits
-  other parts. Each debug view links to captured original requests instead of
-  implying that its display order is the client message order.
+- **Details** is centered on the selected turn: compact status, elapsed time and
+  request/token usage stay visible, and the default body shows original model
+  requests directly. A single **Inspect** selector replaces stacked tab bars.
+  **All run metadata** keeps full execution/session fields and detailed usage;
+  **Activity & tools** presents recorded events in their original order as a
+  compact timeline. Select an event for its locators, usage, original record,
+  SDK content drilldown and recorded child execution link. Live tree depth and
+  parent execution navigation remain intact; the timeline invents no hierarchy.
+  Parent/conversation links remain beside the selected identity. Closing Details
+  returns focus without stopping observation or changing the selection.
+- **Actions** in Details groups retry with a new prompt, fork and final JSON
+  download. Stop remains directly visible for running work, including the actual
+  active conversation while an older turn is selected. Failure and recovery
+  states remain prominent; **Review recovery** leads directly to the same
+  confirmed Resume/End and external-effect controls. **Recovery & stopped work**
+  is also available from Inspect and Actions, separately from SDK debugging.
+- **Inspect → Advanced SDK debugging** contains **SDK structured records**,
+  **SDK text excerpts** and **SDK preparation snapshot**. These are projections,
+  not final outbound messages. Instructions is labeled as a separate SDK request
+  field rather than another message before a system part; original data and
+  projection order are unchanged. Text excerpts contain only user/assistant text
+  and omit other parts. Each debug view links to captured original requests
+  instead of implying that its display order is the client message order.
 - **More** groups conversation rename/fork/close and recovery entry points.
   Running work has a direct **Stop** beside Send. Recovery needs and pending
   cancellation expose **Recovery options**; explicit Resume/End choices remain
   available after confirming the previous executor has stopped. They never
   infer process death or silently take ownership.
 - **Options** beside the composer contains planning, thinking, memory scope and
-  workspace files. Ctrl / Cmd Enter sends. Each message's Markdown source
+  workspace files and keyboard/lifecycle hints. Ctrl / Cmd Enter sends. Each message's Markdown source
   disclosure preserves original source and its copy action.
 - **Tools & settings** contains Executions, Metrics, exact-ID lookup and Runtime
   capabilities. Execution filters, explicit newest-20 scans, list paging and the
@@ -110,7 +125,7 @@ released session owner. It does not resume model or tool work. Unknown outcomes
 are not reported as complete; another explicit attempt reads the current state
 before continuing. Resolve unknown external effects in **Recovery** if needed.
 
-To continue the original work instead, **Details → Recovery → Resume stopped execution**
+To continue the original work instead, **Details → Inspect → Recovery & stopped work → Resume stopped execution**
 retains the explicit stopped-executor confirmation and may call models or tools.
 **Stop execution** remains available for a running executor. A cancellation
 request may remain `CANCELLING` until the owner finishes or the stopped-execution
@@ -158,7 +173,7 @@ was applied. Selecting a child execution preserves its identity rather than
 treating its events as a root model call. Full JSON details preserve public
 fields that do not fit the compact presentation.
 
-The **SDK debugging → Prompt snapshot** tab summarizes system/fixed/dynamic instructions,
+The **Inspect → SDK preparation snapshot** view summarizes system/fixed/dynamic instructions,
 conversation context, attachment media types, tools and output contracts from
 the framework request snapshot. These are SDK projections, not final native
 client messages. The console never turns these instructions into a purported
