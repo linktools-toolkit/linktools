@@ -97,7 +97,8 @@ def _execution(
 
 
 class _Executions:
-    def __init__(self, values: dict[str, ExecutionRecord]) -> None:
+    def __init__(self, values: dict[str, ExecutionRecord], state_store) -> None:
+        self.state_store = state_store
         self.values = values
 
     async def get(self, execution_id: str, *, tenant_id: str):
@@ -149,7 +150,8 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
                     status=ExecutionStatus.STARTED,
                     prompt="active prompt",
                 ),
-            }
+            },
+            state.execution.executions.state_store,
         )
         service = DefaultSessionService(
             state.conversation,
