@@ -42,7 +42,8 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
     inline = work / "inline.txt"
     inline.write_text("INLINE ORIGINAL", encoding="utf-8")
     suffix = work / "suffix.txt"
-    suffix.write_text("SUFFIX ORIGINAL", encoding="utf-8")
+    if file_change == "deleted":
+        suffix.write_text("SUFFIX ORIGINAL", encoding="utf-8")
     models = FixtureModels()
     group = CapabilityGroup("inline-capture")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -85,8 +86,11 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
                 capture = await runtime._input_captures.task_input(capture, principal=PRINCIPAL)
             case = CaseSpec.from_capture(case_ref, capture=capture)
             candidate = CandidateSpec("captured", task=target.ref)
-        for file in (inline, suffix):
-            file.unlink() if file_change == "deleted" else file.write_text("MUTATED", encoding="utf-8")
+        if file_change == "deleted":
+            inline.unlink()
+            suffix.unlink()
+        else:
+            inline.write_text("MUTATED", encoding="utf-8")
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef(f"data-{capture_kind}", 1), (case,)),
             principal=PRINCIPAL, idempotency_key=f"dataset-{capture_kind}")
         prompt_offset, attachment_offset = len(models.prompts), len(models.attachments)
