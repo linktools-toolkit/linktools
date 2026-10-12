@@ -15,7 +15,7 @@ from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, Ru
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
 from ._session_tool_test_helpers import _split_sqlite_storage
-from .test_live_history_readback_integration import _Models
+from ._runtime_test_helpers import _Models
 
 
 _NAMESPACE = "recovery-ownership"
