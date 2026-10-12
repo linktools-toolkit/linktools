@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -220,11 +221,13 @@ async def test_unconfirmed_completion_rejects_missing_durable_tail() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
+@pytest.mark.parametrize("late_producer", (False, True))
+async def test_graph_wait_does_not_wait_for_observer_completion(late_producer: bool) -> None:
     principal = Principal("owner", "tenant")
     broker = LiveExecutionEventBroker()
-    broker.prepare_local_producer("execution")
-    broker.register_local_producer("execution", 0)
+    if not late_producer:
+        broker.prepare_local_producer("execution")
+        broker.register_local_producer("execution", 0)
     executions = _ExecutionReader(_execution(event_seq=1))
     events = _EventReader(
         {0: (ExecutionEvent("execution", 1, "EXECUTION_STARTED", {}),)}
@@ -239,6 +242,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
     waiter_release = asyncio.Event()
     graph_terminal_release = asyncio.Event()
     observed_live = asyncio.Event()
+    observed_durable = asyncio.Event()
     observed_terminal = asyncio.Event()
     now = datetime.now(timezone.utc)
     terminal_graph_event = TaskEvent(
@@ -394,6 +398,8 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
 
     async def observer(event: TaskGraphRunEvent) -> None:
         observed.append(event)
+        if isinstance(event.event, ExecutionTreeEvent) and event.event.event.durable_seq is not None:
+            observed_durable.set()
         if (
             isinstance(event.event, ExecutionTreeEvent)
             and event.event.event.durable_seq is None
@@ -402,27 +408,37 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         if event.event == terminal_graph_event:
             observed_terminal.set()
 
+    async def observe() -> None:
+        events = run.watch(include_content=True)
+        try:
+            async for item in events:
+                await observer(item)
+        finally:
+            await events.aclose()
+
+    observing = None
+    if late_producer:
+        observing = asyncio.create_task(observe())
+        await asyncio.wait_for(observed_durable.wait(), 5)
+        broker.register_local_producer("execution", 1)
     broker.publish_event(
         "execution",
         "EXECUTION_STARTED",
         {},
         durable_seq=1,
     )
+    broker.publish(ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "live graph output"))
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
         durable_seq=None,
     )
-    async def observe():
-        events = run.watch()
-        try:
-            async for item in events:
-                await observer(item)
-        finally:
-            await events.aclose()
-    observing = asyncio.create_task(observe())
-    await asyncio.wait_for(observed_live.wait(), 1)
+    if observing is None:
+        observing = asyncio.create_task(observe())
+    await asyncio.wait_for(observed_live.wait(), 5)
+    assert any(isinstance(item.event, ExecutionTreeEvent)
+               and item.event.event.payload.get("text") == "live graph output" for item in observed)
 
     executions.execution = _execution(
         status=ExecutionStatus.SUCCEEDED,
@@ -448,7 +464,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
     assert observed[-1].event.phase == "final"
     assert observed[-1].cursor is not None
     assert decode_graph_watch_cursor("watch-test", "tenant", "graph", observed[-1].cursor,
-        include_content=False) == (2, {"node": {"execution": 2}})
+        include_content=True) == (2, {"node": {"execution": 2}})
 
 
 @pytest.mark.asyncio
@@ -1508,10 +1524,15 @@ async def test_remote_durable_polling_does_not_retain_broker_activity(
 
     delays: list[float] = []
 
-    async def sleep(delay: float) -> None:
-        delays.append(delay)
+    async def expire(awaitable: Awaitable[None], timeout: float) -> None:
+        delays.append(timeout)
+        pending = asyncio.ensure_future(awaitable)
+        await asyncio.sleep(0)
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        raise asyncio.TimeoutError
 
-    monkeypatch.setattr(event_module.asyncio, "sleep", sleep)
+    monkeypatch.setattr(event_module.asyncio, "wait_for", expire)
     events = _PollingEvents()
     service = DefaultEventService(
         _ExecutionReader(_execution()),
@@ -1609,3 +1630,127 @@ async def test_forward_control_gap_keeps_future_live_deltas(cursor: int) -> None
     )]
     assert [item.durable_seq for item in events] == [*range(cursor + 1, 3), None, 3]
     assert events[-2].payload["text"] == "after control"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_observer", (False, True))
+async def test_late_producer_wakes_backed_off_observer_and_preserves_cursor(
+    monkeypatch: pytest.MonkeyPatch, cancel_observer: bool,
+) -> None:
+    waiting = asyncio.Event()
+
+    class Broker(LiveExecutionEventBroker):
+        async def wait_for_activity(self, execution_id: str) -> None:
+            waiting.set()
+            await super().wait_for_activity(execution_id)
+
+    broker = Broker()
+    wait_for_activity = event_module._wait_live_activity
+    delays: list[float] = []
+
+    async def wait_at_maximum_backoff(
+        broker: LiveExecutionEventBroker, execution_id: str, *, timeout: float,
+    ) -> None:
+        delays.append(timeout)
+        if timeout < 30:
+            raise asyncio.TimeoutError
+        await wait_for_activity(broker, execution_id, timeout=timeout)
+
+    monkeypatch.setattr(event_module, "_wait_live_activity", wait_at_maximum_backoff)
+    service = _service(_execution(event_seq=2), _EventReader({}), broker)
+    stream = service.stream(
+        "execution", principal=Principal("owner", "tenant"), after_event_seq=2,
+    )
+    pending = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        assert delays[-1] == 30
+        broker.register_local_producer("execution", 0)
+        broker.publish(ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "already seen"))
+        broker.publish_event("execution", ExecutionEventType.EXECUTION_STARTED, {}, durable_seq=1)
+        broker.publish_event("execution", ExecutionEventType.TOOL_CALL_STARTED,
+                             {"call_id": "call", "tool_name": "tool"}, durable_seq=2)
+        broker.publish(ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "new live text"))
+        event = await asyncio.wait_for(pending, 1)
+        assert event.durable_seq is None
+        assert event.payload["text"] == "new live text"
+        if cancel_observer:
+            pending = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        else:
+            await stream.aclose()
+        assert not broker._subscriptions
+        assert not broker._activity_waiters
+    finally:
+        pending.cancel()
+        with suppress(asyncio.CancelledError):
+            await pending
+        await stream.aclose()
+        broker.complete("execution")
+    assert not broker._activity
+
+
+@pytest.mark.asyncio
+async def test_durable_terminal_commit_between_page_and_metadata_reads() -> None:
+    broker = LiveExecutionEventBroker()
+    committed = False
+    terminal = ExecutionEvent("execution", 1, ExecutionEventType.EXECUTION_SUCCEEDED, {})
+
+    class Events(_EventReader):
+        async def list(self, execution_id: str, *, tenant_id: str,
+                       after_event_seq: int, limit: int) -> Page[ExecutionEvent]:
+            return Page((terminal,) if committed and after_event_seq < 1 else ())
+
+    class Executions(_ExecutionReader):
+        async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
+            nonlocal committed
+            committed = True
+            broker.register_local_producer("execution", 0)
+            broker.complete("execution")
+            return _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_seq=1)
+
+    service = DefaultEventService(
+        Executions(_execution()), Events({}), _AllowAll(),
+        lambda execution_id, tenant_id: None, broker,
+    )
+    events = [event async for event in service.stream("execution", principal=Principal("owner", "tenant"))]
+    assert [event.durable_seq for event in events] == [1]
+    assert events[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+    assert not broker._subscriptions
+    assert not broker._activity
+
+
+@pytest.mark.asyncio
+async def test_activity_waiter_cancellation_preserves_other_observer_wakeup() -> None:
+    broker = LiveExecutionEventBroker()
+    first = asyncio.create_task(broker.wait_for_activity("execution"))
+    second = asyncio.create_task(broker.wait_for_activity("execution"))
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    broker.register_local_producer("execution", 0)
+    await asyncio.wait_for(second, 1)
+    broker.complete("execution")
+    assert not broker._activity
+    assert not broker._activity_waiters
+
+
+@pytest.mark.asyncio
+async def test_activity_waiter_generations_release_independently() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    first = asyncio.create_task(broker.wait_for_activity("execution"))
+    await asyncio.sleep(0)
+    broker.abandon_prepared_local_producer("execution")
+    second = asyncio.create_task(broker.wait_for_activity("execution"))
+    await asyncio.sleep(0)
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    await asyncio.wait_for(first, 1)
+    assert not broker._activity
+    assert not broker._activity_waiters
