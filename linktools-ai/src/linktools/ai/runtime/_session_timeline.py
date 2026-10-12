@@ -3,7 +3,8 @@
 """Shared read-only Session timeline projection."""
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from typing import Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
@@ -25,12 +26,14 @@ from ._input import stored_user_input_view
 from .service_api import SessionTurn, SessionTurnItem
 from .state._contracts import (
     ConversationRepositories,
+    ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
     SessionTurnCommitRef,
     SessionTurnRef,
 )
 from .state._views import project_session_history_message
+from .state._store import StateGroupTransaction, StateTransaction
 
 _TIMELINE_PROJECTION_VERSION = 1
 _TIMELINE_CURSOR_KIND = "SESSION_TIMELINE"
@@ -210,6 +213,92 @@ async def _timeline_blocks(
     return tuple(reversed(newest_first)), next_coordinate
 
 
+_TimelineBlocks = tuple[tuple[SessionRecord, tuple[SessionTurnRef, ...]], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _TimelineState:
+    blocks: _TimelineBlocks
+    next_coordinate: tuple[str, int] | None
+    executions: Mapping[str, ExecutionRecord]
+    commits: dict[tuple[str, int], SessionTurnCommitRef]
+
+
+async def _capture_timeline_state(
+    conversation: ConversationRepositories,
+    executions: ExecutionRepository,
+    session_id: str,
+    *,
+    tenant_id: str,
+    cursor: str | None,
+    cursor_signer: CursorSigner,
+    limit: int,
+) -> _TimelineState:
+    session_store = conversation.sessions.state_store
+    execution_store = executions.state_store
+
+    async def blocks_in_transaction(
+        _transaction: StateTransaction,
+    ) -> tuple[_TimelineBlocks, tuple[str, int] | None]:
+        root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
+        if root is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        coordinate = _decode_timeline_cursor(
+            cursor, tenant_id=tenant_id, session_id=session_id, signer=cursor_signer,
+        )
+        return await _timeline_blocks(
+            conversation, root, coordinate=coordinate, limit=limit,
+        )
+
+    async def execution_records(
+        blocks: _TimelineBlocks,
+    ) -> Mapping[str, ExecutionRecord]:
+        ids = tuple(dict.fromkeys(
+            ref.execution_id for _record, refs in blocks for ref in refs
+        ))
+        if not ids:
+            return {}
+        records = await executions.get_many(ids, tenant_id=tenant_id)
+        if len(records) != len(ids):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return records
+
+    async def commit_records(
+        blocks: _TimelineBlocks,
+    ) -> dict[tuple[str, int], SessionTurnCommitRef]:
+        commits: dict[tuple[str, int], SessionTurnCommitRef] = {}
+        for record, refs in blocks:
+            if not refs:
+                continue
+            values = await conversation.sessions.list_timeline_commits(
+                record.session_id, tenant_id=conversation.sessions.tenant_id,
+                start_turn_seq=refs[0].turn_seq,
+                end_turn_seq=refs[-1].turn_seq + 1,
+            )
+            for value in values:
+                commits[(record.session_id, value.turn_seq)] = value
+        return commits
+
+    if session_store.storage_group is execution_store.storage_group:
+        async def read(group: StateGroupTransaction) -> _TimelineState:
+            blocks, next_coordinate = await blocks_in_transaction(
+                group.transaction(session_store)
+            )
+            records = await execution_records(blocks)
+            commits = await commit_records(blocks)
+            return _TimelineState(blocks, next_coordinate, records, commits)
+
+        return await session_store.storage_group.read_many(
+            (session_store, execution_store), read,
+        )
+
+    # Separate routes keep their own snapshots; no cross-database scope is implied.
+    blocks, next_coordinate = await session_store.read(blocks_in_transaction)
+    records = await execution_records(blocks)
+    commits = await session_store.read(lambda _transaction: commit_records(blocks))
+    return _TimelineState(blocks, next_coordinate, records, commits)
+
+
 async def project_session_timeline(
     conversation: ConversationRepositories,
     executions: ExecutionRepository,
@@ -230,52 +319,27 @@ async def project_session_timeline(
     if header is None:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
-    root = await conversation.sessions.get(
-        session_id,
-        tenant_id=principal.tenant_id,
-    )
-    if root is None:
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-
-    coordinate = _decode_timeline_cursor(
-        cursor,
-        tenant_id=principal.tenant_id,
-        session_id=session_id,
-        signer=cursor_signer,
-    )
-    blocks, next_coordinate = await _timeline_blocks(
-        conversation,
-        root,
-        coordinate=coordinate,
+    state = await _capture_timeline_state(
+        conversation, executions, session_id,
+        tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
         limit=limit,
     )
+    blocks = state.blocks
+    next_coordinate = state.next_coordinate
     refs = tuple(ref for _record, values in blocks for ref in values)
     if not refs:
         return Page((), None)
-    execution_ids = tuple(dict.fromkeys(ref.execution_id for ref in refs))
-    execution_records = await executions.get_many(
-        execution_ids,
-        tenant_id=principal.tenant_id,
-    )
-    if len(execution_records) != len(execution_ids):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    commits: dict[tuple[str, int], SessionTurnCommitRef] = {}
+    execution_records = state.executions
+    commits = state.commits
     messages: dict[str, tuple[ModelMessage, ...]] = {}
     message_bases: dict[str, int] = {}
     for record, values in blocks:
         if not values:
             continue
-        start = values[0].turn_seq
-        end = values[-1].turn_seq + 1
-        committed = await conversation.sessions.list_timeline_commits(
-            record.session_id,
-            tenant_id=conversation.sessions.tenant_id,
-            start_turn_seq=start,
-            end_turn_seq=end,
+        committed = tuple(
+            value for (source_id, _sequence), value in commits.items()
+            if source_id == record.session_id
         )
-        for item in committed:
-            commits[(record.session_id, item.turn_seq)] = item
         if not committed:
             continue
         if record.continuation is None:

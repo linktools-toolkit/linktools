@@ -137,31 +137,38 @@ class SqlStateStorageGroup:
         _logger.debug("SQL StateStorageGroup closed")
 
     async def read(self, store: "SqlStateStore", fn: StateCallback[ValueT]) -> ValueT:
-        self._ensure_member(store)
-        active = active_state_transaction(store)
+        return await self.read_many(
+            (store,), lambda group: fn(group.transaction(store))
+        )
+
+    async def read_many(
+        self,
+        stores: Sequence["SqlStateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        members = tuple(dict.fromkeys(stores))
+        if not members:
+            raise ValueError("StateStorageGroup read requires a store")
+        for store in members:
+            self._ensure_member(store)
+        active = active_state_transaction(members[0])
         if active is not None:
-            return await fn(active)
+            return await fn(active_state_group_transaction(self, members, writable=False))
         async with self._session() as session:
             async with session.begin():
                 await self._context.dialect.begin_consistent_read(session)
-                transaction = _SqlTransaction(
-                    session,
-                    self._metadata,
-                    self._context,
-                    store.store_digest,
-                )
-                token = bind_state_scope(
-                    self,
-                    {store: transaction},
-                    writable=False,
-                )
+                transactions = {
+                    store: _SqlTransaction(
+                        session,
+                        self._metadata,
+                        self._context,
+                        store.store_digest,
+                    )
+                    for store in members
+                }
+                token = bind_state_scope(self, transactions, writable=False)
                 try:
-                    readonly = active_state_transaction(store)
-                    if readonly is None:
-                        raise RuntimeError(
-                            "read-only StateTransaction scope was not bound"
-                        )
-                    return await fn(readonly)
+                    return await fn(active_state_group_transaction(self, members, writable=False))
                 finally:
                     reset_state_transaction(token)
 

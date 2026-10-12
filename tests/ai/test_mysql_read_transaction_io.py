@@ -74,3 +74,85 @@ async def test_mysql_consistent_reads_preserve_caller_transactions(
     finally:
         await reader.dispose()
         await writer.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("_server", ("mysql",), indirect=True)
+async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_server) -> None:
+    import hashlib
+    from dataclasses import replace
+
+    from sqlalchemy import event
+
+    from linktools.ai.migrate import provision_database
+    from linktools.ai.runtime.state._sql import SqlStateStore
+    from linktools.ai.runtime.state._store import StoredRecord, active_state_scope
+
+    _, command = _server
+    socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
+    url = URL.create("mysql+asyncmy", username="root", database=command[-1], query={"unix_socket": socket})
+    reader = create_async_engine(url, isolation_level="READ COMMITTED", pool_size=1,
+                                 max_overflow=0, pool_pre_ping=True, hide_parameters=True)
+    writer = create_async_engine(url, isolation_level="READ COMMITTED", hide_parameters=True)
+    await provision_database(writer)
+    digests = [hashlib.sha256(value.encode()).digest() for value in ("group-a", "group-b", "record")]
+    first = SqlStateStore(reader, store_digest=digests[0])
+    second = SqlStateStore(reader, store_digest=digests[1], group=first.storage_group)
+    writer_first = SqlStateStore(writer, store_digest=digests[0])
+    writer_second = SqlStateStore(writer, store_digest=digests[1], group=writer_first.storage_group)
+    stores = (first, second, writer_first, writer_second)
+    value = StoredRecord(digests[2], None, None, "probe", "record", None,
+                         0, None, 0, None, {"value": 1})
+    checkouts = []
+    event.listen(reader.sync_engine, "checkout", lambda *args: checkouts.append(True))
+    try:
+        for store in stores:
+            await store.initialize()
+
+        async def seed(scope):
+            for store in (writer_first, writer_second):
+                await scope.transaction(store).insert_record(value)
+
+        await writer_first.storage_group.mutate((writer_first, writer_second), seed)
+        checkouts.clear()
+
+        async def capture(scope):
+            observed = await first.read(lambda tx: tx.get_record(value.key_digest))
+            assert observed == value
+            # The writer runs in an independent task, without inheriting reader ownership.
+            async def publish():
+                async def update(write):
+                    for store in (writer_first, writer_second):
+                        assert await write.transaction(store).replace_record(
+                            replace(value, storage_version=1, data={"value": 2}), expected_storage_version=0,
+                        )
+                await writer_first.storage_group.mutate((writer_first, writer_second), update)
+            import contextvars
+            task = contextvars.Context().run(asyncio.create_task, publish())
+            await task
+            assert await second.read(lambda tx: tx.get_record(value.key_digest)) == value
+            assert await scope.transaction(first).get_record(value.key_digest) == value
+
+        await first.storage_group.read_many((first, second), capture)
+        assert len(checkouts) == 1
+        assert active_state_scope() is None
+        assert (await second.read(lambda tx: tx.get_record(value.key_digest))).data["value"] == 2
+
+        for interruption in (_InterruptedSetup, asyncio.CancelledError):
+            async def fail(scope):
+                assert await scope.transaction(first).get_record(value.key_digest) is not None
+                raise interruption()
+            with pytest.raises(interruption):
+                await first.storage_group.read_many((first, second), fail)
+            assert active_state_scope() is None
+            async with reader.connect() as connection:
+                settings = tuple((await connection.execute(text(
+                    "SELECT @@session.transaction_isolation, @@autocommit"
+                ))).one())
+                assert settings == ("READ-COMMITTED", 0)
+            assert (await first.read(lambda tx: tx.get_record(value.key_digest))).data["value"] == 2
+    finally:
+        for store in reversed(stores):
+            await store.close()
+        await reader.dispose()
+        await writer.dispose()
