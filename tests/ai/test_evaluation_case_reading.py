@@ -46,11 +46,14 @@ async def test_coordinator_reads_distinct_case_versions_afresh(
     async def no_budget(*args, **kwargs):
         return False
 
+    async def read_cases(references):
+        return tuple([await read_case(ref) for ref in references])
+
+    owner._state = SimpleNamespace(get_cases=read_cases)
     monkeypatch.setattr(owner, "_record", read_record)
     monkeypatch.setattr(owner, "_require_content", no_budget)
     monkeypatch.setattr(owner, "_budget_exhausted", no_budget)
     monkeypatch.setattr(owner, "_trials", read_trials)
-    monkeypatch.setattr(owner, "_case", read_case)
     await owner._tick("run", object(), object())
     assert reads == list(refs)
     reads.clear()
