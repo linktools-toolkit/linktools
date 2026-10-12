@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
+from typing import Generic
+
+from typing_extensions import TypeVar
 
 from ..core import (
     RunBudget,
@@ -31,6 +34,9 @@ from ..errors import AIError, ErrorCode
 from ..errors import ErrorDiagnostics
 from ._capture import TaskInvocationInputRef
 from ._definitions import Task, TaskExpander, TaskExpanderRef, TaskRef
+
+_AppT = TypeVar("_AppT")
+_ResultT = TypeVar("_ResultT", covariant=True, default=JsonValue)
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -109,8 +115,8 @@ _TERMINAL_TASK_STATUSES = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class TaskResultRef:
+@dataclass(frozen=True)
+class TaskResultRef(Generic[_ResultT]):
     """Stable reference to a retained successful Task result."""
 
     namespace: str
@@ -132,25 +138,33 @@ class TaskResultRef:
             raise ValueError("task result reference is invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class TaskNodeResultRef:
+@dataclass(frozen=True, init=False)
+class TaskNodeResultRef(Generic[_ResultT]):
     """An explicit result input from a scheduling dependency in this graph."""
 
     node_id: str
+
+    def __init__(self, node_id: "str | TaskNode[_ResultT]") -> None:
+        object.__setattr__(
+            self, "node_id", node_id.node_id if isinstance(node_id, TaskNode) else node_id,
+        )
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("task node result reference is invalid")
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class TaskNode:
+@dataclass(frozen=True, init=False)
+class TaskNode(Generic[_ResultT]):
+    """One invocation with frozen input and explicit scheduling dependencies."""
+
     node_id: str
     dependencies: tuple[str, ...]
-    task: "TaskRef | None"
+    task: "TaskRef[_ResultT] | None"
     budget_cost: int
     expander: "TaskExpanderRef | None"
-    input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
+    input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]]"
     input_capture: "TaskInvocationInputRef | None"
     original_input: "Mapping[str, JsonValue] | None" = field(repr=False)
     timeout_seconds: "float | None"
@@ -169,11 +183,11 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]" = (),
         *,
-        task: "Task | TaskRef | None" = None,
+        task: "Task[_AppT, _ResultT] | TaskRef[_ResultT] | None" = None,
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpander | TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None" = None,
+        input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]] | None" = None,
         input_capture: "TaskInvocationInputRef | None" = None,
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
@@ -209,12 +223,12 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]" = (),
         *,
-        task: "TaskRef | None",
+        task: "TaskRef[_ResultT] | None",
         input: "Mapping[str, JsonValue] | None" = None,
         original_input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None" = None,
+        input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]] | None" = None,
         input_capture: "TaskInvocationInputRef | None" = None,
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
@@ -224,7 +238,7 @@ class TaskNode:
         reconcile: bool = False,
         dependency_policy: str = "all_succeeded",
         failure_policy: str = "propagate",
-    ) -> "TaskNode":
+    ) -> "TaskNode[_ResultT]":
         """Build a node whose execution contract has already been resolved."""
         value = cls.__new__(cls)
         value._initialize(
@@ -254,12 +268,12 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]",
         *,
-        task: "Task | TaskRef | None",
+        task: "Task[_AppT, _ResultT] | TaskRef[_ResultT] | None",
         input: "Mapping[str, JsonValue] | None",
         original_input: "Mapping[str, JsonValue] | None",
         budget_cost: int,
         expander: "TaskExpander | TaskExpanderRef | None",
-        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None",
+        input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]] | None",
         input_capture: "TaskInvocationInputRef | None",
         timeout_seconds: "float | None",
         max_attempts: int,
@@ -481,7 +495,7 @@ class TaskNode:
 
     @classmethod
     def wait(
-        cls,
+        cls: "type[TaskNode]",
         node_id: str,
         *,
         dependencies: "tuple[str, ...]" = (),
@@ -493,7 +507,7 @@ class TaskNode:
         return cls(
             node_id,
             dependencies,
-            task=TaskRef.deferred_input(),
+            task=TaskRef[JsonValue].deferred_input(),
             input=values,
             output_type=output_type,
         )
@@ -601,15 +615,23 @@ class TaskNodeView:
 
 @dataclass(frozen=True, slots=True)
 class TaskGraph:
+    """An immutable DAG of task invocations, validated when constructed."""
+
     graph_id: str
-    nodes: "tuple[TaskNode, ...]"
+    nodes: "tuple[TaskNode[object], ...]"
 
     def __post_init__(self) -> None:
         if not self.graph_id.strip():
             raise ValueError("task graph id is required")
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.node_id for node in self.nodes}
-        if len(ids) != len(self.nodes) or any(
+        if len(ids) != len(self.nodes):
+            raise TaskGraphValidationError(
+                ErrorCode.TASK_DAG_INVALID,
+                "task graph contains duplicate node ids",
+                safe_details={"reason": "duplicate_node_id"},
+            )
+        if any(
             dependency not in ids
             for node in self.nodes
             for dependency in node.dependencies
@@ -917,7 +939,7 @@ class TaskGraphHandle:
 class TaskGraphView:
     graph_id: str
     status: TaskStatus
-    nodes: "tuple[TaskNode, ...]"
+    nodes: "tuple[TaskNode[object], ...]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -925,11 +947,11 @@ class TaskNodeInfo:
     """Safe public task-node metadata without raw input content."""
 
     node_id: str
-    task: "TaskRef | None"
+    task: "TaskRef[object] | None"
     dependencies: tuple[str, ...]
     budget_cost: int
     expander: "TaskExpanderRef | None"
-    input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
+    input_refs: "Mapping[str, TaskResultRef[object] | TaskNodeResultRef[object]]"
     input_capture: "TaskInvocationInputRef | None"
     timeout_seconds: "float | None"
     max_attempts: int
@@ -941,7 +963,7 @@ class TaskNodeInfo:
     failure_policy: str = "propagate"
 
     @classmethod
-    def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
+    def from_node(cls, node: TaskNode[object]) -> "TaskNodeInfo":
         return cls(
             node.node_id,
             node.task,
@@ -991,7 +1013,7 @@ class TaskGraphInfo:
 class TaskGraphState:
     graph_id: str
     status: TaskStatus
-    nodes: "tuple[TaskNode, ...]"
+    nodes: "tuple[TaskNode[object], ...]"
     node_states: "tuple[TaskNodeView, ...]"
     event_seq: int = 0
 

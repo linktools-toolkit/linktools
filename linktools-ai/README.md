@@ -39,6 +39,8 @@ continuation, and durable recovery guarantees.
 
 ## Evaluation
 
+See [Task graph authoring](docs/task-graphs.md) for typed JSON results, conditional branches, batch expansion, collection, and submission-time diagnostics.
+
 Use `runtime.evaluations` to evaluate Tasks, Agent-backed Tasks, and native TaskGraphs with retained evidence, rule/model/human scorers, rescoring, and paired reports. See the [evaluation guide](docs/evaluation.md) for an offline end-to-end example and the capture, comparison, authorization, and retention contracts.
 
 ## 1. Run a workspace
