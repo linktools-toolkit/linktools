@@ -360,33 +360,26 @@ class SqlObjectStore:
             await asyncio.to_thread(temporary.close)
 
     async def _stream_open(self, key: str) -> AsyncIterator[bytes]:
-        from sqlalchemy import select
+        from sqlalchemy import case, or_, select
 
         table = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
         session = self._context.sessions()
         result = None
         try:
-            header = (
-                (
-                    await self._context.run_statement(session.execute(
-                        select(table).where(
-                            table.c.key_digest == _key_digest(self.store_id, key).hex()
-                        )
-                    ))
-                )
-                .mappings()
-                .one_or_none()
+            first = or_(chunks.c.chunk_index == 0, chunks.c.chunk_index.is_(None))
+            # Opaque object keys are unbounded; transmit the header only once.
+            header_columns = tuple(
+                case((first, column)).label(column.name)
+                for column in (table.c.store_id, table.c.object_key, table.c.content_digest, table.c.size)
             )
-            if header is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            if header["store_id"] != self.store_id or header["object_key"] != key:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
             async def start_stream() -> None:
                 nonlocal result
                 result = await session.stream(
-                    select(chunks)
-                    .where(chunks.c.key_digest == header["key_digest"])
+                    select(*header_columns, chunks.c.chunk_index, chunks.c.content)
+                    .select_from(table.outerjoin(chunks, chunks.c.key_digest == table.c.key_digest))
+                    .where(table.c.key_digest == _key_digest(self.store_id, key).hex())
                     .order_by(chunks.c.chunk_index)
                 )
 
@@ -394,12 +387,19 @@ class SqlObjectStore:
             digest = hashlib.sha256()
             size = 0
             expected_index = 0
+            header = None
             rows = result.mappings()
             while True:
                 try:
                     row = await self._context.run_statement(rows.__anext__())
                 except StopAsyncIteration:
                     break
+                if header is None:
+                    if row["store_id"] != self.store_id or row["object_key"] != key:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    header = ObjectStat(key, str(row["content_digest"]), int(row["size"]))
+                if row["chunk_index"] is None:
+                    continue
                 if int(row["chunk_index"]) != expected_index:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value = bytes(row["content"])
@@ -407,9 +407,11 @@ class SqlObjectStore:
                 digest.update(value)
                 size += len(value)
                 yield value
+            if header is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if (
-                size != int(header["size"])
-                or digest.hexdigest() != str(header["content_digest"])
+                size != header.size
+                or digest.hexdigest() != header.digest
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:

@@ -79,3 +79,76 @@ def test_completion_preserves_cancellation_and_budget_gate_meanings(
         cancellation_requested=cancellation_requested, budget_stopped=budget_stopped) == expected
     assert evaluation_completion((), (), pending_launches=pending, blocked=True,
         cancellation_requested=cancellation_requested, budget_stopped=budget_stopped) == "needs_attention"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("released,boundary", ((False, "storage"), (True, "storage"),
+                                               (False, "author"), (False, "score_node"),
+                                               (False, "recovery")))
+async def test_inspect_preserves_scorer_graph_read_boundaries_without_saved_score(
+    monkeypatch: pytest.MonkeyPatch, released: bool, boundary: str,
+) -> None:
+    from linktools.ai.core import service_principal
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.evaluation import TargetTrialRef, TrialView
+    from linktools.ai.runtime._evaluation import RuntimeEvaluations
+    from linktools.ai.runtime.state._evaluation_records import EvaluationLaunchIntent
+    from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
+    from .test_evaluation_persistence import experiment
+
+    service = object.__new__(RuntimeEvaluations)
+    service._namespace = "evaluation"
+    record = experiment()
+    principal = record.manifest.principal
+    caller = service_principal(principal.tenant_id, "viewer") if boundary == "author" else principal
+    trial = TargetTrialRef(record.experiment_id, "trial")
+    graph = TaskGraph("score-graph", (TaskNode("score", task=TaskRef("score", 1), input={
+        "evidence_ref": {"namespace": "evaluation", "tenant_id": principal.tenant_id,
+                         "evidence_id": "evidence", "digest": "a" * 64},
+    }),))
+    admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, principal, "score-start"))
+    launch = EvaluationLaunchIntent("score:trial:score", trial, "score",
+        TaskGraphSubmission("evaluation", admission, graph), None, confirmed=True, released=released)
+    record = replace(record, intents=(launch,))
+
+    async def read_record(experiment_id, actor):
+        assert experiment_id == record.experiment_id and actor == caller
+        return record
+
+    async def read_trials(value, actor):
+        return (TrialView(trial, value.manifest.trials[0].case_ref, "target", 1),), {}
+
+    failure = AIError(ErrorCode.AUTHORIZATION_DENIED if boundary == "author" else ErrorCode.STORAGE_INTEGRITY_ERROR)
+    graph_reads = 0
+
+    async def read_graph(intent, actor):
+        nonlocal graph_reads
+        graph_reads += 1
+        assert intent == launch
+        if boundary == "storage" or boundary == "author" and actor == principal:
+            raise failure
+        if boundary == "recovery":
+            return TaskGraphState(graph.graph_id, TaskStatus.RECOVERY_REQUIRED, graph.nodes,
+                (TaskNodeView(graph.graph_id, "score", (), TaskStatus.RECOVERY_REQUIRED, None, 1, None, None,
+                              "recovery_required", "a" * 64),))
+        return TaskGraphState(graph.graph_id, TaskStatus.RUNNING,
+            (TaskNode("other", task=TaskRef("score", 1)),),
+            (TaskNodeView(graph.graph_id, "other", (), TaskStatus.RUNNING, None, 0, None, None, None, None),))
+
+    monkeypatch.setattr(service, "_record", read_record)
+    monkeypatch.setattr(service, "_trials", read_trials)
+    monkeypatch.setattr(service, "_graph_state", read_graph)
+    if boundary == "recovery":
+        view = await service._inspect(record.experiment_id, caller)
+        assert view.completion == "needs_attention"
+        assert view.progress.planned_scores == 1 and view.progress.terminal_scores == 0
+        assert view.needs_attention[0].code == "recovery_required"
+        assert view.needs_attention[0].trial == trial
+        assert graph_reads <= 1
+    elif boundary == "score_node":
+        with pytest.raises(RuntimeError, match="coroutine raised StopIteration"):
+            await service._inspect(record.experiment_id, caller)
+    else:
+        with pytest.raises(AIError) as raised:
+            await service._inspect(record.experiment_id, caller)
+        assert raised.value is failure

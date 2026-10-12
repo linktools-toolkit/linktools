@@ -106,7 +106,8 @@ async def _settle_task(task: "asyncio.Future[_TaskT]") -> tuple[_TaskT, bool]:
     cancelled = False
     while True:
         try:
-            return await asyncio.shield(task), cancelled
+            await asyncio.wait((task,))
+            return task.result(), cancelled
         except asyncio.CancelledError:
             if task.done():
                 if task.cancelled():

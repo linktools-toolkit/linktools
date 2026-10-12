@@ -96,6 +96,9 @@ class SqlAlchemyDialect(Protocol):
     @property
     def single_writer(self) -> bool: ...
 
+    @property
+    def prefer_update_executemany(self) -> bool: ...
+
     async def configure_engine(self, engine: "AsyncEngine") -> None: ...
 
     async def begin_consistent_read(self, session: "AsyncSession") -> None: ...
@@ -118,7 +121,9 @@ class SqlAlchemyDialect(Protocol):
         table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]",
         index_elements: "Sequence[str]",
-    ) -> None: ...
+    ) -> int | None:
+        """Return the inserted count, or None when conflicts cannot be distinguished."""
+        ...
 
     async def upsert(
         self,
@@ -193,6 +198,10 @@ class SQLiteDialect:
     def single_writer(self) -> bool:
         return self.name == "sqlite"
 
+    @property
+    def prefer_update_executemany(self) -> bool:
+        return False
+
     async def configure_engine(self, engine: "AsyncEngine") -> None:
         if self.single_writer:
             await configure_sqlite_engine(engine)
@@ -259,16 +268,17 @@ class SQLiteDialect:
         table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]",
         index_elements: "Sequence[str]",
-    ) -> None:
+    ) -> int | None:
         if not rows:
-            return
+            return None
 
         statement = (
             self._insert(table)
             .values([dict(row) for row in rows])
             .on_conflict_do_nothing(index_elements=list(index_elements))
         )
-        await session.execute(statement)
+        result = await session.execute(statement)
+        return result.rowcount if result.rowcount >= 0 else None
 
     async def upsert(
         self,
@@ -418,6 +428,11 @@ class MySQLDialect(SQLiteDialect):
     def name(self) -> str:
         return "mysql"
 
+    @property
+    def prefer_update_executemany(self) -> bool:
+        # Row-wise driver execution preserves each value's max_allowed_packet boundary.
+        return True
+
     def _database_now_expression(self) -> "ColumnElement[datetime]":
         from sqlalchemy import func
 
@@ -462,9 +477,9 @@ class MySQLDialect(SQLiteDialect):
         table: "Table",
         rows: "Sequence[Mapping[str, SqlValue]]",
         index_elements: "Sequence[str]",
-    ) -> None:
+    ) -> int | None:
         if not rows:
-            return
+            return None
         from sqlalchemy.dialects.mysql import insert
 
         statement = insert(table).values([dict(row) for row in rows])
@@ -472,6 +487,8 @@ class MySQLDialect(SQLiteDialect):
         await session.execute(
             statement.on_duplicate_key_update(**{column: statement.inserted[column]})
         )
+        # FOUND_ROWS makes an ignored duplicate indistinguishable from an insert.
+        return None
 
     async def upsert(
         self,

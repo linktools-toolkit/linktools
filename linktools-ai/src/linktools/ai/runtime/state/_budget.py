@@ -14,7 +14,7 @@ from ._budget_records import BudgetModelReservation, BudgetToolReservation
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._plan import RuntimeDomain
 from ._repository_common import RepositoryBase, replace_checked
-from ._store import RecordQuery, StateStore, StateTransaction, StoredRecord
+from ._store import RecordQuery, RecordReplacement, StateStore, StateTransaction, StoredRecord
 
 
 class _UnresolvedLocalReservation(AIError):
@@ -139,6 +139,11 @@ class BudgetRepositoryImpl(RepositoryBase):
         self, transaction: StateTransaction, scope_id: str,
     ) -> tuple[StoredRecord, BudgetUsage]:
         row = await transaction.get_record(self._key("budget_scope", scope_id))
+        return await self._decode_scope_record(scope_id, row)
+
+    async def _decode_scope_record(
+        self, scope_id: str, row: StoredRecord | None,
+    ) -> tuple[StoredRecord, BudgetUsage]:
         if row is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR,
                           safe_details={"reason": "missing_budget_scope", "scope_id": scope_id})
@@ -254,8 +259,11 @@ class BudgetRepositoryImpl(RepositoryBase):
         active = (scope_id, request_id, reservation.admission_id)
 
         async def write(transaction: StateTransaction) -> BudgetUsage:
-            row, usage = await self._scope_record(transaction, scope_id)
-            if await transaction.get_record(self._key("budget_model", identity)) is not None:
+            scope_key = self._key("budget_scope", scope_id)
+            reservation_key = self._key("budget_model", identity)
+            records = await transaction.get_records((scope_key, reservation_key))
+            row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
+            if records.get(reservation_key) is not None:
                 self._reject(scope_id, "model_requests", "duplicate_dispatch")
             await self._check_admission(transaction, row, usage, "model_requests")
             updated = replace(usage, model_requests=usage.model_requests + 1,
@@ -299,8 +307,11 @@ class BudgetRepositoryImpl(RepositoryBase):
         status = "unknown" if total_tokens is None else "settled"
 
         async def write(transaction: StateTransaction) -> BudgetUsage:
-            scope_row, usage = await self._scope_record(transaction, scope_id)
-            row = await transaction.get_record(self._key("budget_model", identity))
+            scope_key = self._key("budget_scope", scope_id)
+            reservation_key = self._key("budget_model", identity)
+            records = await transaction.get_records((scope_key, reservation_key))
+            scope_row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
+            row = records.get(reservation_key)
             if row is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             reservation = await self._decode(row, BudgetModelReservation)
@@ -320,9 +331,13 @@ class BudgetRepositoryImpl(RepositoryBase):
                 "budget_model", identity, replace(reservation, status=status, total_tokens=total_tokens),
                 scope=self._scope("budget_model", "budget", scope_id), state=status,
             )
-            await replace_checked(transaction, replace(candidate, storage_version=row.storage_version + 1),
-                                  row.storage_version)
-            await self._replace_usage(transaction, scope_row, updated)
+            scope_candidate = self._stored("budget_scope", scope_id, updated)
+            await transaction.replace_records((
+                RecordReplacement(replace(candidate, storage_version=row.storage_version + 1),
+                                  row.storage_version),
+                RecordReplacement(replace(scope_candidate, storage_version=scope_row.storage_version + 1),
+                                  scope_row.storage_version),
+            ))
             return updated
 
         async def readback() -> BudgetUsage | None:
@@ -349,8 +364,11 @@ class BudgetRepositoryImpl(RepositoryBase):
         identity = [scope_id, call_id]
 
         async def write(transaction: StateTransaction) -> BudgetUsage:
-            row, usage = await self._scope_record(transaction, scope_id)
-            if await transaction.get_record(self._key("budget_tool", identity)) is not None:
+            scope_key = self._key("budget_scope", scope_id)
+            reservation_key = self._key("budget_tool", identity)
+            records = await transaction.get_records((scope_key, reservation_key))
+            row, usage = await self._decode_scope_record(scope_id, records.get(scope_key))
+            if records.get(reservation_key) is not None:
                 self._reject(scope_id, "tool_calls", "duplicate_dispatch")
             await self._check_admission(transaction, row, usage, "tool_calls")
             updated = replace(usage, tool_calls=usage.tool_calls + 1)
