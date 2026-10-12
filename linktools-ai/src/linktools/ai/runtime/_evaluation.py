@@ -184,11 +184,17 @@ class RuntimeEvaluations:
         record = await self._state.get(experiment_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        await self._authorize(principal, action, experiment_id,
+        await self._check_record(record, principal, action, allow_expired=allow_expired)
+        return record
+
+    async def _check_record(
+        self, record: EvaluationRecord, principal: Principal, action: AuthorizationAction,
+        *, allow_expired: bool = False,
+    ) -> None:
+        await self._authorize(principal, action, record.experiment_id,
                               owner=record.manifest.principal.principal_id)
         if not allow_expired and record.metadata_expires_at is not None and record.metadata_expires_at <= _now():
             raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, safe_details={"reason": "metadata_expired"})
-        return record
 
     async def _require_content(self, record: EvaluationRecord, principal: Principal) -> None:
         seen: set[str] = set()
@@ -561,13 +567,27 @@ class RuntimeEvaluations:
                 self._watchers.pop(experiment_id, None)
 
     async def read_evidence(self, evidence_ref: EvidenceRef, *, principal: Principal) -> EvidenceBundle:
+        return await self._read_evidence(evidence_ref, principal=principal)
+
+    async def _read_evidence(
+        self, evidence_ref: EvidenceRef, *, principal: Principal,
+        source_records: dict[str, EvaluationRecord] | None = None,
+    ) -> EvidenceBundle:
         if evidence_ref.namespace != self._namespace or evidence_ref.tenant_id != self._storage.tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorize(principal, AuthorizationAction.EVALUATION_EVIDENCE_READ, evidence_ref.evidence_id)
         bundle = await self._state.read_evidence(evidence_ref)
         if bundle is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        source_record = await self._record(bundle.trial.target_experiment_id, principal, AuthorizationAction.EVALUATION_EVIDENCE_READ)
+        source_id = bundle.trial.target_experiment_id
+        source_record = None if source_records is None else source_records.get(source_id)
+        if source_record is None:
+            source_record = await self._record(source_id, principal, AuthorizationAction.EVALUATION_EVIDENCE_READ)
+            if source_records is not None:
+                source_records[source_id] = source_record
+        else:
+            await self._authorize(principal, AuthorizationAction.EVALUATION_EVIDENCE_READ, source_id)
+            await self._check_record(source_record, principal, AuthorizationAction.EVALUATION_EVIDENCE_READ)
         require_evaluation_content(source_record, now=_now())
         if bundle.ref != evidence_ref or bundle.digest != evidence_ref.digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -759,8 +779,12 @@ class RuntimeEvaluations:
         revisions[f"evaluation:{experiment_id}"] = record.revision
         blocked = False
         target_usage = {item.trial.trial_id: item.subject is None and item.graph_ref is None for item in trials}
+        source_records = {record.experiment_id: record}
+        evidence_sources: set[str] = set()
         for item in record.evidence:
-            target_usage[item.trial.trial_id] = (await self.read_evidence(item.evidence_ref, principal=principal)).usage_complete
+            evidence = await self._read_evidence(item.evidence_ref, principal=principal, source_records=source_records)
+            evidence_sources.add(evidence.trial.target_experiment_id)
+            target_usage[item.trial.trial_id] = evidence.usage_complete
         scorer_usage = {scorer.slot_id: {item.trial.trial_id: True for item in trials} for scorer in record.manifest.scorers}
         for intent in record.intents:
             if intent.scorer_slot_id is not None:
@@ -781,6 +805,13 @@ class RuntimeEvaluations:
         report = build_evaluation_report(record.manifest, cases, trials, scores, cutoff=cutoff,
                                          report_id=uuid.uuid4().hex, created_at=_now())
         report = replace(report, completion=_completion(record, trials, scores, blocked=blocked))
+        if evidence_sources:
+            # Reuse is local to this snapshot; a concurrent purge must still prevent its release.
+            for source_id in dict.fromkeys((record.experiment_id, *sorted(evidence_sources))):
+                action = (AuthorizationAction.EVALUATION_EVIDENCE_READ if source_id in evidence_sources
+                          else AuthorizationAction.EVALUATION_READ)
+                latest = await self._record(source_id, principal, action)
+                await self._require_content(latest, principal)
         return record, report
 
     async def get_report(self, report_id: str, *, principal: Principal) -> EvaluationReport | ComparisonReport:
