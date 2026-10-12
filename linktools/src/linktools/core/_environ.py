@@ -255,7 +255,7 @@ class BaseEnviron(abc.ABC):
         """
         from ._config_store import ConfigStore
 
-        self.paths.ensure_config()
+        # Reads need no writable storage; ConfigStore creates directories on write.
         return ConfigStore(self.paths.config / name, lock_manager=self.locks)
 
     @cached_property(lock=True)
