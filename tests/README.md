@@ -72,10 +72,10 @@ It cannot be combined with `checks.pytest.groups`, and its name must not collide
 with an independent package. Each member still runs its own `manage.py check`,
 with separate logs and summaries. An ordinary failure does not skip later members;
 the job ultimately fails. Cancellation signals stop the loop. New packages without
-`ci-pool` remain independent. Core, common and mobile currently share the `linktools`
+`ci-pool` remain independent. Core, common, mobile and cntr currently share the `linktools`
 pool. Its job title lists the members, for example
-`Python <version> linktools + linktools-common + linktools-mobile checks`.
-Adding a member through its manifest also updates the title. Separate common/mobile
+`Python <version> linktools + linktools-cntr + linktools-common + linktools-mobile checks`.
+Adding a member through its manifest also updates the title. Separate common/mobile/cntr
 check names are no longer emitted. Core retains its full-package installation.
 
 Packages can instead declare test groups. For example,
@@ -125,7 +125,7 @@ count as completed coverage. Per-job summaries identify package, Python, group,
 tier and outcome; pytest also prints skip reasons. The final summary states the
 selected tier. Repository protection settings are managed separately.
 
-The current five packages use 11 jobs: 8 execution jobs, discovery, Python 3.6
+The current five packages use 9 jobs: 6 execution jobs, discovery, Python 3.6
 compatibility and final coverage. Each AI group installs its
 local dependency closure and runs the package architecture/lint gates before
 its own tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.
