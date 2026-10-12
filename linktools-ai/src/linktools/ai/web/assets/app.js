@@ -2,8 +2,8 @@ import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricVal
 import {renderMarkdown, inputPresentation} from './message.js';
 
 const $ = id => document.getElementById(id);
-const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
-  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', conversationMode:'original', nativeTimeline:null, details:[], detailCursor:null, models:new Map(), events:new Map(),
+const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
+  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', conversationMode:'chat', nativeTimeline:null, expandedRequests:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
@@ -25,11 +25,11 @@ function button(label, action, className='quiet') {
 function markdownMessage(source, className='') {
   const node=element('div',`message ${className}`), body=element('div','markdown');
   const original=element('details','message-source');
-  original.append(element('summary','','Markdown source'),element('pre','',source));
-  node.append(body,button('Copy Markdown',async()=>{
+  original.append(element('summary','','Markdown source'),button('Copy Markdown',async()=>{
     if(!navigator.clipboard)throw new Error('Clipboard unavailable. Open Markdown source to copy the original text.');
     await navigator.clipboard.writeText(source);
-  },'quiet copy-message'),original);
+  },'quiet copy-message'),element('pre','',source));
+  node.append(body,original);
   body.innerHTML=renderMarkdown(source);
   return node;
 }
@@ -46,6 +46,13 @@ function userMessage(value) {
   return node;
 }
 function clear(id) { $(id).replaceChildren(); }
+function requestFocusWithin(container) {
+  return container.contains(document.activeElement) ? document.activeElement?.dataset?.requestFocus : null;
+}
+function restoreRequestFocus(container,key) {
+  if(!key)return;
+  [...container.querySelectorAll('[data-request-focus]')].find(node=>node.dataset.requestFocus===key)?.focus({preventScroll:true});
+}
 function notice(message='', executionId=null, revision=state.noticeRevision+1) { state.noticeRevision=revision; state.cancellationNoticeId=executionId; $('notice').textContent=message; $('notice').hidden=!message; return revision; }
 function showError(error) {
   if(error.name==='AbortError')return;
@@ -73,6 +80,8 @@ function renderCurrentState() {
   } else if(info)label=`Selected execution: ${info.status}`;
   else if(state.selectedExecution || state.selectedSession)label='Loading…';
   $('current-status').textContent=label;
+  $('current-status').hidden=label==='Session available' && !['CANCELLED','FAILED'].includes(state.observedInfo?.status);
+  $('recovery-shortcut').hidden=!owner || !['RECOVERY_REQUIRED','CANCELLING','START_UNKNOWN'].includes(info?.status);
   $('current-status').classList.toggle('error',state.session?.status==='CLEANUP_REQUIRED' || Boolean(info && (!state.session || owner===info.execution_id) && ['FAILED','START_UNKNOWN','RECOVERY_REQUIRED'].includes(info.status)));
   $('show-active').hidden=!owner || owner===state.selectedExecution;
   $('stop-run').setAttribute('aria-label',`Stop selected execution ${state.selectedExecution || ''}`);
@@ -107,6 +116,7 @@ function setDisabled() {
   const readonly=!state.config || state.config.read_only;
   document.querySelectorAll('[data-view]').forEach(node=>node.disabled=!state.config);
   $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
+  $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
@@ -124,6 +134,8 @@ function setDisabled() {
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
   $('cancel').hidden=readonly || !active || terminal(active.status);
+  $('inspector-active-stop').hidden=readonly || !active || terminal(active.status) || active.execution_id===state.selectedExecution;
+  $('inspector-active-stop').disabled=readonly || !active || state.actionsPending.has(`${active.execution_id}:end-stopped`);
   $('cancel').setAttribute('aria-label',`Stop current execution ${active?.execution_id || ''}`);
   $('stop-run').disabled=ending;$('cancel').disabled=Boolean(active && state.actionsPending.has(`${active.execution_id}:end-stopped`));
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
@@ -132,6 +144,9 @@ function setDisabled() {
 function renderPage() {
   const sessions=state.view==='sessions', executions=state.view==='executions', metrics=state.view==='metrics';
   $('metrics-view').hidden=!metrics;
+  $('conversation-heading').hidden=!sessions || !state.selectedSession;
+  $('page-heading').hidden=sessions && Boolean(state.selectedSession);
+  $('conversations-home').hidden=sessions;
   $('conversation-view').hidden=metrics || sessions && !state.selectedSession;
   $('conversation-column').hidden=!sessions;
   $('welcome').hidden=!sessions || Boolean(state.selectedSession);
@@ -146,9 +161,15 @@ function renderPage() {
   $('execution-live').hidden=!executions;
   if($('live'))clear('live');clear('execution-live');renderLive();
 }
+function closeSidebar(focus=false) {
+  $('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');
+  if(focus)$('menu').focus();
+}
 function setView(view, refreshSelection=true) {
+  closeSidebar();
   if(view!==state.view){saveDraft();++state.generation;state.nativeTimeline=null;state.filters.set(state.view,$('filter').value);$('filter').value=state.filters.get(view) || '';state.list=[];clear('list');}
   state.view=view;
+  $('workspace-tools').open=false;
   document.querySelectorAll('[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view===view));
   $('page-title').textContent={sessions:'Conversations',executions:'Executions',metrics:'Metrics'}[view];
   $('execution-filters').hidden=view !== 'executions'; $('filter-form').hidden=view === 'metrics';$('open-tools').hidden=view==='metrics';
@@ -217,7 +238,8 @@ function renderList() {
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
     sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':item.active_execution_id || !terminal(item.status) && !session ? 'running':''}`));
-    sub.append(element('span','',`${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
+    sub.append(element('span','',session ? `${item.active_execution_id?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}` : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
+    node.title=`${item.status} · ${item.agent_id || 'task'} · ${id}`;
     node.append(sub); $('list').append(node);
   });
 }
@@ -268,14 +290,14 @@ function restoreDraft(sessionId) {
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
-  const generation=++state.generation;
+  const generation=++state.generation,focusComposer=state.focusComposerSession===sessionId;state.focusComposerSession=null;
   if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
   restoreDraft(state.selectedSession);
   state.nativeTimeline=null;
   state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
   const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;
-  $('sidebar').classList.remove('open');renderPage();
+  closeSidebar();renderPage();
   if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
   $('composer').hidden=!sessionId; $('conversation-title').textContent='Loading…';
   $('conversation-meta').textContent=''; clear('session-details'); if(!preserveObservation)clear('conversation'); clear('inspector-content');
@@ -295,6 +317,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
     }
     if (executionId) await selectExecution(executionId,generation);
     setDisabled(); renderList();
+    if(focusComposer && generation===state.generation && state.selectedSession===sessionId)$('prompt').focus();
   } catch(error) { if (generation===state.generation) showError(error); }
 }
 async function moreTurns() {
@@ -312,43 +335,45 @@ async function moreTurns() {
   } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
 }
 function renderConversation({prepend=false}={}) {
-  const liveFocus=document.activeElement?.dataset?.liveFocus;
+  const liveFocus=document.activeElement?.dataset?.liveFocus,requestFocus=requestFocusWithin($('conversation'));
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
-  const follows=previousTop+container.clientHeight>=previousHeight-40;
+  const follows=previousTop+container.clientHeight>=previousHeight-40, original=state.conversationMode==='original';
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
-  $('native-mode').classList.toggle('active',state.conversationMode==='original');
-  $('chat-mode').classList.toggle('active',state.conversationMode==='chat');
-  if(state.timelineError)$('conversation').append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
-  state.turns.forEach(turn => {
+  $('native-mode').classList.toggle('active',original);$('native-mode').setAttribute('aria-pressed',String(original));
+  $('chat-mode').classList.toggle('active',!original);$('chat-mode').setAttribute('aria-pressed',String(!original));
+  $('request-context').hidden=!original;
+  if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
+  if(original) {
+    const select=$('request-turn');select.replaceChildren();
+    state.turns.forEach((turn,index)=>{const option=element('option','',`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status}`);option.value=turn.execution_id;select.append(option);});
+    if(state.selectedExecution && !state.turns.some(turn=>turn.execution_id===state.selectedExecution)){const option=element('option','',`Execution ${short(state.selectedExecution)}`);option.value=state.selectedExecution;select.append(option);}
+    select.value=state.selectedExecution || '';select.disabled=!select.children.length;
+    const section=element('section','model-requests');renderNativeTimeline(section);container.append(section);
+  } else state.turns.forEach(turn => {
     const section=element('article','turn');
-    const heading=element('div','turn-heading'); heading.append(element('span','',date(turn.created_at)),element('span','badge',turn.status));
-    heading.append(button('Details',async()=>{showInspector(true,true);await selectExecution(turn.execution_id,state.generation);}));
-    section.append(heading);
     section.append(userMessage(turn.user_input));
-    if(state.conversationMode==='original') {
-      if(turn.execution_id===state.selectedExecution)renderNativeTimeline(section);
-      else section.append(button('View original model requests',async()=>selectExecution(turn.execution_id)));
-    } else {
-    section.append(element('p','muted','Response display · SDK records. Original client arrays are in Original request timeline.'));
     const replies=turn.items.filter(item=>item.item_kind!=='user');
     replies.forEach(item => {
       if (item.item_kind==='assistant') {
-        const label=element('div','message-label'); label.append(element('span','avatar','lt'),element('span','',state.session?.agent_id || 'AGENT'));
-        section.append(label,typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
+        section.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
       } else if (['tool_call','tool_result','thinking'].includes(item.item_kind)) {
         const detail=element('details','tool-message'); detail.append(element('summary','',`${item.item_kind.replaceAll('_',' ')} · ${item.tool_name || ''}`),element('pre','',text(item.content))); section.append(detail);
       }
     });
-    }
     if (!turn.conversation_committed) section.append(element('p','muted','History is incomplete; the Runtime has not committed this turn.'));
     if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
-    $('conversation').append(section);
+    const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
+    if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
+    heading.append(button('Model requests',async()=>{state.conversationMode='original';await selectExecution(turn.execution_id,state.generation);renderConversation();}),button('Details',async()=>{showInspector(true,true);await selectExecution(turn.execution_id,state.generation);}));
+    section.append(heading);container.append(section);
   });
-  if(state.conversationMode==='original' && state.selectedExecution && !state.turns.some(turn=>turn.execution_id===state.selectedExecution)){const section=element('article','turn');renderNativeTimeline(section);$('conversation').append(section);}
-  if (!state.turns.length && !state.timelineError) $('conversation').append(element('p','empty',state.selectedSession ? 'Ready when you are. Send a message to start this conversation.':'Inspect this execution using the panels on the right.'));
-  const live=element('section','turn'); live.id='live'; $('conversation').append(live); renderLive(liveFocus);
+  if (!state.turns.length && !state.timelineError && !original)container.append(element('p','empty',state.selectedSession ? 'Send a message to get started.':'Choose an execution to inspect.'));
+  const live=element('section','turn');live.id='live';
+  if(original){const preview=element('details','live-preview');preview.append(element('summary','','Live conversation preview · not the original response'),live);container.append(preview);}else container.append(live);
+  renderLive(liveFocus);restoreRequestFocus(container,requestFocus);
   container.scrollTop=prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
 }
+
 let liveRenderTimer=null;
 function scheduleLiveRender() {
   if(liveRenderTimer===null)liveRenderTimer=setTimeout(()=>{liveRenderTimer=null;renderLive();},60);
@@ -388,11 +413,12 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   state.observedInfo=info;return info;
 }
 async function selectExecution(id, generation=state.generation) {
-  const executionGeneration=++state.executionGeneration;
+  const executionGeneration=++state.executionGeneration,selectionChanged=id!==state.selectedExecution;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
   if(state.nativeTimeline?.id!==id)state.nativeTimeline=null;
   state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;setDisabled();clear('inspector-content');renderLive();
   $('execution-meta').textContent=`Loading ${id}…`;
+  if(selectionChanged && state.view==='sessions' && state.conversationMode==='original')renderConversation();
   try {
   let info=await api(`/api/executions/${enc(id)}`);
   if (generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution) return;
@@ -404,7 +430,12 @@ async function selectExecution(id, generation=state.generation) {
   else await loadDetail(false);
   setDisabled();
   if (generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution) await syncObservation();
-  } catch(error){if(generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution && (id!==state.observedExecution || readGeneration===state.observationReadGeneration))throw error;}
+  } catch(error){
+    if(generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution && (id!==state.observedExecution || readGeneration===state.observationReadGeneration)){
+      if(selectionChanged && state.view==='sessions' && state.conversationMode==='original'){state.nativeTimeline={id,items:[],cursor:null,loading:false,error:error.message,pending:new Map()};renderNativeViews();}
+      throw error;
+    }
+  }
 }
 function renderExecution() {
   const info=state.execution; if (!info) return;
@@ -429,22 +460,25 @@ function downloadClientBody(value,name) {
 function nativeBody(value,name,{request=false}={}) {
   const container=element('div');
   if(value.body==null){container.append(element('p','muted',`Original body unavailable · ${value.capture_error || 'not observed'}`));return container;}
-  container.append(button('Download original bytes',async()=>downloadClientBody(value,name)));
+  const download=button('Download original bytes',async()=>downloadClientBody(value,name));download.dataset.requestFocus=name+':download';container.append(download);
   let source;
   try {source=clientBodyText(value);}
   catch(error){container.append(element('p','muted',`Text display unavailable · ${error.message}. Original bytes remain downloadable.`));return container;}
   const full=element('details');full.open=true;
-  full.append(element('summary','',request?'Original outbound request body · native messages array and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text'),element('pre','json',source));
+  const summary=element('summary','',request?'Original outbound request body · native messages array and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text');summary.dataset.requestFocus=name+':body';
+  full.append(summary,element('pre','json',source));
   container.append(full);return container;
 }
-function nativeInteraction(item) {
-  const card=element('section','detail-card');
-  card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose} · ${modelLabel(item.model)}`));
+function nativeInteraction(item,scope='conversation') {
+  const key=modelKey(item),expandedKey=scope+':'+key,card=element('details','detail-card model-request'),summary=element('summary');
+  card.open=state.expandedRequests.has(expandedKey);card.ontoggle=()=>{if(!card.isConnected)return;if(card.open)state.expandedRequests.add(expandedKey);else state.expandedRequests.delete(expandedKey);};
+  summary.dataset.requestFocus=key+':request';summary.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`));card.append(summary);
+  card.append(element('p','request-identity',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose} · ${modelLabel(item.model)}`));
   if(item.usage)card.append(element('p','',usageLabel(item.usage)));
   card.append(rawDetail({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code},'Logical request timing and identity'));
   if(!item.client_requests_included)card.append(element('p','muted','Original client content was not requested.'));
-  else if(item.client_requests===null)card.append(element('p','muted',item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':'Original client messages were not recorded. SDK snapshots are not used to backfill them.'));
-  else if(!item.client_requests.length)card.append(element('p','muted','No supported client dispatch was observed in this request scope.'));
+  else if(item.client_requests===null)card.append(element('p','muted',item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':'Original client messages were not recorded. SDK snapshots are not used to backfill them. Only the supported OpenAI Chat binding is captured; other provider APIs may be unavailable here.'));
+  else if(!item.client_requests.length)card.append(element('p','muted','No supported client dispatch was observed in this request scope. Only the OpenAI Chat binding is currently captured; SDK snapshots are not substituted.'));
   else item.client_requests.forEach((attempt,index)=>{
     const row=element('section','detail-card'),key=clientAttemptKey(item,index);row.dataset.clientAttempt=key;
     row.append(element('h4','',`Client attempt ${index+1} · ${attempt.api}`),element('p','muted','SDK client outbound request. Provider-server receipt is not observable here.'),nativeBody(attempt,`${key}-request.bin`,{request:true}));
@@ -464,11 +498,11 @@ function renderNativeTimeline(container) {
   view.items.forEach(item=>container.append(nativeInteraction(item)));
   if(view.error)container.append(element('p','muted',view.error));
   else if(!view.items.length)container.append(element('p','muted',view.loading?'Loading original client records…':'No model request records are available.'));
-  const refresh=button('Refresh original requests',async()=>loadNativeTimeline(false,true));refresh.disabled=view.loading;container.append(refresh);
-  if(view.cursor){const more=button('Load more model requests',async()=>loadNativeTimeline(true));more.disabled=view.loading;container.append(more);}
+  const refresh=button('Refresh original requests',async()=>loadNativeTimeline(false,true));refresh.dataset.requestFocus='refresh';refresh.setAttribute('aria-busy',String(view.loading));container.append(refresh);
+  if(view.cursor){const more=button('Load more model requests',async()=>loadNativeTimeline(true));more.dataset.requestFocus='more';more.setAttribute('aria-busy',String(view.loading));container.append(more);}
 }
 function renderNativeViews() {
-  if(state.view==='sessions')renderConversation();
+  if(state.view==='sessions' && state.conversationMode==='original')renderConversation();
   if(state.tab==='models' && !$('inspector').hidden && state.nativeTimeline?.id===state.selectedExecution){
     state.details=state.nativeTimeline.items;state.detailCursor=state.nativeTimeline.cursor;renderDetails();$('detail-more').hidden=!state.detailCursor;
   }
@@ -562,6 +596,7 @@ async function loadDetail(more=false, selectors={}) {
   if (!more) { state.details=[]; state.detailCursor=null; clear('inspector-content'); }
   $('detail-more').hidden=true;
   document.querySelectorAll('[data-tab]').forEach(node=>node.classList.toggle('active',node.dataset.tab===tab));
+  if(['history','transcript','sdkmodels'].includes(tab))$('sdk-debugging').open=true;
   if (tab==='overview') { renderOverview(); return; }
   if (tab==='models') {
     await loadNativeTimeline(more,!more && !(state.view==='sessions' && state.conversationMode==='original'));
@@ -593,7 +628,13 @@ function renderOverview() {
   }
 }
 function renderDetails() {
+  const requestFocus=requestFocusWithin($('inspector-content'));
   clear('inspector-content');
+  if(['history','transcript','sdkmodels'].includes(state.tab)) {
+    const note=element('div','source-note');
+    note.append(element('p','',state.tab==='history' ? 'SDK structured records, not outbound messages. Instructions is a separate SDK request field, not an earlier system or developer message. Display order is not client message order.' : state.tab==='transcript' ? 'SDK text excerpts only: user text and assistant text. System, instructions, tools and other structured parts are omitted; this is not a complete model request.' : 'SDK preparation snapshot, not the final client request. Categories describe framework input, not outbound message order.'));
+    note.append(button('Open original model requests',async()=>{state.tab='models';await loadDetail();}));$('inspector-content').append(note);
+  }
   if(state.tab==='recovery' && !state.config.read_only) {
     const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
@@ -603,7 +644,7 @@ function renderDetails() {
   state.details.forEach(item=>{
     const card=element('div','detail-card');
     if(state.tab==='models') {
-      card.append(nativeInteraction(item));
+      card.append(nativeInteraction(item,'inspector'));
     } else if(state.tab==='sdkmodels') {
       card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`),element('p','muted','Framework preparation snapshot. This is not the final client message array.'));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
@@ -614,7 +655,7 @@ function renderDetails() {
       const row=item.payload || {}; card.append(element('h3','',`#${item.step_event_seq} · ${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request #'+(row.model_request_seq ?? '—')}`),element('p','',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`),rawDetail(item));
       const selectors={}; ['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
       if(row.call_id)selectors.tool_call_id=row.call_id;
-      card.append(button('Read content',async()=>{
+      card.append(button('Read SDK content',async()=>{
         if(item.execution_id!==state.selectedExecution){
           const generation=state.generation,selection=selectExecution(item.execution_id),executionGeneration=state.executionGeneration;
           await selection;
@@ -634,11 +675,16 @@ function renderDetails() {
         catch(error){if(current() && noticeRevision===state.noticeRevision)throw error;}
       })));
     } else {
-      card.append(element('h3','',`${item.item_kind || 'Text'} ${item.tool_name?'· '+item.tool_name:''}`),element('p','',`Message ${item.message_seq} · run ${item.agent_run_seq ?? '—'}${item.execution_id?' · '+short(item.execution_id):''}`),element('pre','json',text(item.content ?? item.text)),rawDetail(item));
+      const instructions=state.tab==='history' && item.item_kind==='instructions';
+      card.classList.toggle('sdk-field',instructions);
+      const title=instructions?'SDK instructions field':state.tab==='transcript'?'SDK text excerpt':`SDK ${item.item_kind || 'unknown'} part${item.tool_name?' · '+item.tool_name:''}`;
+      const locator=instructions?`Request record ${item.message_seq} · field metadata`:`Record ${item.message_seq}${item.part_index!=null?' · part '+item.part_index:''}`;
+      card.append(element('h3','',title),element('p','',`${locator} · run ${item.agent_run_seq ?? '—'}${item.execution_id?' · '+short(item.execution_id):''}`),element('pre','json',text(item.content ?? item.text)),rawDetail(item));
     }
     if(state.tab==='history' && item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
     $('inspector-content').append(card);
   });
+  restoreRequestFocus($('inspector-content'),requestFocus);
 }
 async function refreshSelected() {
   const refreshGeneration=++state.refreshGeneration, generation=state.generation, executionGeneration=state.executionGeneration, sessionId=state.view==='sessions'?state.selectedSession:null, id=state.selectedExecution, noticeRevision=state.noticeRevision, noticeId=state.cancellationNoticeId;
@@ -820,14 +866,14 @@ async function sendMessage(event) {
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
-  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-title').focus();
+  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-agent').focus();
 }
 async function createSession(event) {
   event.preventDefault();const button=$('create-session');button.disabled=true;
   const sessionId=$('new-dialog').dataset.sessionId,generation=state.generation,noticeRevision=state.noticeRevision;
   try {
     const session=await mutate('/api/sessions',{session_id:sessionId,title:$('new-title').value,agent_id:$('new-agent').value,cwd:$('new-cwd').value || null});
-    if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();setView('sessions',false);navigate(session.session_id,null);}
+    if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();state.conversationMode='chat';state.focusComposerSession=session.session_id;setView('sessions',false);navigate(session.session_id,null);}
     await loadList();
   } catch(error){if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation && noticeRevision===state.noticeRevision)showError(error);}
   finally {if($('new-dialog').dataset.sessionId===sessionId)button.disabled=false;}
@@ -1000,7 +1046,17 @@ async function fromHash() {
 window.addEventListener('hashchange',()=>fromHash().catch(showError));window.addEventListener('beforeunload',stopStream);
 $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').onsubmit=createSession;
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
-$('menu').onclick=()=>$('sidebar').classList.toggle('open');
+$('menu').onclick=()=>{const open=$('menu').getAttribute('aria-expanded')!=='true';$('sidebar').classList.toggle('open',open);$('menu').setAttribute('aria-expanded',String(open));};
+$('sidebar-close').onclick=()=>closeSidebar(true);
+window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open)closeSidebar(true);});
+$('new-title').oninvalid=()=>$('new-options').open=true;
+$('request-turn').onchange=()=>selectExecution($('request-turn').value).catch(showError);
+async function openRecovery(active=false) {
+  const id=active?state.session?.active_execution_id:state.selectedExecution;if(!id)return;
+  showInspector(true,true);state.tab='recovery';await selectExecution(id);
+}
+$('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
+$('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
 $('options-toggle').onclick=()=>{const open=$('composer-options').hidden;$('composer-options').hidden=!open;$('options-toggle').setAttribute('aria-expanded',String(open));};
 $('inspector-toggle').onclick=()=>{const open=$('inspector').hidden;showInspector(open,true);if(open)loadDetail().catch(showError);};
 $('inspector-close').onclick=()=>showInspector(false,true);
@@ -1009,13 +1065,14 @@ $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').ope
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
-$('native-mode').onclick=()=>{state.conversationMode='original';renderConversation();loadNativeTimeline().catch(showError);};
+$('native-mode').onclick=()=>{state.conversationMode='original';renderConversation();return loadNativeTimeline().catch(showError);};
 $('chat-mode').onclick=()=>{state.conversationMode='chat';renderConversation();};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
 $('settings').onclick=showSettings;$('export').onclick=()=>exportResult().catch(showError);
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
+$('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
 $('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>executionAction('retry').catch(showError);$('fork-run').onclick=()=>executionAction('fork').catch(showError);$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));

@@ -21,6 +21,8 @@ class Element {
   connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
   append(...children){children.forEach(child=>{if(child.parentElement)child.parentElement.children=child.parentElement.children.filter(item=>item!==child);});this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
+  contains(node){return node===this || this.children.some(child=>child.contains?.(node));}
+  querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
   focus(){document.activeElement=this;}
   scrollIntoView(){}
   setAttribute(name,value){this.attributes ??= {};this.attributes[name]=String(value);}
@@ -144,9 +146,68 @@ await until('initial session list',()=>node('list').children.length===2);
 assert.equal(node('list').children.length,2);
 await select('#session=a');
 assert.equal(node('conversation-title').textContent,'Alpha');
-assert.match(node('conversation').textContent,/Original request timeline/);
-assert.doesNotMatch(node('conversation').textContent,/a answer/);
+assert.match(node('conversation').textContent,/a answer/);
+assert.doesNotMatch(node('conversation').textContent,/Original request timeline/);
+assert.equal(node('request-context').hidden,true);
+assert.equal(node('chat-mode').getAttribute('aria-pressed'),'true');
+if(process.argv[3]==='guided') {
+  const descendants=node=>[node,...node.children.flatMap(descendants)];
+  assert.equal(node('conversation-heading').hidden,false);assert.equal(node('page-heading').hidden,true);
+  assert.equal(node('inspector').hidden,true);assert.equal(node('sdk-debugging').open,false);
+  assert.equal(calls.filter(call=>call.key.endsWith('/models')).length,0,'Default conversation does not fetch original or SDK request bodies');
+  const source='{ "messages": [{"role":"system","content":"actual system first"},{"role":"system","content":"actual instructions second"}],"untouched":9007199254740993 }';
+  const original={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},client_requests_included:true,client_requests:[{api:'openai.chat.completions',body:Buffer.from(source).toString('base64'),body_encoding:'base64',response:null}]};
+  detailResponses.set('/api/executions/a-run/history',{items:[
+    {execution_id:'a-run',message_seq:1,agent_run_seq:1,part_index:null,item_kind:'instructions',content:'SDK instructions field first in projection'},
+    {execution_id:'a-run',message_seq:1,agent_run_seq:1,part_index:0,item_kind:'system',content:'SDK system part follows field metadata'},
+  ],next_cursor:null});
+  detailResponses.set('/api/executions/a-run/models',{items:[original],next_cursor:null});
+  await detail('history',/SDK instructions field first in projection/);
+  assert.equal(node('sdk-debugging').open,true);
+  assert.match(node('inspector-content').textContent,/not outbound messages/);assert.match(node('inspector-content').textContent,/Display order is not client message order/);
+  assert.match(node('inspector-content').textContent,/SDK instructions field/);assert.match(node('inspector-content').textContent,/field metadata/);assert.match(node('inspector-content').textContent,/SDK system part/);
+  assert.doesNotMatch(node('inspector-content').textContent,/Message 1/);
+  for(const value of ['SDK instructions field first in projection','SDK system part follows field metadata'])assert.ok(descendants(node('inspector-content')).some(item=>item.tagName==='PRE' && item.textContent===value),'SDK field and part content remain unchanged');
+  await descendants(node('inspector-content')).find(item=>item.tagName==='BUTTON' && item.textContent==='Open original model requests').click();
+  assert.ok(descendants(node('inspector-content')).some(item=>item.tagName==='PRE' && item.textContent===source),'Original source follows captured client order, never SDK projection order');
+  assert.doesNotMatch(node('inspector-content').textContent,/SDK instructions field first in projection/);
+  node('inspector-close').click();await node('native-mode').click();await until('independent model request mode',()=>node('conversation').textContent.includes('actual system first'));
+  assert.equal(node('request-context').hidden,false);assert.equal(node('request-turn').value,'a-run');
+  assert.doesNotMatch(node('conversation').textContent,/a question|a answer/,'Request mode does not interleave conversation turns with full outbound arrays');
+  const request=descendants(node('conversation')).find(item=>item.className.includes('model-request') && item.tagName==='DETAILS');
+  assert.equal(request.open,false);request.open=true;request.ontoggle();request.children[0].focus();
+  await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh original requests').click();
+  assert.equal(descendants(node('conversation')).find(item=>item.className.includes('model-request') && item.tagName==='DETAILS').open,true,'Refreshing source preserves the expanded request');
+  assert.equal(document.activeElement?.dataset.requestFocus,'a-run:1:1:request','Source refresh preserves keyboard focus on the same logical request');
+  await detail('models',/actual system first/);
+  const inspectorRequest=descendants(node('inspector-content')).find(item=>item.tagName==='DETAILS' && item.className.includes('model-request'));
+  inspectorRequest.open=true;inspectorRequest.ontoggle();inspectorRequest.open=false;inspectorRequest.ontoggle();
+  node('inspector-close').click();await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh original requests').click();
+  assert.equal(descendants(node('conversation')).find(item=>item.className.includes('model-request') && item.tagName==='DETAILS').open,true,'Closing the inspector copy cannot collapse the original request being read in the conversation pane');
+  timelineOverrides.set('a',{items:[...timeline('a').items,{...timeline('a').items[0],execution_id:'a-two',user_input:'Second question'}],next_cursor:null});
+  await select('#session=a&execution=a-run');
+  networkFailures.add('GET /api/executions/a-two');node('request-turn').value='a-two';await node('request-turn').onchange();
+  assert.equal(node('request-turn').value,'a-two');assert.match(node('conversation').textContent,/Runtime read unavailable/);
+  assert.doesNotMatch(node('conversation').textContent,/actual system first/,'Failed turn selection cannot retain another turn original bytes');
+  assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Download original bytes'));
+  networkFailures.clear();await select('#session=a&execution=a-run');
+  node('chat-mode').click();assert.match(node('conversation').textContent,/a answer/);assert.equal(node('request-context').hidden,true);
+  await detail('transcript',/SDK text excerpts only/);assert.match(node('inspector-content').textContent,/System, instructions, tools/);
+  node('new-session').click();assert.equal(document.activeElement,node('new-agent'));assert.equal(node('new-options').open,false);
+  node('new-dialog').close();await node('native-mode').click();node('new-session').click();node('new-title').value='Fresh chat';node('new-agent').value='default';
+  const creation=deferred('POST /api/sessions'),creating=node('new-form').requestSubmit();await creation.requested;
+  const createdId=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions').body.session_id;
+  sessions.set(createdId,{session_id:createdId,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:'Fresh chat'}});timelineOverrides.set(createdId,{items:[],next_cursor:null});
+  creation({session_id:createdId});await creating;await until('fresh conversation composer focus',()=>node('conversation-title').textContent==='Fresh chat' && document.activeElement===node('prompt'));
+  assert.equal(node('chat-mode').getAttribute('aria-pressed'),'true','A new conversation always starts in chat, even after inspecting original requests');
+  node('menu').click();assert.equal(node('menu').getAttribute('aria-expanded'),'true');
+  node('sidebar-close').click();assert.equal(node('menu').getAttribute('aria-expanded'),'false');assert.equal(document.activeElement,node('menu'));
+  node('menu').click();view('metrics').click();await hashChanged;assert.equal(node('menu').getAttribute('aria-expanded'),'false');
+  node('menu').click();await Promise.all(handlers.get('keydown').map(handler=>handler({key:'Escape'})));assert.equal(node('menu').getAttribute('aria-expanded'),'false');assert.equal(document.activeElement,node('menu'));
+  console.log('Guided conversation contracts passed: default chat, independent original requests, unchanged bytes, SDK field/part provenance and discoverable controls');process.exit(0);
+}
 if(process.argv[3]==='native') {
+  await node('native-mode').click();await until('original request reading mode',()=>node('conversation').textContent.includes('Refresh original requests'));
   const descendants=node=>[node,...node.children.flatMap(descendants)];
   const clickText=label=>descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent===label).click();
   const bytes=value=>({body:Buffer.from(value).toString('base64'),body_encoding:'base64'});
@@ -286,7 +347,7 @@ assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('
 for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
 assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="close-session"[\s\S]*?<\/details>/);
 assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
-assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','sdkmodels','trace','recovery']);
+assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab).sort(),['overview','history','transcript','models','sdkmodels','trace','recovery'].sort(),'All inspection functions remain reachable after grouping SDK debugging');
 if(readOnly){
   for(const id of ['send','prompt','planning','thinking','memory','files','new-session','retry','fork-run','end-stopped','rename-session','fork-session','close-session'])assert.equal(node(id).disabled,true,id);
   assert.equal(node('connection').hidden,false);assert.equal(node('connection').textContent,'Read-only');
@@ -383,6 +444,12 @@ if(process.argv[3]==='navigation'){
     if(success)resolution({resolved:true});else resolution.reject(new Error('old resolution failed'));
     await resolving;assert.equal(node('notice').textContent,'');assert.equal(historyReads(),beforeResolution,'An old resolution cannot reload a newer panel');
   }
+  sessions.get('a').active_execution_id=null;await select('#session=a');
+  const recoverySelection=deferred('GET /api/executions/a-run'),openingRecovery=node('open-recovery').click();await recoverySelection.requested;
+  await select('#session=b');await detail('history',/History marker/);const beforeLateRecovery=calls.length;
+  recoverySelection(info('a-run'));await openingRecovery;
+  assert.ok(!calls.slice(beforeLateRecovery).some(call=>call.key==='/api/executions/b-run/history'),'A stale recovery selection cannot reload the new SDK drilldown');
+  assert.match(all.find(item=>item.dataset.tab==='history').className,/active/);
   console.log('Navigation contracts passed: stale responses, current owner during paging/reopen and independent repeated paging');process.exit(0);
 }
 if(process.argv[3]==='races'){
@@ -394,7 +461,7 @@ if(process.argv[3]==='races'){
   const activate=async id=>{
     sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
     await select('#session=a');
-    await node('conversation').children[0].children[0].children.find(item=>item.tagName==='BUTTON').click();
+    await node('conversation').children[0].children.find(item=>item.className==='turn-heading').children.find(item=>item.tagName==='BUTTON' && item.textContent==='Details').click();
     return streamBlocks.get(id).controller;
   };
   const snapshot=(controller,id)=>{controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get(id))+'\n\n'));controller.close();};
@@ -489,7 +556,7 @@ if(process.argv[3]==='workspace'){
   timelineOverrides.set('a',{items:[old,{...old,execution_id:'a-live',status:'STARTED',conversation_committed:false,user_input:'Current question',items:[]}],next_cursor:null});
   streamBlocks.set('a-live',{});await select('#session=a');
   const observations=()=>calls.filter(item=>item.key==='/api/executions/a-live/events');
-  const oldTurn=node('conversation').children[0];await oldTurn.children[0].children.find(item=>item.tagName==='BUTTON').click();
+  const oldTurn=node('conversation').children[0];await descendants(oldTurn).find(item=>item.tagName==='BUTTON' && item.textContent==='Details').click();
   assert.match(node('execution-meta').textContent,/a-run/);assert.equal(node('cancel').hidden,false);assert.equal(node('end-active').hidden,false);
   let controller=streamBlocks.get('a-live').controller;
   const delta=(value,cursor='cursor-one')=>controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',cursor,item:{execution_id:'a-live',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:value}}}})+'\n\n'));
@@ -554,8 +621,8 @@ assert.doesNotMatch(node('inspector-content').textContent,/999/);
 
 // A child trace read cannot apply its selectors after the user changes selection.
 detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'trace-child',step_event_seq:1,payload:{agent_run_seq:7,model_request_seq:9}}],next_cursor:null});
-await detail('trace',/Read content/);
-const readChild=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read content');
+await detail('trace',/Read SDK content/);
+const readChild=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read SDK content');
 const releaseTraceChild=deferred('GET /api/executions/trace-child');
 const childRead=readChild.click();await releaseTraceChild.requested;await select('#session=a');await detail('models',/No records|No durable detail/);
 const afterTraceNavigation=calls.length;
@@ -568,8 +635,8 @@ detailResponses.delete('/api/executions/b-run/trace');
 for(const destination of ['tab','execution','current']){
   await select('#session=b');
   detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'trace-child',step_event_seq:1,payload:{agent_run_seq:7,model_request_seq:9}}],next_cursor:null});
-  await detail('trace',/Read content/);
-  const read=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read content');
+  await detail('trace',/Read SDK content/);
+  const read=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read SDK content');
   const release=deferred('GET /api/executions/trace-child'),childRead=read.click();await release.requested;
   if(destination==='tab')await detail('models',/No records|No durable detail/);
   if(destination==='execution')await select('#session=b&execution=b-run');
@@ -684,7 +751,7 @@ timelineOverrides.set('a',{items:[older,{...older,execution_id:'a-new',user_inpu
 await select('#session=a&execution=a-run');
 const releaseRefresh=deferred('GET /api/sessions/a');node('refresh').click();await releaseRefresh.requested;
 const newTurn=node('conversation').children.find(child=>child.textContent.includes('new question'));
-await newTurn.children[0].children.find(child=>child.tagName==='BUTTON').click();await until('live stream opened',()=>Boolean(streamBlocks.get('a-new').controller));
+await newTurn.children.find(item=>item.className==='turn-heading').children.find(item=>item.tagName==='BUTTON' && item.textContent==='Details').click();await until('live stream opened',()=>Boolean(streamBlocks.get('a-new').controller));
 const stream=streamBlocks.get('a-new');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'New execution text'}}},cursor:'resume-cursor'})+'\n\n'));
 await until('live assistant text',()=>node('live').textContent.includes('New execution text'));assert.match(node('live').textContent,/New execution text/);
@@ -980,7 +1047,7 @@ assert.match(node('inspector-content').textContent,/System Prompt1 part\(s\) · 
 assert.match(node('inspector-content').textContent,/Fixed Instructions \(F0\/F1\)/);
 assert.equal(calls.filter(call=>call.key.endsWith('/trace')).length,beforeTrace);
 detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'b-run',step_event_seq:1,payload:{kind:'MODEL_RESPONSE',status:'SUCCEEDED',scope:'root',agent_run_seq:1,step_index:0,model_request_seq:1,purpose:'agent',duration_ns:2000000,token_usage:{input_tokens:10,output_tokens:4}}}],next_cursor:null});
-await detail('trace',/Read content/);
+await detail('trace',/Read SDK content/);
 assert.match(node('inspector-content').textContent,/request #1/);
 assert.match(node('inspector-content').textContent,/agent · 2.000 ms · 10 in \/ 4 out/);
 
