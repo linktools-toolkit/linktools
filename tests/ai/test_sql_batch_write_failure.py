@@ -174,3 +174,60 @@ async def test_caught_cancellation_after_insert_statement_rolls_back_group(
     finally:
         await store.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("_server", ("mysql",), indirect=True)
+async def test_mysql_large_replacements_preserve_individual_record_capacity(
+    _server: tuple[str, list[str]],
+) -> None:
+    from sqlalchemy.engine import URL
+
+    _name, command = _server
+    socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
+    url = URL.create("mysql+asyncmy", username="root", database="metrics_test",
+                     query={"unix_socket": socket, "charset": "utf8mb4"})
+    admin = create_async_engine(url, hide_parameters=True)
+    engine = None
+    store = None
+    try:
+        async with admin.connect() as connection:
+            original_limit = int(await connection.scalar(text("SELECT @@GLOBAL.max_allowed_packet")))
+            try:
+                await connection.execute(text("SET GLOBAL max_allowed_packet = 1048576"))
+                # A fresh physical connection inherits the temporary server limit.
+                engine = create_async_engine(url, hide_parameters=True, pool_size=1, max_overflow=0)
+                await provision_database(engine)
+                async with engine.connect() as probe:
+                    assert await probe.scalar(text("SELECT @@SESSION.max_allowed_packet")) == 1048576
+                store = SqlStateStore(engine)
+                await store.initialize()
+                records = tuple(_record(index) for index in range(8))
+                await store.mutate(lambda tx: tx.insert_records(records))
+                replacements = tuple(replace(record, storage_version=1, data={"body": "x" * (128 * 1024)})
+                                     for record in records)
+
+                async def replace_individually(transaction):
+                    for record in replacements:
+                        assert await transaction.replace_record(record, expected_storage_version=0)
+
+                await store.mutate(replace_individually)
+                final = tuple(replace(record, storage_version=2, state="replaced") for record in replacements)
+                await store.mutate(lambda tx: tx.replace_records(tuple(
+                    RecordReplacement(record, 1) for record in final
+                )))
+                assert await store.read(lambda tx: tx.get_records(tuple(r.key_digest for r in records))) == {
+                    record.key_digest: record for record in final
+                }
+            finally:
+                try:
+                    if store is not None:
+                        await store.close()
+                finally:
+                    try:
+                        if engine is not None:
+                            await engine.dispose()
+                    finally:
+                        await connection.execute(text(f"SET GLOBAL max_allowed_packet = {original_limit}"))
+    finally:
+        await admin.dispose()
