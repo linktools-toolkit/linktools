@@ -2,7 +2,7 @@ import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricVal
 import {renderMarkdown, inputPresentation} from './message.js';
 
 const $ = id => document.getElementById(id);
-const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
+const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
   execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', conversationMode:'chat', nativeTimeline:null, expandedRequests:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
@@ -191,6 +191,7 @@ function navigateView(view) {
 async function loadList(more=false) {
   const generation=++state.listGeneration, view=state.view;
   if (view === 'metrics') return;
+  const sessionReadGeneration=view==='sessions'?++state.sessionReadGeneration:0;
   $('list-action').value='paged';setListFilterAvailability();
   const params=new URLSearchParams({limit:'50'});
   if (more && state.listCursor) params.set('cursor',state.listCursor);
@@ -205,6 +206,10 @@ async function loadList(more=false) {
   if(view==='executions'){const count=['agent_id','session_id','parent_execution_id'].filter(key=>params.has(key)).length;$('execution-filter-summary').textContent=`Execution filters${count?' · '+count+' applied':''}`;}
   const key=item => view==='sessions' ? item.session_id:item.execution_id;
   state.list=more ? mergePage(state.list,payload.items,key):payload.items;
+  if(view==='sessions'){
+    if(!more)state.listSessionReads.clear();
+    payload.items.forEach(item=>state.listSessionReads.set(item.session_id,sessionReadGeneration));
+  }
   state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor; $('list-scope').hidden=!payload.recent_only;
   $('list-scope').textContent='Showing recent sessions in read-only mode';
   renderList();
@@ -228,13 +233,20 @@ async function loadRecentExecutions() {
   } finally {state.actionsPending.delete('recent-scan');}
 }
 function renderList() {
+  const focus=$('list').contains(document.activeElement)?document.activeElement?.dataset?.listKey:null;
   clear('list'); const filter=$('filter').value.trim().toLowerCase();
-  const rows=state.list.filter(item => JSON.stringify(item).toLowerCase().includes(filter));
+  const items=state.view==='sessions' ? state.list.map(item=>{
+    if(item.session_id!==state.session?.session_id)return item;
+    // Session revisions cover metadata, while admission/release can keep the same revision.
+    const newer=state.session.revision>item.revision || state.session.revision===item.revision && state.sessionAppliedGeneration>=(state.listSessionReads.get(item.session_id) || 0);
+    return newer?state.session:item;
+  }) : state.list;
+  const rows=items.filter(item => JSON.stringify(item).toLowerCase().includes(filter));
   if (!rows.length) $('list').append(element('p','empty',filter ? 'No matches in loaded rows.':'Nothing here yet.'));
   rows.forEach(item => {
     const session=state.view==='sessions', id=session ? item.session_id:item.execution_id;
     const active=session ? id===state.selectedSession:id===state.selectedExecution;
-    const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);
+    const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);node.dataset.listKey=`${state.view}:${id}`;
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
     sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':item.active_execution_id || !terminal(item.status) && !session ? 'running':''}`));
@@ -242,6 +254,7 @@ function renderList() {
     node.title=`${item.status} · ${item.agent_id || 'task'} · ${id}`;
     node.append(sub); $('list').append(node);
   });
+  if(focus)[...$('list').children].find(node=>node.dataset.listKey===focus)?.focus({preventScroll:true});
 }
 function stopStream() { state.stream?.abort(); state.stream=null; }
 function navigate(sessionId, executionId) {
@@ -767,7 +780,7 @@ async function refreshObservation(id, generation) {
     if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
     const turn=state.turns.find(item=>item.execution_id===id);
     if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
-    renderConversation();
+    renderConversation();renderList();
   }
   if(state.cancellationNoticeId===id && terminal(info.status)) {
     const session=info.session_id ? (payload && info.session_id===sessionId ? payload.session : (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session) : null;

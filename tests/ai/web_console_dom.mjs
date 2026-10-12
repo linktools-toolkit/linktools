@@ -466,9 +466,24 @@ if(process.argv[3]==='races'){
   };
   const snapshot=(controller,id)=>{controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get(id))+'\n\n'));controller.close();};
   let controller=await activate('owner-one');
+  node('filter-form').requestSubmit();await until('running sidebar before terminal',()=>node('list').textContent.includes('Running'));
   const staleInfo={...executions.get('owner-one')},late=deferred('GET /api/executions/owner-one');
   node('refresh').click();await late.requested;delays.delete('GET /api/executions/owner-one');
+  const staleList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await staleList.requested;
+  const listReadsBefore=calls.filter(call=>call.key==='/api/sessions').length;
+  node('list').children.find(item=>item.textContent.includes('Beta')).focus();
   executions.get('owner-one').status='CANCELLED';sessions.get('a').active_execution_id=null;snapshot(controller,'owner-one');await until('released session after terminal snapshot',()=>node('current-status').textContent==='Session available');
+  assert.doesNotMatch(node('list').textContent,/Running/,'Canonical terminal release updates the sidebar without Refresh');
+  assert.match(document.activeElement?.textContent || '',/Beta/,'Background completion preserves the focused sidebar row');
+  assert.equal(calls.filter(call=>call.key==='/api/sessions').length,listReadsBefore,'Projecting accepted session metadata adds no list request');
+  const rowsBefore=node('list').children;node('prompt').focus();
+  staleList({items:[{...sessions.get('a'),active_execution_id:'owner-one'},sessions.get('b')],next_cursor:null});await until('stale list response rendered',()=>node('list').children!==rowsBefore);
+  assert.doesNotMatch(node('list').children.find(item=>item.className.includes('active')).textContent,/Running/,'A late older list read cannot overwrite accepted session release');
+  assert.equal(document.activeElement,node('prompt'),'Background list refresh does not steal composer focus');
+  const newOwnerList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await newOwnerList.requested;
+  newOwnerList({items:[{...sessions.get('a'),active_execution_id:'external-run'},sessions.get('b')],next_cursor:null});await until('newer same-revision list owner visible',()=>node('list').textContent.includes('Running'));
+  const renamedList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await renamedList.requested;
+  renamedList({items:[{...sessions.get('a'),revision:1,metadata:{title:'Renamed elsewhere'},active_execution_id:'external-run'},sessions.get('b')],next_cursor:null});await until('newer revision list title visible',()=>node('list').textContent.includes('Renamed elsewhere'));
   late(staleInfo);await settle();assert.equal(node('cancel').hidden,true);assert.equal(node('end-active').hidden,true);assert.equal(node('current-status').textContent,'Session available');
 
   // Snapshot delivery and response EOF are distinct; an older Refresh cannot undo terminal truth.
