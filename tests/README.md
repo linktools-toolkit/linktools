@@ -87,10 +87,13 @@ checks:
     paths:
       - ../tests/ai
     groups:
-      evaluation:
+      evaluation-recovery:
         - test_evaluation*
         - test_captured*
         - test_graph_capture*
+        - test_runtime_recovery_ownership.py
+        - test_runtime_process_recovery.py
+        - test_keyed_execution_recovery.py
       runtime: []
 ```
 
@@ -112,7 +115,7 @@ the selected package's manifest, and unknown groups fail clearly. Tier selection
 remains independent:
 
 ```bash
-PYTEST_ADDOPTS='--test-group=evaluation' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=evaluation-recovery' python manage.py check linktools-ai --test-tier daily
 PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
 ```
 
@@ -161,7 +164,8 @@ and open dependency-update policy are unchanged.
 
 Pagination, scan/group limits, numeric-order edge cases, and corruption semantics
 are not moved merely because they contain large counts. Native database fixtures
-remain isolated; daemon scope is unchanged.
+remain isolated: each worker owns a session-scoped server, and modules use separate
+databases. Server startup, shutdown and protocol-error checks remain in place.
 
 In automatic CI, explicit/keyed recovery and capture-context sampling reduce
 only draft-PR execution. Ready PRs, `master` and release checks still run every
