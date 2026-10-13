@@ -124,7 +124,16 @@ rollback artifacts and are not deleted if later validation or startup fails.
 
 Use `context.write_files(self, files, mode=0o600, group=None)` once during
 `on_starting`. `files` maps relative names to UTF-8 text. The call returns an
-immutable host directory and does not publish it to running services.
+immutable host directory and does not publish it to running services. Generated
+files remain owner-only (`0600`) unless the producer explicitly supplies another
+mode. For a non-root reader, use `mode=0o640, group=<container group>` and make that
+group part of the service's effective or supplementary groups. New generation
+roots and nested directories are explicitly `0755`, independently of the CLI
+umask; this directory policy is part of the generation identity. Reuse checks
+both file and directory permissions and rejects drift rather than repairing an
+active generation. A group change needs no privilege when the CLI owns the file
+and the group is its effective primary or supplementary group; other changes
+retain the normal privilege path.
 
 Compose templates reference the corresponding logical sources under
 `APP_PATH / "generated/current"`. The framework resolves selected file mounts to
@@ -184,6 +193,17 @@ Flare prepares navigation files with its configured group access. Initial
 migration copies other legacy application assets to `runtime-app`, leaving the
 legacy directory available to an old Compose model. Application uses normal
 file mounts and service recreation, not migration callbacks around Compose.
+`runtime-app` and its application-managed `config.yml` use the resolved
+`DOCKER_UID`/`DOCKER_GID`, including explicit numeric overrides. Existing unrelated
+assets are not recursively reowned or made writable. Only the new migration copy
+is reowned recursively, without following symlinks to external user files.
+
+Ownership hooks accept numeric IDs without requiring host account names:
+`chown(path, user, recursive=False, *, group=None)` and the equivalent template
+filter `path | chown(DOCKER_UID, group=DOCKER_GID)`. A named user with no group
+keeps its existing primary-group behavior; a numeric user with no group preserves
+the file's group. The third positional argument remains `recursive`. Numeric zero
+is a valid owner, while a filter without a user remains a no-op.
 
 Nginx prepares a complete configuration, checks it with the target image and
 starts it normally. Deployment no longer reloads a configuration generation.

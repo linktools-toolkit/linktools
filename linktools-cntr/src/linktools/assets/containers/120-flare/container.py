@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Flare container definition."""
 import os
+import stat
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
@@ -92,7 +93,11 @@ class Container(BaseContainer):
     def on_starting(self, context: "OperationContext") -> None:
         import shutil
         import tempfile
+        uid = self.get_config("DOCKER_UID", type=int)
+        gid = self.get_config("DOCKER_GID", type=int)
         app = self.get_app_path("runtime-app")
+        if app.is_symlink():
+            raise ContainerError("Flare runtime-app must not be a symbolic link: " + str(app))
         if not app.exists():
             self.get_app_path().mkdir(parents=True, exist_ok=True)
             temporary = Path(tempfile.mkdtemp(prefix=".flare-app-", dir=str(self.get_app_path())))
@@ -109,14 +114,28 @@ class Container(BaseContainer):
                             shutil.copytree(str(source), str(destination), symlinks=True)
                         else:
                             shutil.copy2(str(source), str(destination))
-                self.runtime.chown(temporary, self.user, recursive=True)
-                self.runtime.chmod(temporary, 0o750)
+                self._prepare_runtime_permissions(temporary, uid, gid, recursive=True)
                 os.rename(str(temporary), str(app))
             except BaseException:
                 shutil.rmtree(str(temporary))
                 raise
-        context.write_files(self, self._navigation_files(), mode=0o640,
-                            group=self.get_config("DOCKER_GID", type=int))
+        else:
+            self._prepare_runtime_permissions(app, uid, gid)
+        context.write_files(self, self._navigation_files(), mode=0o640, group=gid)
+
+    def _prepare_runtime_permissions(self, app: "Path", uid: int, gid: int,
+                                     recursive: bool = False) -> None:
+        if app.is_symlink() or not app.is_dir():
+            raise ContainerError("Flare runtime-app must be a directory: " + str(app))
+        config = app / "config.yml"
+        if config.is_symlink() or (config.exists() and not config.is_file()):
+            raise ContainerError("Flare config.yml must be a regular file: " + str(config))
+        if config.exists():
+            self.runtime.chmod(config, stat.S_IMODE(config.stat().st_mode) | 0o600)
+            if not recursive:
+                self.runtime.chown(config, uid, group=gid)
+        self.runtime.chmod(app, 0o750)
+        self.runtime.chown(app, uid, recursive=recursive, group=gid)
 
     def on_check(self, context: "OperationContext") -> None:
         for name in ("apps.yml", "bookmarks.yml"):
