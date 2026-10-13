@@ -233,15 +233,28 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
         path = PurePosixPath(name)
         if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
             raise ContainerError("Prepared file must stay within its tree: " + name)
-    payload = json.dumps([mode, group, sorted(files.items())], ensure_ascii=True,
+    directories = {"."}
+    for name in files:
+        directories.update(str(parent) for parent in PurePosixPath(name).parents)
+    directory_mode = 0o755
+    payload = json.dumps([mode, group, directory_mode, sorted(files.items())], ensure_ascii=True,
                          separators=(",", ":"))
     root = container.get_app_path("generated")
     destination = root / sha256_of(payload)
+    if destination.is_symlink():
+        raise ContainerError("Prepared file tree was modified: " + str(destination))
     if destination.exists():
-        actual = {path.relative_to(destination).as_posix() for path in destination.rglob("*")
-                  if path.is_file()}
-        if actual != set(files) or any(
-                (destination / name).is_symlink() or
+        entries = tuple(destination.rglob("*"))
+        actual = {path.relative_to(destination).as_posix() for path in entries}
+        expected = set(files) | (directories - {"."})
+        if (actual != expected or
+                any(path.is_symlink() for path in entries) or any(
+                    not (destination / name).is_dir() or
+                    stat.S_IMODE((destination / name).stat().st_mode) != directory_mode
+                    for name in directories)):
+            raise ContainerError("Prepared file tree was modified: " + str(destination))
+        if any(
+                not (destination / name).is_file() or
                 (destination / name).read_text(encoding="utf-8") != content or
                 stat.S_IMODE((destination / name).stat().st_mode) != mode or
                 (group is not None and (destination / name).stat().st_gid != group)
@@ -251,14 +264,19 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
         root.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
         try:
-            container.runtime.chmod(temporary, 0o755)
+            for name in sorted(directories, key=lambda value: len(PurePosixPath(value).parts)):
+                directory = temporary / name
+                directory.mkdir(parents=True, exist_ok=True)
+                os.chmod(directory, directory_mode)
             for name, content in files.items():
                 path = temporary / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 utils.atomic_write(path, content, encoding="utf-8")
                 if group is not None and path.stat().st_gid != group:
+                    unprivileged = (os.name == "posix" and path.stat().st_uid == os.geteuid() and
+                                    group in {os.getegid(), *os.getgroups()})
                     container.runtime.create_process(
-                        "chgrp", str(group), str(path), privilege=True).check_call()
+                        "chgrp", str(group), str(path), privilege=not unprivileged).check_call()
                 container.runtime.chmod(path, mode)
             os.rename(str(temporary), str(destination))
         except BaseException:

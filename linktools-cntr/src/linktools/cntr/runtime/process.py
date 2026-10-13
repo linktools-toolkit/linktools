@@ -165,7 +165,9 @@ class RuntimeProcessFactory:
         spec = self.docker_compose_args(containers, *args, privilege=privilege)
         return self.create_process(*spec.args, privilege=spec.privilege, **kwargs)
 
-    def chown(self, path: "PathType", user: str, recursive: bool = False) -> None:
+    def chown(self, path: "PathType", user: "str | int", recursive: bool = False, *,
+              group: "str | int | None" = None) -> None:
+        """Set ownership; numeric users need no host account and preserve an omitted group."""
         manager = self.manager
         path = manager.env_config.cast(path, type="path")
         if not os.path.exists(path):
@@ -178,17 +180,29 @@ class RuntimeProcessFactory:
             return
         args = ["chown"]
         if recursive:
-            args.append("-R")
-        uid, gid = get_uid(user), get_gid(user)
-        args.extend([f"{uid}:{gid}", str(path)])
+            args.extend(("-h", "-R"))
+        numeric_user = str(user).isdigit()
+        uid = int(str(user)) if numeric_user else get_uid(user)
+        status = os.stat(path)
+        if isinstance(group, type(None)):
+            gid = None if numeric_user else get_gid(user)
+        elif str(group).isdigit():
+            gid = int(str(group))
+        else:
+            import grp
+            gid = grp.getgrnam(str(group)).gr_gid
+        args.extend([str(uid) if gid is None else f"{uid}:{gid}", str(path)])
         try:
-            stat = os.stat(path)
+            effective_uid = os.geteuid()
+            unprivileged = (effective_uid == 0 or
+                            (status.st_uid == uid == effective_uid and
+                             (gid is None or gid in {os.getegid(), *os.getgroups()})))
             # A RuntimeProcessFactory subclass overriding create_process still
             # governs privilege here, since this calls back into `self`, not
             # a separate manager-level wrapper.
             self.create_process(
                 *args,
-                privilege=manager.uid != stat.st_uid or manager.uid != uid
+                privilege=not unprivileged
             ).check_call()
         except Exception as e:
             manager.logger.warning(f"Failed to chown of {path}")
