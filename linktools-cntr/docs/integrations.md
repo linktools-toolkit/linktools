@@ -347,7 +347,7 @@ must not mutate or restore historical derived ACL/OIDC settings.
 
 ## Request body limits
 
-Template variables are passed through unchanged. The server template uses an
+Template variables are passed through unchanged. The shared `nginx/params.conf` template uses an
 explicit `client_max_body_size` key when present, otherwise `1m`, matching
 nginx's native default. The common proxy snippet does not silently raise that
 limit. Configure an individual site's server policy using the existing endpoint
@@ -376,6 +376,22 @@ the site limit must also admit that request on the forwarding hop; retain lower
 limits explicitly on other locations when raising the site limit. SafeLine and
 the application can impose their own limits; this setting does not disable or
 bypass WAF inspection.
+
+## Shared server defaults
+
+`nginx/params.conf` defines request-body limits, request/response buffering,
+cache policy, body-buffer size, and proxy/client timeouts with ordinary
+`template_vars.get(...)` defaults. Each business server and WAF origin includes
+it once. Override a shared default through the existing template variables;
+keep path-specific native directives inside their locations.
+
+Custom templates must remove location-level includes of `nginx/params.conf`.
+Otherwise their local defaults can override the hostname's merged settings,
+and directives repeated within one location can fail nginx validation. This
+changes coverage: locations that previously omitted the snippet now inherit
+the shared defaults. Request headers and protocol-specific settings remain
+location-local. The unused FastCGI temporary-file setting is removed; it does
+not control HTTP proxy or gRPC traffic.
 
 ## Native nginx templates
 

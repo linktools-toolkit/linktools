@@ -493,7 +493,7 @@ def test_site_body_limit_is_inherited_by_public_and_origin_servers(fresh_manager
     rendered = prepared_config(nginx)["sites/generated.conf"]
     value = "1m" if limit is None else str(limit)
     assert rendered.count('client_max_body_size "' + value + '";') == 1 + int(waf)
-    assert "client_max_body_size" not in nginx.get_source_path("templates", "params.conf").read_text()
+    assert "client_max_body_size" in nginx.get_source_path("templates", "params.conf").read_text()
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -579,3 +579,21 @@ def test_body_limit_does_not_inject_or_change_template_variables(fresh_manager, 
     site = generation_site(nginx, template_vars=values)
     assert dict(site.template_vars) == values
     assert dict(site._declaration.template_vars) == values
+
+
+@pytest.mark.parametrize("waf", [False, True])
+def test_server_parameters_have_shared_defaults_and_explicit_overrides(fresh_manager, tmp_path, waf):
+    nginx = fresh_manager.containers["nginx"]
+    source = tmp_path / "custom.conf"
+    source.write_text("location / { proxy_read_timeout 7s; return 204; }")
+    values = {"proxy_request_buffering": "on", "proxy_buffering": "on",
+              "client_body_buffer_size": "4k", "proxy_connect_timeout": "11s",
+              "proxy_read_timeout": "12s", "proxy_send_timeout": "13s", "send_timeout": "14s"}
+    site = generation_site(nginx, template=source, template_vars=values, waf=waf, default_server=True)
+    nginx.__dict__["sites"] = {site._declaration: site}
+    rendered = prepared_config(nginx)["sites/generated.conf"]
+    for key, value in dict(values, client_max_body_size="1m", proxy_cache="off").items():
+        assert rendered.count(key + ' "' + value + '";') == 1 + int(waf)
+    assert rendered.count("proxy_read_timeout 7s;") == 1 + int(waf)
+    assert "fastcgi_max_temp_file_size" not in rendered
+    assert dict(site.template_vars) == values
