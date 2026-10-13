@@ -184,11 +184,17 @@ class RuntimeEvaluations:
         record = await self._state.get(experiment_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        await self._authorize(principal, action, experiment_id,
+        await self._check_record(record, principal, action, allow_expired=allow_expired)
+        return record
+
+    async def _check_record(
+        self, record: EvaluationRecord, principal: Principal, action: AuthorizationAction,
+        *, allow_expired: bool = False,
+    ) -> None:
+        await self._authorize(principal, action, record.experiment_id,
                               owner=record.manifest.principal.principal_id)
         if not allow_expired and record.metadata_expires_at is not None and record.metadata_expires_at <= _now():
             raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, safe_details={"reason": "metadata_expired"})
-        return record
 
     async def _require_content(self, record: EvaluationRecord, principal: Principal) -> None:
         seen: set[str] = set()
@@ -220,7 +226,7 @@ class RuntimeEvaluations:
                                   owner=await self._state.case_owner(ref))
             await self._state.get_case(ref)
             case = (await self._compiler.case(item, principal=principal, content_expires_at=content_expires_at) if isinstance(item, CaseSpec)
-                    else await self._case(item, principal=principal))
+                    else await self.get_case(item, principal=principal))
             if case.expected is not None:
                 await self._value(case.expected)
             cases.append(case)
@@ -248,10 +254,10 @@ class RuntimeEvaluations:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return value
 
-    async def _case(self, ref: CaseRef, *, principal: Principal | None = None) -> CaseContract:
-        if principal is not None:
-            await self._authorize(principal, AuthorizationAction.EVALUATION_DATASET_READ, ref.dataset_id,
-                                  owner=await self._state.case_owner(ref))
+    async def get_case(self, ref: CaseRef, *, principal: Principal) -> CaseContract:
+        """Read one frozen case with its own ownership and retention checks."""
+        await self._authorize(principal, AuthorizationAction.EVALUATION_DATASET_READ, ref.dataset_id,
+                              owner=await self._state.case_owner(ref))
         value = await self._state.get_case(ref)
         if value is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -561,13 +567,27 @@ class RuntimeEvaluations:
                 self._watchers.pop(experiment_id, None)
 
     async def read_evidence(self, evidence_ref: EvidenceRef, *, principal: Principal) -> EvidenceBundle:
+        return await self._read_evidence(evidence_ref, principal=principal)
+
+    async def _read_evidence(
+        self, evidence_ref: EvidenceRef, *, principal: Principal,
+        source_records: dict[str, EvaluationRecord] | None = None,
+    ) -> EvidenceBundle:
         if evidence_ref.namespace != self._namespace or evidence_ref.tenant_id != self._storage.tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorize(principal, AuthorizationAction.EVALUATION_EVIDENCE_READ, evidence_ref.evidence_id)
         bundle = await self._state.read_evidence(evidence_ref)
         if bundle is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        source_record = await self._record(bundle.trial.target_experiment_id, principal, AuthorizationAction.EVALUATION_EVIDENCE_READ)
+        source_id = bundle.trial.target_experiment_id
+        source_record = None if source_records is None else source_records.get(source_id)
+        if source_record is None:
+            source_record = await self._record(source_id, principal, AuthorizationAction.EVALUATION_EVIDENCE_READ)
+            if source_records is not None:
+                source_records[source_id] = source_record
+        else:
+            await self._authorize(principal, AuthorizationAction.EVALUATION_EVIDENCE_READ, source_id)
+            await self._check_record(source_record, principal, AuthorizationAction.EVALUATION_EVIDENCE_READ)
         require_evaluation_content(source_record, now=_now())
         if bundle.ref != evidence_ref or bundle.digest != evidence_ref.digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -617,10 +637,11 @@ class RuntimeEvaluations:
 
     async def _trials(
         self, record: EvaluationRecord, principal: Principal,
+        *, trial_ids: tuple[str, ...] | None = None,
     ) -> tuple[tuple[TrialView, ...], dict[str, int]]:
         if record.manifest.kind == "score_only":
             source = await self._record(record.manifest.source_experiment_id, principal)
-            trials, revisions = await self._trials(source, principal)
+            trials, revisions = await self._trials(source, principal, trial_ids=trial_ids)
             wanted = set(record.manifest.source_trials)
             refs = {item.trial: item.evidence_ref for item in record.evidence}
             return tuple(replace(item, evidence_ref=refs.get(item.trial, item.evidence_ref))
@@ -631,7 +652,10 @@ class RuntimeEvaluations:
         candidates = {item.slot_id: item for item in record.manifest.candidates}
         result = []
         revisions = {f"evaluation:{record.experiment_id}": record.revision}
+        selected = None if trial_ids is None else frozenset(trial_ids)
         for plan in record.manifest.trials:
+            if selected is not None and plan.trial_id not in selected:
+                continue
             trial = TargetTrialRef(record.experiment_id, plan.trial_id)
             slot = _target_slot(trial)
             item = TrialView(trial, plan.case_ref, plan.candidate_slot_id, plan.repetition,
@@ -759,8 +783,12 @@ class RuntimeEvaluations:
         revisions[f"evaluation:{experiment_id}"] = record.revision
         blocked = False
         target_usage = {item.trial.trial_id: item.subject is None and item.graph_ref is None for item in trials}
+        source_records = {record.experiment_id: record}
+        evidence_sources: set[str] = set()
         for item in record.evidence:
-            target_usage[item.trial.trial_id] = (await self.read_evidence(item.evidence_ref, principal=principal)).usage_complete
+            evidence = await self._read_evidence(item.evidence_ref, principal=principal, source_records=source_records)
+            evidence_sources.add(evidence.trial.target_experiment_id)
+            target_usage[item.trial.trial_id] = evidence.usage_complete
         scorer_usage = {scorer.slot_id: {item.trial.trial_id: True for item in trials} for scorer in record.manifest.scorers}
         for intent in record.intents:
             if intent.scorer_slot_id is not None:
@@ -781,7 +809,19 @@ class RuntimeEvaluations:
         report = build_evaluation_report(record.manifest, cases, trials, scores, cutoff=cutoff,
                                          report_id=uuid.uuid4().hex, created_at=_now())
         report = replace(report, completion=_completion(record, trials, scores, blocked=blocked))
+        if evidence_sources:
+            # Reuse is local to this snapshot; a concurrent purge must still prevent its release.
+            await self._recheck_content(record.experiment_id, principal, evidence_sources)
         return record, report
+
+    async def _recheck_content(
+        self, experiment_id: str, principal: Principal, evidence_sources: set[str],
+    ) -> None:
+        for source_id in dict.fromkeys((experiment_id, *sorted(evidence_sources))):
+            action = (AuthorizationAction.EVALUATION_EVIDENCE_READ if source_id in evidence_sources
+                      else AuthorizationAction.EVALUATION_READ)
+            latest = await self._record(source_id, principal, action)
+            await self._require_content(latest, principal)
 
     async def get_report(self, report_id: str, *, principal: Principal) -> EvaluationReport | ComparisonReport:
         await self._authorize(principal, AuthorizationAction.EVALUATION_READ, report_id)
@@ -867,6 +907,75 @@ class RuntimeEvaluations:
         if value.tenant_id != principal.tenant_id or value.resource_kind != kind or value.filter_digest != digest:
             raise AIError(ErrorCode.CURSOR_INVALID)
         return value.position
+
+    async def current_trials(
+        self, experiment_id: str, *, principal: Principal,
+        cursor: str | None = None, limit: int = 50,
+    ) -> Page[TrialView]:
+        """Read a window of current plan states without publishing a report.
+
+        Cursors retain plan order and position; each request may choose its own limit.
+        States are observed independently, not at a cross-page or cross-graph cutoff.
+        Native hydration is limited to the window; the run record is still read whole.
+        Case references describe the plan, not availability of their retained inputs.
+        """
+        validate_page_limit(limit)
+        record = await self._record(experiment_id, principal)
+        await self._require_content(record, principal)
+        plans = (record.manifest.source_trials if record.manifest.kind == "score_only"
+                 else record.manifest.trials)
+        digest = canonical_sha256({"namespace": self._namespace, "experiment": experiment_id,
+                                  "manifest": record.manifest_digest,
+                                  "principal": principal_identity_payload(principal)})
+        kind = "evaluation.current_trials"
+        position = self._cursor_position(cursor, kind, digest, principal) if cursor is not None else "0"
+        try:
+            if not position.isascii() or not position.isdecimal():
+                raise ValueError("invalid plan position")
+            index = int(position)
+            if index >= len(plans):
+                raise ValueError("plan position is out of range")
+        except ValueError as error:
+            raise AIError(ErrorCode.CURSOR_INVALID) from error
+        selected = plans[index:index + limit]
+        values = await self._current_trial_views(record, principal, tuple(item.trial_id for item in selected))
+        next_cursor = (self._cursor(kind, digest, str(index + len(selected)), principal)
+                       if index + len(selected) < len(plans) else None)
+        return Page(values, next_cursor)
+
+    async def read_trial(
+        self, experiment_id: str, trial_id: str, *, principal: Principal,
+    ) -> TrialView:
+        """Read one member's current state; use get_case for its retained Case contract."""
+        record = await self._record(experiment_id, principal)
+        await self._require_content(record, principal)
+        plans = (record.manifest.source_trials if record.manifest.kind == "score_only"
+                 else record.manifest.trials)
+        if not any(item.trial_id == trial_id for item in plans):
+            await self.get_dataset(record.manifest.dataset, principal=principal)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return (await self._current_trial_views(record, principal, (trial_id,)))[0]
+
+    async def _current_trial_views(
+        self, record: EvaluationRecord, principal: Principal, trial_ids: tuple[str, ...],
+    ) -> tuple[TrialView, ...]:
+        trials, _ = await self._trials(record, principal, trial_ids=trial_ids)
+        by_id = {item.trial.trial_id: item for item in trials}
+        if set(by_id) != set(trial_ids):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values = tuple(by_id[trial_id] for trial_id in trial_ids)
+        source_records = {record.experiment_id: record}
+        evidence_sources: set[str] = set()
+        for trial in values:
+            if trial.evidence_ref is not None:
+                evidence = await self._read_evidence(trial.evidence_ref, principal=principal,
+                                                     source_records=source_records)
+                if evidence.trial != trial.trial:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                evidence_sources.add(evidence.trial.target_experiment_id)
+        await self.get_dataset(record.manifest.dataset, principal=principal)
+        await self._recheck_content(record.experiment_id, principal, evidence_sources)
+        return values
 
     async def _page(
         self, experiment_id: str, principal: Principal, filters: TrialFilter | ScoreFilter,
@@ -1769,6 +1878,14 @@ class EvaluationRun:
         self, *, filters: TrialFilter | None = None, cursor: str | None = None, limit: int = 100,
     ) -> Page[TrialView]:
         return await self._evaluations._page(self.experiment_id, self._principal, filters or TrialFilter(), cursor, limit)
+
+    async def current_trials(self, *, cursor: str | None = None, limit: int = 50) -> Page[TrialView]:
+        """Read current states in fixed plan order, with a per-request window size."""
+        return await self._evaluations.current_trials(
+            self.experiment_id, principal=self._principal, cursor=cursor, limit=limit)
+
+    async def read_trial(self, trial_id: str) -> TrialView:
+        return await self._evaluations.read_trial(self.experiment_id, trial_id, principal=self._principal)
 
     async def scores(
         self, *, filters: ScoreFilter | None = None, cursor: str | None = None, limit: int = 100,

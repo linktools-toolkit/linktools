@@ -73,6 +73,21 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
                 assert sample.case_ref.revision == 1
                 assert sample.label_provenance.source != "spoofed"
                 assert sample.to_mapping()["label_provenance"] == sample.label_provenance.to_mapping()
+        for selected_run in (run, rescored):
+            first = await selected_run.current_trials(limit=2)
+            second = await selected_run.current_trials(cursor=first.next_cursor, limit=2)
+            current = (*first.items, *second.items)
+            assert second.next_cursor is None
+            assert {item.case_ref for item in current} == {case.ref for case in cases}
+            assert await selected_run.read_trial(current[0].trial.trial_id) == current[0]
+            frozen = await selected_run.trials(limit=3)
+            assert tuple(item.trial for item in frozen.items) == tuple(item.trial for item in current)
+            for item in current:
+                case = await runtime.evaluations.get_case(item.case_ref, principal=PRINCIPAL)
+                original = next(original for original in cases if original.ref == item.case_ref)
+                assert case.ref == original.ref
+                assert case.label_provenance == original.label_provenance
+        assert len(received) == len(cases) * 2
 
 
 @pytest.mark.asyncio
