@@ -18,6 +18,7 @@ from ..agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
+    CapabilityFilter,
     CompiledAgent,
     OutputBinding,
     restore_output,
@@ -396,6 +397,7 @@ class Runtime(Generic[AppT]):
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
         tool_responses: ToolResponseFixture | None = None,
+        capability_filter: CapabilityFilter | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -413,6 +415,7 @@ class Runtime(Generic[AppT]):
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
         tool_responses: ToolResponseFixture | None = None,
+        capability_filter: CapabilityFilter | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -429,6 +432,7 @@ class Runtime(Generic[AppT]):
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
         tool_responses: ToolResponseFixture | None = None,
+        capability_filter: CapabilityFilter | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         """Open a Runtime, optionally skipping namespace-wide startup recovery.
 
@@ -455,6 +459,7 @@ class Runtime(Generic[AppT]):
             authorization=authorization,
             auto_recover=auto_recover,
             tool_responses=tool_responses,
+            capability_filter=capability_filter,
         )
 
     @property
@@ -1466,6 +1471,7 @@ async def _open_runtime(
     authorization: "AuthorizationPolicy | None",
     auto_recover: bool = True,
     tool_responses: ToolResponseFixture | None = None,
+    capability_filter: CapabilityFilter | None = None,
 ):
     from ._factory import compose_runtime_components
 
@@ -1481,6 +1487,7 @@ async def _open_runtime(
         authorization=authorization,
         auto_recover=auto_recover,
         tool_responses=tool_responses,
+        capability_filter=capability_filter,
     )
     try:
         if components.metric_control is not None:

@@ -6,7 +6,7 @@ from ..spec import SubagentRef
 from ._capture import AgentInputCaptureRef
 from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
 from ._catalog import AgentCatalog
-from ._compiler import AgentCompiler
+from ._compiler import AgentCompiler, CapabilityFilter
 from ._compiled import CompiledAgent
 from ._output import (
     AssistantTextOutput,
@@ -24,6 +24,7 @@ __all__ = [
     "AgentBindingContract",
     "AgentCatalog",
     "AgentCompiler",
+    "CapabilityFilter",
     "CompiledAgent",
     "AssistantTextOutput",
     "OutputBinding",

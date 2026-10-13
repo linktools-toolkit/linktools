@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Deterministic Agent selection, binding, and exact historical recovery."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from inspect import iscoroutine
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel
 
@@ -34,6 +35,9 @@ from ._compiled import CompiledAgent
 from ._output import OutputBinding, bind_output, restore_output
 
 
+CapabilityFilter: TypeAlias = Callable[[AgentSpec, CapabilityContribution[object]], bool]
+
+
 class AgentCompiler:
     """Own the single Agent-level selection boundary for a captured candidate set."""
 
@@ -43,6 +47,7 @@ class AgentCompiler:
         model_resolver: ModelResolver,
         candidates: Sequence[CapabilityContribution[object]],
         agents: Mapping[str, AgentSpec],
+        capability_filter: CapabilityFilter | None = None,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -60,12 +65,13 @@ class AgentCompiler:
         for agent_id, specification in current_agents.items():
             if not isinstance(agent_id, str) or not isinstance(specification, AgentSpec) or specification.id != agent_id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if capability_filter is not None and not callable(capability_filter):
+            raise TypeError("capability_filter must be callable or None")
+        self._capability_filter = capability_filter
         self._models = model_resolver
         self._candidates = ordered
         self._by_identity = {(item.kind, item.id): item for item in ordered}
         self._agents: Mapping[str, AgentSpec] = MappingProxyType(current_agents)
-        self._agent_ids = tuple(sorted(current_agents))
-        self._mcp_by_id: dict[str, CapabilityContribution[object]] = {}
         server_tokens: dict[str, str] = {}
         for candidate in ordered:
             if candidate.kind == "tool" and candidate.id.startswith("mcp__"):
@@ -77,19 +83,26 @@ class AgentCompiler:
             if previous is not None and previous != candidate.id:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             server_tokens[token] = candidate.id
-            self._mcp_by_id[candidate.id] = candidate
 
     def compile(self, spec: AgentSpec) -> CompiledAgent:
         """Compile one current declaration from the captured candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
         model = self._models.resolve(spec.model)
-        selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(spec)
-        selected_skills = self._select_exact_kind("skill", spec.allow_skills)
-        selected_subagents = self._select_subagents(spec)
-        selected_capabilities = self._select_exact_kind(
-            "capability",
-            spec.allow_capabilities,
+        declarations = tuple(item for item in self._candidates if item.kind != "agent")
+        delegates = tuple(
+            CapabilityContribution.from_declaration(agent) for agent in self._agents.values()
+        )
+        candidates = self.filter_capabilities(
+            spec,
+            (*declarations, *delegates),
+            capability_filter=self._capability_filter,
+        )
+        selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(spec, candidates)
+        selected_skills = self._select_exact_kind("skill", spec.allow_skills, candidates)
+        selected_capabilities = self._select_exact_kind("capability", spec.allow_capabilities, candidates)
+        selected_subagents = self._select_subagents(
+            spec, tuple(item.id for item in candidates if item.kind == "agent"),
         )
         return self._build_compiled_agent(
             spec,
@@ -102,6 +115,46 @@ class AgentCompiler:
             tool_policy=tool_policy,
             mcp_policy=mcp_policy,
         )
+
+    @classmethod
+    def filter_capabilities(
+        cls,
+        spec: AgentSpec,
+        contributions: Sequence[CapabilityContribution[object]],
+        *,
+        capability_filter: CapabilityFilter | None = None,
+    ) -> tuple[CapabilityContribution[object], ...]:
+        """Return visible candidates, not a fully resolved executable toolset.
+
+        The optional synchronous filter runs before Agent selectors are resolved.
+        It is not an authorization policy or a durable callback. Agent candidates
+        are delegation targets; the root Agent declaration is never filtered.
+        """
+        if not isinstance(spec, AgentSpec):
+            raise TypeError("spec must be AgentSpec")
+        if capability_filter is not None and not callable(capability_filter):
+            raise TypeError("capability_filter must be callable or None")
+        available: list[CapabilityContribution[object]] = []
+        identities: set[tuple[str, str]] = set()
+        for item in contributions:
+            if not isinstance(item, CapabilityContribution):
+                raise TypeError("contributions must contain CapabilityContribution values")
+            identity = (item.kind, item.id)
+            if identity in identities:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            identities.add(identity)
+            if item.kind == "agent" and item.id == spec.id:
+                continue
+            if capability_filter is not None:
+                included = capability_filter(spec, item)
+                if not isinstance(included, bool):
+                    if iscoroutine(included):
+                        included.close()
+                    raise TypeError("capability_filter must return bool synchronously")
+                if not included:
+                    continue
+            available.append(item)
+        return tuple(available)
 
     def bind(
         self,
@@ -267,25 +320,28 @@ class AgentCompiler:
             for kind, values in selected.items()
         }
 
+    @classmethod
     def _select_tools(
-        self,
+        cls,
         spec: AgentSpec,
+        candidates: Sequence[CapabilityContribution[object]],
     ) -> "tuple[tuple[CapabilityContribution[object], ...], tuple[CapabilityContribution[object], ...], tuple[str, ...], tuple[str, ...]]":
         tools = {
             candidate.id: candidate
-            for candidate in self._candidates
+            for candidate in candidates
             if candidate.kind == "tool"
         }
+        mcp_by_id = {item.id: item for item in candidates if item.kind == "mcp"}
         select_all = "*" in spec.allow_tools
         selected_tool_ids: set[str] = set(tools) if select_all else set()
         selected_mcp_by_id: dict[str, CapabilityContribution[object]] = (
-            dict(self._mcp_by_id) if select_all else {}
+            dict(mcp_by_id) if select_all else {}
         )
         tool_policy: list[str] = ["*"] if select_all else []
         mcp_policy: list[str] = (
             [
                 mcp_server_selector(item.id)
-                for item in sorted(self._mcp_by_id.values(), key=lambda item: item.id)
+                for item in sorted(mcp_by_id.values(), key=lambda item: item.id)
             ]
             if select_all
             else []
@@ -315,7 +371,7 @@ class AgentCompiler:
                 selected_tool_ids.add(selector)
                 continue
             server_id, _tool = parsed
-            candidate = self._mcp_by_id.get(server_id)
+            candidate = mcp_by_id.get(server_id)
             if candidate is None:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             selected_mcp_by_id[candidate.id] = candidate
@@ -327,14 +383,16 @@ class AgentCompiler:
             tuple(sorted(set(mcp_policy))),
         )
 
+    @classmethod
     def _select_exact_kind(
-        self,
+        cls,
         kind: Literal["skill", "capability"],
         selectors: Sequence[str],
+        candidates: Sequence[CapabilityContribution[object]],
     ) -> "tuple[CapabilityContribution[object], ...]":
         values = {
             candidate.id: candidate
-            for candidate in self._candidates
+            for candidate in candidates
             if candidate.kind == kind
         }
         select_all = "*" in selectors
@@ -343,7 +401,7 @@ class AgentCompiler:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected = tuple(
             candidate
-            for candidate in self._candidates
+            for candidate in candidates
             if candidate.kind == kind
             and (select_all or candidate.id in selected_ids)
         )
@@ -353,8 +411,9 @@ class AgentCompiler:
             else tuple(sorted(selected, key=lambda item: item.id))
         )
 
-    def _select_subagents(self, spec: AgentSpec) -> "tuple[str, ...]":
-        available = set(self._agent_ids)
+    @classmethod
+    def _select_subagents(cls, spec: AgentSpec, agent_ids: Sequence[str]) -> "tuple[str, ...]":
+        available = set(agent_ids)
         select_all = "*" in spec.allow_subagents
         selected = set(spec.allow_subagents).difference({"*"})
         if spec.id in selected or not selected.issubset(available):
@@ -458,4 +517,4 @@ def _workspace_selector_classes(
     return None
 
 
-__all__ = ["AgentCompiler"]
+__all__ = ["AgentCompiler", "CapabilityFilter"]
