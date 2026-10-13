@@ -311,7 +311,7 @@ class Container(BaseContainer):
     def _render_site_template(self, container: "BaseContainer", source: "PathType",
                         site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
                         sites: "Sequence[ResolvedSite] | None" = None,
-                        route_auth: bool = False, block: "str | None" = None) -> str:
+                        route_auth: bool = False, template_vars: "Mapping[str, Any] | None" = None) -> str:
         """Render one location template with unambiguous local/nginx namespaces."""
         nginx = self
         source = Path(source).absolute()
@@ -337,8 +337,7 @@ class Container(BaseContainer):
         if route_auth:
             extra["route_auth"] = True
         try:
-            template = environment.get_template(template_name)
-            context = dict(
+            return environment.get_template(template_name).render(
                 site=site,
                 container=container,
                 nginx=nginx,
@@ -347,12 +346,9 @@ class Container(BaseContainer):
                     name: str(container.env_config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
                     for name, suffix in (("nginx", "253"), ("tengine", "254"))
                 }),
-                template_vars=site.template_vars,
+                template_vars=site.template_vars if template_vars is None else template_vars,
                 **extra,
             )
-            if block is not None:
-                return "".join(template.blocks[block](template.new_context(context)))
-            return template.render(context)
         except TemplateError as exc:
             raise ContainerTemplateError(
                 f"Invalid nginx template {source} for {container.name}: {exc}"
@@ -403,9 +399,6 @@ class Container(BaseContainer):
             def routing_policy(site):
                 return (
                     site.https, site.waf, site.waf_bypass,
-                    self._render_site_template(
-                        site.producer, self.get_source_path("templates", "server.conf"),
-                        site, block="body_limit") if len(sites) > 1 else None,
                     site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
                     site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
                 )
@@ -415,6 +408,15 @@ class Container(BaseContainer):
                     raise ContainerError(
                         "Incompatible nginx routing policies on {}:{} for {} and {}".format(
                             domain, port, leader.producer.name, site.producer.name))
+            template_vars, owners = {}, {}
+            for site in sites:
+                for key, value in site.template_vars.items():
+                    if key in template_vars and template_vars[key] != value:
+                        raise ContainerError(
+                            "Conflicting nginx template variable {} on {}:{} for {} and {}".format(
+                                key, domain, port, owners[key], site.producer.name))
+                    template_vars[key] = value
+                    owners[key] = site.producer.name
             route_auth = len(sites) > 1 and any(
                 (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
                 for member in sites[1:])
@@ -429,7 +431,8 @@ class Container(BaseContainer):
                 routes.append(business)
             rendered.append(self._render_site_template(
                 leader.producer, self.get_source_path("templates", "server.conf"),
-                leader, business="\n".join(routes), sites=sites, route_auth=route_auth))
+                leader, business="\n".join(routes), sites=sites, route_auth=route_auth,
+                template_vars=template_vars))
         return {"sites/generated.conf": "\n".join(rendered)}, any(site.waf for site in active)
 
     def on_starting(self, context: "OperationContext") -> None:

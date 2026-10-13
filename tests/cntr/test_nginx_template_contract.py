@@ -496,24 +496,56 @@ def test_site_body_limit_is_inherited_by_public_and_origin_servers(fresh_manager
     assert "client_max_body_size" not in nginx.get_source_path("templates", "params.conf").read_text()
 
 
-@pytest.mark.parametrize("limits,compatible", [
-    ((None, "1m"), True), (("10m", "10m"), True), ((0, "0"), True),
-    ((None, "10m"), False), (("10m", 0), False),
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("left,right,compatible", [
+    ({}, {"client_max_body_size": "10m"}, True),
+    ({"client_max_body_size": "1m"}, {"client_max_body_size": "10m"}, False),
+    ({"client_max_body_size": 0}, {"client_max_body_size": 0}, True),
+    ({"client_max_body_size": 0}, {"client_max_body_size": "0"}, False),
+    ({"custom": {"nested": [1, 2]}}, {"custom": {"nested": [1, 2]}}, True),
+    ({"custom": [1]}, {"custom": [2]}, False),
+    ({"first": "kept"}, {"second": "kept"}, True),
 ])
-def test_shared_hostname_requires_compatible_body_limits(fresh_manager, tmp_path, limits, compatible):
+def test_shared_hostname_merges_explicit_template_variables(
+        fresh_manager, tmp_path, left, right, compatible, reverse, waf):
     nginx = fresh_manager.containers["nginx"]
+    from copy import deepcopy
+    declarations = [left, right]
+    original = deepcopy(declarations)
     sites = []
-    for index, limit in enumerate(limits):
+    for index, values in enumerate(declarations):
         path = tmp_path / (str(index) + ".conf")
-        path.write_text("location /route" + str(index) + " { return 204; }")
-        sites.append(generation_site(nginx, str(index), template=path,
-            template_vars={"business_value": index, **({} if limit is None else {"client_max_body_size": limit})}))
+        path.write_text("# local " + str(index) + " {{ template_vars | length }}\nlocation /route" + str(index) + " { return 204; }")
+        sites.append(generation_site(nginx, str(index), template=path, template_vars=values, waf=waf, default_server=index == 0))
+    if reverse:
+        sites.reverse()
     nginx.__dict__["sites"] = {site._declaration: site for site in sites}
     if compatible:
-        assert "location /route1" in prepared_config(nginx)["sites/generated.conf"]
+        rendered = prepared_config(nginx)["sites/generated.conf"]
+        assert "# local 0 " + str(len(left)) in rendered
+        assert "# local 1 " + str(len(right)) in rendered
+        value = right.get("client_max_body_size", left.get("client_max_body_size", "1m"))
+        assert rendered.count('client_max_body_size "' + str(value) + '";') == 1 + int(waf)
     else:
-        with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
+        with pytest.raises(ContainerError, match="Conflicting nginx template variable"):
             prepared_config(nginx)
+    assert declarations == original
+    for site in sites:
+        assert dict(site.template_vars) == dict(site._declaration.template_vars)
+
+
+def test_template_variable_conflict_does_not_disclose_values(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    sites = [generation_site(nginx, str(index), template_vars={"secret": value})
+             for index, value in enumerate(("private-one", "private-two"))]
+    nginx.__dict__["sites"] = {site._declaration: site for site in sites}
+    with pytest.raises(ContainerError) as error:
+        prepared_config(nginx)
+    assert "secret" in str(error.value)
+    assert "nginx" in str(error.value)
+    assert "private-one" not in str(error.value)
+    assert "private-two" not in str(error.value)
 
 
 def test_native_location_body_limit_can_override_site_default(fresh_manager, tmp_path):
@@ -547,13 +579,3 @@ def test_body_limit_does_not_inject_or_change_template_variables(fresh_manager, 
     site = generation_site(nginx, template_vars=values)
     assert dict(site.template_vars) == values
     assert dict(site._declaration.template_vars) == values
-
-
-@pytest.mark.parametrize("values,expected", [({}, "1m"), ({"client_max_body_size": 0}, "0"),
-                                            ({"client_max_body_size": None}, "None")])
-def test_body_limit_policy_block_does_not_render_business(fresh_manager, values, expected):
-    nginx = fresh_manager.containers["nginx"]
-    source = nginx.get_source_path("templates", "server.conf")
-    site = make_site(template_vars=values)
-    assert nginx._render_site_template(nginx, source, site, block="body_limit").strip() == (
-        'client_max_body_size "' + expected + '";')
