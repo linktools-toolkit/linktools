@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from linktools.core import environ
 
@@ -89,6 +90,15 @@ _logger = environ.get_logger("ai.runtime.history")
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionCapabilityRef:
+    """Safe identity of a capability bound to one execution, not proof of use."""
+
+    kind: Literal["agent", "tool", "skill", "mcp", "capability"]
+    id: str
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionInfo:
     """Execution metadata required by local diagnostics."""
 
@@ -111,6 +121,7 @@ class ExecutionInfo:
     terminal_at: datetime | None = None
     binding_digest: str | None = None
     usage: UsageSummary | None = None
+    capability_refs: tuple[ExecutionCapabilityRef, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
@@ -201,6 +212,16 @@ def _project_execution_info(
     usage: UsageSummary | None = None,
 ) -> ExecutionInfo:
     result = record.result
+    binding = record.binding
+    capability_refs = None
+    if isinstance(binding, AgentBindingContract):
+        capability_refs = tuple(
+            ExecutionCapabilityRef(pin.kind, pin.id, pin.revision)
+            for pin in binding.selected
+        ) + tuple(
+            ExecutionCapabilityRef("agent", ref.id, ref.revision)
+            for ref in binding.subagents
+        )
     return ExecutionInfo(
         execution_id=record.execution_id,
         binding_kind=record.binding_kind,
@@ -218,6 +239,7 @@ def _project_execution_info(
         terminal_at=None if result is None else result.created_at,
         binding_digest=record.binding_digest,
         usage=usage,
+        capability_refs=capability_refs,
         error_code=record.error_code,
         safe_error_details=record.safe_error_details,
         error_diagnostics=None,
@@ -1227,4 +1249,4 @@ def _terminal_error_code(record: ExecutionRecord) -> str:
     return code.value
 
 
-__all__ = ["ExecutionInfo", "RuntimeHistory"]
+__all__ = ["ExecutionCapabilityRef", "ExecutionInfo", "RuntimeHistory"]

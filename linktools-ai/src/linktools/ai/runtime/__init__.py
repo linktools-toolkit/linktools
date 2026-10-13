@@ -19,7 +19,7 @@ from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._metrics import MetricFlushResult, MetricBufferStatus
-from ._runtime_history import ExecutionInfo, RuntimeHistory
+from ._runtime_history import ExecutionCapabilityRef, ExecutionInfo, RuntimeHistory
 from ._snapshot import (
     RestoredRuntime,
     RuntimeSnapshot,
@@ -150,6 +150,7 @@ __all__ = [
     "CreateSessionRequest",
     "EventService",
     "ExecutionEvent",
+    "ExecutionCapabilityRef",
     "ExecutionHandle",
     "ExecutionHistoryItem",
     "ExecutionHistoryReader",

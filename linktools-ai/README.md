@@ -775,7 +775,20 @@ page = await runtime.executions.list(
 history projections without loading a ModelRegistry or compiling Agents.
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
-or raw error diagnostics. `result()`, `history()/trace()`,
+or raw error diagnostics. Its optional `ExecutionInfo.capability_refs` contains
+immutable `ExecutionCapabilityRef(kind, id, revision)` values from that
+execution's frozen Agent binding: selected tools, Skills, MCP servers, runtime
+capabilities and directly allowed child Agents (`kind="agent"`). The main Agent
+identity remains `agent_id`. An Agent with no selected capabilities returns `()`;
+non-Agent executions return `None`. `recent_executions()` exposes the same
+projection after authorizing each execution. This is the execution's bound
+capability set, not the current catalog and not evidence of an actual tool call,
+child execution, or Skill body read. MCP entries identify bound servers, not
+their expanded remote tool lists; built-in helper tools are not a separate
+catalog in this field. No descriptions, prompts, resource paths,
+MCP arguments or model configuration are included, and projection adds no
+repository or object reads. Existing `ExecutionInfo` constructors may omit the
+new field; it defaults to `None`. `result()`, `history()/trace()`,
 `transcript()/model_interactions()`, `task_graph()`,
 `list_execution_events()/list_task_events()`,
 `usage()/graph_usage()`, `attachment_facts()`,
