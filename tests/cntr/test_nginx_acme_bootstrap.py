@@ -80,7 +80,18 @@ def run_script(case, action):
 def test_acme_issuance_happens_in_image_build_only(certificate_case):
     container, _, _, _, _, _ = certificate_case
     dockerfile = container.docker_file
-    assert "AS acme-build" not in dockerfile
+    assert "FROM alpine:3.23.6 AS acme" in dockerfile
+    assert "FROM nginx:stable-alpine AS nginx" in dockerfile
+    assert "COPY --from=acme /opt/acme /opt/acme" in dockerfile
+    assert "COPY --from=acme /opt/nginx-initial /opt/nginx-initial" in dockerfile
+    final_stage = dockerfile.split(" AS nginx", 1)[1]
+    assert final_stage.index("--upgrade") < final_stage.index("--install-cert") < final_stage.index("--renew")
+    assert "--renew --domain example.test" in final_stage
+    assert "--upgrade --force" in final_stage
+    assert "--force" not in final_stage.split("--renew", 1)[1]
+    assert "--issue" not in final_stage
+    assert "id=cntr_acme_account" not in final_stage
+    assert "id=cntr_acme_dns" in final_stage
     assert "--issue --force" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_dns" in dockerfile
     assert "ARG CNTR_BUILD_REVISION" in dockerfile
@@ -317,3 +328,97 @@ exit 94
     subprocess.run(["sh", "-c", setup], check=True, env=env)
     assert (usr_bin / "acme.sh").resolve() == home / "acme.sh"
     assert all(os.access(local_bin / name, os.X_OK) for name in ("nginx-certificates", "nginx-acme"))
+
+
+@pytest.mark.parametrize("waf", [False, True])
+def test_http_only_build_does_not_require_acme(fresh_manager, waf):
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", False)
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", waf)
+    container = fresh_manager.containers["nginx"]
+    container.reset_rendered_inputs()
+    dockerfile = container.docker_file
+    assert "FROM nginx:stable-alpine AS nginx" in dockerfile
+    assert "FROM alpine:" not in dockerfile
+    assert "nginx-acme" not in dockerfile
+    assert "secrets" not in container.docker_compose["services"]["nginx"]["build"]
+
+
+@pytest.mark.parametrize("renew_status", [0, 2, 1, 3])
+@pytest.mark.parametrize("install_status", [0, 1])
+@pytest.mark.parametrize("upgrade_status", [0, 1, 2])
+def test_final_stage_refresh_accepts_only_success_or_not_due(certificate_case, tmp_path,
+                                                            renew_status, install_status, upgrade_status):
+    container, _, _, seed, _, _ = certificate_case
+    final = container.docker_file.split(" AS nginx", 1)[1]
+    command = "set -eu;" + final.rsplit("set -eu;", 1)[1]
+    command = command.replace("\\\n", "").replace("/opt/nginx-initial", str(seed))
+    calls = tmp_path / "refresh-calls"
+    wrapper = tmp_path / "refresh-acme"
+    wrapper.write_text("""#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$MOCK_CALLS"
+case " $* " in
+  *" --upgrade "*) exit "$MOCK_UPGRADE_STATUS" ;;
+  *" --install-cert "*) exit "$MOCK_INSTALL_STATUS" ;;
+  *" --renew "*) exit "$MOCK_RENEW_STATUS" ;;
+  *) exit 91 ;;
+esac
+""")
+    wrapper.chmod(0o755)
+    command = command.replace("/usr/local/bin/nginx-acme", str(wrapper))
+    env = dict(os.environ, CNTR_BUILD_REVISION="test-only", MOCK_CALLS=str(calls),
+               MOCK_INSTALL_STATUS=str(install_status), MOCK_RENEW_STATUS=str(renew_status),
+               MOCK_UPGRADE_STATUS=str(upgrade_status))
+    result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) is (upgrade_status == 0 and install_status == 0 and renew_status in (0, 2))
+    seen = calls.read_text().splitlines()
+    assert "--upgrade --force" in seen.pop(0)
+    if upgrade_status:
+        assert seen == []
+        return
+    assert "--install-cert --domain example.test" in seen[0]
+    assert "--reloadcmd :" in seen[0]
+    assert str(seed / "certs/example.test_fullchain.pem") in seen[0]
+    assert len(seen) == (1 if install_status else 2)
+    if not install_status:
+        assert "--renew --domain example.test" in seen[1]
+    assert not any("--force" in call or "--issue" in call for call in seen)
+
+
+@pytest.mark.parametrize("renew_status", [0, 2, 1])
+def test_final_refresh_does_not_persist_dns_credentials(certificate_case, tmp_path, renew_status):
+    container, _, _, seed, _, _ = certificate_case
+    credentials = tmp_path / "dns.env"
+    credentials.write_text("export CF_Token='test-current-secret'\n")
+    keys = tmp_path / "dns-keys"
+    keys.write_text("CF_Token\nAli_Key\n")
+    account = seed / "acme/account.conf"
+    account.write_text("SAVED_Ali_Key='test-old-secret'\nACCOUNT_EMAIL='test@example.test'\n")
+    mock = tmp_path / "mock-acme"
+    mock.write_text("""#!/bin/sh
+set -eu
+test "$CF_Token" = test-current-secret
+! grep -q test-old-secret "$MOCK_ACCOUNT"
+printf "SAVED_CF_Token='test-current-secret'\\n" >> "$MOCK_ACCOUNT"
+case " $* " in
+  *" --renew "*) exit "$MOCK_RENEW_STATUS" ;;
+  *" --upgrade "*|*" --install-cert "*) exit 0 ;;
+  *) exit 91 ;;
+esac
+""")
+    mock.chmod(0o755)
+    wrapper = tmp_path / "actual-nginx-acme"
+    wrapper.write_text(container.get_source_path("nginx-acme").read_text()
+                       .replace("/run/acme-secrets/dns.env", str(credentials))
+                       .replace("/opt/acme/dns-keys", str(keys))
+                       .replace("/opt/acme/acme.sh", str(mock)))
+    wrapper.chmod(0o755)
+    command = "set -eu;" + container.docker_file.rsplit("set -eu;", 1)[1]
+    command = (command.replace("\\\n", "").replace("/opt/nginx-initial", str(seed))
+               .replace("/usr/local/bin/nginx-acme", str(wrapper)))
+    env = dict(os.environ, CNTR_BUILD_REVISION="test-only", MOCK_ACCOUNT=str(account),
+               MOCK_RENEW_STATUS=str(renew_status))
+    result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) is (renew_status in (0, 2)), result.stderr
+    assert account.read_text() == "ACCOUNT_EMAIL='test@example.test'\n"
+    assert (seed / "acme/account.key").read_text() == "existing-account"

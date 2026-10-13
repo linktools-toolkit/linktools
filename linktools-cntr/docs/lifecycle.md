@@ -194,8 +194,19 @@ an alternative configuration to hide a cycle.
 
 ## ACME
 
-Initial certificates are issued during a single-stage image build. DNS
-credentials are written to `APP_PATH/nginx/acme-secrets/dns.env` with restricted
+HTTPS images use two build stages: `acme` installs acme.sh and issues the initial
+certificate on fixed Alpine 3.23.6; `nginx` copies the ACME installation, sanitized
+account state, certificates and runtime scripts. Runtime dependencies are installed
+from the nginx base image's own repositories, rather than copying Alpine binaries.
+The final nginx build step upgrades acme.sh through its official `--upgrade`
+command with `--force` to require an actual update attempt, configures the seed
+certificate paths and runs a normal renewal check. An upgrade failure stops the
+build before certificate refresh. Certificates that are not due for renewal are
+retained; an actual renewal error fails the build. The force flag applies only to
+the software update, never certificate renewal.
+HTTP-only images contain just the nginx stage and require no ACME secrets.
+
+DNS credentials are written to `APP_PATH/nginx/acme-secrets/dns.env` with restricted
 host permissions, used as a BuildKit secret and mounted read-only at runtime.
 Only the ACME subprocess loads them into its environment. Known DNS provider
 assignments are removed from saved ACME configuration before it is copied into
