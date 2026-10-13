@@ -28,6 +28,7 @@ from ._instructions import (
     RepositoryInstructions,
 )
 from ._identity import (
+    CapabilityRef,
     agent_ref_payload,
     binding_digest_payload,
     capability_ref_payload,
@@ -36,6 +37,7 @@ from ._naming import mcp_server_name_token
 from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 __all__ = [
+    "CapabilityRef",
     "AgentSpec",
     "AgentSpecCodec",
     "AgentSpecAdapter",

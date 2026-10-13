@@ -3,6 +3,7 @@
 """Stable references for named behavior and digest inputs for Agent bindings."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._schema import canonicalize_json_schema
@@ -10,6 +11,15 @@ from ._schema import canonicalize_json_schema
 _CONTRIBUTION_KINDS = frozenset(
     {"agent", "tool", "skill", "mcp", "capability"}
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityRef:
+    """Named capability identity without its behavior contract or locators."""
+
+    kind: str
+    id: str
+    revision: int
 
 
 def agent_ref_payload(
@@ -169,6 +179,7 @@ def _mapping(value: object) -> "dict[str, JsonValue]":
 
 
 __all__ = [
+    "CapabilityRef",
     "agent_ref_payload",
     "binding_digest_payload",
     "capability_ref_payload",
