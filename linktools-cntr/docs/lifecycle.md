@@ -193,10 +193,6 @@ Flare prepares navigation files with its configured group access. Initial
 migration copies other legacy application assets to `runtime-app`, leaving the
 legacy directory available to an old Compose model. Application uses normal
 file mounts and service recreation, not migration callbacks around Compose.
-`runtime-app` and its application-managed `config.yml` use the resolved
-`DOCKER_UID`/`DOCKER_GID`, including explicit numeric overrides. Existing unrelated
-assets are not recursively reowned or made writable. Only the new migration copy
-is reowned recursively, without following symlinks to external user files.
 
 Ownership hooks accept numeric IDs without requiring host account names:
 `chown(path, user, recursive=False, *, group=None)` and the equivalent template

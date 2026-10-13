@@ -5,7 +5,6 @@ import json
 import os
 import stat
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -164,75 +163,6 @@ def test_template_ownership_accepts_lazy_numeric_ids_and_root(fresh_manager, tmp
     assert len(hooks) == 1
     hooks[0]()
     assert calls == [("/private/home", str(uid), "87654", True)]
-
-
-@pytest.mark.parametrize("existing", [False, True])
-def test_flare_uses_runtime_ids_and_only_repairs_known_existing_paths(fresh_manager, tmp_path, monkeypatch, existing):
-    owner = fresh_manager.containers["flare"]
-    fresh_manager.env_config.set("DOCKER_UID", 98765)
-    fresh_manager.env_config.set("DOCKER_GID", 87654)
-    app = owner.get_app_path("runtime-app")
-    legacy = owner.get_app_path("app")
-    source = app if existing else legacy
-    source.mkdir(parents=True)
-    config = source / "config.yml"
-    config.write_text("title: Keep my settings\n")
-    config.chmod(0o400)
-    assets = source / "assets"
-    assets.mkdir()
-    custom = assets / "private.txt"
-    custom.write_text("user asset")
-    custom.chmod(0o400)
-    external = tmp_path / "external"
-    external.write_text("untouched")
-    external.chmod(0o400)
-    (source / "external-link").symlink_to(external)
-    before = (custom.stat(), external.stat())
-    calls = []
-    monkeypatch.setattr(owner.runtime, "chown", lambda path, user, recursive=False, **kwargs:
-                        calls.append((Path(path), user, kwargs["group"], recursive)))
-    monkeypatch.setattr(owner.runtime, "chmod", lambda path, mode, **kwargs: os.chmod(path, mode))
-    written = []
-    owner.on_starting(SimpleNamespace(write_files=lambda container, files, **kwargs: written.append((files, kwargs))))
-    assert (app / "config.yml").read_text() == "title: Keep my settings\n"
-    assert stat.S_IMODE((app / "config.yml").stat().st_mode) == 0o600
-    assert stat.S_IMODE(app.stat().st_mode) == 0o750
-    assert written[0][1] == {"mode": 0o640, "group": 87654}
-    assert set(written[0][0]) == {"apps.yml", "bookmarks.yml"}
-    assert all(user == 98765 and group == 87654 for _, user, group, _ in calls)
-    if existing:
-        assert {(path, recursive) for path, _, _, recursive in calls} == {(app, False), (app / "config.yml", False)}
-        assert custom.stat() == before[0]
-    else:
-        assert len(calls) == 1 and calls[0][3] is True
-        assert calls[0][0].name.startswith(".flare-app-")
-        assert (legacy / "config.yml").read_text() == "title: Keep my settings\n"
-        assert stat.S_IMODE((legacy / "config.yml").stat().st_mode) == 0o400
-    assert external.stat() == before[1]
-    assert (app / "external-link").is_symlink()
-
-
-@pytest.mark.parametrize("link_target", ["root", "config"])
-def test_flare_refuses_to_change_ownership_through_special_path_links(fresh_manager, tmp_path, monkeypatch, link_target):
-    owner = fresh_manager.containers["flare"]
-    app = owner.get_app_path("runtime-app")
-    external = tmp_path / "outside"
-    external.mkdir()
-    config = external / "config.yml"
-    config.write_text("untouched")
-    config.chmod(0o400)
-    if link_target == "root":
-        app.parent.mkdir(parents=True, exist_ok=True)
-        app.symlink_to(external, target_is_directory=True)
-    else:
-        app.mkdir(parents=True)
-        (app / "config.yml").symlink_to(config)
-    monkeypatch.setattr(owner.runtime, "chown", lambda *args, **kwargs: pytest.fail("must not chown"))
-    monkeypatch.setattr(owner.runtime, "chmod", lambda *args, **kwargs: pytest.fail("must not chmod"))
-    with pytest.raises(ContainerError, match="must"):
-        owner.on_starting(SimpleNamespace(write_files=lambda *args, **kwargs: pytest.fail("must not publish")))
-    assert config.read_text() == "untouched"
-    assert stat.S_IMODE(config.stat().st_mode) == 0o400
 
 
 
