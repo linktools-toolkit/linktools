@@ -3,13 +3,16 @@
 """Opt-in execution observations retain independent cursors and finite coverage."""
 
 import asyncio
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import ExecutionObservationEvent, ExecutionTreeEvent, TaskModelProjection
+from linktools.ai.runtime import _cursor as runtime_cursor
 from linktools.ai.runtime._watch_cursor import (
     decode_execution_observation_cursor, decode_execution_watch_cursor,
     encode_execution_observation_cursor,
@@ -131,7 +134,11 @@ async def test_metadata_envelope_keeps_inner_tree_cursor_and_recompensates_on_re
 
 
 @pytest.mark.asyncio
-async def test_model_notification_rereads_active_identity_without_new_event_position() -> None:
+async def test_model_notification_rereads_active_identity_without_new_event_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [time.time()]
+    monkeypatch.setattr(runtime_cursor, "time", SimpleNamespace(time=lambda: clock[0]))
     bundle = _bundle()
     history = bundle.runtime.history
     initial = replace(history.rows[0], status="RUNNING", started_at=datetime.now(timezone.utc))
@@ -139,13 +146,16 @@ async def test_model_notification_rereads_active_identity_without_new_event_posi
     history.durable = False
     bundle.tree.release.clear()
     stream = bundle.execution_run.watch(include_model_interactions=True)
-    first = await anext(stream)
-    history.update(replace(initial, status="SUCCEEDED"))
-    second = await asyncio.wait_for(anext(stream), 1)
-    assert first.event.item.status == "RUNNING"
-    assert second.event.item.status == "SUCCEEDED"
-    assert first.cursor == second.cursor
-    await stream.aclose()
+    try:
+        first = await anext(stream)
+        clock[0] += 2
+        history.update(replace(initial, status="SUCCEEDED"))
+        second = await asyncio.wait_for(anext(stream), 1)
+        assert first.event.item.status == "RUNNING"
+        assert second.event.item.status == "SUCCEEDED"
+        assert _positions(first.cursor) == _positions(second.cursor) == {}
+    finally:
+        await stream.aclose()
     assert all(subscription.closed for subscription in history.subscriptions)
 
 
