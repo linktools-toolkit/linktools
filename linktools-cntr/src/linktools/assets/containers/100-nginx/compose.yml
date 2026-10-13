@@ -11,8 +11,8 @@ services:
 #   {% endif %}
     volumes:
       - '{{ container.get_app_path("generated", "current") }}:/etc/nginx/managed:ro'
-      - '{{ (APP_PATH/"certs") | mkdir }}:/etc/certs'
-      - '{{ (APP_PATH/"acme") | mkdir }}:/root/.acme.sh'
+      - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
+      - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
 #   {% if NGINX_HTTPS_ENABLE %}
       - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
 #   {% endif %}

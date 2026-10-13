@@ -14,7 +14,7 @@ services:
       - '{{ APP_PATH/"generated/current/lldap_config.toml" }}:/generated/lldap_config.toml:ro'
       - '{{ APP_PATH/"generated/current/ldap_user_pass" }}:/generated/ldap_user_pass:ro'
       - '{{ (APP_PATH/"data") | mkdir | chown }}:/data'
-      - '{{ (APP_PATH/"secrets") | mkdir }}:/secrets:ro'
+      - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
 #   {% if LLDAP_PORT > 0 or LLDAP_WEB_PORT > 0 %}
     ports:
 #     {% if LLDAP_PORT > 0 %}

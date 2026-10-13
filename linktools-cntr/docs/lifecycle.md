@@ -209,9 +209,11 @@ user with no group keeps its existing primary-group behavior; a numeric user wit
 the file's group. The third positional argument remains `recursive`. Numeric zero
 is a valid owner. These defaults belong to the template filter; the lower-level
 `runtime.chown` still requires an explicit user.
-CLI-maintained secret directories and certificate/account state keep their
-writer ownership: their root-running consumers mount them without `chown`.
-Do not apply ownership hooks to immutable generated inputs.
+Persistent directory mounts, including secret and certificate/account state,
+use the configured ownership through `chown`. When overriding the runtime IDs,
+ensure the CLI identity can still maintain paths it needs to write.
+Do not apply ownership hooks to immutable generated inputs; set their access
+permissions through `write_files` instead.
 
 Nginx prepares a complete configuration, checks it with the target image and
 starts it normally. Deployment no longer reloads a configuration generation.

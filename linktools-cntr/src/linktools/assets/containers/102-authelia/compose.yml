@@ -19,7 +19,7 @@ services:
       - X_AUTHELIA_CONFIG_FILTERS=template
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
-      - '{{ (APP_PATH/"secrets") | mkdir }}:/secrets:ro'
+      - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
 #     {% for name in container.config_files %}
       - '{{ APP_PATH/"generated/current"/name }}:/generated/{{ name }}:ro'
 #     {% endfor %}
@@ -46,7 +46,7 @@ services:
     user: root
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
-      - '{{ (APP_PATH/"secrets") | mkdir }}:/secrets:ro'
+      - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
       - '{{ APP_PATH/"generated/current/configuration.yml" }}:/generated/configuration.yml:ro'
     environment:
       - AAD_LOGLEVEL=DEBUG

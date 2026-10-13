@@ -341,33 +341,30 @@ def test_template_default_owner_uses_container_config_resolver(fresh_manager, tm
     assert set(resolved) == set(values)
 
 
-@pytest.mark.parametrize("name,protected", [
+@pytest.mark.parametrize("name,paths", [
     ("nginx", ("certs", "acme")),
     ("lldap", ("secrets",)),
     ("authelia", ("secrets",)),
 ])
-def test_builtin_cli_owned_mounts_do_not_register_ownership_changes(
-        fresh_manager, monkeypatch, name, protected):
+def test_builtin_persistent_mounts_use_default_ownership_without_recursion(
+        fresh_manager, monkeypatch, name, paths):
+    from linktools.cntr.lifecycle import HookPhase
+
     owner = fresh_manager.containers[name]
     fresh_manager.env_config.set("DOCKER_UID", 98765)
     fresh_manager.env_config.set("DOCKER_GID", 87654)
     fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
-    ownership_paths = []
-    monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs:
-                        ownership_paths.append(key[1]) if key[0] == "chown" else None)
-    before = {}
-    for part in protected:
-        directory = owner.get_app_path(part)
-        directory.mkdir(parents=True, exist_ok=True)
-        directory.chmod(0o700)
-        private = directory / "private"
-        private.write_text("retain writer access")
-        private.chmod(0o600)
-        before[private] = private.stat()
+    calls = []
+    monkeypatch.setattr(owner.runtime, "chown", lambda path, user, **kwargs:
+                        calls.append((str(path), int(user), int(kwargs["group"]), kwargs["recursive"])))
     source = owner.get_source_path("compose.yml")
     owner.render_template(source)
     owner.render_template(source)
-    assert not set(ownership_paths).intersection(str(owner.get_app_path(part)) for part in protected)
-    for private, status in before.items():
-        assert private.stat() == status
-        private.write_text("writer can still update")
+    assert calls == []
+    expected = {str(owner.get_app_path(part)) for part in paths}
+    hooks = [hook for hook in owner.hooks.iter_phase(HookPhase.BEFORE_START)
+             if hook.name == "chown" and hook.key[1] in expected]
+    assert len(hooks) == len(expected)
+    for hook in hooks:
+        hook.callback()
+    assert set(calls) == {(path, 98765, 87654, False) for path in expected}
