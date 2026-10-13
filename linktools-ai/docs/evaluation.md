@@ -90,10 +90,12 @@ if __name__ == "__main__":
 
 `completion == "complete"` means orchestration finished, not that quality passed.
 Read the report's failures and coverage, or configure a comparison gate.
-For live dashboards and polling, use `await run.preview_report()`. It uses the
+For full current report statistics, use `await run.preview_report()`. It uses the
 same authorized report calculation and cutoff as `create_report()` without
 persisting report rows or objects. Its report ID is ephemeral and cannot be
 retrieved with `get_report()`; use `create_report()` when a saved report is needed.
+This still calculates the full report. Use `current_trials()` for a dashboard's
+visible trial page instead of repeatedly calculating and discarding a full report.
 `TrialView.execution_status` preserves the native execution outcome, while
 `graph_status` separately reports its target graph. A successful execution can
 still have a graph that requires recovery; the evaluation then needs attention.
@@ -148,6 +150,48 @@ principal originally admitted with its graph.
 
 The remaining snippets are focused extensions: run asynchronous calls inside an
 open Runtime and reuse or replace the example's Tasks, principal, and dimension.
+
+## Current trial reads
+
+```python
+page = await runtime.evaluations.current_trials(
+    run.experiment_id, principal=principal, limit=50,
+)
+trial = await runtime.evaluations.read_trial(
+    run.experiment_id, page.items[0].trial.trial_id, principal=principal,
+)
+case = await runtime.evaluations.get_case(trial.case_ref, principal=principal)
+```
+
+`run.current_trials(...)` and `run.read_trial(trial_id)` delegate to the same
+operations with the run's principal. The direct facade forms avoid a separate
+`get()` read before each request. All calls authorize the current caller.
+
+Current pages traverse immutable manifest membership in order. A cursor binds
+the run, manifest, namespace, tenant, principal and next position; each request
+may choose a different `limit`. Reusing a cursor with the same limit reads the
+same members with newly observed states. States are not an atomic snapshot
+across graphs or pages. Native recovery changes remain visible without waiting
+for an evaluation-record update. Score-only runs expose only their selected
+source trials. Dynamic terminal/status filters are not supported here.
+
+Hydration selects at most `limit` members before reading their native states and
+retained evidence. Evidence, source-owner, dataset and retention authorization
+remain enforced. These operations do not publish reports or cursor-side state,
+read all Case bodies, or calculate scorer usage. They still read whole run and
+dataset records, so storage bytes and in-memory plan selection can grow with
+the total plan size even though native/evidence reads are page-bounded.
+
+`TrialView` is a state-and-reference view, not proof that the referenced Case's
+input remains available. For example, explicit retention maintenance can remove
+an old Case while a limited run-cleanup batch has not yet reached every run.
+`get_case()` and full reports retain their missing/expired-content errors;
+current state reads do not read Case bodies just to establish their availability.
+Selected evidence still receives its own content/integrity checks.
+
+Existing `run.trials()` and `run.scores()` retain their frozen snapshot cursors
+and filters. Use them with reports/exports when fixed observations are needed;
+do not interchange their cursors with current-page cursors.
 
 ## Trial resource contexts
 

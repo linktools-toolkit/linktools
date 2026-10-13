@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 from ..asset import AssetVersionRef
 from ..core import ImmutableJsonMapping, JsonValue, UsageMetrics, canonical_sha256, validate_idempotency_key
 from ..storage import ObjectRef
-from ._contracts import InlineValue, ScorerContract, TargetTrialRef
+from ._contracts import CaseRef, InlineValue, LabelProvenance, ScorerContract, TargetTrialRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,18 +265,27 @@ class ScoringInput:
     content: Mapping[str, JsonValue]
     evidence_ref: EvidenceRef
     candidate_label: str
+    case_ref: CaseRef | None
+    label_provenance: LabelProvenance | None
 
     def __init__(
         self, trial: TargetTrialRef, target: ExecutionTargetEvidence | GraphTargetEvidence,
         expected: JsonValue, expected_present: bool, rubric: JsonValue,
         config: Mapping[str, JsonValue], evidence_ref: EvidenceRef, candidate_label: str,
         *, rubric_present: bool = False, target_input: JsonValue = None,
+        case_ref: CaseRef | None = None, label_provenance: LabelProvenance | None = None,
     ) -> None:
         if not isinstance(expected_present, bool) or not isinstance(rubric_present, bool):
             raise ValueError("input presence must be boolean")
         object.__setattr__(self, "trial", trial)
         object.__setattr__(self, "target", target)
         object.__setattr__(self, "evidence_ref", evidence_ref)
+        if case_ref is not None and not isinstance(case_ref, CaseRef):
+            raise TypeError("case_ref must be a CaseRef")
+        if label_provenance is not None and not isinstance(label_provenance, LabelProvenance):
+            raise TypeError("label_provenance must be a LabelProvenance")
+        object.__setattr__(self, "case_ref", case_ref)
+        object.__setattr__(self, "label_provenance", label_provenance)
         object.__setattr__(self, "candidate_label", candidate_label)
         object.__setattr__(self, "content", ImmutableJsonMapping({
             "expected": expected, "expected_present": expected_present,
@@ -323,16 +332,42 @@ class ScoringInput:
         return {name: item.to_mapping() for name, item in self.target.outputs.items()}
 
     def to_mapping(self) -> dict[str, JsonValue]:
-        return {"kind": "evaluation-scoring-input", "trial": self.trial.to_mapping(),
-                "target": self.target.to_mapping(), **dict(self.content),
-                "evidence_ref": self.evidence_ref.to_mapping(), "candidate_label": self.candidate_label}
+        result: dict[str, JsonValue] = {
+            "kind": "evaluation-scoring-input", "trial": self.trial.to_mapping(),
+            "target": self.target.to_mapping(), **dict(self.content),
+            "evidence_ref": self.evidence_ref.to_mapping(), "candidate_label": self.candidate_label,
+        }
+        if self.case_ref is not None:
+            result["case_ref"] = self.case_ref.to_mapping()
+        if self.label_provenance is not None:
+            result["label_provenance"] = self.label_provenance.to_mapping()
+        return result
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, JsonValue]) -> "ScoringInput":
         required = {"kind", "trial", "target", "expected", "expected_present", "rubric", "rubric_present",
                     "config", "evidence_ref", "candidate_label", "target_input"}
-        if set(value) != required or value["kind"] != "evaluation-scoring-input":
+        optional = {"case_ref", "label_provenance"}
+        if not required.issubset(value) or set(value) - required - optional or value["kind"] != "evaluation-scoring-input":
             raise ValueError("invalid scoring input contract")
+        case_ref = None
+        if value.get("case_ref") is not None:
+            case = _mapping(value["case_ref"])
+            if set(case) != {"dataset_id", "case_id", "revision"}:
+                raise ValueError("invalid scoring case reference")
+            revision = case["revision"]
+            if type(revision) is not int:
+                raise ValueError("case revision must be an integer")
+            case_ref = CaseRef(_text(case, "dataset_id"), _text(case, "case_id"), revision)
+        label_provenance = None
+        if value.get("label_provenance") is not None:
+            label = _mapping(value["label_provenance"])
+            if set(label) != {"source", "actor", "procedure", "revision"}:
+                raise ValueError("invalid scoring label provenance")
+            label_provenance = LabelProvenance(
+                _text(label, "source"), _optional_text(label, "actor"),
+                _optional_text(label, "procedure"), _optional_text(label, "revision"),
+            )
         trial = _mapping(value["trial"])
         evidence = _mapping(value["evidence_ref"])
         for field_name in ("expected_present", "rubric_present"):
@@ -345,7 +380,7 @@ class ScoringInput:
                    EvidenceRef(_text(evidence, "namespace"), _text(evidence, "tenant_id"),
                                _text(evidence, "evidence_id"), _text(evidence, "digest")),
                    _text(value, "candidate_label"), rubric_present=cast(bool, value["rubric_present"]),
-                   target_input=value["target_input"])
+                   target_input=value["target_input"], case_ref=case_ref, label_provenance=label_provenance)
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
