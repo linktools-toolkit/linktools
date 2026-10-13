@@ -32,11 +32,7 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
     def chown(path: "PathType", user: "str | int | None" = None, recursive: bool = False, *,
               group: "str | int | None" = None) -> str:
         path = config.cast(path, type="path")
-        if user is None:
-            user = container.get_config_later("DOCKER_UID")
-            if group is None:
-                group = container.get_config_later("DOCKER_GID")
-        if str(user) != "":
+        if user is not None and str(user) != "":
             options = {"group": group} if group is not None else {}
             container.add_start_hook(("chown", str(path), str(user), bool(recursive), str(group)),
                                      lambda: container.runtime.chown(path, user, recursive=recursive, **options),

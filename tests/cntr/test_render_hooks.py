@@ -5,7 +5,8 @@
 The mkdir/chown/chmod template helpers (and filters) must register start hooks
 idempotently: rendering the same path twice -- within one template or across
 compose + Dockerfile renders -- registers a hook only once. Distinct paths and
-distinct actions are not collapsed. Default chown resolves the configured Docker IDs.
+distinct actions are not collapsed. chown without a user registers nothing
+(unchanged).
 
 Tests measure the delta added by a render, since prepare_installed_containers
 already registers some hooks (e.g. nginx-conf) via configs evaluation.
@@ -50,9 +51,9 @@ def test_re_rendering_same_template_does_not_duplicate(fresh_manager, tmp_path):
     assert len(list(container.hooks.iter_phase(HookPhase.BEFORE_START))) == after_first
 
 
-def test_chown_without_user_registers_configured_owner_once(fresh_manager, tmp_path):
+def test_chown_without_user_registers_nothing(fresh_manager, tmp_path):
     container = fresh_manager.containers["portainer"]
-    assert _added(container, tmp_path, "{{ chown('/a') }}{{ chown('/a') }}") == 1
+    assert _added(container, tmp_path, "{{ chown('/a') }}") == 0
 
 
 def test_helpers_available_as_filters(fresh_manager, tmp_path):

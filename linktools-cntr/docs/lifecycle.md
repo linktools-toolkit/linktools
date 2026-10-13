@@ -106,7 +106,7 @@ The existing seven `HookPhase` values are unchanged.
 ## Template paths and deferred actions
 
 Template getters return data without executing filesystem or runtime changes.
-For a shared directory, the consuming template uses `path | mkdir | chown`.
+For a shared directory, the consuming template uses `path | mkdir | chown(docker_user)`.
 These filters register idempotent `BEFORE_START` actions on that consumer, so
 previewing or repeatedly rendering a cached provider's paths does not execute them.
 A partial start prepares the selected consumer's mounts even when the path provider
@@ -201,17 +201,15 @@ is reowned recursively, without following symlinks to external user files.
 Ownership hooks accept numeric IDs without requiring host account names:
 `chown(path, user, recursive=False, *, group=None)` and the equivalent template
 filter `path | chown(DOCKER_UID, group=DOCKER_GID)`.
-The template filter defaults an omitted or `None` user to the container's
-`DOCKER_UID`, and in that case an omitted or `None` group to `DOCKER_GID`.
-Use `path | chown` for this default pair, or `path | chown(group=...)` to
-override only its group. Explicit users retain their existing behavior: a named
-user with no group keeps its existing primary-group behavior; a numeric user with no group preserves
-the file's group. The third positional argument remains `recursive`. Numeric zero
-is a valid owner. These defaults belong to the template filter; the lower-level
-`runtime.chown` still requires an explicit user.
-Persistent directory mounts, including secret and certificate/account state,
-use the configured ownership through `chown`. When overriding the runtime IDs,
-ensure the CLI identity can still maintain paths it needs to write.
+The template filter leaves an omitted or `None` user as a placeholder: it returns
+the path without registering an ownership hook or resolving default IDs.
+Explicit users retain their existing behavior: a named user with no group keeps
+its existing primary-group behavior; a numeric user with no group preserves the
+file's group. The third positional argument remains `recursive`. Numeric zero
+is a valid owner. The lower-level `runtime.chown` requires an explicit user.
+Existing bare `chown` calls on persistent-directory mounts remain placeholders.
+When choosing an explicit owner, ensure the CLI identity can still maintain paths
+it needs to write.
 Do not apply ownership hooks to immutable generated inputs; set their access
 permissions through `write_files` instead.
 
