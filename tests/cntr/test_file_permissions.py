@@ -279,3 +279,95 @@ def test_prepared_tree_root_link_is_rejected_without_following_it(file_owner, tm
         stage_files(file_owner, files)
     assert root.is_symlink()
     assert (retained / "nested/config").read_text() == "private"
+
+
+@pytest.mark.parametrize("uid,gid", [(0, 0), (98765, 87654)])
+@pytest.mark.parametrize("expression,expected_user,expected_group,recursive", [
+    ("chown", None, None, False),
+    ("chown(None)", None, None, False),
+    ("chown(recursive=True)", None, None, True),
+    ("chown(group=0)", None, "0", False),
+    ("chown(12345)", "12345", "absent", False),
+    ('chown("named-user", True)', "named-user", "absent", True),
+])
+def test_template_ownership_defaults_to_container_ids(
+        fresh_manager, tmp_path, monkeypatch, uid, gid,
+        expression, expected_user, expected_group, recursive):
+    owner = fresh_manager.containers["flare"]
+    fresh_manager.env_config.set("DOCKER_UID", uid)
+    fresh_manager.env_config.set("DOCKER_GID", gid)
+    hooks = []
+    calls = []
+    monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs: hooks.append(hook))
+    monkeypatch.setattr(owner.runtime, "chown", lambda path, user, **kwargs: calls.append(
+        (str(user), str(kwargs.get("group", "absent")), kwargs["recursive"])))
+    template = tmp_path / "compose.yml"
+    template.write_text('{{ "/private/home" | ' + expression + ' }}')
+    assert owner.render_template(template) == "/private/home"
+    assert calls == []
+    assert len(hooks) == 1
+    hooks[0]()
+    assert calls == [(str(uid) if expected_user is None else expected_user,
+                      str(gid) if expected_group is None else expected_group, recursive)]
+
+
+def test_template_default_owner_uses_container_config_resolver(fresh_manager, tmp_path, monkeypatch):
+    from linktools.runtime import lazy_load
+
+    owner = fresh_manager.containers["flare"]
+    fresh_manager.env_config.set("DOCKER_UID", 11111)
+    fresh_manager.env_config.set("DOCKER_GID", 22222)
+    original = owner.get_config_later
+    values = {"DOCKER_UID": 0, "DOCKER_GID": 87654}
+    resolved = []
+
+    def resolve(key):
+        resolved.append(key)
+        return values[key]
+
+    monkeypatch.setattr(owner, "get_config_later", lambda key, **kwargs:
+                        lazy_load(resolve, key) if key in values else original(key, **kwargs))
+    hooks = []
+    calls = []
+    monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs: hooks.append(hook))
+    monkeypatch.setattr(owner.runtime, "chown", lambda path, user, **kwargs:
+                        calls.append((int(user), int(kwargs["group"]))))
+    template = tmp_path / "compose.yml"
+    template.write_text('{{ "/private/home" | chown }}')
+    owner.render_template(template)
+    assert calls == []
+    hooks[0]()
+    assert calls == [(0, 87654)]
+    assert set(resolved) == set(values)
+
+
+@pytest.mark.parametrize("name,protected", [
+    ("nginx", ("certs", "acme")),
+    ("lldap", ("secrets",)),
+    ("authelia", ("secrets",)),
+])
+def test_builtin_cli_owned_mounts_do_not_register_ownership_changes(
+        fresh_manager, monkeypatch, name, protected):
+    owner = fresh_manager.containers[name]
+    fresh_manager.env_config.set("DOCKER_UID", 98765)
+    fresh_manager.env_config.set("DOCKER_GID", 87654)
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    ownership_paths = []
+    monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs:
+                        ownership_paths.append(key[1]) if key[0] == "chown" else None)
+    before = {}
+    for part in protected:
+        directory = owner.get_app_path(part)
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+        private = directory / "private"
+        private.write_text("retain writer access")
+        private.chmod(0o600)
+        before[private] = private.stat()
+    source = owner.get_source_path("compose.yml")
+    owner.render_template(source)
+    owner.render_template(source)
+    assert not set(ownership_paths).intersection(str(owner.get_app_path(part)) for part in protected)
+    for private, status in before.items():
+        assert private.stat() == status
+        private.write_text("writer can still update")
