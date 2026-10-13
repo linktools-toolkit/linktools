@@ -558,3 +558,137 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         denied.read()
         connection.close()
         assert app.paths == app_paths
+
+
+@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("limit,maximum", [(None, 1024 * 1024), ("10m", 10 * 1024 * 1024), (0, None)])
+def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager, tmp_path, waf, limit, maximum):
+    binary = os.environ.get("CNTR_TEST_NGINX") or shutil.which("nginx")
+    if not binary:
+        pytest.skip("Native nginx with realip is required")
+    nginx = fresh_manager.containers["nginx"]
+    received = []
+
+    class Backend(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            size = 0
+            if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                while True:
+                    chunk = int(self.rfile.readline().split(b";", 1)[0], 16)
+                    if not chunk:
+                        self.rfile.readline()
+                        break
+                    size += len(self.rfile.read(chunk))
+                    self.rfile.read(2)
+            else:
+                size = len(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            received.append((size, self.headers.get("X-Fixture-Waf")))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    with contextlib.ExitStack() as stack:
+        app = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+        stack.callback(app.server_close)
+        stack.callback(app.shutdown)
+        threading.Thread(target=app.serve_forever, daemon=True).start()
+        public_port, origin_port = _port(), _port()
+        config = {"NGINX_HTTP_PORT": public_port, "NGINX_WAF_PORT": origin_port,
+                  "SAFELINE_SUBNET_PREFIX": "127.0.0"}
+        producer = SimpleNamespace(name="body-fixture", env_config=config)
+        site = _native_site(app.server_port)
+        site.https, site.waf, site.auth = False, waf, False
+        site.waf_bypass = (r"^/bypass",)
+        site.template_vars = {} if limit is None else {"client_max_body_size": limit}
+        business = nginx._render_site_template(
+            producer, nginx.get_source_path("templates", "default.conf"), site)
+        # Explicit native limits must override the server policy on both hops.
+        business += "\nlocation /small { client_max_body_size 1m; proxy_pass " + site.proxy + "; }"
+        business += "\nlocation /bypass/unlimited { client_max_body_size 0; proxy_pass " + site.proxy + "; }"
+        server = nginx._render_site_template(
+            producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
+        server = server.replace("listen " + str(origin_port) + " ",
+                                "listen 127.0.0.253:" + str(origin_port) + " ")
+        if waf:
+            # This is a transport-only WAF fixture, not a SafeLine acceptance test.
+            server += """
+server {
+    listen 127.0.0.254:PORT;
+    client_max_body_size 0;
+    location / {
+        proxy_bind 127.0.0.254;
+        proxy_http_version 1.1;
+        proxy_set_header Host app.test;
+        proxy_set_header X-Fixture-Waf 1;
+        proxy_pass http://127.0.0.253:PORT;
+    }
+}
+""".replace("PORT", str(origin_port))
+        root = nginx._render_site_template(producer, nginx.get_source_path("templates", "nginx.conf"),
+            SimpleNamespace(template_vars={"waf": waf, "site_files": ()}))
+        root = root.replace("include /etc/nginx/mime.types;", "")
+        # Packaged nginx may use a root-owned absolute path despite the test prefix.
+        root = root.replace("http {", "http {\n    client_body_temp_path " +
+                            nginx.quote(str(tmp_path / "client_body_temp")) + ";", 1)
+        root = root.replace("worker_processes auto", "worker_processes 1")
+        for old, new in (("/var/log/nginx/error.log", "error.log"),
+                         ("/var/log/nginx/access.log", "access.log"),
+                         ("/var/run/nginx.pid", "nginx.pid"),
+                         ("/run/nginx-health.sock", "health.sock")):
+            root = root.replace(old, str(tmp_path / new))
+        if os.environ.get("CNTR_NGINX_TEST_TCP_HEALTH") == "1":
+            root = root.replace("unix:" + str(tmp_path / "health.sock"), "127.0.0.1:" + str(_port()))
+        root = root.rsplit("}", 1)[0] + server + "\n}\n"
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "nginx.conf").write_text(root)
+        command = [binary, "-p", str(tmp_path) + "/", "-c", str(tmp_path / "nginx.conf")]
+        check = subprocess.run(command + ["-t"], capture_output=True, text=True)
+        if "Operation not permitted" in check.stderr:
+            pytest.skip("Native nginx listener is unavailable in this environment")
+        assert check.returncode == 0, check.stderr
+        process = subprocess.Popen(command + ["-g", "daemon off; master_process off;"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stack.callback(process.wait, timeout=5)
+        stack.callback(process.terminate)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", public_port), timeout=.1):
+                    break
+            except OSError:
+                assert time.monotonic() < deadline, "nginx did not begin listening"
+                time.sleep(.02)
+
+        def request(size, chunked, path="/"):
+            connection = http.client.HTTPConnection("127.0.0.1", public_port, timeout=10)
+            payload = b"a" * size
+            body = (payload[index:index + 65536] for index in range(0, size, 65536)) if chunked else payload
+            try:
+                try:
+                    connection.request("POST", path, body, {"Host": "app.test"}, encode_chunked=chunked)
+                except BrokenPipeError:
+                    pass  # nginx can reject Content-Length before the client finishes writing.
+                response = connection.getresponse()
+                response.read()
+                assert response.status in (200, 413), (response.status, (tmp_path / "error.log").read_text())
+                return response.status
+            finally:
+                connection.close()
+
+        for chunked in (False, True):
+            for size in (512 * 1024, 1536 * 1024, 10 * 1024 * 1024 + 1):
+                expected = 413 if maximum is not None and size > maximum else 200
+                assert request(size, chunked) == expected, (limit, waf, chunked, size)
+                if expected == 200:
+                    assert received[-1] == (size, "1" if waf else None)
+            assert request(1536 * 1024, chunked, "/small") == 413
+            bypass_size = 1536 * 1024
+            expected = 413 if maximum is not None and bypass_size > maximum else 200
+            assert request(bypass_size, chunked, "/bypass/inherited") == expected
+            if expected == 200:
+                assert received[-1] == (bypass_size, None)
+            assert request(bypass_size, chunked, "/bypass/unlimited") == 200
+            assert received[-1] == (bypass_size, None)

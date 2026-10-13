@@ -34,6 +34,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectStore, StoredPayload, read_object
+from ..spec import CapabilityRef
 from ..task import (
     TaskBindingContract,
     TaskEvent,
@@ -111,6 +112,7 @@ class ExecutionInfo:
     terminal_at: datetime | None = None
     binding_digest: str | None = None
     usage: UsageSummary | None = None
+    capability_refs: tuple[CapabilityRef, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
@@ -201,6 +203,10 @@ def _project_execution_info(
     usage: UsageSummary | None = None,
 ) -> ExecutionInfo:
     result = record.result
+    binding = record.binding
+    capability_refs = None
+    if isinstance(binding, AgentBindingContract):
+        capability_refs = binding.capability_refs
     return ExecutionInfo(
         execution_id=record.execution_id,
         binding_kind=record.binding_kind,
@@ -218,6 +224,7 @@ def _project_execution_info(
         terminal_at=None if result is None else result.created_at,
         binding_digest=record.binding_digest,
         usage=usage,
+        capability_refs=capability_refs,
         error_code=record.error_code,
         safe_error_details=record.safe_error_details,
         error_diagnostics=None,

@@ -11,6 +11,7 @@ from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
+    CapabilityRef,
     SubagentRef,
     binding_digest_payload,
     capability_ref_payload,
@@ -183,6 +184,17 @@ class AgentBindingContract:
             self,
             "_binding_digest",
             canonical_sha256(binding_digest_payload(self.to_payload())),
+        )
+
+    @property
+    def capability_refs(self) -> "tuple[CapabilityRef, ...]":
+        """Selected capabilities and direct child Agents, not evidence of use."""
+        return tuple(
+            CapabilityRef(pin.kind, pin.id, pin.revision)
+            for pin in self.selected
+        ) + tuple(
+            CapabilityRef(ref.kind, ref.id, ref.revision)
+            for ref in self.subagents
         )
 
     @property

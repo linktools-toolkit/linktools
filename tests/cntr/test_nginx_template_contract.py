@@ -153,11 +153,8 @@ def test_business_file_is_rendered_once_for_repeated_preparation(fresh_manager, 
     calls = []
     source = tmp_path / "business.conf"
     source.write_text("{{ template_vars.record() }}\nlocation / { return 204; }")
-    site = make_site(server_name="_", default_server=True, waf=False, auth=False, template=source,
+    site = generation_site(nginx, server_name="_", default_server=True, https=True, waf=False, auth=False, template=source,
                      template_vars={"record": lambda: calls.append("render") or "# business"})
-    site.producer = nginx
-    site.enabled = True
-    site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
     owner = nginx
     first = prepared_config(nginx)
@@ -396,10 +393,7 @@ def test_header_overrides_suppress_headers_without_losing_same_level_defaults(fr
 
 def test_generated_sites_are_self_contained_and_internal_names_are_purpose_specific(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    site = make_site(default_server=True)
-    site.producer = nginx
-    site.enabled = True
-    site.resolve = lambda: site
+    site = generation_site(nginx, default_server=True, https=True, waf=True, auth=True)
     nginx.__dict__["sites"] = {("nginx", "web"): site}
     files = prepared_config(nginx)
     assert set(files) == {"nginx.conf", "sites/generated.conf"}
@@ -418,10 +412,7 @@ def test_embedded_business_preserves_multiline_quoted_values(fresh_manager, tmp_
     source = tmp_path / "business.conf"
     content = 'location / { return 200 "first\nsecond"; }'
     source.write_text(content)
-    site = make_site(default_server=True, auth=False, waf=False, template=source)
-    site.producer = nginx
-    site.enabled = True
-    site.resolve = lambda: site
+    site = generation_site(nginx, default_server=True, https=True, auth=False, waf=False, template=source)
     nginx.__dict__["sites"] = {("nginx", "web"): site}
     rendered = prepared_config(nginx)["sites/generated.conf"]
     assert content in rendered
@@ -489,3 +480,120 @@ def test_request_header_definition_drives_business_auth_and_waf(fresh_manager, m
     assert headers["x-forwarded-port"] == '\"\"'
     with pytest.raises(ContainerError, match="reserved"):
         nginx.validated_auth_headers({"x-forwarded-for": "forged"})
+
+
+@pytest.mark.parametrize("https", [False, True])
+@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("limit", [None, "10m", 0])
+def test_site_body_limit_is_inherited_by_public_and_origin_servers(fresh_manager, https, waf, limit):
+    nginx = fresh_manager.containers["nginx"]
+    site = generation_site(nginx, https=https, waf=waf, default_server=True,
+                           template_vars={} if limit is None else {"client_max_body_size": limit})
+    nginx.__dict__["sites"] = {site._declaration: site}
+    rendered = prepared_config(nginx)["sites/generated.conf"]
+    value = "1m" if limit is None else str(limit)
+    assert rendered.count('client_max_body_size "' + value + '";') == 1 + int(waf)
+    assert "client_max_body_size" in nginx.get_source_path("templates", "params.conf").read_text()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("left,right,compatible", [
+    ({}, {"client_max_body_size": "10m"}, True),
+    ({"client_max_body_size": "1m"}, {"client_max_body_size": "10m"}, False),
+    ({"client_max_body_size": 0}, {"client_max_body_size": 0}, True),
+    ({"client_max_body_size": 0}, {"client_max_body_size": "0"}, False),
+    ({"custom": {"nested": [1, 2]}}, {"custom": {"nested": [1, 2]}}, True),
+    ({"custom": [1]}, {"custom": [2]}, False),
+    ({"first": "kept"}, {"second": "kept"}, True),
+])
+def test_shared_hostname_merges_explicit_template_variables(
+        fresh_manager, tmp_path, left, right, compatible, reverse, waf):
+    nginx = fresh_manager.containers["nginx"]
+    from copy import deepcopy
+    declarations = [left, right]
+    original = deepcopy(declarations)
+    sites = []
+    for index, values in enumerate(declarations):
+        path = tmp_path / (str(index) + ".conf")
+        path.write_text("# local " + str(index) + " {{ template_vars | length }}\nlocation /route" + str(index) + " { return 204; }")
+        sites.append(generation_site(nginx, str(index), template=path, template_vars=values, waf=waf, default_server=index == 0))
+    if reverse:
+        sites.reverse()
+    nginx.__dict__["sites"] = {site._declaration: site for site in sites}
+    if compatible:
+        rendered = prepared_config(nginx)["sites/generated.conf"]
+        assert "# local 0 " + str(len(left)) in rendered
+        assert "# local 1 " + str(len(right)) in rendered
+        value = right.get("client_max_body_size", left.get("client_max_body_size", "1m"))
+        assert rendered.count('client_max_body_size "' + str(value) + '";') == 1 + int(waf)
+    else:
+        with pytest.raises(ContainerError, match="Conflicting nginx template variable"):
+            prepared_config(nginx)
+    assert declarations == original
+    for site in sites:
+        assert dict(site.template_vars) == dict(site._declaration.template_vars)
+
+
+def test_template_variable_conflict_does_not_disclose_values(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    sites = [generation_site(nginx, str(index), template_vars={"secret": value})
+             for index, value in enumerate(("private-one", "private-two"))]
+    nginx.__dict__["sites"] = {site._declaration: site for site in sites}
+    with pytest.raises(ContainerError) as error:
+        prepared_config(nginx)
+    assert "secret" in str(error.value)
+    assert "nginx" in str(error.value)
+    assert "private-one" not in str(error.value)
+    assert "private-two" not in str(error.value)
+
+
+def test_native_location_body_limit_can_override_site_default(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    source = tmp_path / "upload.conf"
+    source.write_text("location / { client_max_body_size 0; return 204; }")
+    site = generation_site(nginx, template=source, waf=True,
+                           template_vars={"client_max_body_size": "10m"})
+    nginx.__dict__["sites"] = {site._declaration: site}
+    rendered = prepared_config(nginx)["sites/generated.conf"]
+    assert rendered.count('client_max_body_size "10m";') == 2
+    assert rendered.count("client_max_body_size 0;") == 2
+
+
+def test_body_limit_is_one_quoted_token_and_rejects_control_characters(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    source = nginx.get_source_path("templates", "server.conf")
+    rendered = nginx._render_site_template(nginx, source,
+        make_site(template_vars={"client_max_body_size": '10m; include /other;'}))
+    assert 'client_max_body_size "10m; include /other;";' in rendered
+    with pytest.raises(ContainerError, match="control character"):
+        nginx._render_site_template(nginx, source,
+            make_site(template_vars={"client_max_body_size": "10m;\ninclude /other;"}))
+
+
+@pytest.mark.parametrize("values", [{}, {"client_max_body_size": "10m"},
+                                   {"client_max_body_size": 0}, {"client_max_body_size": None},
+                                   {"business_value": "kept"}])
+def test_body_limit_does_not_inject_or_change_template_variables(fresh_manager, values):
+    nginx = fresh_manager.containers["nginx"]
+    site = generation_site(nginx, template_vars=values)
+    assert dict(site.template_vars) == values
+    assert dict(site._declaration.template_vars) == values
+
+
+@pytest.mark.parametrize("waf", [False, True])
+def test_server_parameters_have_shared_defaults_and_explicit_overrides(fresh_manager, tmp_path, waf):
+    nginx = fresh_manager.containers["nginx"]
+    source = tmp_path / "custom.conf"
+    source.write_text("location / { proxy_read_timeout 7s; return 204; }")
+    values = {"proxy_request_buffering": "on", "proxy_buffering": "on",
+              "client_body_buffer_size": "4k", "proxy_connect_timeout": "11s",
+              "proxy_read_timeout": "12s", "proxy_send_timeout": "13s", "send_timeout": "14s"}
+    site = generation_site(nginx, template=source, template_vars=values, waf=waf, default_server=True)
+    nginx.__dict__["sites"] = {site._declaration: site}
+    rendered = prepared_config(nginx)["sites/generated.conf"]
+    for key, value in dict(values, client_max_body_size="1m", proxy_cache="off").items():
+        assert rendered.count(key + ' "' + value + '";') == 1 + int(waf)
+    assert rendered.count("proxy_read_timeout 7s;") == 1 + int(waf)
+    assert "fastcgi_max_temp_file_size" not in rendered
+    assert dict(site.template_vars) == values

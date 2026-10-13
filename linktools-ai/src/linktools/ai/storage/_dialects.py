@@ -493,8 +493,17 @@ class MySQLDialect(SQLiteDialect):
         if not rows:
             return None
         from sqlalchemy.dialects.mysql import insert
+        from sqlalchemy.exc import IntegrityError
 
         statement = insert(table).values([dict(row) for row in rows])
+        try:
+            await session.execute(statement)
+        except IntegrityError as error:
+            if _read_mysql_errno(error.orig) != 1062:
+                raise
+            # InnoDB rolls back the failed statement, keeping this transaction usable.
+        else:
+            return len(rows)
         column = index_elements[0]
         await session.execute(
             statement.on_duplicate_key_update(**{column: statement.inserted[column]})

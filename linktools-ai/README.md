@@ -775,7 +775,43 @@ page = await runtime.executions.list(
 history projections without loading a ModelRegistry or compiling Agents.
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
-or raw error diagnostics. `result()`, `history()/trace()`,
+or raw error diagnostics. Its optional `ExecutionInfo.capability_refs` contains
+immutable `linktools.ai.spec.CapabilityRef(kind, id, revision)` values from that
+execution's frozen Agent binding: selected tools, Skills, MCP servers, runtime
+capabilities and directly allowed child Agents (`kind="agent"`). The main Agent
+identity remains `agent_id`. An Agent with no selected capabilities returns `()`;
+non-Agent executions return `None`. `recent_executions()` exposes the same
+projection after authorizing each execution. This is the execution's bound
+capability set, not the current catalog and not evidence of an actual tool call,
+child execution, or Skill body read. MCP entries identify bound servers, not
+their expanded remote tool lists; built-in helper tools are not a separate
+catalog in this field. No descriptions, prompts, resource paths,
+MCP arguments or model configuration are included, and projection adds no
+repository or object reads. Existing `ExecutionInfo` constructors may omit the
+new field; it defaults to `None`.
+
+The same capability identity projection belongs to
+`AgentBindingContract.capability_refs`, so it is usable before persistence and
+after restore, without a Runtime or Trace UI. History delegates to this binding
+property rather than defining a second selection rule:
+
+```python
+binding = compiler.bind(compiled_agent, output=None).binding_contract
+refs = binding.capability_refs
+restored = AgentBindingContract.from_payload(binding.to_payload())
+assert restored.capability_refs == refs
+info = await runtime.history.inspect_execution(execution_id, principal=principal)
+# info.capability_refs describes this execution's binding, including derive overrides.
+```
+
+The projection preserves selected capability order and then direct child Agent
+references. It does not recursively include a child's selected capabilities or
+replace the separate main Agent/Task identity. A compiled Agent must first be
+bound to resolve exact direct child revisions; inspection never guesses them
+from a current catalog. TaskGraph Agent nodes use their own execution bindings;
+application-owned Tasks do not acquire inferred Agent capabilities.
+
+`result()`, `history()/trace()`,
 `transcript()/model_interactions()`, `task_graph()`,
 `list_execution_events()/list_task_events()`,
 `usage()/graph_usage()`, `attachment_facts()`,
