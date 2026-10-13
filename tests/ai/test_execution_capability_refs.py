@@ -12,9 +12,9 @@ from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup, SkillDefinition
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, ExecutionCapabilityRef, ExecutionInfo, Runtime, RuntimeHistory, RuntimeStorage, UsageSummary
+from linktools.ai.runtime import AgentTaskInput, ExecutionInfo, Runtime, RuntimeHistory, RuntimeStorage, UsageSummary
 from linktools.ai.runtime.state._contracts import ExecutionCandidate, ExecutionCandidatePage
-from linktools.ai.spec import AgentSpec, SkillSpec
+from linktools.ai.spec import AgentSpec, CapabilityRef, SkillSpec, capability_ref_payload
 from linktools.ai.task import Task, TaskGraph, TaskNode
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -82,6 +82,7 @@ async def test_safe_bound_refs_cover_every_kind_without_extra_reads(contribution
     principal = Principal("caller", "tenant", "service")
     info = await history.inspect_execution("execution", principal=principal)
     expected = tuple((pin.kind, pin.id, pin.revision) for pin in binding.selected) + (("agent", "child", 3),)
+    assert info.capability_refs == binding.capability_refs
     assert tuple((ref.kind, ref.id, ref.revision) for ref in info.capability_refs) == expected
     assert {ref.kind for ref in info.capability_refs} == {"agent", "tool", "skill", "mcp", "capability"}
     assert info.agent_id == "root"
@@ -102,6 +103,46 @@ async def test_safe_bound_refs_cover_every_kind_without_extra_reads(contribution
     old_payload.pop("subagent_bindings", None)
     old_history, _ = _history(_execution(binding=AgentBindingContract.from_payload(old_payload)))
     assert (await old_history.inspect_execution("execution", principal=principal)).capability_refs == info.capability_refs
+
+
+@pytest.mark.asyncio
+async def test_bound_refs_share_public_identity_and_restore_without_current_filter(contributions):
+    compiler = _compiler(contributions)
+    bound = compiler.bind(compiler.compile(AgentSpec("root")))
+    contract = bound.binding_contract
+    payload = contract.to_payload()
+    digest = contract.binding_digest
+    refs = contract.capability_refs
+    assert all(type(ref) is CapabilityRef for ref in refs)
+    assert tuple(asdict(ref) for ref in refs if ref.kind != "agent") == tuple(
+        capability_ref_payload(pin.kind, pin.id, pin.contract) for pin in contract.selected
+    )
+
+    def unexpected(agent, item):
+        raise AssertionError("restored identities must not use the current selection filter")
+
+    decoded = AgentBindingContract.from_payload(payload)
+    restored = _compiler(contributions, unexpected).restore(decoded)
+    assert restored.binding_contract.capability_refs == refs
+    assert decoded.to_payload() == payload and decoded.binding_digest == digest
+    assert contract.to_payload() == payload and contract.binding_digest == digest
+    history, _ = _history(_execution(binding=restored.binding_contract))
+    principal = Principal("caller", "tenant", "service")
+    assert (await history.inspect_execution("execution", principal=principal)).capability_refs == refs
+
+
+@pytest.mark.asyncio
+async def test_bound_refs_preserve_generic_capability_order_without_recursing_children(contributions):
+    compiler = _compiler(contributions)
+    bound = compiler.bind(compiler.compile(AgentSpec("root"))).binding_contract
+    extra = next(pin for pin in bound.selected if pin.kind == "capability")
+    other = replace(extra, id="aaa-other")
+    child = compiler.bind_subagent(compiler.compile(AgentSpec("child", revision=3))).binding_contract
+    contract = replace(bound, selected=(*bound.selected, other), subagent_bindings=(child,))
+    assert [ref.id for ref in contract.capability_refs if ref.kind == "capability"] == ["extra", "aaa-other"]
+    assert contract.capability_refs[-1] == CapabilityRef("agent", "child", 3)
+    assert len(contract.capability_refs) == len(contract.selected) + len(contract.subagents)
+    assert contract.capability_refs == replace(contract, subagent_bindings=()).capability_refs
 
 
 @pytest.mark.asyncio
@@ -138,7 +179,7 @@ def test_execution_info_earlier_constructor_keeps_optional_refs_default():
     info = ExecutionInfo("execution", "agent", "root", None, ExecutionStatus.SUCCEEDED,
                          ExecutionLineageKind.RUN, None, "execution", None, None, now, now, None)
     assert info.capability_refs is None
-    assert asdict(ExecutionCapabilityRef("skill", "guide", 2)) == {"kind": "skill", "id": "guide", "revision": 2}
+    assert asdict(CapabilityRef("skill", "guide", 2)) == {"kind": "skill", "id": "guide", "revision": 2}
 
 
 @pytest.mark.asyncio
@@ -177,7 +218,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
         task_info = await runtime.history.inspect_execution(nodes["prepare"].execution_id, principal=principal)
         assert task_info.binding_kind == "task" and task_info.capability_refs is None
         info = await runtime.history.inspect_execution(execution_id, principal=principal)
-        assert info.capability_refs == (ExecutionCapabilityRef("skill", "guide", 2),)
+        assert info.capability_refs == (CapabilityRef("skill", "guide", 2),)
         assert info.agent_id == "root"
 
     changed = CapabilityGroup("bound-ref-test")

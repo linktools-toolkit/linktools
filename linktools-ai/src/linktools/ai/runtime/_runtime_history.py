@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
 
 from linktools.core import environ
 
@@ -35,6 +34,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectStore, StoredPayload, read_object
+from ..spec import CapabilityRef
 from ..task import (
     TaskBindingContract,
     TaskEvent,
@@ -90,15 +90,6 @@ _logger = environ.get_logger("ai.runtime.history")
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionCapabilityRef:
-    """Safe identity of a capability bound to one execution, not proof of use."""
-
-    kind: Literal["agent", "tool", "skill", "mcp", "capability"]
-    id: str
-    revision: int
-
-
-@dataclass(frozen=True, slots=True)
 class ExecutionInfo:
     """Execution metadata required by local diagnostics."""
 
@@ -121,7 +112,7 @@ class ExecutionInfo:
     terminal_at: datetime | None = None
     binding_digest: str | None = None
     usage: UsageSummary | None = None
-    capability_refs: tuple[ExecutionCapabilityRef, ...] | None = None
+    capability_refs: tuple[CapabilityRef, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
@@ -215,13 +206,7 @@ def _project_execution_info(
     binding = record.binding
     capability_refs = None
     if isinstance(binding, AgentBindingContract):
-        capability_refs = tuple(
-            ExecutionCapabilityRef(pin.kind, pin.id, pin.revision)
-            for pin in binding.selected
-        ) + tuple(
-            ExecutionCapabilityRef("agent", ref.id, ref.revision)
-            for ref in binding.subagents
-        )
+        capability_refs = binding.capability_refs
     return ExecutionInfo(
         execution_id=record.execution_id,
         binding_kind=record.binding_kind,
@@ -1249,4 +1234,4 @@ def _terminal_error_code(record: ExecutionRecord) -> str:
     return code.value
 
 
-__all__ = ["ExecutionCapabilityRef", "ExecutionInfo", "RuntimeHistory"]
+__all__ = ["ExecutionInfo", "RuntimeHistory"]
