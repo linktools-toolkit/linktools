@@ -32,8 +32,8 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
     def chown(path: "PathType", user: "str | int | None" = None, recursive: bool = False, *,
               group: "str | int | None" = None) -> str:
         path = config.cast(path, type="path")
-        if user is not None and str(user) != "":
-            options = {"group": group} if group is not None else {}
+        if not isinstance(user, type(None)) and str(user) != "":
+            options = {} if isinstance(group, type(None)) else {"group": group}
             container.add_start_hook(("chown", str(path), str(user), bool(recursive), str(group)),
                                      lambda: container.runtime.chown(path, user, recursive=recursive, **options),
                                      name="chown", order=200, source="builtin")

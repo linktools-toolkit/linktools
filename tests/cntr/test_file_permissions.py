@@ -13,6 +13,7 @@ from linktools.cntr.artifacts import stage_files, sha256_of
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.runtime.process import RuntimeProcessFactory
 from linktools.cntr.runtime import process as process_module
+from linktools.runtime import lazy_load
 
 
 @pytest.fixture
@@ -163,6 +164,65 @@ def test_template_ownership_accepts_lazy_numeric_ids_and_root(fresh_manager, tmp
     assert len(hooks) == 1
     hooks[0]()
     assert calls == [("/private/home", str(uid), "87654", True)]
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+@pytest.mark.parametrize("group_only", [False, True])
+def test_template_nullable_ownership_keeps_placeholder(fresh_manager, tmp_path, monkeypatch, lazy, group_only):
+    owner = fresh_manager.containers["flare"]
+    monkeypatch.setattr(owner, "add_start_hook", lambda *args, **kwargs: pytest.fail("ownership hook"))
+    template = tmp_path / "compose.yml"
+    template.write_text('{{ TARGET | chown(group=GROUP) }}' if group_only else
+                        '{{ TARGET | chown(OWNER, group=GROUP) }}')
+    user = lazy_load(lambda: None) if lazy else None
+    group = lazy_load(lambda: 87654) if lazy else 87654
+    assert owner.render_template(template, TARGET=str(tmp_path), OWNER=user, GROUP=group) == str(tmp_path)
+
+
+@pytest.mark.parametrize("user", [0, 98765, "configured-user"])
+def test_template_lazy_ownership_omits_none_group(fresh_manager, tmp_path, monkeypatch, user):
+    owner = fresh_manager.containers["flare"]
+    hooks, calls = [], []
+    monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs: hooks.append(hook))
+    monkeypatch.setattr(owner.runtime, "chown", lambda path, user, **kwargs: calls.append((str(user), kwargs)))
+    template = tmp_path / "compose.yml"
+    template.write_text('{{ TARGET | chown(OWNER, group=GROUP) }}')
+    assert owner.render_template(template, TARGET=str(tmp_path),
+                                 OWNER=lazy_load(lambda: user), GROUP=lazy_load(lambda: None)) == str(tmp_path)
+    assert len(hooks) == 1
+    assert calls == []
+    hooks[0]()
+    assert calls == [(str(user), {"recursive": False})]
+
+
+@pytest.mark.parametrize("user", [0, 98765, "configured-user"])
+@pytest.mark.parametrize("group", [None, 0])
+def test_runtime_lazy_ownership_group_matches_resolved_value(ownership_runtime, monkeypatch, user, group):
+    runtime, calls, path = ownership_runtime
+    monkeypatch.setattr(process_module, "get_uid", lambda user: 1234)
+    monkeypatch.setattr(process_module, "get_gid", lambda user: 4321)
+    runtime.chown(path, user, group=group)
+    runtime.chown(path, lazy_load(lambda: user), group=lazy_load(lambda: group))
+    assert calls[0] == calls[1]
+
+
+def test_lazy_ownership_name_none_is_not_a_placeholder(fresh_manager, ownership_runtime, tmp_path, monkeypatch):
+    import grp
+
+    owner = fresh_manager.containers["flare"]
+    runtime, calls, path = ownership_runtime
+    hooks = []
+    monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs: hooks.append(hook))
+    monkeypatch.setattr(owner.runtime, "chown", runtime.chown)
+    monkeypatch.setattr(process_module, "get_uid", lambda user: 1234)
+    monkeypatch.setattr(grp, "getgrnam", lambda group: SimpleNamespace(gr_gid=4321))
+    template = tmp_path / "compose.yml"
+    template.write_text('{{ TARGET | chown(OWNER, group=GROUP) }}')
+    assert owner.render_template(template, TARGET=str(path),
+                                 OWNER=lazy_load(lambda: "None"), GROUP=lazy_load(lambda: "None")) == str(path)
+    assert len(hooks) == 1
+    hooks[0]()
+    assert calls[0][0] == ("chown", "1234:4321", str(path))
 
 
 

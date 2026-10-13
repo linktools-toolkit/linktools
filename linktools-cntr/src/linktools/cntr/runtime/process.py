@@ -184,7 +184,7 @@ class RuntimeProcessFactory:
         numeric_user = str(user).isdigit()
         uid = int(str(user)) if numeric_user else get_uid(user)
         status = os.stat(path)
-        if group is None:
+        if isinstance(group, type(None)):
             gid = None if numeric_user else get_gid(user)
         elif str(group).isdigit():
             gid = int(str(group))
