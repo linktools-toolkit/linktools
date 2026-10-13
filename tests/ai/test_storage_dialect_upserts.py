@@ -321,3 +321,47 @@ asyncio.run(check())
         env={**os.environ, "LINKTOOLS_PATH": str(tmp_path)},
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("errno", (1048, 1452, 3819, None))
+async def test_mysql_batch_preserves_non_duplicate_integrity_errors(errno: int | None) -> None:
+    from linktools.ai.storage import MySQLDialect
+    from sqlalchemy.exc import IntegrityError
+
+    error = IntegrityError("insert", {}, Exception(errno, "value contains 1062"))
+
+    class FailingSession(_Session):
+        async def execute(self, statement: ClauseElement) -> _Result:
+            self.statements.append(statement)
+            raise error
+
+    session = FailingSession()
+    with pytest.raises(IntegrityError) as caught:
+        await _execute(MySQLDialect(), session, _table(False), "insert_ignore_conflict_many", _rows(False))
+    assert caught.value is error
+    assert len(session.statements) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duplicate", (False, True))
+async def test_mysql_batch_insert_budget_and_duplicate_fallback(duplicate: bool) -> None:
+    from linktools.ai.storage import MySQLDialect
+    from sqlalchemy.dialects import mysql
+    from sqlalchemy.exc import IntegrityError
+
+    class Session(_Session):
+        async def execute(self, statement: ClauseElement) -> _Result:
+            self.statements.append(statement)
+            if duplicate and len(self.statements) == 1:
+                raise IntegrityError("insert", {}, Exception(1062, "Duplicate entry"))
+            return _Result()
+
+    session, rows = Session(), _rows(False)
+    result = await _execute(MySQLDialect(), session, _table(False), "insert_ignore_conflict_many", rows)
+    assert result is None if duplicate else result == len(rows)
+    statements = [str(statement.compile(dialect=mysql.dialect())) for statement in session.statements]
+    assert len(statements) == (2 if duplicate else 1)
+    assert "ON DUPLICATE KEY" not in statements[0]
+    if duplicate:
+        assert "ON DUPLICATE KEY UPDATE" in statements[1]

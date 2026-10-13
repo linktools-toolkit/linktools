@@ -66,20 +66,41 @@ async def _assert_writes(engine: AsyncEngine) -> None:
         ) for index in range(8))
         statements.clear()
         await metrics.record_observations(observations)
-        assert counted() == ({"INSERT": 1, "SELECT": 1} if engine.dialect.name == "mysql"
-                             else {"INSERT": 1})
+        assert counted() == {"INSERT": 1}
         statements.clear()
         await metrics.record_observations(observations)
-        assert counted() == {"INSERT": 1, "SELECT": 1}
+        replay_inserts = 2 if engine.dialect.name == "mysql" else 1
+        assert counted() == {"INSERT": replay_inserts, "SELECT": 1}
+        statements.clear()
+        mixed = replace(observations[0], observation_id="mixed-new")
+        await metrics.record_observations((observations[0], mixed))
+        assert counted() == {"INSERT": replay_inserts, "SELECT": 1}
+        assert await metrics.get_observation("mixed-new") == mixed
+        statements.clear()
         with pytest.raises(AIError, match="STORAGE_CONFLICT"):
             await metrics.record_observations((
                 replace(observations[0], observation_id="rolled-back"),
                 replace(observations[0], status="FAILED"),
             ))
+        assert counted() == {"INSERT": replay_inserts, "SELECT": 1}
         assert await metrics.get_observation("rolled-back") is None
         await asyncio.gather(*(metrics.record_observations(observations) for _ in range(3)))
         for observation in observations:
             assert await metrics.get_observation(observation.observation_id) == observation
+
+        concurrent = replace(observations[0], observation_id="concurrent-new")
+        await asyncio.gather(*(metrics.record_observations((concurrent,)) for _ in range(3)))
+        assert await metrics.get_observation(concurrent.observation_id) == concurrent
+        contested = replace(observations[0], observation_id="concurrent-conflict")
+        alternatives = (contested, replace(contested, status="FAILED"))
+        outcomes = await asyncio.gather(*(
+            metrics.record_observations((candidate,)) for candidate in alternatives
+        ), return_exceptions=True)
+        assert sum(outcome is None for outcome in outcomes) == 1
+        failures = [outcome for outcome in outcomes if isinstance(outcome, AIError)]
+        assert len(failures) == 1 and failures[0].code is ErrorCode.STORAGE_CONFLICT
+        winner = alternatives[outcomes.index(None)]
+        assert await metrics.get_observation(contested.observation_id) == winner
 
         budgets = state.execution.budgets
         await budgets.ensure("scope", RunBudget(model_requests=10, tool_calls=10, total_tokens=100))
