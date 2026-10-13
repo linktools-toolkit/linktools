@@ -88,7 +88,6 @@ class Container(BaseContainer):
     def configs(self) -> "dict[str, Any]":
         return dict(
             NGINX_TAG="stable-alpine",
-            NGINX_CLIENT_MAX_BODY_SIZE=ConfigField(default="1m", cast=str),
             NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
             NGINX_ROOT_DOMAIN=ConfigField.chain(
                 AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), default="_",
@@ -312,7 +311,7 @@ class Container(BaseContainer):
     def _render_site_template(self, container: "BaseContainer", source: "PathType",
                         site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
                         sites: "Sequence[ResolvedSite] | None" = None,
-                        route_auth: bool = False) -> str:
+                        route_auth: bool = False, block: "str | None" = None) -> str:
         """Render one location template with unambiguous local/nginx namespaces."""
         nginx = self
         source = Path(source).absolute()
@@ -338,7 +337,8 @@ class Container(BaseContainer):
         if route_auth:
             extra["route_auth"] = True
         try:
-            return environment.get_template(template_name).render(
+            template = environment.get_template(template_name)
+            context = dict(
                 site=site,
                 container=container,
                 nginx=nginx,
@@ -350,6 +350,9 @@ class Container(BaseContainer):
                 template_vars=site.template_vars,
                 **extra,
             )
+            if block is not None:
+                return "".join(template.blocks[block](template.new_context(context)))
+            return template.render(context)
         except TemplateError as exc:
             raise ContainerTemplateError(
                 f"Invalid nginx template {source} for {container.name}: {exc}"
@@ -383,7 +386,7 @@ class Container(BaseContainer):
                 producer=self, var_name="default",
                 server_name='""', default_server=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
                 waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={},
-                template_vars={"client_max_body_size": self.get_config("NGINX_CLIENT_MAX_BODY_SIZE")},
+                template_vars={},
                 template=self.get_source_path("templates", "index.conf"), proxy=None,
             ))
         from collections import OrderedDict
@@ -400,7 +403,9 @@ class Container(BaseContainer):
             def routing_policy(site):
                 return (
                     site.https, site.waf, site.waf_bypass,
-                    str(site.template_vars["client_max_body_size"]),
+                    self._render_site_template(
+                        site.producer, self.get_source_path("templates", "server.conf"),
+                        site, block="body_limit") if len(sites) > 1 else None,
                     site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
                     site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
                 )

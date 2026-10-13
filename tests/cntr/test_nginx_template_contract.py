@@ -507,7 +507,7 @@ def test_shared_hostname_requires_compatible_body_limits(fresh_manager, tmp_path
         path = tmp_path / (str(index) + ".conf")
         path.write_text("location /route" + str(index) + " { return 204; }")
         sites.append(generation_site(nginx, str(index), template=path,
-            template_vars={"client_max_body_size": limit, "business_value": index}))
+            template_vars={"business_value": index, **({} if limit is None else {"client_max_body_size": limit})}))
     nginx.__dict__["sites"] = {site._declaration: site for site in sites}
     if compatible:
         assert "location /route1" in prepared_config(nginx)["sites/generated.conf"]
@@ -539,42 +539,21 @@ def test_body_limit_is_one_quoted_token_and_rejects_control_characters(fresh_man
             make_site(template_vars={"client_max_body_size": "10m;\ninclude /other;"}))
 
 
-@pytest.mark.parametrize("configured,override,expected", [
-    ("2m", None, "2m"), ("2m", "10m", "10m"), ("2m", 0, 0), (0, None, "0"),
-])
-def test_body_limit_resolves_config_default_once_without_mutating_declaration(
-        fresh_manager, configured, override, expected):
+@pytest.mark.parametrize("values", [{}, {"client_max_body_size": "10m"},
+                                   {"client_max_body_size": 0}, {"client_max_body_size": None},
+                                   {"business_value": "kept"}])
+def test_body_limit_does_not_inject_or_change_template_variables(fresh_manager, values):
     nginx = fresh_manager.containers["nginx"]
-    fresh_manager.env_config.set("NGINX_CLIENT_MAX_BODY_SIZE", configured)
-    values = {"client_max_body_size": override, "business_value": "kept"}
     site = generation_site(nginx, template_vars=values)
-    assert site.template_vars["client_max_body_size"] == expected
-    assert site.template_vars["business_value"] == "kept"
-    assert values == {"client_max_body_size": override, "business_value": "kept"}
-    fresh_manager.env_config.set("NGINX_CLIENT_MAX_BODY_SIZE", "3m")
-    assert site.template_vars["client_max_body_size"] == expected
+    assert dict(site.template_vars) == values
+    assert dict(site._declaration.template_vars) == values
 
 
-def test_disabled_site_does_not_resolve_body_limit_default(fresh_manager, monkeypatch):
+@pytest.mark.parametrize("values,expected", [({}, "1m"), ({"client_max_body_size": 0}, "0"),
+                                            ({"client_max_body_size": None}, "None")])
+def test_body_limit_policy_block_does_not_render_business(fresh_manager, values, expected):
     nginx = fresh_manager.containers["nginx"]
-    site = generation_site(nginx, server_name="")
-    monkeypatch.setattr(site.producer, "get_config", lambda *args, **kwargs: pytest.fail("disabled config read"))
-    assert dict(site.template_vars) == {}
-
-
-@pytest.mark.parametrize("explicit,compatible", [("2m", True), ("1m", False)])
-def test_shared_hostname_uses_configured_body_default(fresh_manager, tmp_path, explicit, compatible):
-    nginx = fresh_manager.containers["nginx"]
-    fresh_manager.env_config.set("NGINX_CLIENT_MAX_BODY_SIZE", "2m")
-    first_template, second_template = tmp_path / "a.conf", tmp_path / "b.conf"
-    first_template.write_text("location /a { return 204; }")
-    second_template.write_text("location /b { return 204; }")
-    first = generation_site(nginx, "a", template=first_template, default_server=True)
-    second = generation_site(nginx, "b", template=second_template,
-                             template_vars={"client_max_body_size": explicit})
-    nginx.__dict__["sites"] = {site._declaration: site for site in (first, second)}
-    if compatible:
-        assert prepared_config(nginx)["sites/generated.conf"].count('client_max_body_size "2m";') == 1
-    else:
-        with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
-            prepared_config(nginx)
+    source = nginx.get_source_path("templates", "server.conf")
+    site = make_site(template_vars=values)
+    assert nginx._render_site_template(nginx, source, site, block="body_limit").strip() == (
+        'client_max_body_size "' + expected + '";')

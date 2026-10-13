@@ -347,11 +347,11 @@ must not mutate or restore historical derived ACL/OIDC settings.
 
 ## Request body limits
 
-The nginx container configuration defines `NGINX_CLIENT_MAX_BODY_SIZE="1m"`
-once, matching nginx's native default. Site template variables resolve this
-default together with their explicit overrides before grouping and rendering.
-The common proxy snippet does not silently raise that limit. Configure an individual site's
-server policy using the existing endpoint template variables:
+Template variables are passed through unchanged. The server template uses an
+explicit `client_max_body_size` key when present, otherwise `1m`, matching
+nginx's native default. The common proxy snippet does not silently raise that
+limit. Configure an individual site's server policy using the existing endpoint
+template variables:
 
 ```python
 endpoint(self, domain=domain, proxy="http://app:8080",
@@ -360,7 +360,12 @@ endpoint(self, domain=domain, proxy="http://app:8080",
 
 The value applies to the public server and its WAF origin server; the WAF
 forwarding location inherits it. Sites sharing a hostname must agree on this
-server policy. Native location directives still override it, including an
+server policy: the rendered body-limit directive must match. Omitted and explicit
+`1m` agree, whereas omitted and `10m` conflict. Numeric and string `0` agree;
+equivalent unit spellings such as
+`1m` and `1024k` are not normalized. Unrelated template variables are not
+compared. A present key is passed through, so invalid values remain subject to
+native nginx validation. Native location directives still override it, including an
 explicit `0` (no nginx body-size limit). The former proxy-snippet default was
 `10240m`; sites without an explicit limit now use `1m`. Other existing explicit
 location directives remain unchanged. For a larger native location behind WAF,
