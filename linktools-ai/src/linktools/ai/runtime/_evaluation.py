@@ -532,18 +532,33 @@ class RuntimeEvaluations:
     ) -> None:
         try:
             while not self._closed:
-                await self._tick(experiment_id, engine, principal, trial_scope=trial_scope)
-                record = await self._record(experiment_id, principal, allow_expired=True)
-                if record.gate != "open" and all(item.released for item in record.intents):
+                try:
+                    await self._tick(experiment_id, engine, principal, trial_scope=trial_scope)
+                    record = await self._record(experiment_id, principal, allow_expired=True)
+                    if record.gate != "open" and all(item.released for item in record.intents):
+                        try:
+                            await self._require_content(record, principal)
+                        except AIError as error:
+                            if error.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
+                                return
+                            raise
+                    view = await self._inspect(experiment_id, principal)
+                    if view.completion in {"complete", "cancelled", "needs_attention"}:
+                        return
+                except AIError as error:
+                    if error.code is not ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
+                        raise
+                    record = await self._record(experiment_id, principal, allow_expired=True)
                     try:
                         await self._require_content(record, principal)
-                    except AIError as error:
-                        if error.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
-                            return
+                    except AIError as expired:
+                        if expired.code is not ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
+                            raise
+                    else:
                         raise
-                view = await self._inspect(experiment_id, principal)
-                if view.completion in {"complete", "cancelled", "needs_attention"}:
-                    return
+                    # A lifetime may end after this pass's validation. The next
+                    # pass must still cancel and release its admitted work.
+                    await self._state.close_reservation_gate(experiment_id)
                 await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             raise

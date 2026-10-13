@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared read-only Session timeline projection."""
+"""Session timeline capture, coordinated refresh, and read-only projection."""
 
 import json
-from collections.abc import AsyncIterator
-from typing import Protocol, cast
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from typing import Literal, Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
@@ -25,11 +26,15 @@ from ._input import stored_user_input_view
 from .service_api import SessionTurn, SessionTurnItem
 from .state._contracts import (
     ConversationRepositories,
+    ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
     SessionTurnCommitRef,
     SessionTurnRef,
 )
+from .state._conversation_repositories import SessionRepositoryImpl
+from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._store import StateGroupTransaction
 from .state._views import project_session_history_message
 
 _TIMELINE_PROJECTION_VERSION = 1
@@ -210,6 +215,139 @@ async def _timeline_blocks(
     return tuple(reversed(newest_first)), next_coordinate
 
 
+_TimelineBlocks = tuple[tuple[SessionRecord, tuple[SessionTurnRef, ...]], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTimelineCapture:
+    root: SessionRecord
+    blocks: _TimelineBlocks
+    next_coordinate: tuple[str, int] | None
+    executions: Mapping[str, ExecutionRecord]
+    commits: dict[tuple[str, int], SessionTurnCommitRef]
+
+
+class _ActiveSessionAdmission(Exception):
+    def __init__(self, record: SessionRecord) -> None:
+        self.record = record
+
+
+async def _capture_timeline_state(
+    conversation: ConversationRepositories,
+    executions: ExecutionRepository,
+    session_id: str,
+    *,
+    tenant_id: str,
+    cursor: str | None,
+    cursor_signer: CursorSigner,
+    limit: int,
+    refresh_phase: Literal["initial", "final"] | None = None,
+    transcript_store: SessionTimelineTranscriptStore | None = None,
+) -> SessionTimelineCapture:
+    async def read_blocks() -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
+        root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
+        if root is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if refresh_phase == "initial" and root.active_execution_id is not None:
+            # Admission coordination must leave this scope before validation or I/O.
+            raise _ActiveSessionAdmission(root)
+        if refresh_phase is not None and transcript_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        page_limit = validate_page_limit(limit)
+        coordinate = _decode_timeline_cursor(
+            cursor, tenant_id=tenant_id, session_id=session_id, signer=cursor_signer,
+        )
+        blocks, next_coordinate = await _timeline_blocks(
+            conversation, root, coordinate=coordinate, limit=page_limit,
+        )
+        return root, blocks, next_coordinate
+
+    async def execution_records(
+        root: SessionRecord, blocks: _TimelineBlocks,
+    ) -> Mapping[str, ExecutionRecord]:
+        ids = tuple(ref.execution_id for _record, refs in blocks for ref in refs)
+        if refresh_phase is not None and root.active_execution_id is not None:
+            ids += (root.active_execution_id,)
+        ids = tuple(dict.fromkeys(ids))
+        if not ids:
+            return {}
+        records = await executions.get_many(ids, tenant_id=tenant_id)
+        if len(records) != len(ids):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return records
+
+    async def commit_records(
+        blocks: _TimelineBlocks,
+    ) -> dict[tuple[str, int], SessionTurnCommitRef]:
+        commits: dict[tuple[str, int], SessionTurnCommitRef] = {}
+        for record, refs in blocks:
+            if not refs:
+                continue
+            values = await conversation.sessions.list_timeline_commits(
+                record.session_id, tenant_id=conversation.sessions.tenant_id,
+                start_turn_seq=refs[0].turn_seq,
+                end_turn_seq=refs[-1].turn_seq + 1,
+            )
+            for value in values:
+                commits[(record.session_id, value.turn_seq)] = value
+        return commits
+
+    # Custom owners may schedule child tasks or perform their own I/O boundaries.
+    if (type(conversation.sessions) is not SessionRepositoryImpl
+            or type(executions) is not ExecutionRepositoryImpl):
+        root, blocks, next_coordinate = await read_blocks()
+        records = await execution_records(root, blocks)
+        commits = await commit_records(blocks)
+        return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+
+    session_store = conversation.sessions.state_store
+    execution_store = executions.state_store
+    if session_store.storage_group is execution_store.storage_group:
+        async def read(_group: StateGroupTransaction) -> SessionTimelineCapture:
+            root, blocks, next_coordinate = await read_blocks()
+            records = await execution_records(root, blocks)
+            commits = await commit_records(blocks)
+            return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+
+        return await session_store.storage_group.read_many(
+            (session_store, execution_store), read,
+        )
+
+    # Separate routes keep their own snapshots; no cross-database scope is implied.
+    root, blocks, next_coordinate = await session_store.read(lambda _transaction: read_blocks())
+    records = await execution_records(root, blocks)
+    commits = await session_store.read(lambda _transaction: commit_records(blocks))
+    return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+
+
+async def capture_session_refresh(
+    conversation: ConversationRepositories,
+    executions: ExecutionRepository,
+    session_id: str,
+    *,
+    tenant_id: str,
+    cursor: str | None,
+    cursor_signer: CursorSigner,
+    limit: int,
+    reconcile: Callable[[SessionRecord], Awaitable[SessionRecord]],
+    transcript_store: SessionTimelineTranscriptStore | None,
+) -> SessionTimelineCapture:
+    """Capture authorized metadata, reconciling admission once outside read scopes."""
+    try:
+        return await _capture_timeline_state(
+            conversation, executions, session_id, tenant_id=tenant_id,
+            cursor=cursor, cursor_signer=cursor_signer, limit=limit,
+            refresh_phase="initial", transcript_store=transcript_store,
+        )
+    except _ActiveSessionAdmission as admission:
+        await reconcile(admission.record)
+    return await _capture_timeline_state(
+        conversation, executions, session_id, tenant_id=tenant_id,
+        cursor=cursor, cursor_signer=cursor_signer, limit=limit,
+        refresh_phase="final", transcript_store=transcript_store,
+    )
+
+
 async def project_session_timeline(
     conversation: ConversationRepositories,
     executions: ExecutionRepository,
@@ -230,52 +368,43 @@ async def project_session_timeline(
     if header is None:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
-    root = await conversation.sessions.get(
-        session_id,
-        tenant_id=principal.tenant_id,
-    )
-    if root is None:
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-
-    coordinate = _decode_timeline_cursor(
-        cursor,
-        tenant_id=principal.tenant_id,
-        session_id=session_id,
-        signer=cursor_signer,
-    )
-    blocks, next_coordinate = await _timeline_blocks(
-        conversation,
-        root,
-        coordinate=coordinate,
+    state = await _capture_timeline_state(
+        conversation, executions, session_id,
+        tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
         limit=limit,
     )
+    return await project_captured_session_timeline(
+        state, transcript_store, cursor_signer, session_id=session_id,
+        tenant_id=principal.tenant_id, transcript_tenant_id=conversation.sessions.tenant_id,
+    )
+
+
+async def project_captured_session_timeline(
+    state: SessionTimelineCapture,
+    transcript_store: SessionTimelineTranscriptStore,
+    cursor_signer: CursorSigner,
+    *,
+    session_id: str,
+    tenant_id: str,
+    transcript_tenant_id: str,
+) -> Page[SessionTurn]:
+    """Load transcript bodies after the captured metadata scope has closed."""
+    blocks = state.blocks
+    next_coordinate = state.next_coordinate
     refs = tuple(ref for _record, values in blocks for ref in values)
     if not refs:
         return Page((), None)
-    execution_ids = tuple(dict.fromkeys(ref.execution_id for ref in refs))
-    execution_records = await executions.get_many(
-        execution_ids,
-        tenant_id=principal.tenant_id,
-    )
-    if len(execution_records) != len(execution_ids):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    commits: dict[tuple[str, int], SessionTurnCommitRef] = {}
+    execution_records = state.executions
+    commits = state.commits
     messages: dict[str, tuple[ModelMessage, ...]] = {}
     message_bases: dict[str, int] = {}
     for record, values in blocks:
         if not values:
             continue
-        start = values[0].turn_seq
-        end = values[-1].turn_seq + 1
-        committed = await conversation.sessions.list_timeline_commits(
-            record.session_id,
-            tenant_id=conversation.sessions.tenant_id,
-            start_turn_seq=start,
-            end_turn_seq=end,
+        committed = tuple(
+            value for (source_id, _sequence), value in commits.items()
+            if source_id == record.session_id
         )
-        for item in committed:
-            commits[(record.session_id, item.turn_seq)] = item
         if not committed:
             continue
         if record.continuation is None:
@@ -290,7 +419,7 @@ async def project_session_timeline(
                     async for item in transcript_store.iter_conversation_message_range(
                         history_id=record.history_id,
                         agent_run_id=record.continuation.agent_run_id,
-                        tenant_id=conversation.sessions.tenant_id,
+                        tenant_id=transcript_tenant_id,
                         start=range_start,
                         end=range_end,
                     )
@@ -341,7 +470,7 @@ async def project_session_timeline(
         None
         if next_coordinate is None
         else _timeline_cursor(
-            tenant_id=principal.tenant_id,
+            tenant_id=tenant_id,
             session_id=session_id,
             source_session_id=next_coordinate[0],
             before_turn_seq=next_coordinate[1],
@@ -351,4 +480,10 @@ async def project_session_timeline(
     return Page(tuple(turns), next_cursor)
 
 
-__all__ = ["SessionTimelineTranscriptStore", "project_session_timeline"]
+__all__ = [
+    "SessionTimelineCapture",
+    "SessionTimelineTranscriptStore",
+    "capture_session_refresh",
+    "project_captured_session_timeline",
+    "project_session_timeline",
+]

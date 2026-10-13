@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.core import ApprovalStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._plan import RuntimePlanStore
@@ -23,8 +24,6 @@ from linktools.ai.runtime.state._contracts import (
     ApprovalRecord,
     ContextProjection,
     LoadedModelContext,
-    TranscriptHeadRecord,
-    TranscriptSeekDimension,
 )
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._filesystem_transaction import _FilesystemTransaction
@@ -376,45 +375,41 @@ async def test_session_model_context_reuses_observed_projection(
     assert projection_reads == 1
 
 
-async def test_message_spans_pass_observed_head_to_seek(
+async def test_message_spans_keep_the_observed_head_without_reading_a_new_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = TranscriptRepository(
-        object(),  # type: ignore[arg-type]
-        object_store=None,
-        namespace="io-history",
-        tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION,
-    )
-    head = replace(repository.empty_head("run"), message_count=1)
-    head_reads = 0
+    from .test_session_history_projection import _materialize, _session
 
-    async def get_head(owner_id: str) -> TranscriptHeadRecord | None:
-        nonlocal head_reads
-        assert owner_id == "run"
-        head_reads += 1
-        return head
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="observed-span-head", tenant_id="tenant")
+    try:
+        session = await state.conversation.sessions.create(_session())
+        assert session.history_id is not None
+        await _materialize(state, "first", tuple(f"prompt:{index}" for index in range(80)))
+        repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository
+        head = await repository.get_head(session.history_id)
+        assert head is not None
+        await _materialize(state, "later", ("two",))
 
-    async def stop_at_seek(
-        owner_id: str,
-        view_index: int,
-        *,
-        dimension: TranscriptSeekDimension = TranscriptSeekDimension.MESSAGE,
-        observed_head: TranscriptHeadRecord | None = None,
-    ) -> int | None:
-        assert owner_id == "run"
-        assert view_index == 0
-        assert dimension is TranscriptSeekDimension.MESSAGE
-        assert observed_head is head
-        raise RuntimeError("seek-observed")
+        async def reject_head_read(*_args, **_kwargs):
+            raise AssertionError("a captured head must not be refreshed")
 
-    monkeypatch.setattr(repository, "get_head", get_head)
-    monkeypatch.setattr(repository, "_seek_fact_sequence", stop_at_seek)
-
-    with pytest.raises(RuntimeError, match="seek-observed"):
-        await repository.load_message_spans("run", ((0, 1),))
-
-    assert head_reads == 1
+        monkeypatch.setattr(repository, "get_head_in_transaction", reject_head_read)
+        spans = await repository.load_message_spans(
+            session.history_id, ((128, 130),), observed_head=head,
+        )
+        assert [message.parts[0].content for message in spans[0]] == ["prompt:64", "answer:prompt:64"]
+        with pytest.raises(AIError) as raised:
+            await repository.load_message_spans(
+                session.history_id, ((160, 162),), observed_head=head,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        monkeypatch.setattr(repository._store, "read", reject_head_read)
+        assert await repository.load_message_spans(
+            session.history_id, ((0, 0), (160, 160)), observed_head=head,
+        ) == ((), ())
+    finally:
+        await state.close()
 
 
 async def test_approval_cancel_batches_known_record_sql(

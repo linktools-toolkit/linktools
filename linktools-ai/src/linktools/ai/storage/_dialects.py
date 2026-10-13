@@ -433,6 +433,18 @@ class MySQLDialect(SQLiteDialect):
         # Row-wise driver execution preserves each value's max_allowed_packet boundary.
         return True
 
+    async def begin_consistent_read(self, session: "AsyncSession") -> None:
+        from sqlalchemy import text
+
+        if session.get_bind().dialect.skip_autocommit_rollback:
+            # Explicit transactions still need rollback when a borrowed engine
+            # suppresses it in autocommit mode. The connection option disables
+            # autocommit for this scope and restores it when the session closes.
+            await super().begin_consistent_read(session)
+            return
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+        await session.execute(text("START TRANSACTION"))
+
     def _database_now_expression(self) -> "ColumnElement[datetime]":
         from sqlalchemy import func
 

@@ -397,7 +397,6 @@ async def _provision_sqlite_database(path: Path, metadata: "MetaData") -> None:
         await context.initialize()
         async with context.engine.begin() as connection:
             await connection.run_sync(metadata.create_all)
-        await context.initialize(metadata=metadata)
         await context.close()
         _ensure_sqlite_database_is_self_contained(temporary)
         await asyncio.to_thread(_sync_file, temporary)

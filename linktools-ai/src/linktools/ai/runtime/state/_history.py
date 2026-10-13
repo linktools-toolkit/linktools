@@ -41,6 +41,7 @@ from ._history_index import (
     resolve_history_range_lazy,
 )
 from ._payload import PAYLOAD_COMPRESS_MINIMUM, decode_payload_bytes, encode_payload_bytes
+from ._conversation_repositories import ConversationHistoryRepositoryImpl
 from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
@@ -110,6 +111,7 @@ class _HistorySegment:
     start: int
     end: int
     observed_head: TranscriptHeadRecord | None
+    initial_facts: tuple[StoredFact, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,15 +964,17 @@ class TranscriptRepository:
         require_no_run_history_lock("TranscriptRepository.iter_message_range")
         if start < 0 or end < start:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        head = await self._resolve_observed_head(owner_id, None)
-        if end > head.message_count:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        initial_facts = await self._store.read(
+            lambda transaction: self._read_range_start(
+                transaction, owner_id, start=start, end=end,
+            )
+        )
         async for message in self._iter_range(
             self._transcript_stream(owner_id),
             start=start,
             end=end,
             seek_owner_id=owner_id,
-            observed_head=head,
+            initial_facts=initial_facts,
         ):
             yield message
 
@@ -1180,6 +1184,7 @@ class TranscriptRepository:
                 end=segment.end,
                 seek_owner_id=segment.history_id,
                 observed_head=segment.observed_head,
+                initial_facts=segment.initial_facts,
             ):
                 values.append(
                     LoadedContextMessage(
@@ -1247,6 +1252,7 @@ class TranscriptRepository:
                 end=segment.end,
                 seek_owner_id=segment.history_id,
                 observed_head=segment.observed_head,
+                initial_facts=segment.initial_facts,
             ):
                 emitted += 1
                 yield message
@@ -1474,29 +1480,24 @@ class TranscriptRepository:
             return ()
         if any(start < 0 or end < start for start, end in windows):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        head = await self._resolve_observed_head(owner_id, observed_head)
-        if any(end > head.message_count for _start, end in windows):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if all(start == end for start, end in windows):
+        stop_at = max(end for _, end in windows)
+        empty = all(start == end for start, end in windows)
+        if empty and observed_head is not None:
+            head = self._validate_observed_head(owner_id, observed_head)
+            if stop_at > head.message_count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return tuple(() for _window in windows)
+        read_from = stop_at if empty else min(start for start, _ in windows)
+        facts = await self._store.read(
+            lambda transaction: self._read_range_start(
+                transaction, owner_id, start=read_from, end=stop_at,
+                observed_head=observed_head,
+            )
+        )
+        if empty:
             return tuple(() for _window in windows)
         values: list[list[ModelMessage]] = [[] for _ in windows]
-        stop_at = max(end for _, end in windows)
-        read_from = min(start for start, _ in windows)
-        after_sequence = await self._seek_fact_sequence(
-            owner_id,
-            read_from,
-            observed_head=head,
-        )
         while True:
-            facts = await self._store.read(
-                lambda transaction, sequence=after_sequence: transaction.list_facts(
-                    FactQuery(
-                        self._transcript_stream(owner_id),
-                        after_sequence=sequence,
-                        limit=_TRANSCRIPT_PAGE_SIZE,
-                    )
-                )
-            )
             if not facts:
                 break
             after_sequence = facts[-1].sequence
@@ -1521,27 +1522,56 @@ class TranscriptRepository:
                     left = max(start - chunk_start, 0)
                     right = min(end - chunk_start, len(messages))
                     values[index].extend(messages[left:right])
+            if len(facts) < _TRANSCRIPT_PAGE_SIZE:
+                break
+            facts = await self._store.read(
+                lambda transaction, sequence=after_sequence: transaction.list_facts(
+                    FactQuery(
+                        self._transcript_stream(owner_id),
+                        after_sequence=sequence,
+                        limit=_TRANSCRIPT_PAGE_SIZE,
+                    )
+                )
+            )
         return self._validate_spans(
             windows,
             tuple(tuple(value) for value in values),
         )
 
+    async def _read_range_start(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+        *,
+        start: int,
+        end: int,
+        observed_head: TranscriptHeadRecord | None = None,
+    ) -> tuple[StoredFact, ...]:
+        """Materialize only the first bounded fact page inside the metadata read."""
+        head = await self._resolve_observed_head(transaction, owner_id, observed_head)
+        if end > head.message_count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if start == end:
+            return ()
+        sequence = await self._seek_fact_sequence(transaction, owner_id, start)
+        return tuple(await transaction.list_facts(FactQuery(
+            self._transcript_stream(owner_id),
+            after_sequence=sequence,
+            limit=_TRANSCRIPT_PAGE_SIZE,
+        )))
+
     async def _seek_fact_sequence(
         self,
+        transaction: StateTransaction,
         owner_id: str,
         message_index: int,
-        *,
-        observed_head: TranscriptHeadRecord | None = None,
     ) -> int | None:
         if message_index < 0:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await self._resolve_observed_head(owner_id, observed_head)
+        if message_index == 0:
+            return None
         block = (message_index // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK
-        record = await self._store.read(
-            lambda transaction: transaction.get_record(
-                self._seek_key(owner_id, block)
-            )
-        )
+        record = await transaction.get_record(self._seek_key(owner_id, block))
         if record is None:
             return None
         try:
@@ -1559,12 +1589,21 @@ class TranscriptRepository:
 
     async def _resolve_observed_head(
         self,
+        transaction: StateTransaction,
         owner_id: str,
         observed_head: TranscriptHeadRecord | None,
     ) -> TranscriptHeadRecord:
         head = observed_head
         if head is None:
-            head = await self.get_head(owner_id)
+            entry = await self.get_head_in_transaction(transaction, owner_id)
+            head = None if entry is None else entry[0]
+        return self._validate_observed_head(owner_id, head)
+
+    def _validate_observed_head(
+        self,
+        owner_id: str,
+        head: TranscriptHeadRecord | None,
+    ) -> TranscriptHeadRecord:
         if (
             head is None
             or head.owner_domain is not self._owner_domain
@@ -1608,26 +1647,35 @@ class TranscriptRepository:
         async def read(
             transaction: StateTransaction,
         ) -> _HistoryResolution:
-            record = await self._history_repository.get_in_transaction(
-                transaction,
-                history_id,
-                tenant_id=tenant_id,
-            )
-            if record is None:
-                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            local_messages = await self._history_repository.local_head_in_transaction(
-                transaction,
-                history_id,
-            )
-            transcript_entry = await self.get_head_in_transaction(
-                transaction,
-                history_id,
-            )
-            if transcript_entry is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            transcript_head, _transcript_record = transcript_entry
-            if transcript_head.message_count != local_messages:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                type(self._history_repository) is ConversationHistoryRepositoryImpl
+                and self._history_repository.namespace == self._namespace
+                and self._history_repository.tenant_id == self._tenant_id
+            ):
+                captured = await self._history_repository.get_with_head_in_transaction(
+                    transaction, history_id, tenant_id=tenant_id,
+                )
+                if captured is None:
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+                record, captured_head = captured
+                transcript_head = self._validate_observed_head(history_id, captured_head)
+                local_messages = transcript_head.message_count
+            else:
+                # Custom adapters and subclasses retain their scalar read semantics.
+                record = await self._history_repository.get_in_transaction(
+                    transaction, history_id, tenant_id=tenant_id,
+                )
+                if record is None:
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+                local_messages = await self._history_repository.local_head_in_transaction(
+                    transaction, history_id,
+                )
+                transcript_entry = await self.get_head_in_transaction(transaction, history_id)
+                if transcript_entry is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                transcript_head, _transcript_record = transcript_entry
+                if transcript_head.message_count != local_messages:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             inherited = record.inherited_message_count
             total = inherited + transcript_head.message_count
             if end > total:
@@ -1651,7 +1699,7 @@ class TranscriptRepository:
                 range_start=start,
                 range_end=end,
             )
-            return _HistoryResolution(tuple(
+            segments = tuple(
                 _HistorySegment(
                     item.segment.owner_history_id,
                     item.local_start,
@@ -1659,7 +1707,16 @@ class TranscriptRepository:
                     transcript_head if item.segment.owner_history_id == history_id else None,
                 )
                 for item in resolved
-            ))
+            )
+            # Only the first segment is prefetched; later segments and pages stay lazy.
+            if segments and self._store is self._history_repository.state_store:
+                first = segments[0]
+                facts = await self._read_range_start(
+                    transaction, first.history_id, start=first.start, end=first.end,
+                    observed_head=first.observed_head,
+                )
+                segments = (replace(first, initial_facts=facts), *segments[1:])
+            return _HistoryResolution(segments)
 
         try:
             return await self._history_repository.state_store.read(read)
@@ -1674,26 +1731,28 @@ class TranscriptRepository:
         end: int,
         seek_owner_id: "str | None" = None,
         observed_head: "TranscriptHeadRecord | None" = None,
+        initial_facts: tuple[StoredFact, ...] | None = None,
     ) -> AsyncIterator[ModelMessage]:
         if end <= start:
             return
         expected = end - start
         emitted = 0
-        after_sequence: int | None = None
-        if seek_owner_id is not None:
-            after_sequence = await self._seek_fact_sequence(
-                seek_owner_id, start, observed_head=observed_head,
-            )
-        while True:
-            facts = await self._store.read(
-                lambda transaction, sequence=after_sequence: transaction.list_facts(
-                    FactQuery(
-                        stream,
-                        after_sequence=sequence,
-                        limit=_TRANSCRIPT_PAGE_SIZE,
+        facts = initial_facts
+        if facts is None:
+            if seek_owner_id is not None:
+                facts = await self._store.read(
+                    lambda transaction: self._read_range_start(
+                        transaction, seek_owner_id, start=start, end=end,
+                        observed_head=observed_head,
                     )
                 )
-            )
+            else:
+                facts = await self._store.read(
+                    lambda transaction: transaction.list_facts(
+                        FactQuery(stream, limit=_TRANSCRIPT_PAGE_SIZE)
+                    )
+                )
+        while True:
             if not facts:
                 if emitted != expected:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1719,6 +1778,15 @@ class TranscriptRepository:
                 if emitted != expected:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return
+            facts = await self._store.read(
+                lambda transaction, sequence=after_sequence: transaction.list_facts(
+                    FactQuery(
+                        stream,
+                        after_sequence=sequence,
+                        limit=_TRANSCRIPT_PAGE_SIZE,
+                    )
+                )
+            )
 
     def project_context(
         self,

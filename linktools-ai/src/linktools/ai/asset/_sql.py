@@ -237,7 +237,7 @@ class SqlAssetBackend:
         return True
 
     async def initialize(self) -> None:
-        await self._context.initialize(metadata=self._metadata)
+        await self._context.initialize()
         table = self._metadata.tables["ai_asset_heads"]
 
         async def initialize_head(session) -> None:

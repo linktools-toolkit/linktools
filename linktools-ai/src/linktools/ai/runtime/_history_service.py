@@ -20,6 +20,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
+from ._history_projection import StepExecutionHistoryReader
 from .service_api import (
     AttachmentFact,
     ExecutionHistoryItem,
@@ -324,6 +325,12 @@ class DefaultExecutionHistoryService:
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, principal: Principal,
     ) -> ModelInteractionReadBoundary:
+        if type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.capture_authorized_model_interaction_cutoffs(
+                execution_id, tenant_id=principal.tenant_id,
+                executions=self._executions,
+            )
         await self._authorize(execution_id, principal)
         return await self._reader.capture_model_interaction_cutoffs(
             execution_id, tenant_id=principal.tenant_id,
@@ -333,6 +340,13 @@ class DefaultExecutionHistoryService:
         self, execution_id: str, *, principal: Principal, agent_run_seq: int,
         after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
     ) -> tuple[ModelInteractionItem, ...]:
+        if type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.read_authorized_model_interaction_metadata(
+                execution_id, tenant_id=principal.tenant_id, executions=self._executions,
+                agent_run_seq=agent_run_seq, after_model_request_seq=after_model_request_seq,
+                through_model_request_seq=through_model_request_seq, limit=limit,
+            )
         await self._authorize(execution_id, principal)
         return await self._reader.read_model_interaction_metadata(
             execution_id, tenant_id=principal.tenant_id, agent_run_seq=agent_run_seq,
@@ -493,11 +507,11 @@ class DefaultExecutionHistoryService:
             position=cursor,
         )
 
-    async def _authorize(
+    async def _authorize_header(
         self,
         execution_id: str,
         principal: Principal,
-    ) -> ExecutionRecord:
+    ) -> None:
         tenant_id = principal.tenant_id
         header = await self._executions.get_header(
             execution_id,
@@ -510,9 +524,16 @@ class DefaultExecutionHistoryService:
             AuthorizationAction.EXECUTION_READ,
             header,
         )
+
+    async def _authorize(
+        self,
+        execution_id: str,
+        principal: Principal,
+    ) -> ExecutionRecord:
+        await self._authorize_header(execution_id, principal)
         record = await self._executions.get(
             execution_id,
-            tenant_id=tenant_id,
+            tenant_id=principal.tenant_id,
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)

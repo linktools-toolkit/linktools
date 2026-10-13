@@ -154,6 +154,8 @@ class _BoundStateGroupTransaction:
 def active_state_group_transaction(
     group: "StateStorageGroup",
     stores: Sequence["StateStore"],
+    *,
+    writable: bool = True,
 ) -> "StateGroupTransaction":
     active = _active_state_scope.get()
     if active is None:
@@ -163,13 +165,13 @@ def active_state_group_transaction(
         raise StateTransactionNestingError(
             "a child task cannot reuse its parent StateStorageGroup transaction"
         )
-    if not active.writable:
+    if writable and not active.writable:
         raise StateTransactionNestingError(
             "a read-only StateStore callback cannot mutate state"
         )
     if active.group is not group:
         raise StateTransactionNestingError(
-            "a task cannot mutate two StateStorageGroups at once"
+            "a task cannot access two StateStorageGroups at once"
         )
     for store in stores:
         if store not in active.transactions:
@@ -806,6 +808,14 @@ class StateGroupTransaction(Protocol):
 
 class StateStorageGroup(Protocol):
     async def read(self, store: "StateStore", fn: StateCallback[ValueT]) -> ValueT: ...
+
+    async def read_many(
+        self,
+        stores: Sequence["StateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        """Read enlisted stores in one consistent, task-local callback scope."""
+        ...
 
     async def mutate(
         self,

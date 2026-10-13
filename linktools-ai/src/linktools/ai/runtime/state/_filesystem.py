@@ -269,35 +269,55 @@ class FilesystemStateStorageGroup:
     async def read(
         self, store: "FilesystemStateStore", fn: StateCallback[ValueT]
     ) -> ValueT:
-        self._ensure_member(store)
-        active = active_state_transaction(store)
-        if active is not None:
-            return await fn(active)
-        started = monotonic()
-        await store._consistency_lock.acquire()
-        try:
-            self._ensure_member(store)
-        except BaseException:
-            store._consistency_lock.release()
-            raise
-        _logger.debug(
-            "filesystem member lock acquired: domain=%s member_lock_wait_ms=%.3f",
-            store._runtime_domain,
-            (monotonic() - started) * 1000,
+        return await self.read_many(
+            (store,), lambda group: fn(group.transaction(store))
         )
+
+    async def read_many(
+        self,
+        stores: Sequence["FilesystemStateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        members = tuple(dict.fromkeys(stores))
+        if not members:
+            raise ValueError("StateStorageGroup read requires a store")
+        for store in members:
+            self._ensure_member(store)
+        members = tuple(sorted(members, key=lambda value: value.root.as_posix()))
+        active = active_state_transaction(members[0])
+        if active is not None:
+            return await fn(active_state_group_transaction(self, members, writable=False))
+        started = monotonic()
+        locked: list[FilesystemStateStore] = []
         try:
-            async with self._read_fence(store):
-                transaction = _FilesystemTransaction(store.root, store._require_index())
-                token = bind_state_scope(self, {store: transaction}, writable=False)
+            for store in members:
+                await store._consistency_lock.acquire()
+                locked.append(store)
+                self._ensure_member(store)
+            _logger.debug(
+                "filesystem read members locked: scope=%s stores=%s member_lock_wait_ms=%.3f",
+                self._scope_digest,
+                len(members),
+                (monotonic() - started) * 1000,
+            )
+            async with AsyncExitStack() as stack:
+                for store in members:
+                    await stack.enter_async_context(self._read_fence(store))
+                transaction_now = datetime.now(timezone.utc)
+                transactions = {
+                    store: _FilesystemTransaction(
+                        store.root, store._require_index(), now=transaction_now
+                    )
+                    for store in members
+                }
+                token = bind_state_scope(self, transactions, writable=False)
                 try:
-                    readonly = active_state_transaction(store)
-                    if readonly is None:
-                        raise RuntimeError("read-only StateTransaction scope was not bound")
-                    return await fn(readonly)
+                    return await fn(active_state_group_transaction(self, members, writable=False))
                 finally:
                     reset_state_transaction(token)
         finally:
-            store._consistency_lock.release()
+            for store in reversed(locked):
+                store._consistency_lock.release()
 
     @asynccontextmanager
     async def _read_fence(self, store: "FilesystemStateStore") -> AsyncIterator[None]:

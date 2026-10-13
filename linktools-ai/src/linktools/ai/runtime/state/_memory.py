@@ -61,24 +61,32 @@ class InMemoryStateStorageGroup:
         store: "InMemoryStateStore",
         fn: StateCallback[ValueT],
     ) -> ValueT:
-        self._ensure_member(store)
-        active = active_state_transaction(store)
+        return await self.read_many(
+            (store,), lambda group: fn(group.transaction(store))
+        )
+
+    async def read_many(
+        self,
+        stores: Sequence["InMemoryStateStore"],
+        fn: StateGroupCallback[ValueT],
+    ) -> ValueT:
+        members = tuple(dict.fromkeys(stores))
+        if not members:
+            raise ValueError("StateStorageGroup read requires a store")
+        for store in members:
+            self._ensure_member(store)
+        active = active_state_transaction(members[0])
         if active is not None:
-            return await fn(active)
+            return await fn(active_state_group_transaction(self, members, writable=False))
         async with self._lock:
-            transaction = self._transaction(store)
-            token = bind_state_scope(
-                self,
-                {store: transaction},
-                writable=False,
-            )
+            transaction_now = datetime.now(timezone.utc)
+            transactions = {
+                store: self._transaction(store, now=transaction_now)
+                for store in members
+            }
+            token = bind_state_scope(self, transactions, writable=False)
             try:
-                readonly = active_state_transaction(store)
-                if readonly is None:
-                    raise RuntimeError(
-                        "read-only StateTransaction scope was not bound"
-                    )
-                return await fn(readonly)
+                return await fn(active_state_group_transaction(self, members, writable=False))
             finally:
                 reset_state_transaction(token)
 

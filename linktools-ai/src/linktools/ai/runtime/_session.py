@@ -37,7 +37,11 @@ from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._handoff import HandoffGate, HandoffState
-from ._session_timeline import project_session_timeline
+from ._session_timeline import (
+    capture_session_refresh,
+    project_captured_session_timeline,
+    project_session_timeline,
+)
 from ._input import _InputFileSource
 from .service_api import (
     CancelExecutionRequest,
@@ -49,6 +53,7 @@ from .service_api import (
     ForkSessionRequest,
     ListSessionRequest,
     ResumeSessionRequest,
+    SessionDetail,
     SessionHistoryItem,
     SessionHistoryReader,
     SessionTurn,
@@ -286,6 +291,47 @@ class DefaultSessionService:
                 cursor=cursor,
                 limit=limit,
             )
+
+    async def refresh(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SessionDetail:
+        """Reconcile admission and capture the session with its timeline page."""
+        async with self._session_consumer(session_id, principal.tenant_id):
+            header = await self._conversation.sessions.get_header(
+                session_id, tenant_id=principal.tenant_id,
+            )
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(
+                principal, AuthorizationAction.SESSION_READ, header,
+            )
+            state = await capture_session_refresh(
+                self._conversation, self._executions, session_id,
+                tenant_id=principal.tenant_id, cursor=cursor,
+                cursor_signer=self._cursor_signer, limit=limit,
+                reconcile=self._reconcile_terminal_admission,
+                transcript_store=self._transcript_store,
+            )
+            record = state.root
+            active = self._active_execution_id(
+                record,
+                None if record.active_execution_id is None
+                else state.executions.get(record.active_execution_id),
+            )
+            session = await self._view(record, principal, active=active)
+            if self._transcript_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            timeline = await project_captured_session_timeline(
+                state, self._transcript_store, self._cursor_signer,
+                session_id=session_id, tenant_id=principal.tenant_id,
+                transcript_tenant_id=self._conversation.sessions.tenant_id,
+            )
+            return SessionDetail(session, timeline)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         await self._authorization.authorize(

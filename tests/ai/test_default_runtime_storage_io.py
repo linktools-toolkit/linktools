@@ -12,7 +12,9 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
+from linktools.ai.runtime.state.schema import build_runtime_sql_metadata
+from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, validate_sql
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
@@ -66,10 +68,15 @@ async def test_existing_incompatible_sqlite_is_not_implicitly_migrated(
         connection.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
 
     state = RuntimeStorage.sqlite(database)
-    with pytest.raises(AIError) as error:
-        await state.initialize(namespace="sqlite-existing", tenant_id="tenant")
-
-    assert error.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+    await state.initialize(namespace="sqlite-existing", tenant_id="tenant")
+    await state.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
+    try:
+        with pytest.raises(AIError) as error:
+            await validate_sql(engine, build_runtime_sql_metadata(state.plan.durable_domains))
+        assert error.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+    finally:
+        await engine.dispose()
     with sqlite3.connect(database) as connection:
         tables = {
             row[0]

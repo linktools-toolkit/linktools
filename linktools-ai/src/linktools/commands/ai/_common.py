@@ -21,7 +21,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqlite
+from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import Metrics
 from linktools.ai.storage import FilesystemMutationLock, StorageOverlay
 from linktools.ai.workspace import Workspace
@@ -93,9 +93,7 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     runtime_root.mkdir(parents=True, exist_ok=True)
     path = runtime_root / "metrics.db"
     async with FilesystemMutationLock(str(path) + ".lock"):
-        if path.exists():
-            await validate_metrics_sqlite(path)
-        else:
+        if not path.exists():
             await provision_metrics_sqlite(path)
     return Metrics.sqlite(path, namespace="default")
 

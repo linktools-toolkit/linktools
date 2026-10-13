@@ -125,7 +125,8 @@ def _execution(
 
 
 class _Executions:
-    def __init__(self, values: dict[str, ExecutionRecord]) -> None:
+    def __init__(self, values: dict[str, ExecutionRecord], state_store) -> None:
+        self.state_store = state_store
         self.values = values
         self.get_many_calls = 0
 
@@ -311,7 +312,10 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             execution_id="failed",
         )
 
-        executions = _Executions({"success": success, "failed": failed})
+        executions = _Executions(
+            {"success": success, "failed": failed},
+            state.execution.executions.state_store,
+        )
         service = DefaultSessionService(
             state.conversation,
             executions,  # type: ignore[arg-type]

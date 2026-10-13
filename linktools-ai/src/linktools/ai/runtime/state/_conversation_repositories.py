@@ -127,6 +127,34 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         head = await self._decode(record, TranscriptHeadRecord)
         return head.message_count
 
+    async def get_with_head_in_transaction(
+        self,
+        transaction: StateTransaction,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        """Read a branch descriptor and its canonical local head together."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        history_key = self._key("conversation_history", history_id)
+        head_key = self._key("transcript_head", history_id)
+        records = await transaction.get_records((history_key, head_key))
+        record = records.get(history_key)
+        if record is None:
+            return None
+        history = await self._decode_history(record)
+        stored_head = records.get(head_key)
+        if stored_head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head = await self._decode(stored_head, TranscriptHeadRecord)
+        if (
+            stored_head.kind != "transcript_head"
+            or head.owner_domain is not TranscriptOwnerDomain.CONVERSATION
+            or head.owner_id != history_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return history, head
+
     async def get_index_node_in_transaction(
         self,
         transaction: StateTransaction,

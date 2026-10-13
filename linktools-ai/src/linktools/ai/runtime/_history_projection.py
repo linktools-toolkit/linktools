@@ -4,10 +4,10 @@
 
 import heapq
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import (
@@ -67,6 +67,10 @@ from .state._contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
+from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._model_interaction_store import ModelInteractionStateStepArchive
+from .state._step_archive import StateStepArchive
+from .state._store import StateGroupTransaction
 from .state._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunHistoryCapture,
@@ -86,6 +90,7 @@ _EXECUTION_TRACE_PROJECTION_VERSION = 1
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
 _MODEL_INTERACTION_PROJECTION_VERSION = 1
 _ATTACHMENT_FACT_PROJECTION_VERSION = 1
+_ModelMetadataT = TypeVar("_ModelMetadataT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,6 +508,41 @@ class StepExecutionHistoryReader:
         )
         return Page(selected, next_cursor)
 
+    async def capture_authorized_model_interaction_cutoffs(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+    ) -> ModelInteractionReadBoundary:
+        """Read the service's post-authorization record with its model metadata."""
+        async def read() -> ModelInteractionReadBoundary:
+            record = await executions.get(execution_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+                return await self.capture_model_interaction_cutoffs(
+                    execution_id, tenant_id=tenant_id,
+                )
+            return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+
+        return await self._read_model_metadata(executions, read)
+
+    async def _read_model_metadata(
+        self, executions: ExecutionRepository, read: Callable[[], Awaitable[_ModelMetadataT]],
+    ) -> _ModelMetadataT:
+        # Only known metadata-only owners can safely share the read callback.
+        if (executions is self._executions
+                and type(executions) is ExecutionRepositoryImpl
+                and type(self._store) in (StateStepArchive, ModelInteractionStateStepArchive)):
+            execution_store = executions.state_store
+            history_store = self._store.state_store
+            if execution_store.storage_group is history_store.storage_group:
+                async def capture(_group: StateGroupTransaction) -> _ModelMetadataT:
+                    return await read()
+
+                return await execution_store.storage_group.read_many(
+                    (execution_store, history_store), capture,
+                )
+        # Separate routes and custom owners retain independent reads.
+        return await read()
+
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionReadBoundary:
@@ -510,6 +550,11 @@ class StepExecutionHistoryReader:
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+
+    async def _capture_model_interaction_cutoffs(
+        self, execution_id: str, record: ExecutionRecord, *, tenant_id: str,
+    ) -> ModelInteractionReadBoundary:
         if record.agent_run_seq < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         run_ids = tuple(make_agent_run_id(
@@ -540,21 +585,54 @@ class StepExecutionHistoryReader:
         )
         return ModelInteractionReadBoundary(tuple(cutoffs), durable_cutoffs, local_available, available)
 
+    async def read_authorized_model_interaction_metadata(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+        agent_run_seq: int, after_model_request_seq: int, through_model_request_seq: int,
+        limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]:
+        """Read authorized execution and bounded request metadata in one owner scope."""
+        async def read() -> tuple[ModelInteractionItem, ...]:
+            record = await executions.get(execution_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+                return await self.read_model_interaction_metadata(
+                    execution_id, tenant_id=tenant_id, agent_run_seq=agent_run_seq,
+                    after_model_request_seq=after_model_request_seq,
+                    through_model_request_seq=through_model_request_seq, limit=limit,
+                )
+            selected_limit = _validate_model_metadata_range(
+                agent_run_seq, after_model_request_seq, through_model_request_seq, limit,
+            )
+            return await self._read_model_interaction_metadata(
+                execution_id, record, tenant_id=tenant_id, agent_run_seq=agent_run_seq,
+                after_model_request_seq=after_model_request_seq,
+                through_model_request_seq=through_model_request_seq, limit=selected_limit,
+            )
+
+        return await self._read_model_metadata(executions, read)
+
     async def read_model_interaction_metadata(
         self, execution_id: str, *, tenant_id: str, agent_run_seq: int,
         after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
     ) -> tuple[ModelInteractionItem, ...]:
         """Read a bounded suffix or one active identity from an explicit cutoff."""
-        limit = validate_page_limit(limit)
-        if (isinstance(agent_run_seq, bool) or not isinstance(agent_run_seq, int)
-                or agent_run_seq < 1
-                or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
-                       for value in (after_model_request_seq, through_model_request_seq))
-                or after_model_request_seq > through_model_request_seq):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        limit = _validate_model_metadata_range(
+            agent_run_seq, after_model_request_seq, through_model_request_seq, limit,
+        )
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return await self._read_model_interaction_metadata(
+            execution_id, record, tenant_id=tenant_id, agent_run_seq=agent_run_seq,
+            after_model_request_seq=after_model_request_seq,
+            through_model_request_seq=through_model_request_seq, limit=limit,
+        )
+
+    async def _read_model_interaction_metadata(
+        self, execution_id: str, record: ExecutionRecord, *, tenant_id: str, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int,
+    ) -> tuple[ModelInteractionItem, ...]:
         if agent_run_seq > record.agent_run_seq:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         count = min(limit, through_model_request_seq - after_model_request_seq)
@@ -2027,6 +2105,19 @@ def _metadata_token(
     if not raw.isdigit():
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return int(raw)
+
+
+def _validate_model_metadata_range(
+    agent_run_seq: int, after_model_request_seq: int, through_model_request_seq: int, limit: int,
+) -> int:
+    limit = validate_page_limit(limit)
+    if (isinstance(agent_run_seq, bool) or not isinstance(agent_run_seq, int)
+            or agent_run_seq < 1
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                   for value in (after_model_request_seq, through_model_request_seq))
+            or after_model_request_seq > through_model_request_seq):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return limit
 
 
 def _validate_agent_run(

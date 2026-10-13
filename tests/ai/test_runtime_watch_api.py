@@ -1417,6 +1417,7 @@ def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
         "get",
         "create",
         "reconcile",
+        "refresh",
         "list",
         "history",
         "timeline",

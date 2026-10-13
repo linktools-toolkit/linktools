@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Result reads reuse authorized inline metadata without weakening handoff fences."""
+
+import asyncio
+import hashlib
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import event
+
+from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
+from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
+from linktools.ai.storage import ObjectRef, StoredPayload
+
+from .test_incremental_projection_boundaries import _storage
+from .test_runtime_persistence_evidence import _execution, _result
+
+pytestmark = pytest.mark.asyncio
+_PRINCIPAL = Principal("principal", "tenant", "service")
+
+
+def _service(state, *, repository=None, authorization=None, objects=None, release=None):
+    return DefaultExecutionService(
+        replace(state.execution, executions=repository or state.execution.executions),
+        objects or state.object_store(RuntimeDomain.EXECUTION),
+        authorization or TenantAuthorizationPolicy(), sessions=state.conversation.sessions,
+        catalog=None, compiler=None, runtime_bridge=SimpleNamespace(port=None),
+        live_broker=None, history_reader=None, release_terminal=release,
+    )
+
+
+async def _seed(state, *, output=None):
+    execution = _execution()
+    result = _result(execution.execution_id, "inline", execution.created_at)
+    if output is not None:
+        result = replace(result, output=output)
+    execution = replace(execution, status=ExecutionStatus.SUCCEEDED, result=result)
+    await state.execution.executions.create_with_history_head(execution)
+    return execution
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("method", ("result", "result_payload_size"))
+async def test_terminal_result_queries_use_one_authorized_result_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, method: str,
+) -> None:
+    state = _storage(backend, tmp_path)
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    try:
+        record = await _seed(state)
+        repository = state.execution.executions
+        get = repository.get
+        reads = 0
+        statements = []
+
+        async def tracked_get(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            return await get(*args, **kwargs)
+
+        monkeypatch.setattr(repository, "get", tracked_get)
+        engine = repository.state_store.storage_group.context.engine.sync_engine if backend == "sqlite" else None
+
+        def capture(connection, cursor, statement, parameters, context, many):
+            statements.append(statement)
+
+        if engine is not None:
+            event.listen(engine, "before_cursor_execute", capture)
+        try:
+            value = await getattr(_service(state), method)("execution", principal=_PRINCIPAL)
+        finally:
+            if engine is not None:
+                event.remove(engine, "before_cursor_execute", capture)
+        assert value.output == {"text": "result"} if method == "result" else value == record.result.output.size
+        # Header authorization, its fresh payload, and post-body handoff authority.
+        assert reads <= 3
+        assert sum(item.lstrip().upper().startswith("SELECT") for item in statements) <= 3
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("method", ("result", "result_payload_size"))
+async def test_result_metadata_is_read_after_awaited_authorization(method: str) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    try:
+        record = await _seed(state)
+        output = StoredPayload.inline_json({"text": "changed after authorization"})
+
+        class Authorization:
+            async def authorize(self, principal, action, resource):
+                await asyncio.sleep(0)
+                await state.execution.executions.compare_and_swap(
+                    "execution", tenant_id="tenant", expected_revision=record.revision,
+                    next_record=replace(record, revision=record.revision + 1,
+                                        result=replace(record.result, output=output)),
+                )
+
+        value = await getattr(_service(state, authorization=Authorization()), method)(
+            "execution", principal=_PRINCIPAL,
+        )
+        assert value.output == {"text": "changed after authorization"} if method == "result" else value == output.size
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("adapter", ("independent", "subclass"))
+@pytest.mark.parametrize("method", ("result", "result_payload_size"))
+async def test_custom_result_repository_remains_authoritative(adapter: str, method: str) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    try:
+        record = await _seed(state)
+        repository = state.execution.executions
+        output = StoredPayload.inline_json({"source": "custom result owner"})
+        calls = []
+
+        class CustomResult:
+            async def get_result(self, execution_id, *, tenant_id):
+                calls.append((execution_id, tenant_id))
+                return replace(record.result, output=output)
+
+        class Independent(CustomResult):
+            get = repository.get
+            get_header = repository.get_header
+
+        class Derived(CustomResult, ExecutionRepositoryImpl):
+            pass
+
+        selected = (Independent() if adapter == "independent" else
+                    Derived(repository.state_store, namespace="result-read", tenant_id="tenant"))
+        value = await getattr(_service(state, repository=selected), method)("execution", principal=_PRINCIPAL)
+        assert value.output == {"source": "custom result owner"} if method == "result" else value == output.size
+        assert calls == [("execution", "tenant")]
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("change", ("missing", "nonterminal", "cancel"))
+async def test_result_body_wait_preserves_fresh_handoff_and_consumer_cleanup(
+    monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    entered, release = asyncio.Event(), asyncio.Event()
+    body = b'{"answer":"canonical"}'
+    ref = ObjectRef("result-objects", "result", hashlib.sha256(body).hexdigest(), len(body))
+    callbacks = []
+
+    class Objects:
+        store_id = ref.store_id
+
+        async def open(self, key):
+            assert key == ref.key
+            entered.set()
+            await release.wait()
+            yield body
+
+    async def terminal(execution_id, *, tenant_id):
+        callbacks.append((execution_id, tenant_id))
+        return True
+
+    try:
+        record = await _seed(state, output=StoredPayload.object(ref))
+        service = _service(state, objects=Objects(), release=terminal)
+        query = asyncio.create_task(service.result("execution", principal=_PRINCIPAL))
+        await asyncio.wait_for(entered.wait(), 2)
+        if change == "cancel":
+            query.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await query
+        else:
+            async def current(*args, **kwargs):
+                return None if change == "missing" else replace(record, status=ExecutionStatus.STARTED, result=None)
+
+            monkeypatch.setattr(state.execution.executions, "get", current)
+            release.set()
+            result = await query
+            assert result.output == {"answer": "canonical"}
+        assert callbacks == []
+        # A later legitimate terminal handoff is not blocked by the completed consumer.
+        await service.request_terminal_handoff("execution", tenant_id="tenant")
+        assert callbacks == [("execution", "tenant")]
+    finally:
+        release.set()
+        await state.close()
+
+
+async def test_denied_result_read_does_not_resolve_payload() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    try:
+        await _seed(state)
+
+        class Authorization:
+            async def authorize(self, principal, action, resource):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+        with pytest.raises(AIError) as caught:
+            await _service(state, authorization=Authorization()).result("execution", principal=_PRINCIPAL)
+        assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await state.close()

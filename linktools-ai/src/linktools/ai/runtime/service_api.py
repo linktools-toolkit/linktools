@@ -858,6 +858,12 @@ class SessionView:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionDetail:
+    session: SessionView
+    timeline: Page[SessionTurn]
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalView:
     approval_id: str
     status: ApprovalStatus
@@ -1525,6 +1531,16 @@ class SessionService(Protocol):
         *,
         principal: Principal,
     ) -> SessionView: ...
+    async def refresh(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SessionDetail:
+        """Reconcile admission and return a freshly captured session and timeline."""
+        ...
     async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
     async def history(
         self,
@@ -1658,6 +1674,7 @@ __all__ = [
     "Page",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
+    "SessionDetail",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
