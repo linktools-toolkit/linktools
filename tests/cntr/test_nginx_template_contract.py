@@ -489,3 +489,62 @@ def test_request_header_definition_drives_business_auth_and_waf(fresh_manager, m
     assert headers["x-forwarded-port"] == '\"\"'
     with pytest.raises(ContainerError, match="reserved"):
         nginx.validated_auth_headers({"x-forwarded-for": "forged"})
+
+
+@pytest.mark.parametrize("https", [False, True])
+@pytest.mark.parametrize("waf", [False, True])
+@pytest.mark.parametrize("limit", [None, "10m", 0])
+def test_site_body_limit_is_inherited_by_public_and_origin_servers(fresh_manager, https, waf, limit):
+    nginx = fresh_manager.containers["nginx"]
+    site = generation_site(nginx, https=https, waf=waf,
+                           template_vars={} if limit is None else {"client_max_body_size": limit})
+    nginx.__dict__["sites"] = {site._declaration: site}
+    rendered = prepared_config(nginx)["sites/generated.conf"]
+    if limit is None:
+        assert "client_max_body_size" not in rendered
+    else:
+        assert rendered.count('client_max_body_size "' + str(limit) + '";') == 1 + int(waf)
+    assert "client_max_body_size" not in nginx.get_source_path("templates", "params.conf").read_text()
+
+
+@pytest.mark.parametrize("limits,compatible", [
+    ((None, "1m"), True), (("10m", "10m"), True), ((0, "0"), True),
+    ((None, "10m"), False), (("10m", 0), False),
+])
+def test_shared_hostname_requires_compatible_body_limits(fresh_manager, tmp_path, limits, compatible):
+    nginx = fresh_manager.containers["nginx"]
+    sites = []
+    for index, limit in enumerate(limits):
+        path = tmp_path / (str(index) + ".conf")
+        path.write_text("location /route" + str(index) + " { return 204; }")
+        sites.append(generation_site(nginx, str(index), template=path,
+            template_vars={} if limit is None else {"client_max_body_size": limit}))
+    nginx.__dict__["sites"] = {site._declaration: site for site in sites}
+    if compatible:
+        assert "location /route1" in prepared_config(nginx)["sites/generated.conf"]
+    else:
+        with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
+            prepared_config(nginx)
+
+
+def test_native_location_body_limit_can_override_site_default(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    source = tmp_path / "upload.conf"
+    source.write_text("location / { client_max_body_size 0; return 204; }")
+    site = generation_site(nginx, template=source, waf=True,
+                           template_vars={"client_max_body_size": "10m"})
+    nginx.__dict__["sites"] = {site._declaration: site}
+    rendered = prepared_config(nginx)["sites/generated.conf"]
+    assert rendered.count('client_max_body_size "10m";') == 2
+    assert rendered.count("client_max_body_size 0;") == 2
+
+
+def test_body_limit_is_one_quoted_token_and_rejects_control_characters(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    source = nginx.get_source_path("templates", "server.conf")
+    rendered = nginx._render_site_template(nginx, source,
+        make_site(template_vars={"client_max_body_size": '10m; include /other;'}))
+    assert 'client_max_body_size "10m; include /other;";' in rendered
+    with pytest.raises(ContainerError, match="control character"):
+        nginx._render_site_template(nginx, source,
+            make_site(template_vars={"client_max_body_size": "10m;\ninclude /other;"}))

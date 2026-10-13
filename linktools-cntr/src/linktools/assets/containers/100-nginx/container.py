@@ -398,6 +398,8 @@ class Container(BaseContainer):
             def routing_policy(site):
                 return (
                     site.https, site.waf, site.waf_bypass,
+                    str(site.template_vars.get("client_max_body_size")
+                        if site.template_vars.get("client_max_body_size") is not None else "1m"),
                     site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
                     site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
                 )
