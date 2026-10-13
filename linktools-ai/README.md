@@ -838,7 +838,45 @@ binding metadata; portable RuntimeStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
 
-SQLite-backed `RuntimeStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
+SQLite-backed `RuntimeStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is opened without automatic schema validation and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
+
+SQL Runtime, Asset, and Metrics initialization and ordinary reads do not inspect
+table schemas by default. Schema diagnostics are an explicit deployment or
+maintenance operation; without them, an incompatible database may fail at its
+first affected query. Normal persisted-data, ownership, and integrity validation
+still applies. To check a database provisioned with the complete schema:
+
+```python
+from linktools.ai.migrate import build_sql_schema_metadata
+from linktools.ai.storage import validate_sql
+
+await validate_sql(engine, build_sql_schema_metadata())
+```
+
+For a database provisioned only for selected Runtime domains, use the same
+public domain selection as provisioning; include ObjectStore tables when the
+Runtime uses its default SQL ObjectStore:
+
+```python
+from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.state.schema import build_runtime_sql_metadata
+from linktools.ai.storage import build_object_sql_metadata, validate_sql
+
+metadata = build_runtime_sql_metadata(frozenset({
+    RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION,
+}))
+build_object_sql_metadata(metadata=metadata)
+await validate_sql(engine, metadata)
+```
+
+Asset-only diagnostics similarly use the public `build_asset_sql_metadata()`
+plus `build_object_sql_metadata()` when the default SQL ObjectStore is used.
+Metrics already provides `validate_metrics_database(engine)` and
+`validate_metrics_sqlite(path)` in `linktools.ai.migrate`; neither runs on normal
+store access. Explicit `provision_*` calls still create and validate their
+requested schema. The existing explicit
+`SqlStorageContext.initialize(metadata=...)` also remains supported. No schema
+configuration flag is required.
 
 Durable local execution and recovery are provided by Runtime persistence and recovery
 checkpoints and do not require an external workflow server. Harness provides the

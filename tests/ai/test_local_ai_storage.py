@@ -18,6 +18,7 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import validate_metrics_sqlite
 from linktools.ai.runtime import RuntimeHistory, UsageSummary
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
@@ -144,7 +145,7 @@ async def test_local_storage_uses_separate_runtime_and_metrics_databases(
 
 
 @pytest.mark.asyncio
-async def test_existing_invalid_metrics_database_fails_before_runtime_use(
+async def test_existing_metrics_database_is_checked_only_when_explicitly_requested(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
@@ -154,10 +155,14 @@ async def test_existing_invalid_metrics_database_fails_before_runtime_use(
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
 
+    metrics = await _local_metrics(workspace)
+    assert metrics.namespace == "default"
     with pytest.raises(AIError) as error:
-        await _local_metrics(workspace)
+        await validate_metrics_sqlite(database)
 
     assert error.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall() == [("marker",)]
 
 
 @pytest.mark.asyncio

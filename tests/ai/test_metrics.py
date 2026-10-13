@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import build_sql_schema_metadata, provision_metrics_database
+from linktools.ai.migrate import build_sql_schema_metadata, provision_metrics_database, validate_metrics_sqlite
 from linktools.ai.observe import (
     MetricAggregation,
     MetricDefinition,
@@ -28,6 +28,7 @@ from linktools.ai.observe._codec import (
     same_definition_contract,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.exc import OperationalError
 
 
 def _latency_definition() -> MetricDefinition:
@@ -286,8 +287,10 @@ async def test_sqlite_metrics_require_explicit_provisioning(tmp_path: Path) -> N
     path = tmp_path / "metrics.db"
     metrics = Metrics.sqlite(path, namespace="metrics-sqlite")
 
-    with pytest.raises(AIError) as raised:
+    with pytest.raises(OperationalError, match="no such table"):
         await metrics.define(_latency_definition())
+    with pytest.raises(AIError) as raised:
+        await validate_metrics_sqlite(path)
     assert raised.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")

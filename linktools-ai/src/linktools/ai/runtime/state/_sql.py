@@ -114,7 +114,7 @@ class SqlStateStorageGroup:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         if self._initialized:
             return
-        await self._context.initialize(metadata=self._metadata)
+        await self._context.initialize()
         self._initialized = True
         _logger.info(
             "SQL StateStorageGroup initialized: dialect=%s tables=%s",

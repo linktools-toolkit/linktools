@@ -4,22 +4,16 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..core import Page
 from ..errors import AIError, ErrorCode
-from ..storage import validate_sql
 from ._model import MetricDefinition, Observation
-from ._sql import SqlMetricStore, build_metrics_sql_metadata
+from ._sql import SqlMetricStore
 from ._store import _MetricQueryPushdownPlan, _MetricQueryPushdownResult
-
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class SQLiteMetricStore:
@@ -33,17 +27,6 @@ class SQLiteMetricStore:
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._path = Path(path).expanduser().resolve(strict=False)
-        self._schema_validated = False
-        self._schema_validation_lock = asyncio.Lock()
-
-    async def _ensure_schema(self, engine: "AsyncEngine") -> None:
-        if self._schema_validated:
-            return
-        async with self._schema_validation_lock:
-            if self._schema_validated:
-                return
-            await validate_sql(engine, build_metrics_sql_metadata())
-            self._schema_validated = True
 
     @asynccontextmanager
     async def _store(self) -> AsyncIterator[SqlMetricStore]:
@@ -59,8 +42,7 @@ class SQLiteMetricStore:
         except (ImportError, ModuleNotFoundError) as error:
             raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING) from error
         try:
-            await self._ensure_schema(engine)
-            yield SqlMetricStore(engine, validate_schema=False)
+            yield SqlMetricStore(engine)
         finally:
             await engine.dispose()
 

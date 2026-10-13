@@ -155,7 +155,7 @@ class SqlMetricStore:
         self,
         engine: "AsyncEngine",
         *,
-        validate_schema: bool = True,
+        validate_schema: bool = False,
     ) -> None:
         if not isinstance(validate_schema, bool):
             raise TypeError("validate_schema must be bool")
