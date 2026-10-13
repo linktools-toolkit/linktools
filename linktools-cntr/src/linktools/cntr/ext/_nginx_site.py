@@ -203,7 +203,10 @@ class ResolvedSite:
 
     @cached_property
     def template_vars(self) -> "Mapping":
-        return self._mapping("template_vars")
+        values = dict(self._mapping("template_vars"))
+        if self.enabled and values.get("client_max_body_size") is None:
+            values["client_max_body_size"] = self.producer.get_config("NGINX_CLIENT_MAX_BODY_SIZE")
+        return MappingProxyType(values)
 
     def resolve(self) -> "ResolvedSite":
         if not self.enabled:

@@ -15,7 +15,8 @@ class Producer:
     def __init__(self, site, installed=("nginx", "authelia", "safeline"), **config):
         self.name = "app"
         self.config = dict(NGINX_HTTPS_ENABLE=True, NGINX_AUTH_ENABLE=True,
-                           NGINX_WAF_ENABLE=True, NGINX_HTTP_PORT=80, NGINX_HTTPS_PORT=443)
+                           NGINX_WAF_ENABLE=True, NGINX_HTTP_PORT=80, NGINX_HTTPS_PORT=443,
+                           NGINX_CLIENT_MAX_BODY_SIZE="1m")
         self.config.update(config)
         self.manager = SimpleNamespace(
             integration_snapshot={name: () for name in installed},
@@ -287,7 +288,8 @@ def test_site_factory_and_resolved_view_use_explicit_field_names() -> None:
     )
     site = Producer(declaration).site
     assert site.public_url == declaration.public_url == "https://public.example.test"
-    assert dict(site.template_vars) == declaration.template_vars == {"title": "Application"}
+    assert declaration.template_vars == {"title": "Application"}
+    assert dict(site.template_vars) == {"title": "Application", "client_max_body_size": "1m"}
     assert site.default_server is declaration.default_server is True
     assert not hasattr(site, "key")
     assert not hasattr(declaration, "key")

@@ -347,8 +347,10 @@ must not mutate or restore historical derived ACL/OIDC settings.
 
 ## Request body limits
 
-Sites inherit nginx's native `client_max_body_size 1m` default. The common proxy
-snippet does not silently raise that limit. Configure an individual site's
+The nginx container configuration defines `NGINX_CLIENT_MAX_BODY_SIZE="1m"`
+once, matching nginx's native default. Site template variables resolve this
+default together with their explicit overrides before grouping and rendering.
+The common proxy snippet does not silently raise that limit. Configure an individual site's
 server policy using the existing endpoint template variables:
 
 ```python

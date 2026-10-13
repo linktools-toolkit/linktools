@@ -630,6 +630,9 @@ server {
         root = nginx._render_site_template(producer, nginx.get_source_path("templates", "nginx.conf"),
             SimpleNamespace(template_vars={"waf": waf, "site_files": ()}))
         root = root.replace("include /etc/nginx/mime.types;", "")
+        # Packaged nginx may use a root-owned absolute path despite the test prefix.
+        root = root.replace("http {", "http {\n    client_body_temp_path " +
+                            nginx.quote(str(tmp_path / "client_body_temp")) + ";", 1)
         root = root.replace("worker_processes auto", "worker_processes 1")
         for old, new in (("/var/log/nginx/error.log", "error.log"),
                          ("/var/log/nginx/access.log", "access.log"),
@@ -670,6 +673,7 @@ server {
                     pass  # nginx can reject Content-Length before the client finishes writing.
                 response = connection.getresponse()
                 response.read()
+                assert response.status in (200, 413), (response.status, (tmp_path / "error.log").read_text())
                 return response.status
             finally:
                 connection.close()

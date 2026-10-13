@@ -88,6 +88,7 @@ class Container(BaseContainer):
     def configs(self) -> "dict[str, Any]":
         return dict(
             NGINX_TAG="stable-alpine",
+            NGINX_CLIENT_MAX_BODY_SIZE=ConfigField(default="1m", cast=str),
             NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
             NGINX_ROOT_DOMAIN=ConfigField.chain(
                 AliasProvider("ROOT_DOMAIN"), PromptProvider(cached=True), default="_",
@@ -381,7 +382,8 @@ class Container(BaseContainer):
             active.append(SimpleNamespace(
                 producer=self, var_name="default",
                 server_name='""', default_server=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
-                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, template_vars={},
+                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={},
+                template_vars={"client_max_body_size": self.get_config("NGINX_CLIENT_MAX_BODY_SIZE")},
                 template=self.get_source_path("templates", "index.conf"), proxy=None,
             ))
         from collections import OrderedDict
@@ -398,8 +400,7 @@ class Container(BaseContainer):
             def routing_policy(site):
                 return (
                     site.https, site.waf, site.waf_bypass,
-                    str(site.template_vars.get("client_max_body_size")
-                        if site.template_vars.get("client_max_body_size") is not None else "1m"),
+                    str(site.template_vars["client_max_body_size"]),
                     site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
                     site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
                 )
