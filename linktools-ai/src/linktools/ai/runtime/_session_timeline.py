@@ -32,8 +32,10 @@ from .state._contracts import (
     SessionTurnCommitRef,
     SessionTurnRef,
 )
+from .state._conversation_repositories import SessionRepositoryImpl
+from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._store import StateGroupTransaction
 from .state._views import project_session_history_message
-from .state._store import StateGroupTransaction, StateTransaction
 
 _TIMELINE_PROJECTION_VERSION = 1
 _TIMELINE_CURSOR_KIND = "SESSION_TIMELINE"
@@ -242,12 +244,7 @@ async def _capture_timeline_state(
     refresh_phase: Literal["initial", "final"] | None = None,
     transcript_store: SessionTimelineTranscriptStore | None = None,
 ) -> SessionTimelineCapture:
-    session_store = conversation.sessions.state_store
-    execution_store = executions.state_store
-
-    async def blocks_in_transaction(
-        _transaction: StateTransaction,
-    ) -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
+    async def read_blocks() -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
         root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
         if root is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -295,11 +292,19 @@ async def _capture_timeline_state(
                 commits[(record.session_id, value.turn_seq)] = value
         return commits
 
+    # Custom owners may schedule child tasks or perform their own I/O boundaries.
+    if (type(conversation.sessions) is not SessionRepositoryImpl
+            or type(executions) is not ExecutionRepositoryImpl):
+        root, blocks, next_coordinate = await read_blocks()
+        records = await execution_records(root, blocks)
+        commits = await commit_records(blocks)
+        return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+
+    session_store = conversation.sessions.state_store
+    execution_store = executions.state_store
     if session_store.storage_group is execution_store.storage_group:
-        async def read(group: StateGroupTransaction) -> SessionTimelineCapture:
-            root, blocks, next_coordinate = await blocks_in_transaction(
-                group.transaction(session_store)
-            )
+        async def read(_group: StateGroupTransaction) -> SessionTimelineCapture:
+            root, blocks, next_coordinate = await read_blocks()
             records = await execution_records(root, blocks)
             commits = await commit_records(blocks)
             return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
@@ -309,7 +314,7 @@ async def _capture_timeline_state(
         )
 
     # Separate routes keep their own snapshots; no cross-database scope is implied.
-    root, blocks, next_coordinate = await session_store.read(blocks_in_transaction)
+    root, blocks, next_coordinate = await session_store.read(lambda _transaction: read_blocks())
     records = await execution_records(root, blocks)
     commits = await session_store.read(lambda _transaction: commit_records(blocks))
     return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
