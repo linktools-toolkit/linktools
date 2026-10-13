@@ -14,7 +14,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.core import (
     ExecutionStatus, OperationKind, OperationLedgerInput, OperationStatus,
-    ResourceKind, SessionStatus, idempotency_key_digest,
+    ResourceKind, SessionStatus, agent_conversation_id, idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -68,6 +68,20 @@ async def _head(state: RuntimeStorage, execution_id: str):
     return await state.execution.executions.get_history_head(execution_id, tenant_id="default")
 
 
+async def _flush_started_model(
+    state: RuntimeStorage, execution_id: str, started: asyncio.Event,
+) -> None:
+    # Receipt settlement only confirms launch. Freeze the blocked model's
+    # registration projection before comparing heads across control replays.
+    await asyncio.wait_for(started.wait(), 10)
+    runs = await state.run_store.list_agent_runs(agent_conversation_id=agent_conversation_id(
+        namespace=_NAMESPACE, tenant_id="default", execution_id=execution_id,
+    ))
+    assert runs
+    for run in runs:
+        await state.run_store.flush_execution_projection(run.agent_run_id, execution_id=execution_id)
+
+
 async def _receipt(state: RuntimeStorage, key: str):
     return await state.execution.operations.get(idempotency_key_digest(key), tenant_id="default")
 
@@ -83,9 +97,13 @@ async def _recover(runtime: Runtime, execution_id: str, key: str):
     "active", pytest.param("admitted", marks=pytest.mark.merge),
 ))
 async def test_keyed_recovery_replays_across_runtimes_and_after_completion(tmp_path: Path, phase: str) -> None:
-    async with _recoverable(tmp_path, phase=phase) as (runtime, other, state, execution_id, calls, release):
+    started = asyncio.Event()
+    async with _recoverable(
+        tmp_path, phase=phase, model_started=started,
+    ) as (runtime, other, state, execution_id, calls, release):
         original = await _head(state, execution_id)
         await _recover(runtime, execution_id, "recovery")
+        await _flush_started_model(state, execution_id, started)
         claimed = await _head(state, execution_id)
         assert claimed.producer_generation > original.producer_generation
         receipt = await _receipt(state, "recovery")
@@ -107,7 +125,8 @@ async def test_keyed_recovery_replays_across_runtimes_and_after_completion(tmp_p
 async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _recoverable(tmp_path) as (runtime, other, state, execution_id, calls, release):
+    started = asyncio.Event()
+    async with _recoverable(tmp_path, model_started=started) as (runtime, other, state, execution_id, calls, release):
         backend = runtime._execution_service.runtime_backend()
         launch = backend.launch
         entered = asyncio.Event()
@@ -136,8 +155,12 @@ async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon
             with pytest.raises(asyncio.CancelledError):
                 await recovering
             assert (await _receipt(state, "recovery")).status is OperationStatus.SUCCEEDED
+            await _flush_started_model(state, execution_id, started)
+            started_head = await _head(state, execution_id)
+            assert started_head.producer_claim_id == claimed.producer_claim_id
+            assert started_head.producer_generation == claimed.producer_generation
             await _recover(other, execution_id, "recovery")
-            assert await _head(state, execution_id) == claimed
+            assert await _head(state, execution_id) == started_head
             release.set()
             result = await runtime.executions.wait(execution_id, principal=runtime.default_principal, timeout_seconds=10)
             assert result.result.status is ExecutionStatus.SUCCEEDED
@@ -152,7 +175,8 @@ async def test_running_receipt_rejects_replay_and_caller_cancel_does_not_abandon
 async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
-    async with _recoverable(tmp_path) as (runtime, other, state, execution_id, _calls, _release):
+    started = asyncio.Event()
+    async with _recoverable(tmp_path, model_started=started) as (runtime, other, state, execution_id, _calls, _release):
         backend = runtime._execution_service.runtime_backend()
         launch = backend.launch
         if outcome == "settled_ack_lost":
@@ -193,6 +217,8 @@ async def test_launch_and_settlement_outcomes_do_not_repeat_takeover(
             with pytest.raises(AIError):
                 await _recover(runtime, execution_id, "recovery")
             expected = OperationStatus.FAILED if outcome == "rejected" else OperationStatus.RUNNING
+        if outcome in {"launched_ack_lost", "settled_ack_lost"}:
+            await _flush_started_model(state, execution_id, started)
         claimed = await _head(state, execution_id)
         assert (await _receipt(state, "recovery")).status is expected
         if expected is OperationStatus.SUCCEEDED:
@@ -433,6 +459,7 @@ async def test_late_cancel_recovery_cannot_control_another_producer_claim(
             await asyncio.wait_for(stale_loaded.wait(), 10)
             winner = asyncio.create_task(_recover(runtime, execution_id, "recovery"))
             await asyncio.wait_for(launch_confirmed.wait(), 10)
+            await _flush_started_model(state, execution_id, started)
             receipt = await _receipt(state, "recovery")
             head = await _head(state, execution_id)
             assert receipt.status is OperationStatus.RUNNING
