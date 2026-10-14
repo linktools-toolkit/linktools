@@ -1428,6 +1428,23 @@ class StateStepArchive(AgentRunStore):
         key = self._sequence(agent_run_id, "checkpoint")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
+    async def capture_checkpoint_progress(
+        self, *, agent_run_id: str, checkpoint: PreparedAgentRunCheckpoint,
+    ) -> tuple[int, int]:
+        """Capture the checkpoint's durable position and model interaction high water."""
+        require_no_run_history_lock("StateStepArchive.capture_checkpoint_progress")
+        async def read(_transaction: StateTransaction) -> tuple[int, int]:
+            sequence = await self.checkpoint_count(agent_run_id=agent_run_id)
+            if not sequence or not await self.verify_checkpoint_range(
+                agent_run_id=agent_run_id, after_sequence=sequence - 1,
+                checkpoints=(checkpoint,),
+            ):
+                sequence += 1
+            high_water = await self.model_interaction_count(agent_run_id=agent_run_id)
+            return sequence, high_water
+
+        return await self._store.read(read)
+
     async def verify_checkpoint_range(
         self, *, agent_run_id: str, after_sequence: int,
         checkpoints: Sequence[PreparedAgentRunCheckpoint],

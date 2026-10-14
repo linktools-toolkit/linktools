@@ -223,6 +223,26 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             [agent_run_id, model_request_seq],
         )
 
+    async def capture_checkpoint_progress(
+        self, *, agent_run_id: str, checkpoint: PreparedAgentRunCheckpoint,
+    ) -> tuple[int, int]:
+        require_no_run_history_lock("StateStepArchive.capture_checkpoint_progress")
+        if type(self) is not ModelInteractionStateStepArchive:
+            return await super().capture_checkpoint_progress(
+                agent_run_id=agent_run_id, checkpoint=checkpoint,
+            )
+
+        async def read(transaction: StateTransaction) -> tuple[int, int]:
+            await transaction.get_sequences((
+                self._sequence(agent_run_id, "checkpoint"),
+                self._sequence(agent_run_id, "interaction"),
+            ))
+            return await super(ModelInteractionStateStepArchive, self).capture_checkpoint_progress(
+                agent_run_id=agent_run_id, checkpoint=checkpoint,
+            )
+
+        return await self.state_store.read(read)
+
     async def list_model_interactions(
         self,
         *,
