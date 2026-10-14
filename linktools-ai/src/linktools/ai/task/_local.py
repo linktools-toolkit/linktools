@@ -1246,7 +1246,10 @@ class LocalTaskGraphLauncher:
                                 )
                         return
                     continue
-                _reap_inflight(inflight)
+                if _reap_inflight(inflight):
+                    # A completion can commit while scheduler_state is being read.
+                    # Refresh before deciding that no dependent is runnable.
+                    continue
                 persisted = {
                     state.node_id
                     for state in states
