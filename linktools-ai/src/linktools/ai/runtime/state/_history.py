@@ -566,13 +566,14 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head, record = entry
         next_head = replace(head, pending=prepared.pending, pending_part_count=len(prepared.pending_parts))
-        upgraded = replace(
-            record,
-            data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
-            storage_version=record.storage_version + 1,
-        )
-        if not await transaction.replace_record(upgraded, expected_storage_version=record.storage_version):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if not prepared.chunks or next_head != head:
+            upgraded = replace(
+                record,
+                data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
+                storage_version=record.storage_version + 1,
+            )
+            if not await transaction.replace_record(upgraded, expected_storage_version=record.storage_version):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         if prepared.new_pending_parts:
             await transaction.insert_facts(prepared.new_pending_parts)
 
