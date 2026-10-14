@@ -43,7 +43,8 @@ class _Stream(httpx2.AsyncByteStream):
         self, chunks: list[bytes | BaseException], *, block: bool = False,
         close_error: BaseException | None = None,
     ) -> None:
-        self.chunks = chunks
+        self.chunks = iter(chunks)
+        self.received: list[bytes] = []
         self.block = block
         self.close_error = close_error
         self.blocked = asyncio.Event()
@@ -55,6 +56,7 @@ class _Stream(httpx2.AsyncByteStream):
             self.pulls += 1
             if isinstance(chunk, BaseException):
                 raise chunk
+            self.received.append(chunk)
             yield chunk
         if self.block:
             self.blocked.set()
@@ -143,20 +145,34 @@ async def test_model_client_response_completion_requires_observed_sse_terminator
 
 
 @pytest.mark.asyncio
-async def test_model_client_response_does_not_pull_after_done_or_claim_tail_processing(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("http_version", ("HTTP/1.1", "HTTP/2"))
+async def test_model_client_response_preserves_sdk_tail_consumption(
+    monkeypatch: pytest.MonkeyPatch, http_version: str,
 ) -> None:
     body = _EVENT + _DONE + b": received in same chunk but not processed by SDK\n\n"
-    source = _Stream([body, b"not received"])
-    model, _clients = _model(monkeypatch, lambda request: httpx2.Response(
-        200, headers={"content-type": "text/event-stream"}, stream=source,
-    ))
-    async with model:
-        with ModelClientRequestRecorder() as recorder:
-            await _invoke(model, True)
-    captured = recorder.requests[0].response
-    assert captured is not None and captured.body == body and captured.complete
-    assert source.pulls == 1 and source.closes == 1
+    tail = b": remaining raw transport bytes\n\n"
+
+    async def run(capture: bool):
+        source = _Stream([body, tail])
+        model, _clients = _model(monkeypatch, lambda request: httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=source,
+            extensions={"http_version": http_version.encode()},
+        ))
+        recorder = ModelClientRequestRecorder()
+        async with model:
+            with recorder if capture else nullcontext():
+                await _invoke(model, True)
+        captured = recorder.requests[0].response if capture else None
+        return source, captured
+
+    plain, _ = await run(False)
+    source, captured = await run(True)
+    assert source.received == plain.received
+    assert source.received in ([body], [body, tail])
+    assert captured is not None and captured.body == b"".join(plain.received) and captured.complete
+    assert source.pulls == plain.pulls and source.closes == plain.closes == 1
+    if http_version == "HTTP/2":
+        assert source.pulls == 1 and captured.body == body
 
 
 @pytest.mark.asyncio
@@ -474,9 +490,10 @@ async def test_model_client_response_closed_scope_stops_accumulating_body(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_version", ("HTTP/1.1", "HTTP/2"))
 @pytest.mark.parametrize("cancel", (False, True))
 async def test_model_client_response_iterator_finalization_matches_plain_client(
-    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder, cancel: bool,
+    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder, cancel: bool, http_version: str,
 ) -> None:
     original = RuntimeError("underlying iterator finalization failed")
 
@@ -487,8 +504,12 @@ async def test_model_client_response_iterator_finalization_matches_plain_client(
             self.pulls = 0
             self.closes = 0
             self.finalizations = 0
+            self.iterator = self._iterate()
 
-        async def __aiter__(self) -> AsyncIterator[bytes]:
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self.iterator
+
+        async def _iterate(self) -> AsyncIterator[bytes]:
             try:
                 self.pulls += 1
                 yield _EVENT if cancel else _EVENT + _DONE
@@ -514,6 +535,7 @@ async def test_model_client_response_iterator_finalization_matches_plain_client(
         try:
             model, _clients = _model(monkeypatch, lambda request: httpx2.Response(
                 200, headers={"content-type": "text/event-stream"}, stream=source,
+                extensions={"http_version": http_version.encode()},
             ))
 
             async def invoke() -> None:
@@ -551,7 +573,11 @@ async def test_model_client_response_iterator_finalization_matches_plain_client(
         return False
 
     assert caused_by_original(captured_error) == caused_by_original(plain_error)
-    assert captured_source.pulls == plain_source.pulls == 1
+    assert captured_source.pulls == plain_source.pulls
+    if cancel or http_version == "HTTP/2":
+        assert captured_source.pulls == 1
+    else:
+        assert captured_source.pulls in (1, 2)
     assert captured_source.closes == plain_source.closes == 1
     assert captured_source.finalizations == plain_source.finalizations == 1
     assert [item.get("exception") for item in captured_unhandled] == [item.get("exception") for item in plain_unhandled]
