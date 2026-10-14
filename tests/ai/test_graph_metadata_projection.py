@@ -506,3 +506,40 @@ async def test_standalone_final_watch_close_releases_subscriptions(
         finally:
             await stream.aclose()
         assert not [task for task in asyncio.all_tasks() - before if not task.done()]
+
+
+@pytest.mark.asyncio
+async def test_graph_final_metadata_remains_available_without_live_notifications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    async with _runtime(tmp_path) as runtime:
+        task = runtime.tasks.from_agent("metadata.finite", runtime.agents.get())
+        run = await runtime.tasks.bind(task).start(TaskGraph("finite-metadata", (
+            TaskNode("agent", task=task, input=AgentTaskInput("finished")),
+        )), idempotency_key="finite")
+        assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
+        stream = run.watch()
+        first = None
+        try:
+            async for event in stream:
+                if isinstance(event.event, TaskModelProjection):
+                    first = event.event
+                    break
+            assert first is not None
+
+            async def unavailable(*args, **kwargs):
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+            monkeypatch.setattr(runtime.history, "subscribe_model_interactions", unavailable)
+            remaining = [event async for event in stream]
+        finally:
+            await stream.aclose()
+        metadata = [event.event for event in remaining if isinstance(event.event, TaskModelProjection)]
+        assert metadata and metadata[-1].item == first.item
+        checkpoint = remaining[-1].event
+        assert isinstance(checkpoint, TaskGraphProjection)
+        assert checkpoint.phase == "final"
+        assert checkpoint.coverage is not None and checkpoint.coverage.state_complete
+        assert not runtime._observation_sessions

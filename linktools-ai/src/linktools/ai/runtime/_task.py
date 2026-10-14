@@ -1030,7 +1030,7 @@ class TaskGraphRun(Generic[AppT]):
         models = _GraphModelProjection(self._runtime.history, self._principal)
         try:
             for execution_id, (node_id, view, _, depth) in captured.items():
-                await models.add(node_id, view, depth)
+                await models.add(node_id, view, depth, subscribe=False)
                 await models.capture(execution_id)
         except BaseException:
             await models.close()

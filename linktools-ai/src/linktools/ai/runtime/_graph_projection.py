@@ -29,14 +29,16 @@ class _GraphModelProjection:
         self.active: set[tuple[str, int, int]] = set()
         self.rows: dict[tuple[str, int, int], TaskModelProjection] = {}
 
-    async def add(self, node_id: str, view: ExecutionView, depth: int) -> None:
+    async def add(
+        self, node_id: str, view: ExecutionView, depth: int, *, subscribe: bool = True,
+    ) -> None:
         existing = self.views.get(view.execution_id)
         if existing is not None:
             if existing[0] != node_id or existing[1].root_execution_id != view.root_execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
         self.views[view.execution_id] = (node_id, view, depth)
-        if self.history is not None:
+        if subscribe and self.history is not None:
             subscription = await self.history.subscribe_model_interactions(
                 view.execution_id, principal=self.principal,
             )

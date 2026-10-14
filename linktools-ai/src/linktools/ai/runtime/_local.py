@@ -3922,6 +3922,8 @@ class LocalExecutionBackend:
             agent_run_id=agent_run_id,
             usage=usage,
             producer_generation=producer_generation,
+            # Inline serialization has not yielded since this record was read.
+            observed_execution=current if output_payload.kind == "inline" else None,
         )
 
     async def _expected_session_cursor(
@@ -4801,11 +4803,14 @@ class LocalExecutionBackend:
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         producer_generation: int | None = None,
         expected_revision: int | None = None,
+        observed_execution: ExecutionRecord | None = None,
     ) -> ExecutionRecord:
-        current = await self._execution.executions.get(
-            execution.execution_id,
-            tenant_id=self._tenant_id,
-        )
+        current = observed_execution
+        if current is None:
+            current = await self._execution.executions.get(
+                execution.execution_id,
+                tenant_id=self._tenant_id,
+            )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if expected_revision is not None and current.revision != expected_revision:

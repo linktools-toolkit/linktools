@@ -11,18 +11,20 @@ import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup
 from linktools.ai.core import (
+    AuthorizationAction,
     ExecutionStatus,
     Page,
     Principal,
     ResourceKind,
     ResourceRef,
     TaskStatus,
+    TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
 from linktools.ai.runtime._execution import (
-    DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
@@ -36,7 +38,7 @@ from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
+from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, StoredPayload
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
@@ -49,6 +51,8 @@ from linktools.ai.task import (
 from pydantic import BaseModel
 from pydantic_ai.capabilities import AbstractCapability
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from .test_execution_result_read_io import _seed as _seed_result, _service as _result_service
 
 
 class _RegisteredOutput(BaseModel):
@@ -479,7 +483,8 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
 
 
 @pytest.mark.asyncio
-async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
+@pytest.mark.parametrize("after_wait", ("fresh", "denied"))
+async def test_execution_wait_rechecks_after_local_worker_quiescence(after_wait: str) -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -505,7 +510,21 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
             del execution_id, tenant_id
             return None
 
-    service = object.__new__(DefaultExecutionService)
+    class Authorization(TenantAuthorizationPolicy):
+        denied = False
+
+        async def authorize(
+            self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
+        ) -> None:
+            if self.denied:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await super().authorize(principal, action, resource)
+
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    record = await _seed_result(state)
+    authorization = Authorization()
+    service = _result_service(state, authorization=authorization)
     bridge = _ExecutionRuntimeBridge()
     bridge.bind(Waiter())  # type: ignore[arg-type]
     service._runtime_bridge = bridge
@@ -519,43 +538,40 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
 
     live_broker = LiveBroker()
     service._live_broker = live_broker
-    abandoned: list[str] = []
-    del abandoned
-
-    async def load_authorized(
-        execution_id: str, principal: Principal, action: object
-    ) -> object:
-        del principal, action
-        return SimpleNamespace(
-            execution_id=execution_id, status=ExecutionStatus.SUCCEEDED
-        )
-
-    service._load_authorized = load_authorized  # type: ignore[method-assign]
-
-    async def inspect(execution_id: str, *, principal: Principal) -> object:
-        del execution_id, principal
-        return SimpleNamespace(status=ExecutionStatus.SUCCEEDED)
-
-    async def result(execution_id: str, *, principal: Principal) -> str:
-        del execution_id, principal
-        return "terminal"
-
-    service.inspect = inspect
-    service.result = result
-    wait = DefaultExecutionService.wait.__wrapped__
     task = asyncio.create_task(
-        wait(
-            service,
+        service.wait(
             "execution",
             principal=Principal("principal", "tenant", "service"),
             timeout_seconds=1,
         )
     )
-    await started.wait()
-    assert live_broker.abandoned == ["execution"]
-    assert not task.done()
-    release.set()
-    assert await task == "terminal"
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert live_broker.abandoned == ["execution"]
+        assert not task.done()
+        if after_wait == "denied":
+            authorization.denied = True
+        else:
+            await state.execution.executions.compare_and_swap(
+                "execution", tenant_id="tenant", expected_revision=record.revision,
+                next_record=replace(
+                    record, revision=record.revision + 1,
+                    result=replace(record.result, output=StoredPayload.inline_json({"fresh": True})),
+                ),
+            )
+        release.set()
+        if after_wait == "denied":
+            with pytest.raises(AIError) as error:
+                await task
+            assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+        else:
+            assert (await task).output == {"fresh": True}
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await state.close()
 
 
 def _running_task_graph_state() -> TaskGraphState:
