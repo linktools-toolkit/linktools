@@ -29,13 +29,13 @@ def test_sdk_dependency_requires_synthesized_tool_return_metadata() -> None:
     assert "3.0.0" not in sdk.specifier
 
 
-def test_development_install_selects_declared_web_extra() -> None:
+def test_development_install_selects_declared_optional_extras() -> None:
     from manage import _install_requirements, get_modules
 
     modules = get_modules()
     development = dict(_install_requirements(Namespace(module=["linktools-ai"], editable=True), modules))
     ordinary = dict(_install_requirements(Namespace(module=["linktools-ai"], editable=False), modules))
-    assert development["linktools-ai"] == modules["linktools-ai"]["path"] + "[web]"
+    assert development["linktools-ai"] == modules["linktools-ai"]["path"] + "[magic,web]"
     assert ordinary["linktools-ai"] == modules["linktools-ai"]["path"]
 
 

@@ -3,7 +3,6 @@
 """Encoding constraints of the OpenAI Chat adapter, independent of model support."""
 
 from pydantic_ai.messages import BinaryContent, DocumentUrl
-from pydantic_ai.providers.openai import OpenAIProvider
 
 
 def openai_input_transport(media_type: str, input_kind: str, model: str) -> str | None:
@@ -25,6 +24,8 @@ def openai_input_transport(media_type: str, input_kind: str, model: str) -> str 
         return "image"
     if input_kind == "binary" and probe.is_audio:
         return "audio" if _audio_supported(probe) else None
+    from pydantic_ai.providers.openai import OpenAIProvider
+
     profile = OpenAIProvider.model_profile(model)
     if profile is not None and not profile.get("openai_chat_supports_document_input", True):
         return None
