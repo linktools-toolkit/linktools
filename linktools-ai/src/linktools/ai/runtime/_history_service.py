@@ -20,11 +20,12 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
-from ._history_projection import StepExecutionHistoryReader
+from ._history_projection import StepExecutionHistoryReader, _model_interaction_update_ranges
 from .service_api import (
     AttachmentFact,
     ExecutionHistoryItem,
     ExecutionHistoryReader,
+    ExecutionHistoryService,
     ExecutionTraceItem,
     ExecutionView,
     ListExecutionRequest,
@@ -322,6 +323,21 @@ class DefaultExecutionHistoryService:
             ),
         )
 
+    async def read_model_interaction_updates(
+        self, execution_id: str, *, principal: Principal,
+        after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        """Authorize one bounded capture-and-suffix operation before opening its read scope."""
+        if type(self) is DefaultExecutionHistoryService and type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.read_authorized_model_interaction_updates(
+                execution_id, tenant_id=principal.tenant_id, executions=self._executions,
+                after_cutoffs=after_cutoffs, limit=limit,
+            )
+        return await _read_model_interaction_updates(
+            self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
+        )
+
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, principal: Principal,
     ) -> ModelInteractionReadBoundary:
@@ -544,6 +560,24 @@ class DefaultExecutionHistoryService:
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
+
+
+async def _read_model_interaction_updates(
+    service: ExecutionHistoryService, execution_id: str, *, principal: Principal,
+    after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+    """Compose existing public operations for services without the optional read."""
+    boundary = await service.capture_model_interaction_cutoffs(execution_id, principal=principal)
+    items: list[ModelInteractionItem] = []
+    for run, after, through in _model_interaction_update_ranges(execution_id, boundary, after_cutoffs, limit):
+        rows = await service.read_model_interaction_metadata(
+            execution_id, principal=principal, agent_run_seq=run,
+            after_model_request_seq=after, through_model_request_seq=through, limit=through - after,
+        )
+        if not rows:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        items.extend(rows)
+    return boundary, tuple(items)
 
 
 def _validate_history_filters(filters: Mapping[str, JsonValue]) -> None:

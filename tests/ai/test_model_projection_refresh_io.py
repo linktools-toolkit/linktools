@@ -101,7 +101,8 @@ async def test_refresh_keeps_sparse_ranges_and_bounded_pages(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ("denied", "missing", "wrong_owner"))
-async def test_batched_refresh_propagates_authority_and_integrity_failures(failure: str) -> None:
+@pytest.mark.parametrize("composed", (False, True))
+async def test_batched_refresh_propagates_authority_and_integrity_failures(failure: str, composed: bool) -> None:
     from dataclasses import replace
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.runtime import RuntimeStorage
@@ -115,15 +116,19 @@ async def test_batched_refresh_propagates_authority_and_integrity_failures(failu
         projection = _GraphModelProjection(service, _PRINCIPAL)
         await projection.add("node", project_execution_view(_execution()), 0, subscribe=False)
         assert len([row async for row in projection.refresh("execution")]) == 2
-        original = service.read_model_interaction_metadata
+        original = service.read_model_interaction_updates if composed else service.read_model_interaction_metadata
         async def read(*args, **kwargs):
             if failure == "denied":
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            rows = await original(*args, **kwargs)
-            if failure == "missing":
-                return ()
-            return (replace(rows[0], execution_id="another"), *rows[1:])
-        service.read_model_interaction_metadata = read
+            result = await original(*args, **kwargs)
+            boundary, rows = result if composed else (None, result)
+            rows = () if failure == "missing" else (replace(rows[0], execution_id="another"), *rows[1:])
+            return (boundary, rows) if composed else rows
+        if composed:
+            service.read_model_interaction_updates = read
+        else:
+            service.read_model_interaction_updates = None
+            service.read_model_interaction_metadata = read
         with pytest.raises(AIError) as raised:
             _ = [row async for row in projection.refresh("execution")]
         assert raised.value.code is (

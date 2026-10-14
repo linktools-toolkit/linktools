@@ -508,6 +508,25 @@ class StepExecutionHistoryReader:
         )
         return Page(selected, next_cursor)
 
+    async def read_authorized_model_interaction_updates(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+        after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        """Capture identities and their first bounded suffix in one authorized scope."""
+        async def read() -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+            boundary = await self.capture_authorized_model_interaction_cutoffs(
+                execution_id, tenant_id=tenant_id, executions=executions,
+            )
+            items: list[ModelInteractionItem] = []
+            for run, after, through in _model_interaction_update_ranges(execution_id, boundary, after_cutoffs, limit):
+                items.extend(await self.read_authorized_model_interaction_metadata(
+                    execution_id, tenant_id=tenant_id, executions=executions, agent_run_seq=run,
+                    after_model_request_seq=after, through_model_request_seq=through, limit=through - after,
+                ))
+            return boundary, tuple(items)
+
+        return await self._read_model_metadata(executions, read)
+
     async def capture_authorized_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
     ) -> ModelInteractionReadBoundary:
@@ -2126,6 +2145,32 @@ def _metadata_token(
     if not raw.isdigit():
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return int(raw)
+
+
+def _model_interaction_update_ranges(
+    execution_id: str, boundary: ModelInteractionReadBoundary,
+    after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+) -> tuple[tuple[int, int, int], ...]:
+    remaining = validate_page_limit(limit)
+    afters: dict[int, int] = {}
+    for cutoff in after_cutoffs:
+        _validate_model_metadata_range(cutoff.agent_run_seq, 0, cutoff.model_request_seq, limit)
+        if cutoff.execution_id != execution_id or cutoff.agent_run_seq in afters:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        afters[cutoff.agent_run_seq] = cutoff.model_request_seq
+    current = {value.agent_run_seq: value.model_request_seq for value in boundary.cutoffs}
+    if any(run not in current or after > current[run] for run, after in afters.items()):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    ranges = []
+    for cutoff in boundary.cutoffs:
+        if cutoff.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        after = afters.get(cutoff.agent_run_seq, 0)
+        count = min(remaining, cutoff.model_request_seq - after)
+        if count > 0:
+            ranges.append((cutoff.agent_run_seq, after, after + count))
+            remaining -= count
+    return tuple(ranges)
 
 
 def _validate_model_metadata_range(

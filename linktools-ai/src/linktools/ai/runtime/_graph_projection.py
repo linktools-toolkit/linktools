@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from ..core import Principal
 from ..errors import AIError, ErrorCode
 from ._runtime_history import RuntimeHistory
+from ._history_projection import _model_interaction_update_ranges
 from .service_api import (
     ExecutionView, ModelInteractionItem, ModelInteractionReadBoundary,
     ModelInteractionSubscription, TaskModelProjection, UsageReadCutoff,
@@ -77,6 +78,40 @@ class _GraphModelProjection:
     async def refresh(
         self, execution_id: str, *, boundary: ModelInteractionReadBoundary | None = None,
     ) -> AsyncIterator[tuple[str, TaskModelProjection]]:
+        prefetched: dict[tuple[int, int], ModelInteractionItem] = {}
+        read_updates = getattr(self.history, "read_model_interaction_updates", None)
+        if boundary is None and callable(read_updates):
+            afters = {run: value for (identity, run), value in self.high_waters.items() if identity == execution_id}
+            contiguous = True
+            for run, previous in tuple(afters.items()):
+                active = sorted(sequence for identity, active_run, sequence in self.active
+                                if identity == execution_id and active_run == run and sequence <= previous)
+                if active:
+                    if len(active) != previous - active[0] + 1:
+                        contiguous = False
+                        break
+                    afters[run] = active[0] - 1
+            if contiguous:
+                after_cutoffs = tuple(UsageReadCutoff(execution_id, run, after) for run, after in sorted(afters.items()))
+                boundary, items = await read_updates(
+                    execution_id, principal=self.principal, after_cutoffs=after_cutoffs, limit=200,
+                )
+                ranges = _model_interaction_update_ranges(execution_id, boundary, after_cutoffs, 200)
+                if ranges and not items:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                expected = []
+                for run, after, through in ranges:
+                    count = sum(item.agent_run_seq == run for item in items)
+                    if count > through - after:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    expected.extend((run, sequence) for sequence in range(after + 1, after + count + 1))
+                if [(item.agent_run_seq, item.model_request_seq) for item in items] != expected:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for item in items:
+                    key = (item.agent_run_seq, item.model_request_seq)
+                    if item.execution_id != execution_id or key in prefetched:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    prefetched[key] = item
         boundary = await self.capture(execution_id) if boundary is None else boundary
         self.boundaries[execution_id] = boundary
         if self.history is None:
@@ -110,7 +145,13 @@ class _GraphModelProjection:
                     contiguous.append((after, through))
             for after, through in contiguous:
                 while after < through:
-                    rows = await self.history.read_model_interaction_metadata(
+                    page = []
+                    for sequence in range(after + 1, min(through, after + 200) + 1):
+                        item = prefetched.pop((cutoff.agent_run_seq, sequence), None)
+                        if item is None:
+                            break
+                        page.append(item)
+                    rows = tuple(page) if page else await self.history.read_model_interaction_metadata(
                         execution_id, principal=self.principal,
                         agent_run_seq=cutoff.agent_run_seq,
                         after_model_request_seq=after, through_model_request_seq=through,
@@ -146,6 +187,8 @@ class _GraphModelProjection:
                             self.rows[identity] = projection
                             yield node_id, projection
             self.high_waters[run_key] = cutoff.model_request_seq
+        if prefetched:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self.arm(execution_id)
 
     def cutoffs(self) -> tuple[UsageReadCutoff, ...]:
