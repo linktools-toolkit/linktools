@@ -92,12 +92,12 @@ tools remain on one row. Message order and content do not change with width.
 
 ![500-pixel model-message layout study with original role order](assets/web-console/model-messages-500.jpg)
 
-Implementation status (2026-10-12): the direct reader and recovery behavior passed
-their preceding automated and real-browser checks. The visual hierarchy shown
-here is being applied to production assets in [PR #167](https://github.com/linktools-toolkit/linktools/pull/167),
-which remains Draft during its focused regression, independent review, actual
-browser and exact-head CI checks. These prototype screenshots do not replace
-those production checks. The layout introduces no new message protocol, renderer
+The production console implements this visual hierarchy, including the shared
+selection toolbar, direct model-message reader, request tools and responsive
+role layout. These images remain design studies, not production screenshots or
+proof of provider receipt. [PR #167](https://github.com/linktools-toolkit/linktools/pull/167)
+records the production-browser acceptance and automated verification for the
+implemented assets. The layout introduces no new message protocol, renderer
 owner, Runtime behavior or source reconstruction.
 
 ### Conversation, activity and diagnostics
