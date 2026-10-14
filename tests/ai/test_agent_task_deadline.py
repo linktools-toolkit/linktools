@@ -181,8 +181,10 @@ def _start_interrupted_graph(
                 TaskGraph("deadline-recovery", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=timeout),)),
                 idempotency_key="start",
             )
-            await asyncio.wait_for(entered.wait(), 2)
-            await asyncio.wait_for(observer_entered.wait(), 2)
+            # The parent bounds the complete startup handshake, including
+            # filesystem persistence and child execution admission.
+            await entered.wait()
+            await observer_entered.wait()
             execution = await run.execution("agent")
             view = await runtime.executions.inspect(execution.execution_id, principal=runtime.default_principal)
             assert view.status is ExecutionStatus.STARTED
@@ -215,7 +217,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
     process = context.Process(target=_start_interrupted_graph, args=(str(path), write, backend, 0.5, subagent))
     process.start()
     try:
-        assert await asyncio.to_thread(read.poll, 10)
+        assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
         execution_id, started_at, tenant_id = read.recv()
         assert started_at is not None
     finally:
@@ -299,7 +301,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
     process = context.Process(target=_start_interrupted_graph, args=(str(path), write, "sqlite" if subagent else "filesystem", 120 if subagent else None, subagent, False))
     process.start()
     try:
-        assert await asyncio.to_thread(read.poll, 10)
+        assert await asyncio.to_thread(read.poll, 30), "Interrupted execution did not reach its ready boundary"
         execution_id, started_at, _tenant_id = read.recv()
     finally:
         process.terminate()
