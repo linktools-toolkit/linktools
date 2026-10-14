@@ -2738,6 +2738,11 @@ class DefaultExecutionService:
         execution = await self._load_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ
         )
+        return await self._result_from_execution(execution, tenant_id=principal.tenant_id)
+
+    async def _result_from_execution(
+        self, execution: ExecutionRecord, *, tenant_id: str
+    ) -> ExecutionResult:
         if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
             raise _execution_recovery_error(execution)
         if execution.status not in {
@@ -2748,7 +2753,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.EXECUTION_NOT_READY)
         repository = self._state.executions
         result = (execution.result if type(repository) is ExecutionRepositoryImpl else
-                  await repository.get_result(execution_id, tenant_id=principal.tenant_id))
+                  await repository.get_result(execution.execution_id, tenant_id=tenant_id))
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         error_code, safe_details = _terminal_error(execution)
@@ -2880,7 +2885,9 @@ class DefaultExecutionService:
                         )
                         if failure is not None:
                             raise failure
-                    return await self.result(execution_id, principal=principal)
+                    return await self._result_from_execution(
+                        execution, tenant_id=principal.tenant_id,
+                    )
                 if self._backend is not None:
                     failure = self._backend.worker_failure(
                         execution_id,

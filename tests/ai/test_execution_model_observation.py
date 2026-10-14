@@ -445,3 +445,25 @@ async def test_standalone_drain_does_not_start_another_read_after_deadline(monke
         await anext(stream)
     assert caught.value.safe_details["phase"] == "drain"
     assert not bundle.runtime._observation_sessions
+
+
+@pytest.mark.asyncio
+async def test_execution_final_metadata_remains_available_without_live_notifications() -> None:
+    bundle = _bundle()
+    stream = bundle.execution_run.watch(include_model_interactions=True)
+    first = await anext(stream)
+    assert isinstance(first.event, TaskModelProjection)
+
+    async def unavailable(*args, **kwargs):
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+    bundle.runtime.history.subscribe_model_interactions = unavailable
+    try:
+        remaining = [event async for event in stream]
+    finally:
+        await stream.aclose()
+    metadata = [event.event for event in remaining if isinstance(event.event, TaskModelProjection)]
+    assert metadata and metadata[-1].item == first.event.item
+    assert metadata[-1].visibility == "durable_history"
+    assert all(subscription.closed for subscription in bundle.runtime.history.subscriptions)
+    assert not bundle.runtime._observation_sessions

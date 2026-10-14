@@ -64,12 +64,12 @@ class _ExecutionModelObservation:
         self.cursor = self.checkpoint()
         return ExecutionObservationEvent(inner, self.cursor)
 
-    async def capture(self) -> tuple[tuple[ExecutionView, int, int], ...]:
+    async def capture(self, *, subscribe: bool = True) -> tuple[tuple[ExecutionView, int, int], ...]:
         captured = await self.runtime._capture_execution_tree(
             self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
         )
         for view, depth, _ in captured:
-            await self.models.add(self.execution_id, view, depth)
+            await self.models.add(self.execution_id, view, depth, subscribe=subscribe)
         return captured
 
     async def refresh(self, execution_ids: Iterable[str], *, finite: bool = False) -> AsyncIterator[ExecutionObservationEvent]:
@@ -167,7 +167,7 @@ class _ExecutionModelObservation:
 
     async def final(self) -> AsyncIterator[ExecutionObservationEvent]:
         try:
-            captured = await self.capture()
+            captured = await self.capture(subscribe=False)
             for execution_id in self.models.views:
                 await self.models.capture(execution_id)
         except BaseException as error:
