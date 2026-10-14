@@ -10,6 +10,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextContent,
     TextPart,
     UserPromptPart,
 )
@@ -65,9 +66,9 @@ def test_consumed_binary_is_removed_without_mutating_raw_transcript() -> None:
     assert isinstance(projected_request, ModelRequest)
     content = projected_request.parts[0].content  # type: ignore[attr-defined]
     assert "Workspace file: a.png" in content
-    marker = next(item for item in content if item.startswith("[binary content already consumed] "))
-    assert json.loads(marker.removeprefix("[binary content already consumed] ")) == {
-        "attachment": "a.png", "size": 5, "mime": "image/png",
+    metadata = next(item for item in content if isinstance(item, TextContent))
+    assert json.loads(metadata.content) == {
+        "attachment": "a.png", "size": 5, "mime_type": "image/png",
     }
     assert not any(
         isinstance(item, str) and "identifier=" in item

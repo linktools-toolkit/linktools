@@ -118,19 +118,32 @@ unchanged. Mixed results retain attachment identity; only same-hash/same-range
 text previews can be deduplicated in the compressed view. Basic previews without
 a full hash remain intact.
 
-Consumed binary bodies become a text marker with known attachment metadata, not
-the original file contents. `attachment` retains the existing content identifier;
-for runtime-bound file-tool results this is the attachment occurrence ID, while
-other inputs may use an SDK-derived or caller-supplied identifier. `size` is the
-original byte count and `mime` is the binary content media type. A workspace
-`path` is included only when matching structured file-tool metadata in the same
-request proves the association. Missing paths are omitted; an arbitrary identifier
-or nearby user-written text is never interpreted as a path. Existing workspace
-path labels remain separate text. URL or absolute-host-path identifiers are not
-echoed by the marker.
+Direct binary inputs carry one generated JSON metadata text block followed by the
+binary content. For the separate `files` argument, these pairs precede the prompt
+in the original file-list order. Explicit content arrays keep their authored
+text/file order. Workspace inputs use this same block instead of a separate path
+label. Its fields are `attachment`, `size`, `mime_type`, and `path` when known.
+`attachment` is the existing content identifier: file-tool binding uses the
+Runtime occurrence ID, while other inputs retain their caller/SDK identifier.
+URL or absolute-host-path identifiers are not echoed. Paths come from authorized
+structured input metadata, never from parsing arbitrary user text.
 
-The projection does not change raw persisted history or discard pending binaries.
-It does not add consumption behavior for URL inputs or uploaded-file references.
+The unified `read_file` uses `mime_type` in its `files`/`texts` result entries,
+retaining `input_index` and `sha256` where applicable. Legacy `attach_files` keeps
+its existing `media_type` contract, and old stored read results remain readable.
+SDK content and internal attachment facts retain their own `media_type` field.
+Runtime binding adds the existing attachment identifier to each new `read_file`
+file entry. These tool results already
+carry the metadata, so the SDK-added user content contains only the binary, not a
+second copy of the metadata text.
+
+After a complete response, active context retains the existing metadata and
+removes only the binary content blocks, omitting the resulting empty user content
+block while preserving tool call/return pairing. No consumed-content prefix is
+added. Old stored labels and markers remain readable without rewriting raw history. Legacy
+binaries lacking a reliable metadata association receive one metadata text block
+when projected. URL inputs and uploaded-file references retain their existing
+lifetime; this policy applies only to BinaryContent.
 
 ## Discovery and edits
 

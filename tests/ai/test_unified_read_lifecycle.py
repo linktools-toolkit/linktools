@@ -54,7 +54,7 @@ def _result(
 ) -> ToolReturn:
     body = b"image"
     file = {
-        "path": "evidence.png", "media_type": media_type, "size": len(body),
+        "path": "evidence.png", ("media_type" if legacy else "mime_type"): media_type, "size": len(body),
         "sha256": hashlib.sha256(body).hexdigest(),
     }
     files = [dict(file)]
@@ -96,8 +96,14 @@ def test_unified_read_binds_only_files_with_distinct_stable_occurrences() -> Non
     )
 
     assert original == raw
-    assert bound.return_value == original.return_value
     ids = [item.identifier for item in bound.content if isinstance(item, BinaryContent)]
+    assert bound.return_value == {
+        **original.return_value,
+        "files": [
+            {**file, "attachment": identifier}
+            for file, identifier in zip(original.return_value["files"], ids)
+        ],
+    }
     assert ids == [item.identifier for item in retried.content if isinstance(item, BinaryContent)]
     assert ids != [item.identifier for item in repeated.content if isinstance(item, BinaryContent)]
     accepted = [fact for fact in facts if fact["fact"] == "accepted"]
@@ -115,6 +121,7 @@ def test_unified_read_binds_only_files_with_distinct_stable_occurrences() -> Non
 def test_legacy_attach_files_identity_and_read_strings_are_unchanged() -> None:
     result = _result(legacy=True)
     legacy = _bind(result, "old-call", "attach_files")
+    assert legacy.return_value == result.return_value
     facts = request_attachment_facts(
         [_request(legacy, "old-call", "attach_files")], (),
         accepted_attachment_ids=set(),
@@ -137,6 +144,27 @@ def test_legacy_attach_files_identity_and_read_strings_are_unchanged() -> None:
         [ModelRequest(parts=[ToolReturnPart("read_file", "old text", "text-call")])],
         (), accepted_attachment_ids=set(),
     ) == ()
+
+
+def test_stored_read_media_type_keeps_identity_and_facts_without_new_aliases() -> None:
+    current = _result()
+    legacy = deepcopy(current)
+    file = legacy.return_value["files"][0]
+    file["media_type"] = file.pop("mime_type")
+    bound_current = _bind(current, "read-call")
+    bound_legacy = _bind(legacy, "read-call")
+
+    assert bound_current.content[0].identifier == bound_legacy.content[0].identifier
+    assert "media_type" not in bound_current.return_value["files"][0]
+    assert "mime_type" not in bound_legacy.return_value["files"][0]
+    assert request_attachment_facts(
+        [_request(bound_current, "read-call")], (), accepted_attachment_ids=set(),
+    ) == request_attachment_facts(
+        [_request(bound_legacy, "read-call")], (), accepted_attachment_ids=set(),
+    )
+    history = [_request(bound_legacy, "read-call")]
+    encoded = encode_model_messages(history)
+    assert encode_model_messages(decode_model_messages(encoded)) == encoded
 
 
 @pytest.mark.parametrize("value", [

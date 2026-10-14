@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import PureWindowsPath
 from typing import cast
@@ -18,6 +19,7 @@ from pydantic_ai.messages import (
     ImageUrl,
     ModelMessage,
     ModelRequest,
+    TextContent,
     ToolReturn,
     UploadedFile,
     UserContent,
@@ -38,24 +40,64 @@ _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
 _FILE_TOOLS = frozenset({"attach_files", "read_file"})
 
 
-def consumed_binary_metadata(
+def binary_attachment_text(
     item: BinaryContent,
-    message: ModelRequest,
-) -> dict[str, JsonValue]:
-    """Describe consumed bytes using their existing content identifier.
+    *,
+    path: str | None = None,
+) -> TextContent:
+    """Present existing content identity and known Workspace metadata as JSON.
 
-    An identifier denotes a Runtime occurrence only after tool-return binding.
-    Workspace paths require a matching bound occurrence in this same request;
-    user-provided labels and identifiers are not path provenance.
+    The identifier denotes a Runtime occurrence only after tool-return binding.
+    The metadata tag associates generated text with its binary without treating
+    arbitrary neighboring user text as attachment provenance.
     """
-    metadata: dict[str, JsonValue] = {
+    value: dict[str, JsonValue] = {
         "attachment": None if _is_external_reference(item.identifier) else item.identifier,
         "size": len(item.data),
-        "mime": item.media_type,
+        "mime_type": item.media_type,
     }
+    if path is not None:
+        value["path"] = validate_workspace_path(path)
+    return TextContent(
+        json.dumps(value, ensure_ascii=True, separators=(",", ":")),
+        metadata={"source": "linktools.attachment", "attachment": item.identifier},
+    )
+
+
+def is_binary_attachment_text(
+    value: object,
+    item: BinaryContent,
+    *,
+    path: str | None = None,
+) -> bool:
+    """Match generated attachment text, optionally requiring its known path."""
+    if not isinstance(value, TextContent) or value.metadata != {
+        "source": "linktools.attachment", "attachment": item.identifier,
+    }:
+        return False
+    try:
+        metadata = json.loads(value.content)
+        if not isinstance(metadata, dict) or type(metadata.get("size")) is not int:
+            return False
+        known_path = metadata.get("path")
+        if "path" in metadata and not isinstance(known_path, str):
+            return False
+        if path is not None and known_path != path:
+            return False
+        return metadata == json.loads(binary_attachment_text(item, path=known_path).content)
+    except (TypeError, ValueError):
+        return False
+
+
+def has_binary_attachment_metadata(item: BinaryContent, message: ModelRequest) -> bool:
+    """Check retained metadata in this request without guessing across messages."""
     descriptor = None
+    matched_without_path = False
     paths: set[str] = set()
     for part in message.parts:
+        if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+            if any(is_binary_attachment_text(value, item) for value in part.content):
+                return True
         if (not isinstance(part, BaseToolReturnPart)
             or part.tool_name not in _FILE_TOOLS
             or not isinstance(part.tool_call_id, str) or not part.tool_call_id
@@ -75,16 +117,20 @@ def consumed_binary_metadata(
             if descriptor is None or not _same_attachment(occurrence, descriptor):
                 continue
             files = cast(list[Mapping[str, JsonValue]], part.content["files"])
-            path = files[cast(int, occurrence["call_position"])].get("path")
-            if not isinstance(path, str) or _is_external_reference(path):
+            file = files[cast(int, occurrence["call_position"])]
+            if "attachment" in file and file["attachment"] != item.identifier:
+                continue
+            if "path" not in file:
+                matched_without_path = True
+                continue
+            path = file.get("path")
+            if not isinstance(path, str):
                 continue
             try:
                 paths.add(validate_workspace_path(path))
             except ValueError:
                 continue
-    if len(paths) == 1:
-        metadata["path"] = paths.pop()
-    return metadata
+    return len(paths) == 1 or (matched_without_path and not paths)
 
 
 def _is_external_reference(value: str) -> bool:
@@ -221,8 +267,16 @@ def bind_tool_return_attachments(
                 )
             )
         )
+    value = result.return_value
+    if tool_name == "read_file":
+        value = dict(cast(Mapping[str, JsonValue], value))
+        files = cast(list[Mapping[str, JsonValue]], value["files"])
+        value["files"] = [
+            {**file, "attachment": occurrence["attachment_id"]}
+            for file, occurrence in zip(files, occurrences)
+        ]
     return ToolReturn(
-        return_value=result.return_value,
+        return_value=value,
         content=bound,
         metadata=result.metadata,
         tools=result.tools,
@@ -346,6 +400,10 @@ def _tool_file_occurrences(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous_input_index = input_index
         media_type = raw.get("media_type")
+        if source == "read_file" and "mime_type" in raw:
+            if "media_type" in raw and media_type != raw["mime_type"]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            media_type = raw["mime_type"]
         size = raw.get("size")
         digest = raw.get("sha256")
         if (
@@ -582,7 +640,9 @@ def _is_digest(value: object) -> bool:
 
 __all__ = [
     "bind_tool_return_attachments",
-    "consumed_binary_metadata",
+    "binary_attachment_text",
+    "has_binary_attachment_metadata",
+    "is_binary_attachment_text",
     "input_attachment_views",
     "request_attachment_facts",
 ]

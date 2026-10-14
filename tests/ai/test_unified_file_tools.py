@@ -52,6 +52,10 @@ async def test_unified_read_mixed_batch_preserves_input_order_and_duplicate_occu
         assert [item["input_index"] for item in result.return_value["files"]] == [0, 2]
         assert [item["input_index"] for item in result.return_value["texts"]] == [1]
         assert "alpha" in result.return_value["texts"][0]["content"]
+        assert result.return_value["texts"][0]["mime_type"] == "text/plain"
+        assert "media_type" not in result.return_value["texts"][0]
+        assert all(item["mime_type"] == "image/png" and "media_type" not in item
+                   for item in result.return_value["files"])
         assert "hash" not in result.return_value["texts"][0]
         assert len(result.content) == 2
         assert all(isinstance(item, BinaryContent) and item.data == _PNG for item in result.content)
@@ -305,7 +309,8 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     session = await LocalSandbox().open(root=tmp_path)
     try:
         value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value
-        assert value["files"][0]["media_type"] == mime
+        assert value["files"][0]["mime_type"] == mime
+        assert "media_type" not in value["files"][0]
         assert value["files"][0]["type_source"] == "extension"
         assert value["files"][0]["transport"] == "text-inline"
     finally:

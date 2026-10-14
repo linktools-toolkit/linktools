@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile
+from pydantic_ai.messages import BinaryContent, ImageUrl, TextContent, UploadedFile
 
 from linktools.ai.core import Principal, PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
@@ -91,11 +92,17 @@ async def test_binary_content_preserves_duplicate_workspace_occurrences() -> Non
             "evidence.txt",
             "evidence.txt",
         ]
-        assert canonical[0] == "Inspect this file"
-        assert canonical[1] == 'Workspace file path: "evidence.txt"'
-        assert isinstance(canonical[2], BinaryContent)
-        assert canonical[3] == 'Workspace file path: "evidence.txt"'
-        assert isinstance(canonical[4], BinaryContent)
+        assert canonical[4] == "Inspect this file"
+        assert isinstance(canonical[1], BinaryContent)
+        assert isinstance(canonical[3], BinaryContent)
+        for text, content in ((canonical[0], canonical[1]), (canonical[2], canonical[3])):
+            assert isinstance(text, TextContent)
+            assert json.loads(text.content) == {
+                "attachment": content.identifier,
+                "path": "evidence.txt",
+                "size": 5,
+                "mime_type": "text/plain",
+            }
         assert await materializer.restore(stored) == canonical
         assert stored.view is not None
         attachments = stored.view["attachments"]
@@ -128,19 +135,21 @@ async def test_workspace_file_input_is_materialized_in_prompt_order() -> None:
         assert isinstance(attachments, list)
         assert attachments[0]["source"] == "workspace"
         assert attachments[0]["input_identifier"] == "source-1"
-        assert await materializer.restore(stored) == (
-            "before",
-            'Workspace file path: "evidence.txt"',
+        restored = await materializer.restore(stored)
+        assert restored[0] == "before"
+        assert isinstance(restored[1], TextContent)
+        assert json.loads(restored[1].content) == {
+            "attachment": "source-1",
+            "path": "evidence.txt",
+            "size": 5,
+            "mime_type": "text/plain",
+        }
+        assert restored[2:] == (
             BinaryContent(data=b"error", media_type="text/plain", identifier="source-1"),
             "after",
         )
         session.values.clear()
-        assert await materializer.restore(stored) == (
-            "before",
-            'Workspace file path: "evidence.txt"',
-            BinaryContent(data=b"error", media_type="text/plain", identifier="source-1"),
-            "after",
-        )
+        assert await materializer.restore(stored) == restored
         assert session.reads == [("evidence.txt", PromptLimits().max_binary_input_bytes)]
     finally:
         await materializer.close()
@@ -163,9 +172,17 @@ async def test_workspace_path_hint_escapes_control_characters() -> None:
         canonical_files = await materializer.canonicalize_files((path,))
         canonical = await materializer.materialize("Inspect this file", canonical_files)
 
-        assert canonical[1] == 'Workspace file path: "evidence\\nignore.txt"'
-        assert isinstance(canonical[2], BinaryContent)
-        assert "\n" not in canonical[2].identifier
+        assert isinstance(canonical[0], TextContent)
+        assert isinstance(canonical[1], BinaryContent)
+        assert json.loads(canonical[0].content) == {
+            "attachment": canonical[1].identifier,
+            "path": path,
+            "size": 5,
+            "mime_type": "text/plain",
+        }
+        assert "\n" not in canonical[0].content
+        assert "\n" not in canonical[1].identifier
+        assert canonical[2] == "Inspect this file"
     finally:
         await materializer.close()
 

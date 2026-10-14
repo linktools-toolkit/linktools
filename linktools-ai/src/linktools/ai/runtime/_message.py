@@ -36,12 +36,11 @@ from pydantic_ai.messages import (
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ._attachment import consumed_binary_metadata
+from ._attachment import binary_attachment_text, has_binary_attachment_metadata
 from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
-_CONSUMED_BINARY_MARKER = "[binary content already consumed]"
 _MESSAGE_VERSION = 1
 _TOOL_KINDS = frozenset({"tool-search", "capability-load"})
 _REQUEST_STATES = frozenset({"complete", "interrupted"})
@@ -105,16 +104,14 @@ def project_transient_binary_content(
             part_changed = False
             for item in part.content:
                 if isinstance(item, BinaryContent):
-                    metadata = consumed_binary_metadata(item, message)
-                    content.append(
-                        f"{_CONSUMED_BINARY_MARKER} "
-                        + json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
-                    )
+                    if not has_binary_attachment_metadata(item, message):
+                        content.append(binary_attachment_text(item))
                     part_changed = True
                 else:
                     content.append(item)
             if part_changed:
-                parts.append(replace(part, content=content))
+                if content:
+                    parts.append(replace(part, content=content))
                 message_changed = True
             else:
                 parts.append(part)

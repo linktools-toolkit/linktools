@@ -478,7 +478,7 @@ class _WorkspaceToolSurface:
                     raise AIError(ErrorCode.STORAGE_CONFLICT,
                                   safe_details={"reason": "file_changed"})
                 source_bytes += cast(int, text.pop("bytes_read"))
-                text.update(input_index=index, media_type=fact["media_type"],
+                text.update(input_index=index, mime_type=fact["media_type"],
                             type_source=fact["type_source"])
                 if "detection_reason" in fact:
                     text["detection_reason"] = fact["detection_reason"]
@@ -512,7 +512,7 @@ class _WorkspaceToolSurface:
             total_bytes += len(body)
             source_bytes += len(body)
             files.append({"path": item, "input_index": index,
-                          "media_type": media_type, "type_source": fact["type_source"],
+                          "mime_type": media_type, "type_source": fact["type_source"],
                           "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
                           "transport": decision.transport if decision else "unverified",
                           "verified": decision.verified if decision else False})
