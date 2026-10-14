@@ -756,7 +756,9 @@ while the underlying execution remains cancelled. Unconfirmed cancellation or
 external effects stay `RECOVERY_REQUIRED`; cancellation settlement has a separate
 five-second bound. A result already completed within its deadline remains valid
 when read later. Neither an absent node timeout nor an absent graph deadline adds
-an execution deadline.
+an execution deadline. Automatic recovery checks the same deadline before
+relaunching an execution, including deadlines inherited from Task-bound ancestors.
+Missing invocation evidence fails closed rather than granting fresh time.
 
 ### Runtime context and execution queries
 

@@ -719,6 +719,7 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
         )
+        backend.bind_recovery_relaunch_guard(task_runner.allow_execution_relaunch)
         task_launcher = LocalTaskGraphLauncher(
             storage.task.tasks,
             task_runner,

@@ -1307,6 +1307,58 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if node.effect_policy != "non_replay_safe":
             raise AIError(ErrorCode.TASK_NOT_READY)
 
+    async def allow_execution_relaunch(self, execution: ExecutionRecord) -> bool:
+        """Gate all recovery relaunches with the admitted graph's node deadline."""
+        ancestors: set[str] = set()
+        while True:
+            if execution.execution_id in ancestors:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            ancestors.add(execution.execution_id)
+            if execution.requires_task_invocation_capture and not await self._allow_task_relaunch(execution):
+                return False
+            if execution.parent_execution_id is None:
+                return True
+            if self._execution_state is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            parent = await self._execution_state.get(
+                execution.parent_execution_id, tenant_id=self._task_state.tenant_id,
+            )
+            if (parent is None or parent.execution_id != execution.parent_execution_id
+                    or parent.root_execution_id != execution.root_execution_id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution = parent
+
+    async def _allow_task_relaunch(self, execution: ExecutionRecord) -> bool:
+        if self._input_captures is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        tenant_id = self._task_state.tenant_id
+        invocation = await self._input_captures.read_invocation_node(
+            execution.execution_id,
+            principal=Principal(execution.principal_id, tenant_id, execution.principal_kind),
+        )
+        if invocation is None:
+            # A crashed handoff cannot recover unknown node policy by guessing.
+            return False
+        graph_id, captured_node = invocation
+        admission = await self._task_admissions.get(graph_id, tenant_id=tenant_id)
+        state = await self._task_state.graph_state(graph_id, tenant_id=tenant_id)
+        if admission is None or state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        node = next((item for item in state.nodes if item.node_id == captured_node.node_id), None)
+        binding = next((item for item in state.node_states if item.node_id == captured_node.node_id), None)
+        if (
+            node != captured_node or binding is None or binding.execution_id != execution.execution_id
+            or admission.principal.principal_id != execution.principal_id
+            or admission.principal.kind != execution.principal_kind
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        budget_scope = (
+            None if admission.budget_scope_id is None
+            else (admission.budget_scope_id, admission.budget)
+        )
+        policy = RuntimeAgentTaskRunner.deadline_policy(node, execution.started_at, budget_scope)
+        return policy is None or policy[0] > datetime.now(timezone.utc)
+
     async def recover_bound_executions(
         self,
         graph_id: str,

@@ -332,7 +332,8 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             thinking=thinking,
             idempotency_key=request_identity,
         )
-        return await self._wait_execution(invocation, execution, execution_id, budget_scope)
+        result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
+        return _agent_task_result(result, execution_id)
 
     async def _establish_execution(
         self,
@@ -450,9 +451,9 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         budget_scope: "tuple[str, RunBudget] | None" = None,
     ) -> TaskNodeRunResult:
         execution = await self._get_execution(execution_id, invocation.principal)
-        result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
         await self._capture_invocation(execution, execution_id, invocation)
-        return result
+        result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
+        return _agent_task_result(result, execution_id)
 
     async def _wait_execution(
         self,
@@ -460,13 +461,13 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         execution: object,
         execution_id: str,
         budget_scope: "tuple[str, RunBudget] | None",
-    ) -> TaskNodeRunResult:
+    ) -> object:
         inspect = self._inspect_execution
         timeout = invocation.node.timeout_seconds
         if inspect is None:
             if timeout is not None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return _agent_task_result((await execution.wait()).result, execution_id)
+            return (await execution.wait()).result
         view = None
         if timeout is not None:
             view = await inspect(execution_id, invocation.principal)
@@ -474,7 +475,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                 raise TaskNodeRunError(ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id)
         policy = self.deadline_policy(invocation.node, None if view is None else view.started_at, budget_scope)
         if policy is None:
-            return _agent_task_result((await execution.wait()).result, execution_id)
+            return (await execution.wait()).result
         deadline, code, details = policy
         if view is None:
             view = await inspect(execution_id, invocation.principal)
@@ -495,7 +496,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         if view.terminal_at <= deadline:
             if result is None:
                 result = (await execution.wait()).result
-            return _agent_task_result(result, execution_id)
+            return result
         raise TaskNodeRunError(code, execution_id, error_origin="node", safe_details=details)
 
     @classmethod
