@@ -23,7 +23,10 @@ async def run(project: Path) -> object:
     application = CapabilityGroup[None]("application")
     application.agent(
         "writer",
+        revision=2,
         model="default",
+        allow_tools=("list_files", "search_files", "read_file", "write_file"),
+        allow_skills=(),
         system_prompt="You are a careful writer.",
     )
     async with Runtime.open(

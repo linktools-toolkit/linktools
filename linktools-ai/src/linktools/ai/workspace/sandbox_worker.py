@@ -355,6 +355,18 @@ async def _dispatch(
     method: str,
     params: Mapping[str, Any],
 ) -> str:
+    if method == "inspect_file":
+        return json.dumps(await session.inspect_file(params["path"], max_bytes=params.get("max_bytes")), ensure_ascii=False)
+    if method == "read_text":
+        return json.dumps(await session.read_text(
+            params["path"], offset=params.get("offset"), limit=params.get("limit"),
+            cursor=params.get("cursor"), full_metadata=params.get("full_metadata", False),
+            max_bytes=params.get("max_bytes"), max_read_bytes=params.get("max_read_bytes"),
+        ), ensure_ascii=False)
+    if method == "list_files":
+        return await session.list_files(params.get("path", "."), include_glob=params.get("include_glob", "*"))
+    if method == "search_text":
+        return await session.search_text(params["pattern"], path=params.get("path", "."), include_glob=params.get("include_glob"))
     if method == "read_file":
         return await session.read_file(
             params["path"],

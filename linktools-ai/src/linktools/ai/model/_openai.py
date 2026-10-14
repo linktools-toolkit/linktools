@@ -31,6 +31,9 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request
+from ._contract import ModelBinding
+from ._input import ModelInputCapability, UnknownModelInputs, normalize_input_capabilities, validate_model_inputs
+from ._openai_input import openai_input_transport
 
 _logger = environ.get_logger("ai.model.openai")
 _CLIENT_REQUEST_ENTRY = "linktools.model.client_request_entry"
@@ -193,7 +196,7 @@ class _CapturedOpenAIProvider(OpenAIProvider):
 class _OpenAIModelBinding:
     route_id: str
     model: str
-    vision: bool = False
+    vision: bool | None = None
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
     timeout: "int | float | None" = None
@@ -206,10 +209,30 @@ class _OpenAIModelBinding:
         compare=False,
     )
 
+    input_capabilities: Sequence[ModelInputCapability] | None = None
+    unknown_inputs: UnknownModelInputs | None = None
+
     def __post_init__(self) -> None:
         model = self.model.strip().removeprefix("openai:")
         if not self.route_id.strip() or not model:
             raise ValueError("OpenAI model binding is incomplete")
+        if self.input_capabilities is not None or self.unknown_inputs is not None:
+            if self.vision is not None:
+                raise ValueError("vision cannot be combined with explicit model input declarations")
+            capabilities = normalize_input_capabilities(
+                () if self.input_capabilities is None else self.input_capabilities,
+                resolve_transport=lambda mime: openai_input_transport(mime, "binary", model),
+            )
+            unknown = self.unknown_inputs if self.unknown_inputs is not None else "reject"
+            if unknown not in {"reject", "passthrough"}:
+                raise ValueError("OpenAI unknown_inputs policy is invalid")
+            object.__setattr__(self, "input_capabilities", capabilities)
+            object.__setattr__(self, "unknown_inputs", unknown)
+            object.__setattr__(self, "vision", unknown == "passthrough" or any(
+                item.transport == "image" and item.status == "supported" for item in capabilities
+            ))
+        elif self.vision is None:
+            object.__setattr__(self, "vision", False)
         if type(self.vision) is not bool:
             raise ValueError("OpenAI model vision must be bool")
         if self.connection_resolver is not None and not callable(
@@ -238,12 +261,20 @@ class _OpenAIModelBinding:
         settings: dict[str, JsonValue] = {}
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
-        return {
+        result: dict[str, JsonValue] = {
             "provider": self.provider,
             "model_identity": self.model_identity,
-            "vision": self.vision,
             "settings": settings,
         }
+        if self.input_capabilities is not None:
+            result["inputs"] = {
+                "endpoint": "openai-chat",
+                "unknown": self.unknown_inputs,
+                "capabilities": [item.to_payload() for item in self.input_capabilities],
+            }
+        else:
+            result["vision"] = self.vision
+        return result
 
     def materialize(self) -> Model:
         connection = _resolved_connection(self)
@@ -283,7 +314,7 @@ class _OpenAIModelBinding:
             model,
             int(connection["max_retries"]),
             connection["retry_delay"],
-            vision=self.vision,
+            input_binding=self,
         )
 
 
@@ -393,12 +424,14 @@ class _RetryingModel(WrapperModel):
         max_retries: int,
         retry_delay: "int | float",
         *,
-        vision: bool,
+        vision: bool = False,
+        input_binding: ModelBinding | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._vision = vision
+        self._input_binding = input_binding
 
     async def request(
         self,
@@ -406,7 +439,10 @@ class _RetryingModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
-        _validate_vision_input(messages, vision=self._vision)
+        if self._input_binding is not None:
+            validate_model_inputs(self._input_binding, messages)
+        else:
+            _validate_vision_input(messages, vision=self._vision)
         attempt = 0
         while True:
             try:
@@ -434,7 +470,10 @@ class _RetryingModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
         run_context: "PydanticRunContext[object] | None" = None,
     ) -> AsyncGenerator[StreamedResponse, None]:
-        _validate_vision_input(messages, vision=self._vision)
+        if self._input_binding is not None:
+            validate_model_inputs(self._input_binding, messages)
+        else:
+            _validate_vision_input(messages, vision=self._vision)
         attempt = 0
         while True:
             entered = False

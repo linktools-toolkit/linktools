@@ -11,7 +11,7 @@ dependencies:
 
 dev-dependencies:
   - linktools
-  - linktools-ai[web]
+  - linktools-ai[web,magic]
   - pytest
   - pytest-asyncio
   - httpx>=0.28.0,<1.0.0
@@ -24,6 +24,8 @@ release-dependencies:
   - linktools>=0.10.0
 
 optional-dependencies:
+  magic:
+    - python-magic>=0.4.27,<1.0.0
   web:
     - starlette>=1.0.0,<2.0.0
     - uvicorn>=0.30.0,<1.0.0

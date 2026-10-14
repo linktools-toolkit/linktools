@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """Adapt one opened workspace session to Pydantic AI tools."""
 
+import asyncio
 import hashlib
+import json
 import mimetypes
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, Use
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..core import PromptLimits
+from ..model import ModelBinding, validate_model_input, validate_model_inputs
 from ..errors import AIError, ErrorCode
 from ..workspace import (
     Sandbox,
@@ -37,6 +40,7 @@ class WorkspaceToolDeclaration:
 
     name: str
     metadata: Mapping[str, object]
+    revision: int = 1
 
     def __post_init__(self) -> None:
         immutable_metadata = _immutable_tool_metadata(self.metadata)
@@ -97,24 +101,30 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
+    WorkspaceToolDeclaration("list_files", tool_metadata(
+        effect_policy="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("path",),
+    )),
     WorkspaceToolDeclaration("read_file", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-        context_dedupe="workspace_file_read_v1",
-    )),
+        context_dedupe="workspace_file_read_v2",
+    ), revision=2),
     WorkspaceToolDeclaration("search_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-    )),
+    ), revision=2),
     WorkspaceToolDeclaration("write_file", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
-    )),
+    ), revision=2),
     WorkspaceToolDeclaration("check_command", tool_metadata(
         effect_policy="none",
         plan_safe=True,
@@ -267,11 +277,13 @@ class _WorkspaceToolSurface:
         limits: PromptLimits,
         *,
         vision: bool = True,
+        model_binding: ModelBinding | None = None,
     ) -> None:
         self._session = session
         self._policy = policy
         self._limits = limits
         self._vision = vision
+        self._model_binding = model_binding
         self._mime = mimetypes.MimeTypes(filenames=())
 
     def _require_session(self) -> SandboxSession:
@@ -333,7 +345,7 @@ class _WorkspaceToolSurface:
                         "reason": "media_type_unknown",
                     },
                 )
-            if not self._vision and media_type.lower().startswith("image/"):
+            if self._model_binding is None and not self._vision and media_type.lower().startswith("image/"):
                 raise AIError(
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={
@@ -345,6 +357,8 @@ class _WorkspaceToolSurface:
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             body = await session.read_bytes(path, max_bytes=remaining)
+            if self._model_binding is not None:
+                validate_model_inputs(self._model_binding, BinaryContent(body, media_type=media_type))
             total_bytes += len(body)
             if total_bytes > self._limits.max_binary_input_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -369,56 +383,173 @@ class _WorkspaceToolSurface:
 
     async def read_file(
         self,
-        path: str,
+        path: str | list[str],
         *,
-        offset: int = 0,
+        as_file: bool = False,
+        offset: int | None = None,
         limit: int | None = None,
-    ) -> str:
-        """Read a text file with line numbers.
+        cursor: str | None = None,
+        full_metadata: bool = False,
+    ) -> ToolReturn:
+        """Read text or supported media; as_file sends whole files. Lists are atomic batches.
 
-        Args:
-            path: File path relative to the root directory.
-            offset: Zero-based line offset to start reading from.
-            limit: Maximum number of lines to return (default: 2000).
-
-        Returns:
-            File content with line numbers, plus metadata header.
+        Ranges/metadata require one text preview: zero-based offset, default 200 lines.
+        cursor excludes offset; full_metadata scans for SHA-256 and line count.
         """
         return await self._call(
-            self._require_session().read_file(path, offset=offset, limit=limit),
+            self._read_files_bounded(path, as_file=as_file, offset=offset,
+                                     limit=limit, cursor=cursor,
+                                     full_metadata=full_metadata),
             name="read_file",
+            rejected_codes=_WORKSPACE_REJECTED_CODES | {ErrorCode.STORAGE_CONFLICT},
         )
 
+    async def _read_files_bounded(
+        self, path: str | list[str], *, as_file: bool, offset: int | None,
+        limit: int | None, cursor: str | None, full_metadata: bool,
+    ) -> ToolReturn:
+        try:
+            return await asyncio.wait_for(
+                self._read_files(path, as_file=as_file, offset=offset, limit=limit,
+                                 cursor=cursor, full_metadata=full_metadata),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"reason": "file_batch_timeout"}) from error
+
+    async def _read_files(
+        self, path: str | list[str], *, as_file: bool, offset: int | None,
+        limit: int | None, cursor: str | None, full_metadata: bool,
+    ) -> ToolReturn:
+        paths = [path] if isinstance(path, str) else path
+        if (not isinstance(paths, list) or not paths
+                or any(not isinstance(item, str) or not item for item in paths)
+                or len(paths) > self._limits.max_binary_input_parts):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"reason": "file_batch_invalid"})
+        ranged = offset is not None or limit is not None or cursor is not None or full_metadata
+        if (type(as_file) is not bool or type(full_metadata) is not bool
+                or ranged and (len(paths) != 1 or as_file)
+                or cursor is not None and offset is not None):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"reason": "text_range_invalid"})
+        session = self._require_session()
+        facts = []
+        probe_bytes = 0
+        source_budget = self._limits.max_binary_input_bytes + 8192 * len(paths)
+        for item in paths:
+            remaining = source_budget - probe_bytes
+            if remaining <= 0:
+                raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                              safe_details={"reason": "file_batch_bytes_limit"})
+            fact = await session.inspect_file(item, max_bytes=remaining)
+            probe_bytes += cast(int, fact["bytes_read"])
+            facts.append(fact)
+        if ranged and not facts[0]["is_text"]:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                          safe_details={"reason": "text_range_invalid"})
+        # Reserve metadata before reading bodies so a large batch cannot silently
+        # omit an entry after exhausting its shared output budget.
+        output_limit = self._limits.max_file_output_bytes
+        reserve = sum(len(item.encode("utf-8")) + 2048 for item in paths)
+        if reserve >= output_limit:
+            raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                          safe_details={"reason": "file_batch_output_limit"})
+        total_bytes = 0
+        source_bytes = probe_bytes
+        output_bytes = reserve
+        texts: list[dict[str, object]] = []
+        files: list[dict[str, object]] = []
+        content: list[UserContent] = []
+        for index, (item, fact) in enumerate(zip(paths, facts)):
+            if fact["is_text"] and not as_file:
+                available = min(output_limit - output_bytes,
+                                self._limits.max_binary_input_bytes - total_bytes)
+                if available < 4:
+                    raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                                  safe_details={"reason": "file_batch_output_limit"})
+                text = dict(await session.read_text(
+                    item, offset=offset, limit=limit, cursor=cursor,
+                    full_metadata=full_metadata, max_bytes=available,
+                    max_read_bytes=source_budget - source_bytes,
+                ))
+                if text.pop("state") != fact["state"]:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT,
+                                  safe_details={"reason": "file_changed"})
+                source_bytes += cast(int, text.pop("bytes_read"))
+                text.update(input_index=index, media_type=fact["media_type"],
+                            type_source=fact["type_source"])
+                if "detection_reason" in fact:
+                    text["detection_reason"] = fact["detection_reason"]
+                text_bytes = len(str(text["content"]).encode("utf-8"))
+                total_bytes += text_bytes
+                output_bytes += text_bytes
+                texts.append(text)
+                continue
+            media_type = fact["media_type"]
+            if not isinstance(media_type, str) or not media_type:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                              safe_details={"reason": "media_type_unknown"})
+            size = fact["size"]
+            if not isinstance(size, int):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            remaining = self._limits.max_binary_input_bytes - total_bytes
+            if size > remaining or size > source_budget - source_bytes:
+                raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                              safe_details={"reason": "file_batch_bytes_limit"})
+            decision = None
+            if self._model_binding is not None:
+                decision = validate_model_input(self._model_binding, media_type, size=size)
+            elif not self._vision and media_type.startswith("image/"):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                              safe_details={"reason": "image_input_not_supported"})
+            body = await session.read_bytes(item, max_bytes=remaining,
+                                            expected_state=cast(str, fact["state"]))
+            binary = BinaryContent(data=body, media_type=media_type)
+            if self._model_binding is not None:
+                validate_model_inputs(self._model_binding, (binary,))
+            total_bytes += len(body)
+            source_bytes += len(body)
+            files.append({"path": item, "input_index": index,
+                          "media_type": media_type, "type_source": fact["type_source"],
+                          "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
+                          "transport": decision.transport if decision else "unverified",
+                          "verified": decision.verified if decision else False})
+            if "detection_reason" in fact:
+                files[-1]["detection_reason"] = fact["detection_reason"]
+            content.append(binary)
+        value = {"files": files, "texts": texts}
+        if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > output_limit:
+            raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                          safe_details={"reason": "file_batch_output_limit"})
+        return ToolReturn(return_value=value, content=content or None)
+
     async def write_file(
-        self,
-        path: str,
-        content: str,
-        *,
+        self, path: str, content: str, *, old_text: str | None = None,
         expected_hash: str | None = None,
     ) -> str:
-        """Create or overwrite a file with conflict detection.
+        """Create/overwrite with content, or replace one unique nonempty old_text.
 
-        Args:
-            path: File path relative to the root directory.
-            content: The text content to write.
-            expected_hash: If provided, the write is rejected when the file exists
-                and its current hash doesn't match (optimistic concurrency).
-
-        Returns:
-            Confirmation message with new hash.
+        Empty content is valid. Optional expected_hash checks current raw-byte SHA-256.
         """
+        if not isinstance(content, str) or old_text is not None and (
+            not isinstance(old_text, str) or not old_text
+        ):
+            raise ToolCallRetry("content must be text; old_text must be nonempty or omitted.")
+        session = self._require_session()
+        operation = (session.write_file(path, content, expected_hash=expected_hash)
+                     if old_text is None else session.edit_file(
+                         path, old_text, content, expected_hash=expected_hash))
         rejected_codes = _WORKSPACE_REJECTED_CODES
         if expected_hash is not None:
             rejected_codes |= {ErrorCode.STORAGE_CONFLICT}
-        return await self._call(
-            self._require_session().write_file(
-                path,
-                content,
-                expected_hash=expected_hash,
-            ),
-            name="write_file",
-            rejected_codes=rejected_codes,
-        )
+        return await self._call(operation, name="write_file", rejected_codes=rejected_codes)
+
+    async def list_files(self, path: str = ".", include_glob: str = "*") -> str:
+        """List names and type hints; only ** globs recurse below path."""
+        return await self._call(self._require_session().list_files(
+            path, include_glob=include_glob), name="list_files")
 
     async def edit_file(
         self,
@@ -478,18 +609,12 @@ class _WorkspaceToolSurface:
         path: str = ".",
         include_glob: str | None = None,
     ) -> str:
-        """Search file contents using a regular expression.
+        """Search text recursively by regex, returning matching lines and coverage limits.
 
-        Args:
-            pattern: Regex pattern to search for.
-            path: Directory to search in, relative to the root directory.
-            include_glob: If provided, only search files matching this glob (e.g. '*.py').
-
-        Returns:
-            str: Matching lines formatted as file:line_number:text.
+        include_glob is relative to path: * stays in one level; ** spans zero or more.
         """
         return await self._call(
-            self._require_session().search_files(
+            self._require_session().search_text(
                 pattern,
                 path=path,
                 include_glob=include_glob,
@@ -648,6 +773,7 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         limits: PromptLimits,
         *,
         vision: bool,
+        model_binding: ModelBinding | None = None,
     ) -> None:
         super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
         surface = _WorkspaceToolSurface(
@@ -655,6 +781,7 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
             policy,
             limits,
             vision=vision,
+            model_binding=model_binding,
         )
         for name in selected_tool_names:
             self.add_tool(
@@ -675,6 +802,7 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         limits: PromptLimits,
         *,
         vision: bool,
+        model_binding: ModelBinding | None = None,
     ) -> None:
         self.id = _WORKSPACE_SANDBOX_CAPABILITY_ID
         self._selected_tool_names = selected_tool_names
@@ -682,6 +810,7 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         self._policy = policy
         self._limits = limits
         self._vision = vision
+        self._model_binding = model_binding
 
     def get_instructions(self) -> InstructionPart:
         return _WORKSPACE_INSTRUCTIONS
@@ -693,6 +822,7 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
             self._policy,
             self._limits,
             vision=self._vision,
+            model_binding=self._model_binding,
         )
 
 
@@ -730,6 +860,7 @@ def workspace_capabilities(
     limits: "PromptLimits | None" = None,
     session: SandboxSession | None = None,
     vision: bool = True,
+    model_binding: ModelBinding | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
     selected_limits = PromptLimits() if limits is None else limits
@@ -758,6 +889,7 @@ def workspace_capabilities(
             workspace.policy,
             selected_limits,
             vision=vision,
+            model_binding=model_binding,
         ),
     )
 
@@ -775,16 +907,52 @@ def _workspace_tool(
     )
 
 
+_FILE_REASON_MESSAGES = {
+    'model_input_unknown': 'This model route has no verified support declaration for this file type and transport. Choose a configured compatible route or an authorized conversion.',
+    'model_input_not_supported': 'This model route explicitly does not support this file type. Choose a compatible route or an authorized conversion.',
+    'input_encoding_not_supported': 'The current provider endpoint cannot encode this input. Use a supported transport or an authorized conversion.',
+    'model_input_media_type_unknown': 'The input has no known media type. Provide a recognized file type or explicitly convert it with an authorized tool.',
+    'model_input_size_unknown': 'This route requires a known input size. Use a bounded local file instead of an unmeasured reference.',
+    'model_input_size_exceeded': 'The file exceeds this model route’s byte limit. Use a smaller supported file or an authorized split/conversion.',
+    'uploaded_file_provider_mismatch': 'The uploaded file belongs to a different provider. Use a file reference for this provider or an authorized local copy.',
+    'text_input_not_utf8': 'Whole-file text input must be valid UTF-8. Use a bounded text preview to inspect decoding loss, or explicitly convert the source.',
+    'file_batch_timeout': 'The file batch exceeded its time budget. Retry with fewer files or a smaller text range.',
+    'file_batch_invalid': 'Supply one path or a nonempty path array within the batch item limit; split larger batches.',
+    'file_batch_bytes_limit': 'The file batch exceeds its byte budget. Split the batch or use smaller supported files.',
+    'file_batch_output_limit': 'The file batch cannot fit its output budget. Use fewer files or a smaller text range.',
+    'text_range_invalid': 'offset, limit, cursor and full_metadata require exactly one text preview; cursor cannot be combined with offset.',
+    'file_byte_limit': 'The file exceeds the remaining byte budget. Use a smaller file or split the batch.',
+    'stale_cursor': 'The source changed after this cursor was issued. Read the current file again to obtain a new cursor.',
+    'file_changed': 'The source changed during the operation. Read the current file again before retrying.',
+    'invalid_cursor': 'The cursor is malformed. Use the next_cursor returned by a successful read of this file.',
+    'cursor_path_mismatch': 'This cursor belongs to another path. Continue the original path or start a fresh read.',
+    'invalid_cursor_position': 'The cursor position is outside this file. Start a fresh read.',
+    'invalid_cursor_boundary': 'The cursor does not start at a complete text character boundary. Use a returned cursor or start a fresh read.',
+    'offset_out_of_range': 'The requested line offset is past the file. Start at an earlier offset.',
+    'metadata_byte_limit': 'Full metadata exceeds the scan budget. Use a bounded preview without full_metadata or an authorized external hash operation.',
+    'scan_byte_limit': 'Finding the requested range exceeds the scan budget. Continue from an existing cursor or choose an earlier offset.',
+    'scan_time_limit': 'The text scan exceeded its time budget. Use a smaller range or continue from an existing cursor.',
+    'edit_scan_byte_limit': 'The edit exceeds the source scan budget. Use an authorized large-file editing workflow.',
+    'edit_scan_time_limit': 'The edit exceeded its scan time budget. Read the current source before choosing a smaller authorized editing workflow.',
+    'edit_staging_byte_limit': 'The edited file exceeds the temporary output budget. Use a smaller replacement or an authorized large-file editing workflow.',
+    'no_match': 'old_text does not occur in the current file. Read the target and supply old_text that matches exactly once.',
+    'multiple_matches': 'old_text occurs more than once. Include enough surrounding text to identify exactly one match.',
+    'invalid_text': 'The source contains binary content that cannot be safely edited as text. Use an authorized format-specific editor.',
+}
+
+
 def _workspace_tool_rejected(
     name: str,
     error: AIError,
     default_message: str,
 ) -> ToolCallRetry:
     reason = error.safe_details.get("reason")
-    if name == "attach_files" and reason == "image_input_not_supported":
+    if name in {"attach_files", "read_file"} and reason == "image_input_not_supported":
         message = _UNSUPPORTED_IMAGE_INPUT
-    elif name == "attach_files" and reason == "media_type_unknown":
+    elif name in {"attach_files", "read_file"} and reason == "media_type_unknown":
         message = _UNRECOGNIZED_ATTACHMENT_TYPE
+    elif isinstance(reason, str) and reason in _FILE_REASON_MESSAGES:
+        message = _FILE_REASON_MESSAGES[reason]
     elif reason == "invalid_utf8":
         message = _INVALID_UTF8_WORKSPACE_CONTENT
     elif error.code is ErrorCode.STORAGE_NOT_FOUND:

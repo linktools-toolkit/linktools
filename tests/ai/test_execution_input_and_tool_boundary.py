@@ -172,7 +172,10 @@ async def test_execution_freezes_materialized_input_once() -> None:
         canonical = await service._canonicalize_request(
             _request(files=("evidence.txt",))
         )
-        prepared = await service._freeze_input(canonical)
+        from linktools.ai.model import ModelRegistry
+        model = ModelRegistry.openai(model="test").capture().resolve("default")
+        binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))
+        prepared = await service._freeze_input(canonical, binding)
         assert prepared.request.files == ()
         assert prepared.stored_user_input is not None
         assert isinstance(prepared.request.user_prompt, tuple)

@@ -32,6 +32,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
+_FILE_TOOLS = frozenset({"attach_files", "read_file"})
 
 
 def input_attachment_views(
@@ -116,11 +117,17 @@ def bind_tool_return_attachments(
     call_id: str,
     result: object,
 ) -> object:
-    """Bind attach_files content to stable occurrence ids before it enters history."""
-    if tool_name != "attach_files" or not isinstance(result, ToolReturn):
+    """Bind file-input content to stable occurrence ids before it enters history."""
+    if tool_name not in _FILE_TOOLS or not isinstance(result, ToolReturn):
         return result
-    occurrences = _attach_file_occurrences(result.return_value, call_id=call_id)
+    occurrences = _tool_file_occurrences(
+        result.return_value, source=tool_name, call_id=call_id,
+    )
     if not occurrences:
+        if tool_name == "read_file" and result.content is not None and any(
+            isinstance(item, BinaryContent) for item in result.content
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
     content = result.content
     if content is None or isinstance(content, str):
@@ -177,12 +184,13 @@ def request_attachment_facts(
         for part in message.parts:
             if (
                 isinstance(part, BaseToolReturnPart)
-                and part.tool_name == "attach_files"
+                and part.tool_name in _FILE_TOOLS
                 and isinstance(part.tool_call_id, str)
                 and part.tool_call_id
             ):
-                for occurrence in _attach_file_occurrences(
+                for occurrence in _tool_file_occurrences(
                     part.content,
+                    source=part.tool_name,
                     call_id=part.tool_call_id,
                 ):
                     attachment_id = _require_string(
@@ -251,20 +259,29 @@ def request_attachment_facts(
     return tuple((*initial_facts, *tool_facts))
 
 
-def _attach_file_occurrences(
+def _tool_file_occurrences(
     value: object,
     *,
+    source: str,
     call_id: str,
 ) -> tuple[dict[str, JsonValue], ...]:
     if not isinstance(value, Mapping):
         return ()
     raw_files = value.get("files")
     if not isinstance(raw_files, list):
+        if source == "read_file" and "files" in value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return ()
     result: list[dict[str, JsonValue]] = []
+    previous_input_index = -1
     for position, raw in enumerate(raw_files):
         if not isinstance(raw, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if source == "read_file":
+            input_index = _require_non_negative_int(raw.get("input_index"))
+            if input_index <= previous_input_index:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_input_index = input_index
         media_type = raw.get("media_type")
         size = raw.get("size")
         digest = raw.get("sha256")
@@ -281,12 +298,12 @@ def _attach_file_occurrences(
         result.append(
             {
                 "attachment_id": _attachment_id(
-                    "attach_files",
+                    source,
                     position,
                     content_key,
                     call_id=call_id,
                 ),
-                "source": "attach_files",
+                "source": source,
                 "media_type": media_type,
                 "size": size,
                 "digest": content_key,
@@ -380,7 +397,7 @@ def _same_attachment(
 ) -> bool:
     source = expected.get("source")
     candidate_source = candidate.get("source")
-    if source in {"workspace", "attach_files"}:
+    if source in {"workspace", "attach_files", "read_file"}:
         if candidate_source != "binary":
             return False
     elif source != candidate_source:

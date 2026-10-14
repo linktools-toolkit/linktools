@@ -47,7 +47,7 @@ from ._tool_metadata import (
     tool_metadata,
     validate_tool_metadata,
 )
-from ._workspace import _workspace_tool_definitions
+from ._workspace import _workspace_tool_definitions, workspace_tool_declarations
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.capability.group")
@@ -127,8 +127,11 @@ class CapabilityGroup(Generic[AppT]):
         self._loaders: dict[str, CapabilityLoader[AppT]] = {}
         self._contributions: list[CapabilityContribution[AppT]] = []
         if workspace is not None:
+            declarations = {item.name: item for item in workspace_tool_declarations()}
             self._contributions.extend(
-                CapabilityContribution.from_opaque("tool", tool.name, tool)
+                CapabilityContribution.from_opaque(
+                    "tool", tool.name, tool, revision=declarations[tool.name].revision,
+                )
                 for tool in _workspace_tool_definitions(workspace)
             )
         if assets is not None:

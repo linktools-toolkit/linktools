@@ -13,17 +13,19 @@ import ctypes
 import fnmatch
 import heapq
 import hashlib
-import io
+import mimetypes
 import os
 import re
 import shlex
 import stat
 import sys
+import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from subprocess import DEVNULL, PIPE
+from typing import BinaryIO, TypeVar
 
 from filelock import FileLock
 from linktools.core import environ
@@ -42,6 +44,9 @@ from ._sandbox import (
     normalize_workspace_input_path,
 )
 from ._root import Workspace
+from ._file_io import (
+    _check_state, _facts, _glob_matches, _inspect_file, _read_text_range, _state,
+)
 from ._sandbox_protocol import validate_request_size
 from ._local_process import (
     _ProcessState,
@@ -60,6 +65,10 @@ _MAX_READ_LINES = 2_000
 _MAX_ITEMS = 1_000
 _MAX_SEARCH_PATTERN_CHARS = 1_000
 _MAX_WRITE_CHARS = 10 * 1024 * 1024
+_MAX_EDIT_BYTES = 256 * 1024 * 1024
+_MAX_FILE_SECONDS = 5.0
+_MAX_ENUMERATED_ITEMS = 10_000
+_SyncResult = TypeVar("_SyncResult")
 _DEFAULT_COMMAND_TIMEOUT = 30.0
 _PROTECTED_NAMES = (".env", ".env.*", "*.pem", "*.key")
 _SUDO_COMMAND = re.compile(r"^sudo\s")
@@ -367,6 +376,7 @@ class _LocalSandboxSession:
         path: str,
         *,
         max_bytes: int | None = None,
+        expected_state: str | None = None,
     ) -> bytes:
         if max_bytes is not None and (
             not isinstance(max_bytes, int)
@@ -374,18 +384,26 @@ class _LocalSandboxSession:
             or max_bytes < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if expected_state is not None and not isinstance(expected_state, str):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         def operation() -> bytes:
-            target, _display, _resource_key = self._read_target(path)
+            target, display, _resource_key = self._read_target(path)
             try:
-                info = target.stat()
-                if not stat.S_ISREG(info.st_mode):
+                if not stat.S_ISREG(target.stat().st_mode):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                if max_bytes is None:
-                    return target.read_bytes()
                 with target.open("rb") as stream:
-                    value = stream.read(max_bytes + 1)
-                if len(value) > max_bytes:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                    info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode):
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                    state = _state(display, info)
+                    if expected_state is not None and expected_state != state:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
+                    if max_bytes is not None and info.st_size > max_bytes:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "file_byte_limit"})
+                    value = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+                    _check_state(target, display, stream, state)
+                if max_bytes is not None and len(value) > max_bytes:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "file_byte_limit"})
                 return value
             except AIError:
                 raise
@@ -394,6 +412,46 @@ class _LocalSandboxSession:
             except OSError as error:
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
+        return await self._run_sync(operation)
+
+    async def inspect_file(
+        self, path: str, *, max_bytes: int | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """Inspect only an authorized, bounded header; never expand containers."""
+        validate_request_size("inspect_file", {"path": path, "max_bytes": max_bytes})
+        def operation() -> Mapping[str, JsonValue]:
+            target, display, _resource_key = self._read_target(path)
+            try:
+                return _inspect_file(target, display, max_bytes)
+            except FileNotFoundError as error:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            except OSError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        return await self._run_sync(operation)
+
+    async def read_text(
+        self, path: str, *, offset: int | None = None, limit: int | None = None,
+        cursor: str | None = None, full_metadata: bool = False,
+        max_bytes: int | None = None, max_read_bytes: int | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """Read a bounded UTF-8 preview without implicitly scanning the file."""
+        validate_request_size("read_text", {
+            "path": path, "offset": offset, "limit": limit, "cursor": cursor,
+            "full_metadata": full_metadata, "max_bytes": max_bytes,
+            "max_read_bytes": max_read_bytes,
+        })
+        def operation() -> Mapping[str, JsonValue]:
+            target, display, _resource_key = self._read_target(path)
+            try:
+                return _read_text_range(
+                    target, display, offset=offset, limit=limit,
+                    cursor=cursor, full_metadata=full_metadata, max_bytes=max_bytes,
+                    max_read_bytes=max_read_bytes,
+                )
+            except FileNotFoundError as error:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            except OSError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         return await self._run_sync(operation)
 
     async def read_file(
@@ -524,21 +582,127 @@ class _LocalSandboxSession:
             except AIError as error:
                 raise SandboxOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, _relative(self._root, target)):
-                try:
-                    current = _read_optional_text(target, normalized)
-                    _check_expected_hash(current, expected)
-                    if current is None:
-                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                    if current.count(old_text) != 1:
-                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                    updated = current.replace(old_text, new_text)
-                    _validate_text(updated)
-                except AIError as error:
-                    raise SandboxOperationRejected.from_error(error) from error
-                _atomic_write(self._root, target, updated)
-            digest = hashlib.sha256(updated.encode("utf-8")).hexdigest()
+                digest = _stream_edit(
+                    self._root, target, normalized, old_text, new_text, expected,
+                )
             return _write_result(normalized, digest)
 
+        return await self._run_sync(operation)
+
+    def _enumerate_files(
+        self, target: Path, display: str, resource_key: str | None,
+        *, max_depth: int | None, state: "_WalkState", deadline: float,
+    ) -> Iterable[tuple[Path, str, os.stat_result]]:
+        pending = [(target, 0)]
+        count = 0
+        while pending:
+            current, depth = pending.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        count += 1
+                        if count > _MAX_ENUMERATED_ITEMS or time.monotonic() > deadline:
+                            state.failed = True
+                            return
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            state.failed = True
+                            continue
+                        is_directory = stat.S_ISDIR(info.st_mode)
+                        if not is_directory and not stat.S_ISREG(info.st_mode):
+                            continue
+                        child = Path(entry.path)
+                        logical = _child_display(display, child, target)
+                        if not self._visible_read_path(logical, resource_key=resource_key, directory=is_directory):
+                            continue
+                        yield child, logical, info
+                        if is_directory and (max_depth is None or depth + 1 < max_depth):
+                            pending.append((child, depth + 1))
+            except OSError:
+                state.failed = True
+
+    async def list_files(self, path: str = ".", *, include_glob: str = "*") -> str:
+        """List names with extension hints and explicit recursive glob traversal."""
+        _validate_glob(include_glob)
+        validate_request_size("list_files", {"path": path, "include_glob": include_glob})
+        def operation() -> str:
+            target, display, resource_key = self._read_target(path, directory=True)
+            if not target.is_dir():
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            walk_state = _WalkState()
+            deadline = time.monotonic() + _MAX_FILE_SECONDS
+            depth = None if "**" in include_glob.split("/") else len(include_glob.split("/"))
+            entries: list[tuple[str, str]] = []
+            for candidate, logical, info in self._enumerate_files(
+                target, display, resource_key, max_depth=depth,
+                state=walk_state, deadline=deadline,
+            ):
+                relative = candidate.relative_to(target).as_posix()
+                if not _glob_matches(relative, include_glob):
+                    continue
+                if len(entries) == _MAX_ITEMS:
+                    walk_state.failed = True
+                    break
+                kind = "directory" if stat.S_ISDIR(info.st_mode) else "file"
+                media_type = "-" if kind == "directory" else (mimetypes.guess_type(relative)[0] or "unknown")
+                source = "extension" if media_type not in {"-", "unknown"} else "unknown"
+                entries.append((logical, f"{logical}  {kind}  {info.st_size}  {media_type}  {source}"))
+            result = "\n".join(row for _logical, row in sorted(entries)) or "(empty directory)"
+            if walk_state.failed:
+                return _bound_output_with_marker(result, "\n[truncated: narrow path or include_glob]")
+            return _bound_output(result)
+        return await self._run_sync(operation)
+
+    async def search_text(
+        self, pattern: str, *, path: str = ".", include_glob: str | None = None,
+    ) -> str:
+        """Search bounded text lines using the same path-anchored glob as listing."""
+        expression = _compile_pattern(pattern)
+        if include_glob is not None:
+            _validate_glob(include_glob)
+        validate_request_size("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
+        def operation() -> str:
+            target, display, resource_key = self._read_target(path, directory=None)
+            walk_state = _WalkState()
+            deadline = time.monotonic() + _MAX_FILE_SECONDS
+            if target.is_file():
+                candidates = iter(((target, display, target.stat()),))
+            elif target.is_dir():
+                candidates = self._enumerate_files(target, display, resource_key, max_depth=None, state=walk_state, deadline=deadline)
+            else:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            rows: list[str] = []
+            remaining_scan = 8 * 1024 * 1024
+            for candidate, logical, info in candidates:
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if not self._visible_read_path(logical, resource_key=resource_key, directory=False):
+                    continue
+                relative = candidate.name if candidate == target else candidate.relative_to(target).as_posix()
+                if include_glob is not None and not _glob_matches(relative, include_glob):
+                    continue
+                if remaining_scan <= 0 or time.monotonic() > deadline:
+                    walk_state.failed = True
+                    break
+                try:
+                    matches, incomplete, scanned = _search_bounded_lines(
+                        candidate, logical, expression, remaining_scan, deadline,
+                        _MAX_ITEMS - len(rows),
+                    )
+                except (AIError, OSError):
+                    walk_state.failed = True
+                    continue
+                remaining_scan -= scanned
+                walk_state.failed |= incomplete
+                rows.extend(matches)
+                if len(rows) >= _MAX_ITEMS or sum(map(len, rows)) >= _MAX_RENDERED_CHARS - 64:
+                    walk_state.failed = True
+                    break
+            result = "\n".join(rows) or ("No matches in scanned text." if walk_state.failed else "No matches found.")
+            if walk_state.failed:
+                return _bound_output_with_marker(result, "\n[truncated: search coverage incomplete]")
+            return _bound_output(result)
         return await self._run_sync(operation)
 
     async def list_directory(self, path: str = ".") -> str:
@@ -1170,7 +1334,7 @@ class _LocalSandboxSession:
             )
             raise AIError(code)
 
-    async def _run_sync(self, operation: Callable[[], str]) -> str:
+    async def _run_sync(self, operation: Callable[[], _SyncResult]) -> _SyncResult:
         async with self._state_lock:
             if self._state != "OPEN":
                 code = (
@@ -1864,7 +2028,7 @@ def _read_selected_lines(
 
         with path.open("rb") as stream:
             identity = _file_identity(stream.fileno())
-            for chunk in stream:
+            while chunk := stream.read(64 * 1024):
                 digest.update(chunk)
                 try:
                     consume(decoder.decode(chunk, final=False))
@@ -1891,44 +2055,6 @@ def _read_selected_lines(
     except OSError as error:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
     return digest.hexdigest(), line_count, selected, selected_truncated
-
-
-def _read_text_with_digest(path: Path, logical: str) -> tuple[str, str]:
-    try:
-        digest = hashlib.sha256()
-        value = io.StringIO()
-        decoder = codecs.getincrementaldecoder("utf-8")()
-        with path.open("rb") as stream:
-            identity = _file_identity(stream.fileno())
-            while True:
-                chunk = stream.read(64 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                decoded = decoder.decode(chunk, final=False)
-                if "\x00" in decoded:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                value.write(decoded)
-            decoded = decoder.decode(b"", final=True)
-            if "\x00" in decoded:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            value.write(decoded)
-            if _file_identity(stream.fileno()) != identity or _path_identity(path) != identity:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return value.getvalue(), digest.hexdigest()
-    except UnicodeDecodeError as error:
-        raise AIError(
-            ErrorCode.REQUEST_FIELD_INVALID,
-            safe_details={"path": logical, "reason": "invalid_utf8"},
-        ) from error
-    except FileNotFoundError as error:
-        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-    except OSError as error:
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-
-def _read_text(path: Path, logical: str) -> str:
-    return _read_text_with_digest(path, logical)[0]
 
 
 def _binary_file_size(path: Path) -> int | None:
@@ -1996,10 +2122,145 @@ def _search_file_lines(
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
 
-def _read_optional_text(path: Path, logical: str) -> str | None:
-    if not path.exists():
-        return None
-    return _read_text(path, logical)
+def _search_bounded_lines(
+    path: Path, logical: str, expression: re.Pattern[str], max_bytes: int,
+    deadline: float, limit: int,
+) -> tuple[list[str], bool, int]:
+    rows: list[str] = []
+    scanned = 0
+    line_number = 0
+    retained = ""
+    dropping = False
+    incomplete = False
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending_cr = ""
+    with path.open("rb") as stream:
+        state = _state(logical, os.fstat(stream.fileno()))
+        while True:
+            if time.monotonic() > deadline or scanned >= max_bytes:
+                incomplete = True
+                break
+            chunk = stream.read(min(64 * 1024, max_bytes - scanned))
+            if scanned == 0 and not _facts(chunk[:8192], logical, os.fstat(stream.fileno()).st_size)["is_text"]:
+                _check_state(path, logical, stream, state)
+                return [], False, len(chunk)
+            scanned += len(chunk)
+            value = pending_cr + decoder.decode(chunk, final=not chunk)
+            pending_cr = ""
+            if chunk and value.endswith("\r"):
+                value, pending_cr = value[:-1], "\r"
+            # Retain at most one output-sized line. Longer lines are explicitly uncovered.
+            for fragment in value.splitlines(keepends=True):
+                ended = fragment.endswith(("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"))
+                if not dropping:
+                    if len(retained) + len(fragment) > _MAX_CONTENT_CHARS:
+                        dropping = incomplete = True
+                        retained = ""
+                    else:
+                        retained += fragment
+                if ended:
+                    line_number += 1
+                    if not dropping and expression.search(retained.rstrip("\r\n")):
+                        rows.append(f"{logical}:{line_number}:{retained.rstrip(chr(13) + chr(10))}")
+                    retained = ""
+                    dropping = False
+                    if len(rows) >= limit:
+                        incomplete = True
+                        break
+            if len(rows) >= limit:
+                break
+            if not chunk:
+                if retained and not dropping and expression.search(retained):
+                    rows.append(f"{logical}:{line_number + 1}:{retained}")
+                break
+        _check_state(path, logical, stream, state)
+    return rows, incomplete, scanned
+
+
+def _stream_edit(
+    root: Path, path: Path, logical: str, old_text: str, new_text: str,
+    expected_hash: str | None,
+) -> str:
+    needle, replacement = old_text.encode("utf-8"), new_text.encode("utf-8")
+    original = hashlib.sha256()
+    updated = hashlib.sha256()
+    source_state: str | None = None
+    deadline = time.monotonic() + _MAX_FILE_SECONDS
+
+    def prepare(output: BinaryIO) -> None:
+        nonlocal source_state
+        try:
+            with path.open("rb") as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                if info.st_size > _MAX_EDIT_BYTES:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "edit_scan_byte_limit"})
+                source_state = _state(logical, info)
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+                pending = b""
+                count = scanned = written = 0
+
+                def emit(value: bytes) -> None:
+                    nonlocal written
+                    written += len(value)
+                    if written > _MAX_EDIT_BYTES:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "edit_staging_byte_limit"})
+                    output.write(value)
+                    updated.update(value)
+
+                while True:
+                    if time.monotonic() > deadline:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "edit_scan_time_limit"})
+                    chunk = source.read(64 * 1024)
+                    scanned += len(chunk)
+                    if scanned > _MAX_EDIT_BYTES:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "edit_scan_byte_limit"})
+                    original.update(chunk)
+                    decoded = decoder.decode(chunk, final=not chunk)
+                    if "\x00" in decoded:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "invalid_text"})
+                    pending += chunk
+                    while True:
+                        index = pending.find(needle)
+                        if index < 0:
+                            break
+                        count += 1
+                        emit(pending[:index])
+                        emit(replacement if count == 1 else needle)
+                        pending = pending[index + len(needle):]
+                    if not chunk:
+                        emit(pending)
+                        break
+                    keep = len(needle) - 1
+                    if len(pending) > keep:
+                        end = len(pending) - keep
+                        emit(pending[:end])
+                        pending = pending[end:]
+                if expected_hash is not None:
+                    _check_expected_digest(original.hexdigest(), expected_hash)
+                if count != 1:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "no_match" if count == 0 else "multiple_matches"})
+                _check_state(path, logical, source, source_state)
+        except FileNotFoundError as error:
+            code = ErrorCode.STORAGE_CONFLICT if expected_hash is not None else ErrorCode.STORAGE_NOT_FOUND
+            raise SandboxOperationRejected(code) from error
+        except UnicodeDecodeError as error:
+            raise SandboxOperationRejected(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "invalid_utf8"}) from error
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
+        except OSError as error:
+            raise SandboxOperationRejected(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    def check_before_publish() -> None:
+        try:
+            if source_state is None or _state(logical, path.stat()) != source_state:
+                raise SandboxOperationRejected(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
+        except FileNotFoundError as error:
+            raise SandboxOperationRejected(ErrorCode.STORAGE_CONFLICT) from error
+
+    _atomic_stream_write(root, path, prepare, before_publish=check_before_publish)
+    return updated.hexdigest()
 
 
 def _read_optional_hash(path: Path, logical: str) -> str | None:
@@ -2007,7 +2268,7 @@ def _read_optional_hash(path: Path, logical: str) -> str | None:
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             identity = _file_identity(stream.fileno())
-            for chunk in stream:
+            while chunk := stream.read(64 * 1024):
                 digest.update(chunk)
             if _file_identity(stream.fileno()) != identity or _path_identity(path) != identity:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2090,16 +2351,6 @@ def _validate_glob(value: str) -> None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-def _check_expected_hash(current: str | None, expected: str | None) -> None:
-    if expected is None:
-        return
-    if current is None:
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
-    actual = hashlib.sha256(current.encode("utf-8")).hexdigest()
-    if actual != expected:
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-
 def _check_expected_digest(actual: str | None, expected: str) -> None:
     if actual is None or actual != expected:
         raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2165,6 +2416,15 @@ def _copy_windows_security(source: Path, target: Path) -> None:
 
 
 def _atomic_write(root: Path, path: Path, content: str) -> None:
+    def write(stream: BinaryIO) -> None:
+        stream.write(content.encode("utf-8"))
+    _atomic_stream_write(root, path, write)
+
+
+def _atomic_stream_write(
+    root: Path, path: Path, write: Callable[[BinaryIO], None], *,
+    before_publish: Callable[[], None] | None = None,
+) -> None:
     _check_parent_chain(root, path.parent)
     parent = path.parent
     if not parent.is_dir():
@@ -2191,7 +2451,7 @@ def _atomic_write(root: Path, path: Path, content: str) -> None:
     fd, temporary_path = _create_temp_file(parent)
     try:
         with os.fdopen(fd, "wb") as stream:
-            stream.write(content.encode("utf-8"))
+            write(stream)
             stream.flush()
             os.fsync(stream.fileno())
             if owner is not None:
@@ -2210,6 +2470,8 @@ def _atomic_write(root: Path, path: Path, content: str) -> None:
                     os.setxattr(temporary_path, name, value)
             except OSError as error:
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        if before_publish is not None:
+            before_publish()
         os.replace(temporary_path, path)
     except AIError:
         try:

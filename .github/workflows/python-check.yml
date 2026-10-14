@@ -120,7 +120,17 @@ jobs:
           rm -- .github/.pip-install-scope
           python -m pip install --quiet -U -r requirements.txt
           read -r -a packages <<< "$INSTALL_PACKAGES"
+          if [[ " ${packages[*]} " == *" linktools-ai "* ]]; then
+            if ! command -v file >/dev/null; then
+              sudo apt-get update -qq
+              sudo apt-get install -y file
+            fi
+            echo 'LINKTOOLS_REQUIRE_LIBMAGIC=1' >> "$GITHUB_ENV"
+          fi
           python manage.py install "${packages[@]}" --editable --quiet
+          if [[ " ${packages[*]} " == *" linktools-ai "* ]]; then
+            python -c 'import magic; assert magic.from_buffer(b"%PDF-1.7\n", mime=True) == "application/pdf"'
+          fi
           python - <<'PYCOMPILE'
           from compileall import compile_dir
           from pathlib import Path

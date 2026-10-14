@@ -67,6 +67,14 @@ class _RecordingSession:
     async def read_file(self, path: str, *, offset: int = 0, limit: "int | None" = None) -> str:
         return await self._record("read_file", path, offset=offset, limit=limit)
 
+    async def inspect_file(self, path: str, *, max_bytes=None):
+        return {"path": path, "is_text": True, "media_type": "text/plain",
+                "type_source": "extension", "size": 1, "state": "test-state", "bytes_read": 1}
+
+    async def read_text(self, path: str, **kwargs):
+        await self._record("read_text", path, **kwargs)
+        return {"path": path, "content": "x", "state": "test-state", "bytes_read": 1}
+
     async def write_file(
         self,
         path: str,
@@ -181,7 +189,8 @@ def _tool_contract(tool: object) -> dict[str, object]:
     definition = tool.tool_def  # type: ignore[attr-defined]
     return {
         "version": 1,
-        "revision": 1,
+        "revision": next(item.revision for item in workspace_tool_declarations()
+                         if item.name == definition.name),
         "description": definition.description,
         "parameters": definition.parameters_json_schema,
         "return_schema": definition.return_schema,
@@ -211,6 +220,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "file_info",
         "find_files",
         "list_directory",
+        "list_files",
         "read_file",
         "run_command",
         "search_files",
@@ -219,7 +229,10 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
-    assert all(item.revision == 1 for item in contributions)
+    assert {item.id: item.revision for item in contributions} == {
+        item.id: 2 if item.id in {"read_file", "write_file", "search_files"} else 1
+        for item in contributions
+    }
     assert tuple(
         tool_class_from_metadata(item.value.tool_def.metadata)
         for item in contributions
@@ -228,6 +241,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "shell",
         "filesystem.write",
         "filesystem.write",
+        "filesystem.read",
         "filesystem.read",
         "filesystem.read",
         "filesystem.read",
@@ -452,6 +466,7 @@ async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_
             "file_info",
             "find_files",
             "list_directory",
+            "list_files",
             "read_file",
             "search_files",
             "write_file",
@@ -488,7 +503,7 @@ async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path
     await toolset.tools["check_command"].function("command")  # type: ignore[attr-defined]
     await toolset.tools["stop_command"].function("command")  # type: ignore[attr-defined]
     assert [name for name, _, _ in sandbox.sessions[0].calls] == [
-        "read_file",
+        "read_text",
         "start_command",
         "check_command",
         "stop_command",

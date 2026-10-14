@@ -24,11 +24,11 @@ ToolClass = Literal[
     "shell",
     "mcp",
 ]
-ToolContextDedupe = Literal["workspace_file_read_v1"]
+ToolContextDedupe = Literal["workspace_file_read_v1", "workspace_file_read_v2"]
 
 _TOOL_EFFECTS = frozenset(get_args(ToolEffectPolicy))
 _TOOL_CLASSES = frozenset(get_args(ToolClass))
-_TOOL_CONTEXT_DEDUPE = "workspace_file_read_v1"
+_TOOL_CONTEXT_DEDUPE = frozenset(get_args(ToolContextDedupe))
 
 
 def is_tool_effect_policy(value: str) -> bool:
@@ -122,7 +122,7 @@ def validate_tool_metadata(
 
     context_dedupe = metadata.get(TOOL_CONTEXT_DEDUPE_METADATA_KEY)
     if context_dedupe is not None or TOOL_CONTEXT_DEDUPE_METADATA_KEY in metadata:
-        if context_dedupe != _TOOL_CONTEXT_DEDUPE:
+        if not isinstance(context_dedupe, str) or context_dedupe not in _TOOL_CONTEXT_DEDUPE:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 

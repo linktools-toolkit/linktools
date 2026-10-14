@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Thread-safe model registry and immutable resolver captures."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from threading import RLock
 from types import MappingProxyType
 
@@ -12,6 +12,7 @@ from pydantic_ai.models import Model
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding, ModelResolver
+from ._input import ModelInputCapability, UnknownModelInputs
 
 _logger = environ.get_logger("ai.model.registry")
 
@@ -26,7 +27,9 @@ class ModelRegistry:
         cls,
         *,
         model: str,
-        vision: bool = False,
+        vision: bool | None = None,
+        input_capabilities: Sequence[ModelInputCapability] | None = None,
+        unknown_inputs: UnknownModelInputs | None = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -35,11 +38,20 @@ class ModelRegistry:
         max_tokens: "int | None" = None,
         connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
     ) -> "ModelRegistry":
+        """Create the default Chat route.
+
+        Omitting input declarations retains the vision-only contract. Supplying
+        declarations, even an empty sequence, rejects unknown file inputs unless
+        passthrough is explicitly selected. Do not combine declarations with the
+        legacy vision argument. Other resource budgets still apply.
+        """
         registry = cls()
         registry.register_openai(
             "default",
             model=model,
             vision=vision,
+            input_capabilities=input_capabilities,
+            unknown_inputs=unknown_inputs,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
@@ -62,7 +74,9 @@ class ModelRegistry:
         route_id: str,
         *,
         model: str,
-        vision: bool = False,
+        vision: bool | None = None,
+        input_capabilities: Sequence[ModelInputCapability] | None = None,
+        unknown_inputs: UnknownModelInputs | None = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -78,6 +92,8 @@ class ModelRegistry:
                 route_id=route_id,
                 model=model,
                 vision=vision,
+                input_capabilities=input_capabilities,
+                unknown_inputs=unknown_inputs,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
