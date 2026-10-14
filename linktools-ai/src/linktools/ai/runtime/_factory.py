@@ -692,6 +692,7 @@ async def _build_local_components(
             task_admissions=storage.task.admissions,
             execution_state=storage.execution.executions,
             recovery_backend=backend,
+            resolve_agent_binding=binding_resolver.resolve_contract,
             budgets=storage.execution.budgets,
             task_objects=storage.object_store(RuntimeDomain.TASK),
             artifact_state=storage.artifact,
@@ -719,6 +720,7 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
         )
+        backend.bind_recovery_relaunch_guard(task_runner.allow_execution_relaunch)
         task_launcher = LocalTaskGraphLauncher(
             storage.task.tasks,
             task_runner,

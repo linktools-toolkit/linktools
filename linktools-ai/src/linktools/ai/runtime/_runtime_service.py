@@ -1081,6 +1081,9 @@ class Runtime(Generic[AppT]):
             build_input=build_input,
             start_execution=start_execution,
             record_invocation=record_invocation,
+            inspect_execution=lambda execution_id, principal: self._execution_service.inspect(
+                execution_id, principal=principal,
+            ),
             get_execution=get_execution,
             acquire_execution_hold=acquire_execution_hold,
             release_execution_hold=release_execution_hold,

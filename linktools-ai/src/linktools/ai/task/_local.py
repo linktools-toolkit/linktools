@@ -596,7 +596,8 @@ class LocalTaskGraphLauncher:
                 execution_id=execution_id,
                 error_code=error.code.value,
                 error_digest=digest,
-                error_origin="execution",
+                error_origin=error.error_origin,
+                safe_error_details=error.safe_details if error.error_origin == "node" else {},
                 expected_fence=expected_fence,
             )
         else:
@@ -1597,7 +1598,8 @@ class LocalTaskGraphLauncher:
                     execution_id=execution_id,
                     error_code=code,
                     error_digest=digest,
-                    error_origin="execution",
+                    error_origin=error.error_origin,
+                    safe_error_details=error.safe_details if error.error_origin == "node" else {},
                     expected_fence=expected_fence,
                 )
                 await self._notify(run)
@@ -1936,14 +1938,14 @@ class LocalTaskGraphLauncher:
                             error_code=code,
                             error_digest=digest,
                             error_origin=(
-                                "execution"
+                                error.error_origin
                                 if isinstance(error, TaskNodeRunError)
                                 else "node"
                             ),
                             safe_error_details=(
                                 {}
-                                if isinstance(error, TaskNodeRunError)
-                                or not isinstance(error, AIError)
+                                if not isinstance(error, AIError)
+                                or isinstance(error, TaskNodeRunError) and error.error_origin == "execution"
                                 else error.safe_details
                             ),
                             execution_id=execution_id,

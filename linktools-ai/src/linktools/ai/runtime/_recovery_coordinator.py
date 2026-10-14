@@ -3,7 +3,7 @@
 """Durable local execution recovery coordination."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
@@ -377,6 +377,12 @@ class _RecoveryCoordinator:
     ) -> None:
         self._port = port
         self._instruction_resolver = instruction_resolver
+        self._relaunch_guard: Callable[[ExecutionRecord], Awaitable[bool]] | None = None
+
+    def bind_relaunch_guard(
+        self, guard: Callable[[ExecutionRecord], Awaitable[bool]],
+    ) -> None:
+        self._relaunch_guard = guard
 
     async def check_repository_instructions(
         self,
@@ -844,6 +850,10 @@ class _RecoveryCoordinator:
             if execution.session_id is not None:
                 await self._port._release_session_execution(execution)
             await self._port._finish_checkpoint(checkpoint)
+            return False
+        if (execution.status is not ExecutionStatus.CANCELLING
+                and self._relaunch_guard is not None and not await self._relaunch_guard(execution)):
+            _logger.info("recovery relaunch deferred by task deadline: execution=%s", execution.execution_id)
             return False
         self._port.validate_binding(execution)
         if checkpoint.state in {
