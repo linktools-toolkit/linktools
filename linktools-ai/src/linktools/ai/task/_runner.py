@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, Protocol, TypeVar, runtime_checkable
+from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
@@ -51,11 +51,15 @@ class TaskNodeRunError(AIError):
         execution_id: str,
         *,
         safe_details: "Mapping[str, JsonValue] | None" = None,
+        error_origin: Literal["node", "execution"] = "execution",
     ) -> None:
         if not isinstance(execution_id, str) or not execution_id.strip():
             raise ValueError("task node failure execution id is required")
+        if error_origin not in {"node", "execution"}:
+            raise ValueError("task node failure origin is invalid")
         super().__init__(code, safe_details=safe_details)
         self.execution_id = execution_id
+        self.error_origin = error_origin
 
 
 @runtime_checkable

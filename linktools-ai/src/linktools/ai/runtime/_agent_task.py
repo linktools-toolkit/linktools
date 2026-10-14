@@ -4,7 +4,8 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Generic, TypeVar
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ..agent import AgentBindingContract
 from ..core import (
@@ -21,6 +22,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import (
     Task,
+    TaskNode,
     TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunError,
@@ -37,7 +39,13 @@ from ._agent_task_input import (
 )
 from ._input_contract import CanonicalUserInput, validate_user_input
 
+if TYPE_CHECKING:
+    from ..core import RunBudget
+    from .service_api import ExecutionView
+
+
 AppT = TypeVar("AppT")
+_DEADLINE_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
 class RuntimeAgentTaskRunner(Generic[AppT]):
@@ -71,6 +79,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             [StoredUserInput], Awaitable[CanonicalUserInput]
         ],
         record_invocation: Callable[[str, TaskNodeInvocation], Awaitable[None]] | None = None,
+        inspect_execution: Callable[[str, Principal], Awaitable["ExecutionView"]] | None = None,
     ) -> None:
         if input_mode not in {"literal", "projected"}:
             raise ValueError("Agent Task input mode is invalid")
@@ -100,6 +109,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         self._publish_prepared_input = publish_prepared_input
         self._store_prepared_prompt = store_prepared_prompt
         self._restore_prepared_prompt = restore_prepared_prompt
+        self._inspect_execution = inspect_execution
 
     def validate_binding(self, runtime_owner: object, task: Task[AppT]) -> None:
         if runtime_owner is not self._runtime_owner:
@@ -156,6 +166,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         invocation: TaskNodeInvocation,
         *,
         control: TaskNodeRunControl,
+        budget_scope: "tuple[str, RunBudget] | None" = None,
     ) -> TaskNodeRunResult:
         task_input = AgentTaskInput.from_mapping(invocation.node.input)
         files = task_input.files
@@ -321,7 +332,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             thinking=thinking,
             idempotency_key=request_identity,
         )
-        result = (await execution.wait()).result
+        result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
         return _agent_task_result(result, execution_id)
 
     async def _establish_execution(
@@ -436,11 +447,136 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         self,
         invocation: TaskNodeInvocation,
         execution_id: str,
+        *,
+        budget_scope: "tuple[str, RunBudget] | None" = None,
     ) -> TaskNodeRunResult:
         execution = await self._get_execution(execution_id, invocation.principal)
-        result = (await execution.wait()).result
         await self._capture_invocation(execution, execution_id, invocation)
+        result = await self._wait_execution(invocation, execution, execution_id, budget_scope)
         return _agent_task_result(result, execution_id)
+
+    async def _wait_execution(
+        self,
+        invocation: TaskNodeInvocation,
+        execution: object,
+        execution_id: str,
+        budget_scope: "tuple[str, RunBudget] | None",
+    ) -> object:
+        inspect = self._inspect_execution
+        timeout = invocation.node.timeout_seconds
+        if inspect is None:
+            if timeout is not None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return (await execution.wait()).result
+        view = None
+        if timeout is not None:
+            view = await inspect(execution_id, invocation.principal)
+            if view.started_at is None:
+                raise TaskNodeRunError(ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id)
+        policy = self.deadline_policy(invocation.node, None if view is None else view.started_at, budget_scope)
+        if policy is None:
+            return (await execution.wait()).result
+        deadline, code, details = policy
+        if view is None:
+            view = await inspect(execution_id, invocation.principal)
+        result = None
+        if view.terminal_at is None:
+            remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+            if remaining > 0:
+                try:
+                    result = (await execution.wait(timeout_seconds=remaining)).result
+                except AIError as error:
+                    if error.code not in {ErrorCode.WAIT_TIMEOUT, ErrorCode.EXECUTION_WAIT_TIMEOUT}:
+                        raise
+                view = await inspect(execution_id, invocation.principal)
+            if view.terminal_at is None:
+                view = await self._cancel_expired_execution(invocation, execution, execution_id)
+        if view.terminal_at is None:
+            raise TaskNodeRunError(ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id)
+        if view.terminal_at <= deadline:
+            if result is None:
+                result = (await execution.wait()).result
+            return result
+        raise TaskNodeRunError(code, execution_id, error_origin="node", safe_details=details)
+
+    @classmethod
+    def deadline_policy(
+        cls,
+        node: TaskNode,
+        started_at: datetime | None,
+        budget_scope: "tuple[str, RunBudget] | None",
+    ) -> tuple[datetime, ErrorCode, dict[str, JsonValue]] | None:
+        deadline = None if budget_scope is None else budget_scope[1].deadline_at
+        code = ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED
+        details: dict[str, JsonValue] = {
+            "dimension": "deadline_at", "reason": "deadline_exceeded",
+        }
+        if budget_scope is not None:
+            details["scope_id"] = budget_scope[0]
+        if node.timeout_seconds is not None and started_at is not None:
+            # The first claim and the admitted node are the durable owners. Recovery
+            # derives the same absolute deadline without granting a fresh interval.
+            node_deadline = started_at + timedelta(seconds=node.timeout_seconds)
+            if deadline is None or node_deadline < deadline:
+                deadline = node_deadline
+                code = ErrorCode.EXECUTION_WAIT_TIMEOUT
+                details = {"reason": "node_deadline_exceeded", "timeout_seconds": node.timeout_seconds}
+        if deadline is None:
+            return None
+        details["deadline_at"] = deadline.isoformat()
+        return deadline, code, details
+
+    async def _cancel_expired_execution(
+        self,
+        invocation: TaskNodeInvocation,
+        execution: object,
+        execution_id: str,
+    ) -> "ExecutionView":
+        async def settle() -> "ExecutionView":
+            cancel_error: Exception | None = None
+            try:
+                await execution.cancel()
+            except Exception as error:
+                cancel_error = error
+            inspect = self._inspect_execution
+            if inspect is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            try:
+                view = await inspect(execution_id, invocation.principal)
+                if view.status not in {
+                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                } or view.terminal_at is None:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            except Exception as error:
+                raise TaskNodeRunError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id,
+                    safe_details={"phase": "task_deadline_cancel"},
+                ) from (cancel_error or error)
+            return view
+
+        cleanup = asyncio.create_task(settle())
+        interrupted = False
+        loop = asyncio.get_running_loop()
+        settlement_deadline = loop.time() + _DEADLINE_CANCEL_TIMEOUT_SECONDS
+        while not cleanup.done():
+            remaining = settlement_deadline - loop.time()
+            if remaining <= 0:
+                # ExecutionService retains accepted cancellation independently of
+                # this waiter. An unconfirmed readback must not become failure.
+                cleanup.cancel()
+                cleanup.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+                raise TaskNodeRunError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED, execution_id,
+                    safe_details={"phase": "task_deadline_cancel", "reason": "settlement_timeout"},
+                )
+            try:
+                await asyncio.wait({cleanup}, timeout=remaining)
+            except asyncio.CancelledError:
+                interrupted = True
+        view = cleanup.result()
+        if interrupted:
+            raise asyncio.CancelledError
+        return view
 
     async def supply_input(
         self,
