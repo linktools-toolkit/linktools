@@ -402,7 +402,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         producer_generation: int | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
+    ) -> bool:
         supplied_guard = history_head_guard is not None
         guard = await self._execution_history_guard_in_transaction(
             transaction,
@@ -410,9 +410,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             history_head_guard,
             producer_generation=producer_generation,
         )
-        owner = self._agent_run_key(run.agent_run_id)
-        run_existed = await transaction.get_record(owner) is not None
-        await super()._sync_projection_in_transaction(
+        created = await super()._sync_projection_in_transaction(
             transaction,
             run,
             events=events,
@@ -430,12 +428,13 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             owner_already_guarded=bool(events or checkpoints),
         )
         if guard is not None and not supplied_guard and (
-            not run_existed or events or checkpoints or inserted or observation is not None
+            created or events or checkpoints or inserted or observation is not None
         ):
             await self._advance_execution_history_head_in_transaction(
                 transaction,
                 guard,
             )
+        return created
 
     async def _sync_interactions_in_transaction(
         self,

@@ -2152,7 +2152,8 @@ class StateStepArchive(AgentRunStore):
         producer_generation: int | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
+    ) -> bool:
+        """Commit projection metadata and report whether its AgentRun was admitted."""
         self._ensure_open()
         if interactions:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -2186,7 +2187,7 @@ class StateStepArchive(AgentRunStore):
                     transaction,
                     history_head_guard,
                 )
-            return
+            return created
         owner = self._agent_run_key(run.agent_run_id)
         grouped: dict[str, list[object]] = {
             "event": [],
@@ -2265,6 +2266,7 @@ class StateStepArchive(AgentRunStore):
                 transaction,
                 history_head_guard,
             )
+        return created
 
     async def materialize_checkpoint(
         self,
