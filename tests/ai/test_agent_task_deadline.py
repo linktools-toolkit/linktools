@@ -14,6 +14,7 @@ from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
 from linktools.ai.task import TaskGraph, TaskNode
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -152,6 +153,13 @@ def _start_interrupted_graph(
     path: str, ready: object, backend: str, timeout: float | None = 0.5, subagent: bool = False,
     interrupt_child: bool = True,
 ) -> None:
+    observer_entered = asyncio.Event()
+
+    async def pause_before_deadline_observation(*args, **kwargs):
+        del args, kwargs
+        observer_entered.set()
+        await asyncio.Event().wait()
+
     async def start() -> None:
         entered = asyncio.Event()
 
@@ -174,12 +182,21 @@ def _start_interrupted_graph(
                 idempotency_key="start",
             )
             await asyncio.wait_for(entered.wait(), 2)
+            await asyncio.wait_for(observer_entered.wait(), 2)
             execution = await run.execution("agent")
             view = await runtime.executions.inspect(execution.execution_id, principal=runtime.default_principal)
-            ready.send((execution.execution_id, view.started_at))
+            assert view.status is ExecutionStatus.STARTED
+            assert view.terminal_at is None
+            ready.send((execution.execution_id, view.started_at, runtime.default_principal.tenant_id))
             await asyncio.Event().wait()
 
-    asyncio.run(start())
+    # Crash at the established/captured execution boundary. Suspending only
+    # the writer's observer prevents machine speed from letting its 0.5s timer
+    # settle cancellation before the parent can kill it. Model/child work and
+    # all recovery-side deadline handling remain real.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(RuntimeAgentTaskRunner, "_wait_execution", pause_before_deadline_observation)
+        asyncio.run(start())
 
 
 @pytest.mark.asyncio
@@ -199,13 +216,30 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
     process.start()
     try:
         assert await asyncio.to_thread(read.poll, 10)
-        execution_id, started_at = read.recv()
+        execution_id, started_at, tenant_id = read.recv()
         assert started_at is not None
     finally:
         process.terminate()
         await asyncio.to_thread(process.join, 5)
+        assert not process.is_alive()
+        assert process.exitcode is not None
         read.close()
         write.close()
+    # Read without a Runtime: startup reconciliation must not run before the
+    # crash premise (including the real in-flight child) has been verified.
+    snapshot = RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)
+    await snapshot.initialize(namespace="deadline-recovery", tenant_id=tenant_id, read_only=True)
+    try:
+        original = await snapshot.execution.executions.get(execution_id, tenant_id=tenant_id)
+        assert original is not None
+        assert original.status is ExecutionStatus.STARTED
+        assert original.started_at == started_at
+        assert original.result is None
+        children = await snapshot.execution.executions.list_children(execution_id, tenant_id=tenant_id)
+        assert len(children) == int(subagent)
+        assert all(child.status is ExecutionStatus.STARTED and child.result is None for child in children)
+    finally:
+        await snapshot.close()
     await asyncio.sleep(max(0, (started_at + timedelta(seconds=0.6) - datetime.now(timezone.utc)).total_seconds()))
     calls = 0
 
@@ -266,10 +300,12 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
     process.start()
     try:
         assert await asyncio.to_thread(read.poll, 10)
-        execution_id, started_at = read.recv()
+        execution_id, started_at, _tenant_id = read.recv()
     finally:
         process.terminate()
         await asyncio.to_thread(process.join, 5)
+        assert not process.is_alive()
+        assert process.exitcode is not None
         read.close()
         write.close()
     calls = 0
