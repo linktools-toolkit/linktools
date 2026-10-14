@@ -102,7 +102,13 @@ class _GraphModelProjection:
             ]
             if previous < cutoff.model_request_seq:
                 ranges.append((previous, cutoff.model_request_seq))
+            contiguous: list[tuple[int, int]] = []
             for after, through in ranges:
+                if contiguous and contiguous[-1][1] == after:
+                    contiguous[-1] = (contiguous[-1][0], through)
+                else:
+                    contiguous.append((after, through))
+            for after, through in contiguous:
                 while after < through:
                     rows = await self.history.read_model_interaction_metadata(
                         execution_id, principal=self.principal,
