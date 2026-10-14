@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from pathlib import PureWindowsPath
 from typing import cast
+from urllib.parse import urlsplit
 
 from pydantic_ai.messages import (
     AudioUrl,
@@ -30,9 +32,70 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode
+from ..workspace import validate_workspace_path
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
 _FILE_TOOLS = frozenset({"attach_files", "read_file"})
+
+
+def consumed_binary_metadata(
+    item: BinaryContent,
+    message: ModelRequest,
+) -> dict[str, JsonValue]:
+    """Describe consumed bytes using their existing content identifier.
+
+    An identifier denotes a Runtime occurrence only after tool-return binding.
+    Workspace paths require a matching bound occurrence in this same request;
+    user-provided labels and identifiers are not path provenance.
+    """
+    metadata: dict[str, JsonValue] = {
+        "attachment": None if _is_external_reference(item.identifier) else item.identifier,
+        "size": len(item.data),
+        "mime": item.media_type,
+    }
+    descriptor = None
+    paths: set[str] = set()
+    for part in message.parts:
+        if (not isinstance(part, BaseToolReturnPart)
+            or part.tool_name not in _FILE_TOOLS
+            or not isinstance(part.tool_call_id, str) or not part.tool_call_id
+            or not isinstance(part.content, Mapping)):
+            continue
+        try:
+            occurrences = _tool_file_occurrences(
+                part.content, source=part.tool_name, call_id=part.tool_call_id,
+            )
+        except AIError:
+            continue
+        for occurrence in occurrences:
+            if occurrence["attachment_id"] != item.identifier:
+                continue
+            if descriptor is None:
+                descriptor = _content_descriptor(item)
+            if descriptor is None or not _same_attachment(occurrence, descriptor):
+                continue
+            files = cast(list[Mapping[str, JsonValue]], part.content["files"])
+            path = files[cast(int, occurrence["call_position"])].get("path")
+            if not isinstance(path, str) or _is_external_reference(path):
+                continue
+            try:
+                paths.add(validate_workspace_path(path))
+            except ValueError:
+                continue
+    if len(paths) == 1:
+        metadata["path"] = paths.pop()
+    return metadata
+
+
+def _is_external_reference(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return True
+    return bool(
+        parsed.scheme or parsed.netloc or value.startswith(("/", "\\"))
+        or PureWindowsPath(value).is_absolute()
+    )
 
 
 def input_attachment_views(
@@ -519,6 +582,7 @@ def _is_digest(value: object) -> bool:
 
 __all__ = [
     "bind_tool_return_attachments",
+    "consumed_binary_metadata",
     "input_attachment_views",
     "request_attachment_facts",
 ]

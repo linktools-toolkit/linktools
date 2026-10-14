@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Transient BinaryContent projection contracts."""
 
+import json
+
 import pytest
 from pydantic_ai.messages import (
     BinaryContent,
@@ -63,7 +65,10 @@ def test_consumed_binary_is_removed_without_mutating_raw_transcript() -> None:
     assert isinstance(projected_request, ModelRequest)
     content = projected_request.parts[0].content  # type: ignore[attr-defined]
     assert "Workspace file: a.png" in content
-    assert "[binary content already consumed]" in content
+    marker = next(item for item in content if item.startswith("[binary content already consumed] "))
+    assert json.loads(marker.removeprefix("[binary content already consumed] ")) == {
+        "attachment": "a.png", "size": 5, "mime": "image/png",
+    }
     assert not any(
         isinstance(item, str) and "identifier=" in item
         for item in content

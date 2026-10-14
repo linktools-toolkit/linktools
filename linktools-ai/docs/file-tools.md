@@ -118,6 +118,20 @@ unchanged. Mixed results retain attachment identity; only same-hash/same-range
 text previews can be deduplicated in the compressed view. Basic previews without
 a full hash remain intact.
 
+Consumed binary bodies become a text marker with known attachment metadata, not
+the original file contents. `attachment` retains the existing content identifier;
+for runtime-bound file-tool results this is the attachment occurrence ID, while
+other inputs may use an SDK-derived or caller-supplied identifier. `size` is the
+original byte count and `mime` is the binary content media type. A workspace
+`path` is included only when matching structured file-tool metadata in the same
+request proves the association. Missing paths are omitted; an arbitrary identifier
+or nearby user-written text is never interpreted as a path. Existing workspace
+path labels remain separate text. URL or absolute-host-path identifiers are not
+echoed by the marker.
+
+The projection does not change raw persisted history or discard pending binaries.
+It does not add consumption behavior for URL inputs or uploaded-file references.
+
 ## Discovery and edits
 
 `list_files(path=".", include_glob="*")` lists direct children; `**` explicitly
