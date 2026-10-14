@@ -738,6 +738,26 @@ Agent task prompt content supports native user content such as `BinaryContent`
 and `WorkspaceFileInput`. Runtime stores its captured bytes as part of the
 accepted graph input so retries and recovery do not reread the source files.
 
+`TaskNode.timeout_seconds` also limits Agent-backed nodes. The interval starts at
+that execution's first durable start and covers its model, tool, and delegated
+subagent work. Recovery derives the same absolute deadline from the stored node
+and original start time; it never grants a fresh interval or dispatches expired
+work. This is an execution limit, separate from an HTTP timeout or a caller's
+`run.wait(timeout_seconds=...)` observation limit. Applications can map their own
+configuration into `TaskNode.timeout_seconds`; Runtime does not interpret business
+metadata.
+
+A graph's `RunBudget.deadline_at` can shorten the node deadline. The earlier limit
+wins (the graph deadline wins a tie), without replacing the graph's shared model,
+tool, or token budget. On expiry, Runtime requests execution-tree cancellation
+and reads back its outcome. Confirmed cancellation yields a failed node with
+`EXECUTION_WAIT_TIMEOUT` (or `EXECUTION_USAGE_LIMIT_EXCEEDED` for the graph limit),
+while the underlying execution remains cancelled. Unconfirmed cancellation or
+external effects stay `RECOVERY_REQUIRED`; cancellation settlement has a separate
+five-second bound. A result already completed within its deadline remains valid
+when read later. Neither an absent node timeout nor an absent graph deadline adds
+an execution deadline.
+
 ### Runtime context and execution queries
 
 `Runtime.open()` is the stable Runtime construction entry point. Use

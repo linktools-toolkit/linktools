@@ -98,6 +98,7 @@ from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 from .state._contracts import BudgetRepository
 
 if TYPE_CHECKING:
+    from ..core import RunBudget
     from ._execution import ExecutionBackend
 
 _logger = environ.get_logger("ai.runtime.planner")
@@ -376,7 +377,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._execution_state = execution_state
         self._recovery_backend = recovery_backend
         self._budgets = budgets
-        self._budget_scopes: dict[str, str] = {}
+        self._budget_scopes: dict[str, tuple[str, "RunBudget"]] = {}
         self._task_objects = task_objects
         self._input_materializer = input_materializer
         self._input_captures = input_captures
@@ -841,14 +842,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if admission.budget_scope_id is None:
             self._budget_scopes.pop(admission.graph_id, None)
         else:
-            self._budget_scopes[admission.graph_id] = admission.budget_scope_id
+            self._budget_scopes[admission.graph_id] = (admission.budget_scope_id, usage.limits)
 
     async def _check_graph_budget(self, graph_id: str) -> None:
-        scope_id = self._budget_scopes.get(graph_id)
-        if scope_id is not None:
+        scope = self._budget_scopes.get(graph_id)
+        if scope is not None:
             if self._budgets is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            await self._budgets.check(scope_id)
+            await self._budgets.check(scope[0])
 
     def _require_binding_capture(
         self,
@@ -1406,6 +1407,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         for node, node_state, execution in candidates:
             await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
             now = datetime.now(timezone.utc)
+            deadline = RuntimeAgentTaskRunner.deadline_policy(
+                node, execution.started_at, self._budget_scopes.get(graph_id),
+            )
+            if deadline is not None and deadline[0] <= now:
+                # Reattach the bound waiter to cancel/read back expired execution;
+                # recovery must not dispatch another model or tool first.
+                continue
             operation = OperationLedgerInput(
                 operation_id=canonical_sha256({
                     "action": "task.bound_execution.recover",
@@ -1672,9 +1680,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if invocation.input_capture is not None:
                 contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
                 invocation = replace(invocation, dependency_states={**invocation.dependency_states, **{item.name: item.state for item in contract.dependencies}})
-            if not isinstance(handler.runner, RuntimeAgentTaskRunner):
+            if isinstance(handler.runner, RuntimeAgentTaskRunner):
+                runner_result = await handler.runner.run(
+                    invocation, control=control, budget_scope=self._budget_scopes.get(graph_id),
+                )
+            else:
                 await self._check_graph_budget(graph_id)
-            runner_result = await handler.runner.run(invocation, control=control)
+                runner_result = await handler.runner.run(invocation, control=control)
             return await self._complete_runner_result(invocation, runner_result)
         dependencies = await self._dependencies(
             node,
@@ -1709,7 +1721,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             idempotency_key=idempotency_key,
             correlation=correlation,
             requires_task_invocation_capture=True,
-            budget_scope_id=self._budget_scopes.get(graph_id),
+            budget_scope_id=None if graph_id not in self._budget_scopes else self._budget_scopes[graph_id][0],
         )
         execution_id = handle.execution_id
         if control.execution_id is None:
@@ -2445,10 +2457,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
-            runner_result = await handler.runner.wait_bound(
-                invocation,
-                execution_id,
-            )
+            if isinstance(handler.runner, RuntimeAgentTaskRunner):
+                runner_result = await handler.runner.wait_bound(
+                    invocation, execution_id, budget_scope=self._budget_scopes.get(invocation.graph_id),
+                )
+            else:
+                runner_result = await handler.runner.wait_bound(invocation, execution_id)
             return await self._complete_runner_result(invocation, runner_result)
         view = await self._execution.inspect(
             execution_id,
