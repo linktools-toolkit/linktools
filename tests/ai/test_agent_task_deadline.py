@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
 from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
-from linktools.ai.errors import ErrorCode
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
@@ -132,24 +132,38 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
             assert node.error_code == (ErrorCode.EXECUTION_WAIT_TIMEOUT if earlier == "node" else ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED).value
 
 
+def _recovery_group(subagent: bool, change: str = "none") -> CapabilityGroup:
+    async def marker(value: str) -> str:
+        return value
+
+    group = CapabilityGroup("deadline-recovery")
+    group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
+    group.agent("default", model="default", allow_tools=(), allow_skills=(),
+                allow_subagents=("child",) if subagent else ())
+    group.agent("child", model="default", allow_tools=("marker",), allow_skills=(), allow_subagents=(),
+                system_prompt="changed" if change == "prompt" else "",
+                metadata={"label": "new"} if change == "metadata" else {},
+                description="new description" if change == "metadata" else None,
+                revision=2 if change == "revision" else 1)
+    return group
+
+
 def _start_interrupted_graph(
     path: str, ready: object, backend: str, timeout: float | None = 0.5, subagent: bool = False,
+    interrupt_child: bool = True,
 ) -> None:
     async def start() -> None:
         entered = asyncio.Event()
 
         async def model(messages, info):
             del messages
-            if subagent and any(tool.name == "delegate_task" for tool in info.function_tools):
+            if subagent and interrupt_child and any(tool.name == "delegate_task" for tool in info.function_tools):
                 return ModelResponse(parts=[ToolCallPart("delegate_task", {"subagent_id": "child", "task": "work"})])
             entered.set()
             await asyncio.sleep(30)
             return ModelResponse(parts=[TextPart("late")])
 
-        group = CapabilityGroup("deadline-recovery")
-        group.agent("default", model="default", allow_tools=(), allow_skills=(),
-                    allow_subagents=("child",) if subagent else ())
-        group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+        group = _recovery_group(subagent)
         async with Runtime.open(
             "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
             storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), capabilities=(group,),
@@ -169,10 +183,14 @@ def _start_interrupted_graph(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
-@pytest.mark.parametrize("subagent", (False, True))
+@pytest.mark.parametrize("backend,subagent,change", (
+    ("sqlite", False, "none"), ("filesystem", False, "none"),
+    ("sqlite", True, "none"), ("filesystem", True, "none"),
+    ("sqlite", True, "metadata"), ("sqlite", True, "prompt"),
+    ("sqlite", True, "tool"), ("sqlite", True, "revision"),
+))
 async def test_agent_node_recovery_keeps_first_start_deadline(
-    tmp_path: Path, backend: str, subagent: bool,
+    tmp_path: Path, backend: str, subagent: bool, change: str,
 ) -> None:
     path = tmp_path / "state.db"
     context = multiprocessing.get_context("spawn")
@@ -198,25 +216,25 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         await asyncio.sleep(30)
         return ModelResponse(parts=[TextPart("late")])
 
-    group = CapabilityGroup("deadline-recovery")
-    group.agent("default", model="default", allow_tools=(), allow_skills=(),
-                allow_subagents=("child",) if subagent else ())
-    group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open(
+    group = _recovery_group(subagent, change)
+    runtime_context = Runtime.open(
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
         storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), capabilities=(group,),
-    ) as runtime:
+    )
+    runtime = await runtime_context.__aenter__()
+    try:
         await asyncio.sleep(0.15)
         assert calls == 0
         current = await runtime.executions.inspect(execution_id, principal=runtime.default_principal)
         assert current.started_at == started_at
-        if subagent:
-            # Explicit graph recovery has a separately reproduced baseline
-            # binding mismatch for resolved subagents. Startup must still
-            # prevent expired parent and child model work before that check.
-            return
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).get("deadline-recovery")
+        if change in {"prompt", "tool", "revision"}:
+            with pytest.raises(AIError) as caught:
+                await run.recover(idempotency_key="recover")
+            assert caught.value.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.AGENT_BINDING_UNAVAILABLE}
+            assert calls == 0
+            return
         await run.recover(idempotency_key="recover")
         result = (await run.wait(timeout_seconds=3)).result
         current = await runtime.executions.inspect(execution_id, principal=runtime.default_principal)
@@ -228,14 +246,23 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         node, = (await run.state()).node_states
         assert node.status is TaskStatus.RECOVERY_REQUIRED
         assert node.error_code == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+    finally:
+        if subagent and change in {"none", "metadata"}:
+            # The interrupted delegated effect remains unknown on close too.
+            with pytest.raises(AIError) as caught:
+                await runtime_context.__aexit__(None, None, None)
+            assert caught.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        else:
+            await runtime_context.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio
-async def test_filesystem_agent_recovery_without_deadline_still_relaunches(tmp_path: Path) -> None:
+@pytest.mark.parametrize("subagent", (False, True))
+async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, subagent: bool) -> None:
     path = tmp_path / "state"
     context = multiprocessing.get_context("spawn")
     read, write = context.Pipe(duplex=False)
-    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, "filesystem", None))
+    process = context.Process(target=_start_interrupted_graph, args=(str(path), write, "sqlite" if subagent else "filesystem", 120 if subagent else None, subagent, False))
     process.start()
     try:
         assert await asyncio.to_thread(read.poll, 10)
@@ -249,19 +276,32 @@ async def test_filesystem_agent_recovery_without_deadline_still_relaunches(tmp_p
 
     async def model(messages, info):
         nonlocal calls
-        del messages, info
+        del messages
         calls += 1
+        if subagent and calls == 1 and any(tool.name == "delegate_task" for tool in info.function_tools):
+            return ModelResponse(parts=[ToolCallPart("delegate_task", {"subagent_id": "child", "task": "work"})])
         return ModelResponse(parts=[TextPart("recovered")])
 
-    group = CapabilityGroup("deadline-recovery")
-    group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    group = _recovery_group(subagent)
+    storage = RuntimeStorage.sqlite(path) if subagent else RuntimeStorage.filesystem(path)
     async with Runtime.open(
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.filesystem(path), capabilities=(group,),
+        storage=storage, capabilities=(group,),
     ) as runtime:
+        original_binding = (await storage.execution.executions.get(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )).binding
+        task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
+        run = await runtime.tasks.bind(task).get("deadline-recovery")
+        if subagent:
+            await run.recover(idempotency_key="recover")
         execution = await runtime.executions.get(execution_id)
         assert (await execution.wait(timeout_seconds=3)).result.status is ExecutionStatus.SUCCEEDED
-        assert calls == 1
+        assert calls == (3 if subagent else 1)
         current = await runtime.executions.inspect(execution_id, principal=runtime.default_principal)
         assert current.started_at == started_at
+        if subagent:
+            assert (await run.wait(timeout_seconds=3)).result.status is TaskStatus.SUCCEEDED
+        assert (await storage.execution.executions.get(
+            execution_id, tenant_id=runtime.default_principal.tenant_id,
+        )).binding == original_binding

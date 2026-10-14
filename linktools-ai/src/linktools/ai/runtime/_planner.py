@@ -367,6 +367,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         recovery_durable: bool = True,
         input_materializer: ExecutionInputMaterializer | None = None,
         input_captures: RuntimeInputCaptures | None = None,
+        resolve_agent_binding: Callable[[AgentBindingContract], Awaitable[AgentBindingContract]] | None = None,
     ) -> None:
         self._app = app
         self._namespace = namespace
@@ -381,6 +382,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._task_objects = task_objects
         self._input_materializer = input_materializer
         self._input_captures = input_captures
+        self._resolve_agent_binding = resolve_agent_binding
         self._artifact_state = artifact_state
         self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
@@ -1424,6 +1426,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     expected_binding, output_mode=output.mode,
                     output_schema=output.schema_definition,
                 )
+            if self._resolve_agent_binding is not None:
+                expected_binding = await self._resolve_agent_binding(expected_binding)
             bindings.append((node, node_state, expected_binding))
 
         candidates: list[tuple[TaskNode, TaskNodeView, ExecutionRecord]] = []
@@ -1447,6 +1451,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 or not execution.requires_task_invocation_capture
                 or not isinstance(execution.binding, AgentBindingContract)
                 or execution.binding.binding_digest != expected_binding.binding_digest
+                or execution.binding != expected_binding
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.status not in {

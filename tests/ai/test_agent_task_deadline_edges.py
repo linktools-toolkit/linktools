@@ -257,3 +257,29 @@ async def test_subagent_recovery_inherits_task_ancestor_deadline() -> None:
         principal=principal, budget_scope_id=None, budget=None,
     )))
     assert not await runner.allow_execution_relaunch(child)
+
+
+@pytest.mark.asyncio
+async def test_recovery_binding_candidate_ignores_model_connection_changes() -> None:
+    from linktools.ai.agent import AgentCatalog, AgentCompiler
+    from linktools.ai.model import ModelRegistry
+    from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
+    from linktools.ai.spec import AgentSpec
+
+    specs = {
+        "parent": AgentSpec("parent", allow_tools=(), allow_skills=(), allow_subagents=("child",)),
+        "child": AgentSpec("child", allow_tools=(), allow_skills=(), allow_subagents=()),
+    }
+    contracts = []
+    for endpoint in ("https://first.example/v1", "https://second.example/v1"):
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(
+                model="gpt-test", base_url=endpoint, api_key="test-placeholder",
+            ).capture(),
+            candidates=(), agents=specs,
+        )
+        catalog = AgentCatalog({key: compiler.compile(spec) for key, spec in specs.items()})
+        resolver = _AgentBindingResolver(catalog, compiler)
+        contracts.append(await resolver.resolve_root("parent"))
+    assert contracts[0].binding_digest == contracts[1].binding_digest
+    assert contracts[0] == contracts[1]
