@@ -642,15 +642,21 @@ class StepExecutionHistoryReader:
             namespace=self._namespace, tenant_id=tenant_id,
             execution_id=execution_id, agent_run_seq=agent_run_seq,
         )
-        run = await self._store.get_agent_run(agent_run_id=run_id)
+        if type(self._store) is ModelInteractionStateStepArchive:
+            run, interactions = await self._store.read_model_interactions_with_run(
+                agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
+            )
+        else:
+            run = await self._store.get_agent_run(agent_run_id=run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _validate_agent_run(run, run_id, make_agent_conversation_id(
             namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
         ), agent_run_seq)
-        interactions = await self._store.list_model_interactions(
-            agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
-        )
+        if type(self._store) is not ModelInteractionStateStepArchive:
+            interactions = await self._store.list_model_interactions(
+                agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
+            )
         selected: dict[int, ModelInteractionItem] = {}
         for interaction in interactions:
             if (not isinstance(interaction, (ModelInteractionRecord, StagedModelInteraction)) or interaction.agent_run_id != run_id
