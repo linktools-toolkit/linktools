@@ -47,6 +47,7 @@ from ._contracts import (
     RuntimePayloadRef,
     StoredAgentRunCheckpoint,
     TranscriptChunk,
+    TranscriptHeadRecord,
     TranscriptMessageRef,
     TranscriptOrigin,
     TranscriptSpanRef,
@@ -1533,12 +1534,15 @@ class StateStepArchive(AgentRunStore):
         )
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
-        if existing_run is None:
-            return replace(checkpoint, transcript_message_count_before=0)
-        if existing_run != run:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        before = await self.transcript_message_count_for_run(run)
+        async def capture_metadata(_transaction: StateTransaction) -> int:
+            existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
+            if existing_run is None:
+                return 0
+            if existing_run != run:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await self.transcript_message_count_for_run(run)
+
+        before = await self._store.read(capture_metadata)
         source_messages = tuple(checkpoint.messages)
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1758,11 +1762,15 @@ class StateStepArchive(AgentRunStore):
             if self._runtime_domain is RuntimeDomain.CONVERSATION
             else run.agent_run_id
         )
-        head = await self._history.get_head(owner_id)
-        if head is None:
-            if await self.get_agent_run(agent_run_id=run.agent_run_id) is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            head = self._history.empty_head(owner_id)
+        async def capture_head(_transaction: StateTransaction) -> TranscriptHeadRecord:
+            head = await self._history.get_head(owner_id)
+            if head is None:
+                if await self.get_agent_run(agent_run_id=run.agent_run_id) is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                head = self._history.empty_head(owner_id)
+            return head
+
+        head = await self._store.read(capture_head)
 
         if observed_message_count is not None:
             if observed_message_count < head.message_count:
@@ -2040,19 +2048,23 @@ class StateStepArchive(AgentRunStore):
         repository = self._execution_repository
         if repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
-        if (head is not None and head.state is ExecutionHistoryState.OPEN
-                and head.producer_generation > producer_generation):
-            return
-        execution = await repository.get(execution_id, tenant_id=self._tenant_id)
-        seal = await repository.get_history_seal(execution_id, tenant_id=self._tenant_id)
-        if (execution is None or execution.status not in {
-            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
-        } or head is None or head.state is not ExecutionHistoryState.SEALED
-                or head.producer_generation < producer_generation):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if seal is None or seal.seal_digest != head.seal_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        async def read(_transaction: StateTransaction) -> None:
+            head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
+            if (head is not None and head.state is ExecutionHistoryState.OPEN
+                    and head.producer_generation > producer_generation):
+                return
+            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
+            seal = await repository.get_history_seal(execution_id, tenant_id=self._tenant_id)
+            if (execution is None or execution.status not in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            } or head is None or head.state is not ExecutionHistoryState.SEALED
+                    or head.producer_generation < producer_generation):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if seal is None or seal.seal_digest != head.seal_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        await repository.state_store.read(read)
 
     async def _advance_execution_history_head_in_transaction(
         self,

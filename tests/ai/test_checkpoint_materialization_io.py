@@ -107,3 +107,113 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
             await asyncio.gather(first, return_exceptions=True)
         await state.close()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replay", (False, True))
+async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: Path, replay: bool) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "preparation.db")
+    await state.initialize(namespace="checkpoint-preparation", tenant_id="tenant")
+    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    run = AgentRunRecord("run")
+    checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
+    engine = archive.state_store.storage_group.context.engine.sync_engine
+    begins = []
+
+    def begin(connection):
+        begins.append(connection)
+
+    try:
+        if replay:
+            await archive.materialize_checkpoint(run, checkpoint)
+        event.listen(engine, "begin", begin)
+        try:
+            prepared, interactions, sequence = await state.run_store._prepare_recovery_checkpoint(
+                archive, run, checkpoint, (),
+            )
+        finally:
+            event.remove(engine, "begin", begin)
+        assert prepared.stored.step_index == checkpoint.step_index
+        assert interactions == () and sequence == 1
+        assert len(begins) <= 3
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from linktools.ai.runtime.state._store import active_state_scope
+    from .test_incremental_projection_boundaries import _storage
+
+    state = _storage(backend, tmp_path)
+    await state.initialize(namespace="checkpoint-relocation", tenant_id="tenant")
+    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    run = AgentRunRecord("run")
+    checkpoint = AgentRunCheckpoint(
+        "run", 1, [ModelRequest(parts=[UserPromptPart("retained message")])],
+        transcript_message_count_before=0,
+    )
+    try:
+        await archive.materialize_checkpoint(run, checkpoint)
+        get, count = archive.get_agent_run, archive.transcript_message_count_for_run
+        load = archive.transcript_repository.load_message_span
+        scopes, bodies = [], []
+
+        async def tracked_get(*args, **kwargs):
+            scopes.append(active_state_scope())
+            return await get(*args, **kwargs)
+
+        async def tracked_count(*args, **kwargs):
+            scopes.append(active_state_scope())
+            return await count(*args, **kwargs)
+
+        async def tracked_load(*args, **kwargs):
+            assert active_state_scope() is None
+            bodies.append(True)
+            return await load(*args, **kwargs)
+
+        monkeypatch.setattr(archive, "get_agent_run", tracked_get)
+        monkeypatch.setattr(archive, "transcript_message_count_for_run", tracked_count)
+        monkeypatch.setattr(archive.transcript_repository, "load_message_span", tracked_load)
+        relocated = await archive.relocate_run_checkpoint(run, checkpoint)
+        assert relocated.transcript_message_count_before == 1
+        assert scopes and all(scope is not None and scope is scopes[0] for scope in scopes)
+        assert bodies == [True]
+        assert active_state_scope() is None
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_recovery_metadata_cancellation_releases_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    from linktools.ai.runtime.state._store import active_state_scope
+    from .test_incremental_projection_boundaries import _storage
+
+    state = _storage(backend, tmp_path)
+    await state.initialize(namespace="checkpoint-cancel", tenant_id="tenant")
+    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    run = AgentRunRecord("run")
+    checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
+    count = archive.model_interaction_count
+
+    async def cancelled_count(*args, **kwargs):
+        assert active_state_scope() is not None
+        raise asyncio.CancelledError
+
+    try:
+        monkeypatch.setattr(archive, "model_interaction_count", cancelled_count)
+        with pytest.raises(asyncio.CancelledError):
+            await state.run_store._prepare_recovery_checkpoint(archive, run, checkpoint, ())
+        assert active_state_scope() is None
+        monkeypatch.setattr(archive, "model_interaction_count", count)
+        _, interactions, sequence = await state.run_store._prepare_recovery_checkpoint(archive, run, checkpoint, ())
+        assert interactions == () and sequence == 1
+    finally:
+        await state.close()
