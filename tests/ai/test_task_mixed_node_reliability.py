@@ -5648,10 +5648,9 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from linktools.ai.runtime.state import _filesystem
     from linktools.ai.task import _local
 
-    monkeypatch.setattr(_local, "_LEASE_SECONDS", 1)
-    monkeypatch.setattr(_local, "_HEARTBEAT_SECONDS", 0.1)
     storage_root = tmp_path / "state"
     held_started = asyncio.Event()
     held_cancelled = asyncio.Event()
@@ -5738,7 +5737,16 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
         assert join_calls == 0
 
     assert held_cancelled.is_set()
-    await asyncio.sleep(1.1)
+    expired_at = datetime.now(timezone.utc) + timedelta(seconds=_local._LEASE_SECONDS + 1)
+
+    class AfterLeaseExpiry:
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            return expired_at.astimezone(tz)
+
+    # Expire the abandoned lease without shortening the live commit window.
+    monkeypatch.setattr(_local, "datetime", AfterLeaseExpiry)
+    monkeypatch.setattr(_filesystem, "datetime", AfterLeaseExpiry)
 
     async with Runtime.open(
         "any-succeeded-restart",
