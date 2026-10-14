@@ -665,11 +665,26 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(selected[sequence] for sequence in expected)
 
+    async def subscribe_authorized_model_interactions(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+    ) -> ModelInteractionSubscription | None:
+        """Keep the post-authorization read without repeating the same owner lookup."""
+        if await executions.get(execution_id, tenant_id=tenant_id) is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+            return await self.subscribe_model_interactions(execution_id, tenant_id=tenant_id)
+        return self._subscribe_model_interactions(execution_id, tenant_id=tenant_id)
+
     async def subscribe_model_interactions(
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionSubscription | None:
         if await self._executions.get(execution_id, tenant_id=tenant_id) is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return self._subscribe_model_interactions(execution_id, tenant_id=tenant_id)
+
+    def _subscribe_model_interactions(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ModelInteractionSubscription | None:
         if self._notifications is None:
             return None
         return self._notifications.subscribe_model_interactions(make_agent_conversation_id(

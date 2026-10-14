@@ -357,6 +357,12 @@ class DefaultExecutionHistoryService:
     async def subscribe_model_interactions(
         self, execution_id: str, *, principal: Principal,
     ) -> ModelInteractionSubscription | None:
+        if type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.subscribe_authorized_model_interactions(
+                execution_id, tenant_id=principal.tenant_id,
+                executions=self._executions,
+            )
         await self._authorize(execution_id, principal)
         return await self._reader.subscribe_model_interactions(execution_id, tenant_id=principal.tenant_id)
 
