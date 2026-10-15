@@ -118,6 +118,15 @@ class ComposeRunner:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
+    def _require_scope(self, context: "OperationContext", services: "Iterable[str]") -> None:
+        """Keep both application and recovery inside a named operation's boundary."""
+        if context.is_full_project or context.target_services is None:
+            return
+        outside = set(services) - set(context.target_services)
+        if outside:
+            from ..errors import ContainerError
+            raise ContainerError("Operation cannot mutate unselected services: " + ", ".join(sorted(outside)))
+
     def collect_services(self, context: "OperationContext") -> "list[str]":
         """Service names for the targeted containers; empty for "all" runs."""
         if context.is_full_project:
@@ -162,6 +171,7 @@ class ComposeRunner:
         return args
 
     def build(self, context: "OperationContext", options: "ComposeOptions") -> int:
+        self._require_scope(context, options.services)
         from ..container import SourceContainer
         selected = set(options.services)
         for container in context.target_containers:
@@ -175,6 +185,7 @@ class ComposeRunner:
         return ["pull", "--ignore-buildable", *services]
 
     def pull(self, context: "OperationContext", services: "Sequence[str]") -> int:
+        self._require_scope(context, services)
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(*args, *self.pull_args(services)).check_call()
     def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
@@ -215,6 +226,7 @@ class ComposeRunner:
         return result
 
     def stop(self, context: "OperationContext", services: "Sequence[str]") -> int:
+        self._require_scope(context, services)
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(*args, "stop", *services).check_call()
     def down(self, context: "OperationContext", services: "Sequence[str]") -> int:
@@ -344,12 +356,14 @@ class ComposeRunner:
         return args
 
     def apply_service(self, context: "OperationContext", service: str, recreate: bool = False) -> int:
+        self._require_scope(context, (service,))
         self.wait_service_dependencies(context, service)
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(
                 *args, *self.apply_service_args(service, recreate, context.is_full_project)).check_call()
     def apply_services(self, context: "OperationContext", services: "Sequence[str]") -> int:
         """Apply the exact selection together, preserving native dependency ordering."""
+        self._require_scope(context, services)
         selected = set(services)
         for service in services:
             if set(service_dependencies(context.compose_model["services"][service])) - selected:
@@ -415,6 +429,7 @@ class ComposeRunner:
     def restart_service(self, context: "OperationContext", service: str,
                         model: "dict[str, Any] | None" = None) -> int:
         """Restart the existing container without applying pending Compose changes."""
+        self._require_scope(context, (service,))
         with self._model_args(context, model=model) as args:
             return self.manager.runtime.create_docker_process(
                 *args, "restart", "--no-deps", service).check_call()
@@ -669,6 +684,7 @@ class ComposeRunner:
     def apply_saved_services(self, context: "OperationContext", services: "Sequence[str]",
                              files: "dict[str, str]", *,
                              image_ids: "Mapping[str, str] | None" = None) -> None:
+        self._require_scope(context, services)
         import yaml
         from ..errors import ContainerError
         services = tuple(dict.fromkeys(services))

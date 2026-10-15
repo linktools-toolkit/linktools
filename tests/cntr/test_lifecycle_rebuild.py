@@ -319,7 +319,7 @@ def test_container_co_selection_does_not_create_runtime_cycle(tmp_path):
     nginx, auth = manager.containers["nginx"], manager.containers["auth"]
     nginx.dependencies = ("auth",)
     auth.dependencies = ("nginx",)
-    selected = manager.compose_operations.start_selection(manager.compose_operations.select(["nginx"]))
+    selected = manager.compose_operations.start_selection(manager.compose_operations.select(["nginx", "auth"]))
     assert selected.services == ("nginx", "auth")
 
 
@@ -401,10 +401,10 @@ def test_implicit_sidecar_does_not_promote_its_owners_group_dependencies(tmp_pat
     ])
     manager.containers["auth"].dependencies = ("nginx",)
     selected = manager.compose_operations.start_selection(manager.compose_operations.select(["app"]))
-    assert selected.services == ("redis", "app")
-    assert "nginx" not in {owner.name for owner in selected.target_containers}
-    manager.compose_operations.up(["app"])
-    assert [event[1] for event in manager.events if event[0] == "apply"] == ["redis", "app"]
+    assert selected.services == ("app",)
+    with pytest.raises(ContainerError, match="redis"):
+        manager.compose_operations.up(["app"])
+    assert not any(event[0] in ("images", "apply") for event in manager.events)
 
 
 def test_declared_running_consumer_prepares_before_checks(tmp_path):
@@ -412,8 +412,8 @@ def test_declared_running_consumer_prepares_before_checks(tmp_path):
                                     ("nav", {"nav": {"image": "nav:new"}})], running=("nav",))
     manager.integration_snapshot["app"] = (SimpleNamespace(consumer="nav"),)
     manager.compose_operations.up(["app"])
-    assert ("prepare", "nav") in manager.events
-    assert [event[1] for event in manager.events if event[0] == "apply"] == ["app", "nav"]
+    assert ("prepare", "nav") not in manager.events
+    assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
 
 
 def test_completed_service_uses_compose_conditions_without_new_task_deadline():
@@ -519,11 +519,11 @@ def test_restart_true_propagates_only_after_actual_provider_change(tmp_path):
     ], running=("db", "web"))
     # A matching applied model and image must not trigger a dependent restart.
     AppliedServiceModels(manager, manager.model).record(("db", "web"))
-    manager.compose_operations.up(["db"])
+    manager.compose_operations.up()
     assert not any(event[0] == "restart" for event in manager.events)
     manager.events.clear()
     manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
-    manager.compose_operations.up(["db"])
+    manager.compose_operations.up()
     assert ("restart", "web") in manager.events
 
 
@@ -544,8 +544,9 @@ def test_restart_dependency_transitive_once(tmp_path):
         ("c", {"c": {"image": "c:local", "depends_on": {"a": {"restart": True},
                                                      "b": {"restart": True}}}}),
     ], running=("a", "b", "c"))
+    AppliedServiceModels(manager, manager.model).record(("a", "b", "c"))
     manager.model["services"]["a"]["environment"] = {"VERSION": "2"}
-    manager.compose_operations.up(["a"])
+    manager.compose_operations.up()
     assert [event[1] for event in manager.events if event[0] == "restart"] == ["b", "c"]
 
 
@@ -555,8 +556,8 @@ def test_recreated_namespace_provider_recreates_existing_dependent(tmp_path):
         ("net", {"net": {"image": "net:local", "network_mode": "service:db"}}),
     ], running=("db", "net"))
     manager.model["services"]["db"]["environment"] = {"VERSION": "2"}
-    manager.compose_operations.up(["db"])
-    assert ("restore", ("net",)) in manager.events
+    manager.compose_operations.up(["db", "net"])
+    assert ("apply", "net", True) in manager.events
     assert ("restart", "net") not in manager.events
 
 
@@ -580,7 +581,8 @@ def test_execution_prepares_each_installed_owner_before_selected_operation(tmp_p
     manager.compose_runner.config = lambda *args, **kwargs: manager.events.append(("config",))
     manager.compose_runner.down = lambda *args, **kwargs: manager.events.append(("down",))
     getattr(manager.compose_operations, action)(["app"])
-    assert manager.events[:2] == [("load-prepare", "app"), ("load-prepare", "other")]
-    assert len([event for event in manager.events if event[0] == "load-prepare"]) == 2
+    assert manager.events[0] == ("load-prepare", "app")
+    assert len([event for event in manager.events if event[0] == "load-prepare"]) == (
+        1 if action in ("up", "restart") else 2)
     assert len([event for event in manager.events if event == ("prepare", "app")]) == (
         1 if action in ("up", "restart") else 0)

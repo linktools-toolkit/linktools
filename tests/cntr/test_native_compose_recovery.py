@@ -33,7 +33,7 @@ def test_optional_compose_provider_not_added_to_start_or_build_scope():
         "metrics": {"condition": "service_healthy", "required": False}}
     project = (app, metrics)
     model = {"services": {"app": app.services["app"], "metrics": {"image": "metrics:latest"}}}
-    selected = ComposeOperations(SimpleNamespace()).start_selection(
+    selected = ComposeOperations(SimpleNamespace()).required_selection(
         ComposeSelection(project, (app,), ("app",), False), model)
     assert selected.services == ("app",)
     assert order_services(project, ("app",), model) == ("app",)
@@ -125,7 +125,7 @@ def test_native_provider_co_selection_does_not_create_runtime_edges():
     provider = Owner("provider", ("provider",))
     consumer.get_runtime_requirements = lambda required: (
         {"provider": ("provider",)} if "consumer" in required else {})
-    selection = ComposeOperations(SimpleNamespace()).start_selection(
+    selection = ComposeOperations(SimpleNamespace()).required_selection(
         ComposeSelection((consumer, provider), (consumer,), ("consumer",), False))
     assert set(selection.services) == {"provider", "consumer"}
     assert set(owner.name for owner in selection.target_containers) == {"provider", "consumer"}
@@ -194,7 +194,7 @@ def test_restart_saved_orphan_uses_saved_compose_model(tmp_path):
     manager = SimpleNamespace(data_path=tmp_path, project_name="test",
                               runtime=SimpleNamespace(create_docker_process=process))
     runner = ComposeRunner(manager)
-    context = SimpleNamespace(compose_model={"services": {"current": {"image": "new:image"}}})
+    context = SimpleNamespace(is_full_project=True, compose_model={"services": {"current": {"image": "new:image"}}})
     runner.restart_service(context, "retired", model=saved)
     assert calls[0][-3:] == ("restart", "--no-deps", "retired")
 

@@ -87,10 +87,13 @@ def test_plan_up_full(fresh_manager):
     assert all("--no-deps" in c.args for c in plan.commands)
 
 
-def test_plan_resolved_containers_include_dependencies_of_a_partial_target(fresh_manager):
+def test_partial_plan_retains_dependency_definitions_without_selecting_them(fresh_manager):
     plan = fresh_manager.planner.plan("up", names=["authelia"])
     assert plan.targets == ("authelia",)
     assert {"nginx", "lldap", "authelia"} <= set(plan.resolved_containers)
+    assert set(plan.services) == set(fresh_manager.containers["authelia"].services)
+    assert all(set(command.args[command.args.index("--no-deps") + 1:]) == set(plan.services)
+               for command in plan.commands)
 
 
 def test_plan_up_partial_matches_real_selection(fresh_manager):
@@ -374,16 +377,12 @@ def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager):
         assert command.args[-len(expected_tail):] == expected_tail
 
 
-def test_restart_plan_with_named_config_only_target_has_no_stop(monkeypatch, fresh_manager):
+def test_restart_plan_rejects_named_config_only_target_without_consumer(monkeypatch, fresh_manager):
     monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
 
-    plan = fresh_manager.planner.plan("restart", names=["portainer"])
-
-    assert plan.targets == ("portainer",)
-    assert plan.services == ()
-    assert all(command.phase != "stop" for command in plan.commands)
-    assert all(hook.phase not in ("before-stop", "after-stop") for hook in plan.hooks)
+    with pytest.raises(ContainerError, match="[Nn]o runnable service"):
+        fresh_manager.planner.plan("restart", names=["portainer"])
 
 
 def test_restart_plan_mixed_targets_only_stops_explicit_services(monkeypatch, fresh_manager):
@@ -413,20 +412,19 @@ def test_plan_excludes_unselected_authentication_admin(fresh_manager, monkeypatc
     commands = [command.args for command in plan.commands if command.phase == "up"]
     assert len(commands) == 1
     services = commands[0][commands[0].index("--no-deps") + 1:]
-    assert "authelia-admin" not in services
-    assert "authelia" in services
+    assert services == ("portainer",)
 
 
 def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monkeypatch):
     from linktools.cntr._operations import ComposeSelection
     operations = fresh_manager.compose_operations
-    explicit = operations.select(["portainer"], for_start=True)
+    explicit = operations.select(["portainer", "authelia"], for_start=True)
     selected = ComposeSelection(explicit.project_containers,
                                 (fresh_manager.containers["authelia"], fresh_manager.containers["portainer"]),
                                 ("authelia-redis", "portainer", "authelia"), False)
     monkeypatch.setattr(operations, "start_selection", lambda selection, **kwargs: selected)
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
-    plan = fresh_manager.planner.plan("up", ["portainer"])
+    plan = fresh_manager.planner.plan("up", ["portainer", "authelia"])
     commands = [command.args for command in plan.commands if command.phase == "up"]
     assert len(commands) == 1
     assert commands[0][commands[0].index("--no-deps") + 1:] == selected.services

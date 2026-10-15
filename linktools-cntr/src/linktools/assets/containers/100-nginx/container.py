@@ -345,7 +345,7 @@ class Container(BaseContainer):
             return {}
         result = {self.name: tuple(self.services)}
         for site in sites.values():
-            if not site.enabled:
+            if not site.enabled or (self.name not in required and site.producer.name not in required):
                 continue
             for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
                 if getattr(site, capability):

@@ -217,7 +217,7 @@ def test_exec_nested_operation_preserves_each_prepare_entry(tmp_path, monkeypatc
         assert container.prepared == 2
         return 7
 
-    monkeypatch.setattr(command, "parse_subcommand", lambda parsed: SimpleNamespace(run=run))
+    monkeypatch.setattr(command, "parse_subcommand", lambda parsed: SimpleNamespace(name="custom", run=run))
     assert command.run(args) == 7
 
 
