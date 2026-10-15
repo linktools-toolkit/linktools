@@ -14,6 +14,7 @@ from linktools.ai.capability import (
     ToolCallRetry,
     workspace_capabilities,
 )
+from linktools.ai.model import ModelBinding, ModelRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -77,13 +78,13 @@ async def _boundary(
     session: _AttachmentSession,
     repository: _RepositoryBoundary | None = None,
     *,
-    vision: bool = True,
+    model_binding: ModelBinding | None = None,
 ) -> tuple[BoundaryToolset, object]:
     capability = workspace_capabilities(
         workspace,
         ("attach_files",),
         session=session,  # type: ignore[arg-type]
-        vision=vision,
+        model_binding=model_binding,
     )[0]
     boundary = BoundaryToolset(
         (capability.get_toolset(),),
@@ -216,16 +217,16 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
+async def test_attach_files_rejects_unknown_image_before_read(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
-    boundary, tool = await _boundary(workspace, session, vision=False)
+    boundary, tool = await _boundary(workspace, session, model_binding=ModelRegistry.openai(model="gpt-test").capture().resolve("default"))
 
     with pytest.raises(
         ToolCallRetry,
-        match="does not support image attachments",
+        match="model",
     ):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",

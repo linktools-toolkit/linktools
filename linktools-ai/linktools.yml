@@ -49,6 +49,16 @@ convert:
     dest: src/linktools/capabilities/ai.py
 
 checks:
+  setup:
+    - |
+      if ! command -v file >/dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y file
+      fi
+      if [[ -n "${GITHUB_ENV:-}" ]]; then
+        echo 'LINKTOOLS_REQUIRE_LIBMAGIC=1' >> "$GITHUB_ENV"
+      fi
+      python -c 'import magic; assert magic.from_buffer(b"%PDF-1.7\n", mime=True) == "application/pdf"'
   gate:
     modules:
       - scripts.check.ai

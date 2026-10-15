@@ -493,7 +493,6 @@ class _RemoteModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:remote-mcp"
-    vision = False
     contract: dict[str, JsonValue] = {"provider": "test", "model": "remote-mcp"}
 
     def materialize(self) -> _UsageFunctionModel:

@@ -30,14 +30,15 @@ def test_ai_command_group_exposes_only_execution_acp_and_web() -> None:
 
 
 def test_ai_local_commands_share_runtime_arguments() -> None:
-    common = {"project", "api_key", "base_url", "model", "vision", "memory"}
+    common = {"project", "api_key", "base_url", "model", "memory"}
     for command in (run_command, acp_command):
         parser = command.create_parser()
         actions = {action.dest: action for action in parser._actions}
         assert common <= set(actions)
+        assert "vision" not in actions
         assert all(
             isinstance(actions[name], ConfigAction)
-            for name in ("api_key", "base_url", "model", "vision")
+            for name in ("api_key", "base_url", "model")
         )
         assert not any(
             action.dest
@@ -96,7 +97,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
 
 def test_ai_local_runtime_models_fall_back_to_workspace_model(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path, {"model": "workspace/model"})
-    args = Namespace(model=None, vision=False, base_url=None, api_key=None)
+    args = Namespace(model=None, base_url=None, api_key=None)
 
     binding = _local_runtime_models(workspace, args).capture().resolve("default")
 
@@ -198,3 +199,76 @@ assert not loaded, loaded
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert expected_output in result.stdout
+
+
+@pytest.mark.parametrize("unknown", ["reject", "passthrough"])
+def test_local_input_declarations_preserve_complete_workspace_policy(tmp_path: Path, unknown: str) -> None:
+    workspace = Workspace(tmp_path, {
+        "model": "opaque-model",
+        "unknown_inputs": unknown,
+        "input_capabilities": [
+            {"media_type": "image/png", "status": "unknown", "max_bytes": 1234},
+            {"media_type": "application/x-private", "status": "supported", "transport": "file-block"},
+            {"media_type": "application/pdf", "status": "unsupported"},
+        ],
+    })
+    binding = _local_runtime_models(workspace, Namespace(model=None, base_url=None, api_key=None)).capture().resolve("default")
+    inputs = binding.contract["inputs"]
+    assert inputs["unknown"] == unknown
+    declarations = {item["media_type"]: item for item in inputs["capabilities"]}
+    assert declarations["image/png"] == {"media_type": "image/png", "status": "unknown", "transport": "image", "max_bytes": 1234}
+    assert declarations["application/x-private"]["transport"] == "file-block"
+    assert declarations["application/pdf"]["status"] == "unsupported"
+    assert "vision" not in binding.contract
+
+
+def test_local_input_default_rejects_unknown_attachments(tmp_path: Path) -> None:
+    binding = _local_runtime_models(Workspace(tmp_path, {}), Namespace(model="opaque", base_url=None, api_key=None)).capture().resolve("default")
+    assert binding.contract["inputs"] == {"endpoint": "openai-chat", "unknown": "reject", "capabilities": []}
+
+
+@pytest.mark.parametrize("source", ["OPENAI_VISION", "LINKTOOLS_OPENAI_VISION", "workspace", "config"])
+@pytest.mark.parametrize("value", ["true", "false", ""])
+def test_local_legacy_vision_settings_require_migration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str, value: str) -> None:
+    from linktools.core import environ
+    from linktools.ai.errors import AIError, ErrorCode
+
+    config = environ.build_config("migration-test", "LINKTOOLS_")
+    monkeypatch.setattr(environ, "config", config)
+    workspace = Workspace(tmp_path, {})
+    if source == "workspace":
+        workspace.config["vision"] = value
+    elif source == "config":
+        config.set("OPENAI_VISION", value)
+    else:
+        monkeypatch.setenv(source, value)
+    with pytest.raises(AIError, match="input_capabilities and unknown_inputs") as raised:
+        _local_runtime_models(workspace, Namespace(model="opaque", base_url=None, api_key=None))
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+@pytest.mark.parametrize("config", [
+    {"input_capabilities": None}, {"input_capabilities": {}},
+    {"input_capabilities": ["image/png"]},
+    {"input_capabilities": [{"media_type": "image/png", "extra": True}]},
+    {"input_capabilities": [{"media_type": "image/png", "max_bytes": 0}]},
+    {"unknown_inputs": None}, {"unknown_inputs": "allow"},
+    {"input_capabilities": [{"media_type": "image/png"}, {"media_type": "image/png", "transport": "image"}]},
+    {"input_capabilities": [{"media_type": "application/x-private"}]},
+    {"input_capabilities": [{"media_type": "image/png", "transport": "custom"}]},
+])
+def test_local_input_invalid_configuration_fails_closed(tmp_path: Path, config: dict) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    with pytest.raises(AIError) as raised:
+        _local_runtime_models(Workspace(tmp_path, config), Namespace(model="opaque", base_url=None, api_key=None))
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+def test_local_missing_model_keeps_dependency_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    with pytest.raises(AIError) as raised:
+        _local_runtime_models(Workspace(tmp_path, {}), Namespace(model=None, base_url=None, api_key=None))
+    assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY

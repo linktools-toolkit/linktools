@@ -20,14 +20,38 @@ the checkout, rerun the install command in the same virtual environment as
 until it is installed again. `--help` only exercises lightweight CLI discovery.
 
 Open `http://127.0.0.1:8765`. `--port` selects another local port, and `--open`
-opens the URL in your browser. The existing `--base-url`, `--api-key`, `--vision`
+opens the URL in your browser. The existing `--base-url`, `--api-key`,
 and `--memory` arguments have the same meaning as `ai-run`; prefer environment
 configuration for credentials rather than shell history. The console does not
 persist or edit model credentials.
 
-Shared CLI configuration uses the `LINKTOOLS_` environment prefix. For example,
-`LINKTOOLS_OPENAI_VISION=true` supplies the typed vision setting used by both
-`ai-run` and `ai-web`; the console displays that resolved setting.
+Connection configuration uses the shared CLI configuration and its `LINKTOOLS_`
+environment prefix. Model file-input policy uses the existing workspace file
+`.linktools/config.yaml`, shared by `ai-run`, `ai-acp`, and `ai-web`:
+
+```yaml
+model: your-model
+input_capabilities:
+  - media_type: image/png
+    status: supported
+    max_bytes: 5000000
+  - media_type: application/pdf
+    status: unknown
+unknown_inputs: passthrough
+```
+
+Omitted declarations mean an empty capability list and `unknown_inputs: reject`.
+The console shows the full captured `inputs` contract, including each declaration's
+status, resolved transport, and byte limit. These are caller declarations, not
+verified provider support. Unknown inputs admitted through `passthrough` remain
+unverified, and transport/resource limits still apply. Without a configured model,
+settings report that no model is configured rather than inventing a binding.
+
+The old `--vision` flag is removed. Remove `OPENAI_VISION` and
+`LINKTOOLS_OPENAI_VISION` from environment/persisted configuration and workspace
+`vision` settings; any remaining value, even false or empty, produces a migration
+error instead of an implicit fallback. Use `input_capabilities` and
+`unknown_inputs` explicitly.
 
 ```bash
 ai-web --project /path/to/project --read-only
@@ -133,7 +157,7 @@ place; diagnostic exception messages remain redacted to protect credentials.
 | Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | RuntimeHistory `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
-| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, vision, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
+| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, full inputs contract, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
 
 Retry, fork, recovery and external-effect resolution are explicit actions in the

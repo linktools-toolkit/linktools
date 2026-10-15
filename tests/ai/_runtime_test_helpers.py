@@ -35,9 +35,8 @@ class _Models:
     route_id = "default"
     provider = "test"
     model_identity = "test:live-history"
-    vision = False
     model_digest = "a" * 64
-    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history"}
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history", "vision": False}
 
     def __init__(self, model: FunctionModel) -> None:
         self.model = model
@@ -153,7 +152,6 @@ class _RuntimeUsageModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:usage"
-    vision = False
     model_digest = "u" * 64
     contract: dict[str, JsonValue] = {
         "provider": "test",

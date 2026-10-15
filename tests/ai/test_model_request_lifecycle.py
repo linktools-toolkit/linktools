@@ -1074,7 +1074,6 @@ class _BlockingModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:blocking"
-    vision = False
     model_digest = "b" * 64
     contract: dict[str, JsonValue] = {"provider": "test", "model": "blocking"}
 

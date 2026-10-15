@@ -947,7 +947,6 @@ async def _materialize_agent(
             workspace_names,
             limits=scope.limits,
             session=scope.sandbox_session,
-            vision=compiled_agent.model.vision,
             model_binding=compiled_agent.model,
         )
     )

@@ -151,7 +151,7 @@ async def test_model_transport_retry_stops_after_stream_entry(
                     raise error
 
     provider = Provider()
-    model = _RetryingModel(provider, 2, 0, vision=False)
+    model = _RetryingModel(provider, 2, 0)
 
     async def request() -> None:
         async with model.request_stream([], None, ModelRequestParameters()):

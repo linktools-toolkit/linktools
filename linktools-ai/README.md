@@ -676,12 +676,56 @@ reservation when their durable contract requires it. Model transport retries
 use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
 to `tool_retries=10`, and output correction defaults to `output_retries=3`.
 
-OpenAI model declarations accept explicit `vision=True` or `vision=False`
-(`False` by default). The value is part of the model model digest. A
-model with `vision=False` rejects recognizable image content at the final
-request boundary before provider calls or transport retries; PDF, text, and
-other non-image attachments continue through the existing provider contract.
-LinkTools does not infer image support from model names, endpoints, or probes.
+Model file-input declarations use `input_capabilities` and `unknown_inputs`.
+The default is an empty capability list with `unknown_inputs="reject"`;
+plain prompt text remains usable, but attachments require a declaration or
+explicit passthrough. Declarations are captured in the model's `inputs` contract
+and contribute to its digest:
+
+```python
+from linktools.ai.model import ModelInputCapability, ModelRegistry
+
+models = ModelRegistry.openai(
+    model="your-model",
+    input_capabilities=(
+        ModelInputCapability("image/png", status="supported", max_bytes=5_000_000),
+        ModelInputCapability("application/pdf", status="unknown"),
+    ),
+    unknown_inputs="passthrough",
+)
+```
+
+For `lt ai run`, `lt ai acp`, and `lt ai web`, use the existing
+`.linktools/config.yaml` workspace configuration:
+
+```yaml
+model: your-model
+input_capabilities:
+  - media_type: image/png
+    status: supported
+    max_bytes: 5000000
+  - media_type: application/pdf
+    status: unknown
+unknown_inputs: passthrough
+```
+
+`status` is `supported`, `unsupported`, or `unknown`. An explicit `transport`
+can select an encoding such as `file-block`; the OpenAI adapter resolves omitted
+transports where known. MIME declarations are not a hard-coded model-support
+allowlist. `passthrough` allows unknown declarations through the available
+transport, and these inputs remain unverified; it does not bypass transport or
+resource limits. LinkTools does not infer or probe real provider support from
+model names or endpoints. The Web settings show the full captured `inputs`
+contract, including unknown policy, status, transport, and byte limits.
+
+The old `vision` API argument and `--vision` flag have been removed.
+Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and
+persisted configuration, and remove workspace `vision` settings; their presence
+is a migration error, even when false or empty. There is no implicit mapping to
+new declarations. Recovering a historical execution requires an explicitly
+registered binding matching its persisted historical contract. Historical input
+semantics are retained only at that restore boundary; a new binding with omitted
+declarations cannot recover them or replace them with its empty/reject contract.
 
 Execution file input uses the same durable boundary:
 

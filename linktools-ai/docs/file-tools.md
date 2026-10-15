@@ -23,8 +23,7 @@ example explicitly selects the four modern file tools.
 
 The currently implemented provider adapter is OpenAI Chat (including compatible
 endpoints). These explicit declarations describe that adapter; they do not claim
-that other providers have been implemented. Custom legacy ModelBinding objects
-retain their existing compatibility behavior. A future provider owns its own
+that other providers have been implemented. A future provider owns its own
 encoding decisions at the model-binding boundary, not in file or business tools.
 
 ## What read_file can read
@@ -51,15 +50,22 @@ MIME recognition is not validation, safety approval, or proof of model support.
   rendered, extracted, renamed, or unpacked. Use a selected trusted Skill and
   deployed CLI, or the host's existing authorized preparation stage.
 
-New explicit model input declarations default unknown types to rejection.
-A compatible route may explicitly choose passthrough; it remains unverified and
-cannot override SDK encoding, byte limits, Sandbox authorization, or permissions.
-New configurations use input capabilities alone; do not also set `vision`.
-Supplying both is rejected rather than creating conflicting policies. Omitted
-input declarations preserve existing vision-only route contracts and recovery:
-legacy `vision=false` forbids images, while old non-image inputs retain their
-behavior. Legacy support is interpreted only at the compatibility boundary;
-`vision=true` is not verified support for every image MIME.
+All new model bindings use `input_capabilities` and `unknown_inputs`. Omitting
+both produces an empty capability list and rejection of unknown file inputs;
+it does not restore an earlier input policy. A compatible route may explicitly
+choose `unknown_inputs="passthrough"`; admitted unknown inputs remain unverified.
+Passthrough cannot override SDK encoding, byte limits, Sandbox authorization,
+or permissions.
+
+The `vision` API argument and CLI flag are removed. Legacy environment or
+workspace settings must be removed and replaced with explicit declarations;
+they produce migration errors rather than becoming a second active policy.
+To recover historical executions, the host must explicitly register a binding
+whose contract matches the persisted historical contract. Only that restore
+boundary retains its historical input semantics; an ordinary new OpenAI binding
+with omitted declarations cannot recover those semantics or substitute its new
+empty/reject contract. Historical image permission is not proof that a remote
+model supports every image MIME.
 
 ### Minimal model declaration
 

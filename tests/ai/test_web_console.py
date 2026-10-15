@@ -372,7 +372,7 @@ def test_web_command_preserves_runtime_flags_and_validates_port(monkeypatch: pyt
     from linktools.commands.ai.web import command
     from linktools.cli import CommandError
     parser = command.create_parser()
-    assert {"project", "model", "base_url", "api_key", "vision", "memory", "read_only", "port"} <= {action.dest for action in parser._actions}
+    assert {"project", "model", "base_url", "api_key", "memory", "read_only", "port"} <= {action.dest for action in parser._actions}
     with pytest.raises(CommandError, match="port"):
         command.run(parser.parse_args(["--port", "0"]))
 
@@ -511,7 +511,8 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
             async with client(self.config.app) as http:
                 response = await http.get("/api/config")
                 assert response.json()["read_only"]
-                assert response.json()["vision"] is True
+                assert response.json()["inputs"] is None
+                assert "vision" not in response.json()
                 assert response.json()["api_key_configured"]
                 assert "secret-key-value" not in response.text
                 assert (await http.get("/api/sessions")).json()["items"] == []
@@ -519,7 +520,6 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
     monkeypatch.setattr(Runtime, "open", forbidden)
     monkeypatch.setattr(uvicorn, "Server", Server)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.setenv("LINKTOOLS_OPENAI_VISION", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "secret-key-value")
     env = web_command.command.environ
     monkeypatch.setattr(env, "config", env.build_config("web-test", "LINKTOOLS_"))
@@ -528,22 +528,45 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
     assert not (tmp_path / ".linktools").exists()
 
 
-@pytest.mark.parametrize("vision", [False, True])
-def test_web_vision_uses_the_shared_typed_cli_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, vision: bool) -> None:
-    from linktools.ai.workspace import Workspace
-    from linktools.commands.ai._common import _local_runtime_models
-    from linktools.commands.ai.run import command as run_command
-    from linktools.commands.ai.web import command as web_command
+@pytest.mark.parametrize("unknown", ["reject", "passthrough"])
+def test_web_settings_show_complete_captured_inputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unknown: str) -> None:
+    import linktools.commands.ai.web as web_command
+    import uvicorn
 
-    monkeypatch.setenv("LINKTOOLS_OPENAI_VISION", str(vision).lower())
-    env = web_command.environ
-    monkeypatch.setattr(env, "config", env.build_config("web-test", "LINKTOOLS_"))
-    workspace = Workspace.discover(tmp_path)
-    for command, positional in ((run_command, ["prompt"]), (web_command, [])):
-        args = command.create_parser().parse_args(positional + ["--model", "fake-model"])
-        binding = _local_runtime_models(workspace, args).capture().resolve("default")
-        assert args.vision is vision
-        assert binding.vision is vision
+    config_dir = tmp_path / ".linktools"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "model: opaque-model\nunknown_inputs: " + unknown + "\n"
+        "input_capabilities:\n  - media_type: image/png\n    status: unknown\n    max_bytes: 1234\n"
+    )
+
+    class Server:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def serve(self) -> None:
+            async with client(self.config.app) as http:
+                response = await http.get("/api/config")
+                assert "vision" not in response.json()
+                assert response.json()["inputs"] == {
+                    "endpoint": "openai-chat", "unknown": unknown,
+                    "capabilities": [{"media_type": "image/png", "status": "unknown", "transport": "image", "max_bytes": 1234}],
+                }
+
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
+    assert web_command.command.run(args) == 0
+    assert not (config_dir / "runtime").exists()
+
+
+def test_web_read_only_rejects_legacy_input_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from linktools.commands.ai.web import command
+    from linktools.cli import CommandError
+
+    monkeypatch.setenv("OPENAI_VISION", "false")
+    args = command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
+    with pytest.raises(CommandError, match="input_capabilities and unknown_inputs"):
+        command.run(args)
 
 
 @pytest.mark.asyncio

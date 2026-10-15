@@ -67,6 +67,19 @@ checks:
   ci-pool: linktools
 ```
 
+Package-owned `checks.setup` is an optional non-empty list of Bash scripts for
+CI initialization. `python manage.py install --editable --check-setup` validates
+these scripts before pip and runs them after a successful install, once per
+package in the resolved installation closure, from the repository root. An
+empty package selection installs all packages and includes all their setup.
+Scripts run with `bash -euo pipefail` and failures stop installation. Ordinary
+`install` and read-only `check` never execute setup. These scripts can install
+system dependencies; use the flag only in a prepared CI environment. The AI
+package declares its `file` installation, required-libmagic environment setting
+(via GitHub Actions `GITHUB_ENV`), and real MIME smoke check in its own manifest.
+The workflow only opts into this generic setup; no package-specific branches
+are needed. Omit `checks.setup` when no initialization is required.
+
 `ci-pool` shares setup and installs all pool members and their dependency closure.
 It cannot be combined with `checks.pytest.groups`, and its name must not collide
 with an independent package. Each member still runs its own `manage.py check`,

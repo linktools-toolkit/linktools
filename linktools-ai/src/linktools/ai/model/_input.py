@@ -129,7 +129,13 @@ def decide_model_input(
     contract = binding.contract
     declaration = contract.get("inputs")
     if "inputs" not in contract:
-        if not binding.vision and (media_type.startswith("image/") or input_kind == "image-url"):
+        # Earlier durable contracts retain their original image-only policy.
+        # New OpenAI bindings always capture an explicit input declaration.
+        historical_vision = contract.get("vision")
+        if type(historical_vision) is not bool:
+            raise AIError(ErrorCode.MODEL_CONFIG_INVALID, retryable=False,
+                          safe_details={"reason": "model_input_contract_invalid"})
+        if historical_vision is False and (media_type.startswith("image/") or input_kind == "image-url"):
             return ModelInputDecision(media_type, input_kind, None, "unsupported", False, True, "image_input_not_supported")
         rules, unknown = (), "passthrough"
     else:

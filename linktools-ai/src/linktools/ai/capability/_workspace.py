@@ -18,10 +18,9 @@ from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, Use
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..core import PromptLimits
-from ..model import ModelBinding, validate_model_input, validate_model_inputs
+from ..model import ModelBinding, decide_model_input, validate_model_input, validate_model_inputs
 from ..errors import AIError, ErrorCode
 from ..workspace import (
-    Sandbox,
     SandboxOperationRejected,
     SandboxSession,
     Workspace,
@@ -276,13 +275,11 @@ class _WorkspaceToolSurface:
         policy: WorkspacePolicy,
         limits: PromptLimits,
         *,
-        vision: bool = True,
         model_binding: ModelBinding | None = None,
     ) -> None:
         self._session = session
         self._policy = policy
         self._limits = limits
-        self._vision = vision
         self._model_binding = model_binding
         self._mime = mimetypes.MimeTypes(filenames=())
 
@@ -345,14 +342,10 @@ class _WorkspaceToolSurface:
                         "reason": "media_type_unknown",
                     },
                 )
-            if self._model_binding is None and not self._vision and media_type.lower().startswith("image/"):
-                raise AIError(
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    safe_details={
-                        "field": "paths",
-                        "reason": "image_input_not_supported",
-                    },
-                )
+            if self._model_binding is not None:
+                decision = decide_model_input(self._model_binding, media_type)
+                if not decision.allowed and decision.reason != "model_input_size_unknown":
+                    decision.require_allowed()
             remaining = self._limits.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -501,9 +494,6 @@ class _WorkspaceToolSurface:
             decision = None
             if self._model_binding is not None:
                 decision = validate_model_input(self._model_binding, media_type, size=size)
-            elif not self._vision and media_type.startswith("image/"):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
-                              safe_details={"reason": "image_input_not_supported"})
             body = await session.read_bytes(item, max_bytes=remaining,
                                             expected_state=cast(str, fact["state"]))
             binary = BinaryContent(data=body, media_type=media_type)
@@ -772,7 +762,6 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         policy: WorkspacePolicy,
         limits: PromptLimits,
         *,
-        vision: bool,
         model_binding: ModelBinding | None = None,
     ) -> None:
         super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
@@ -780,7 +769,6 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
             session,
             policy,
             limits,
-            vision=vision,
             model_binding=model_binding,
         )
         for name in selected_tool_names:
@@ -801,7 +789,6 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         policy: WorkspacePolicy,
         limits: PromptLimits,
         *,
-        vision: bool,
         model_binding: ModelBinding | None = None,
     ) -> None:
         self.id = _WORKSPACE_SANDBOX_CAPABILITY_ID
@@ -809,7 +796,6 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         self._session = session
         self._policy = policy
         self._limits = limits
-        self._vision = vision
         self._model_binding = model_binding
 
     def get_instructions(self) -> InstructionPart:
@@ -821,7 +807,6 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
             self._session,
             self._policy,
             self._limits,
-            vision=self._vision,
             model_binding=self._model_binding,
         )
 
@@ -859,7 +844,6 @@ def workspace_capabilities(
     *,
     limits: "PromptLimits | None" = None,
     session: SandboxSession | None = None,
-    vision: bool = True,
     model_binding: ModelBinding | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
@@ -888,7 +872,6 @@ def workspace_capabilities(
             session,
             workspace.policy,
             selected_limits,
-            vision=vision,
             model_binding=model_binding,
         ),
     )

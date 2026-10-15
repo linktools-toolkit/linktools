@@ -253,7 +253,6 @@ class _TaskTestModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:task"
-    vision = False
     model_digest = "a" * 64
     contract: dict[str, JsonValue] = {
         "provider": "test",

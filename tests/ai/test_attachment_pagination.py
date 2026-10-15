@@ -242,7 +242,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     group.capability(PausePreparation(), id="pause-preparation")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
-    models.vision = True
+    models.contract = {**models.contract, "vision": True}
     first = None
     started_items = ()
     async with Runtime.open(

@@ -14,7 +14,6 @@ from httpx2 import AsyncByteStream, ByteStream, DecodingError, EventSource, Limi
 from linktools.core import environ
 from openai import DefaultAsyncHttpxClient
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
-from pydantic_ai.messages import BinaryContent, ImageUrl, ModelRequest, UploadedFile
 from pydantic_ai.models import (
     Model,
     ModelMessage,
@@ -196,7 +195,6 @@ class _CapturedOpenAIProvider(OpenAIProvider):
 class _OpenAIModelBinding:
     route_id: str
     model: str
-    vision: bool | None = None
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
     timeout: "int | float | None" = None
@@ -216,25 +214,15 @@ class _OpenAIModelBinding:
         model = self.model.strip().removeprefix("openai:")
         if not self.route_id.strip() or not model:
             raise ValueError("OpenAI model binding is incomplete")
-        if self.input_capabilities is not None or self.unknown_inputs is not None:
-            if self.vision is not None:
-                raise ValueError("vision cannot be combined with explicit model input declarations")
-            capabilities = normalize_input_capabilities(
-                () if self.input_capabilities is None else self.input_capabilities,
-                resolve_transport=lambda mime: openai_input_transport(mime, "binary", model),
-            )
-            unknown = self.unknown_inputs if self.unknown_inputs is not None else "reject"
-            if unknown not in {"reject", "passthrough"}:
-                raise ValueError("OpenAI unknown_inputs policy is invalid")
-            object.__setattr__(self, "input_capabilities", capabilities)
-            object.__setattr__(self, "unknown_inputs", unknown)
-            object.__setattr__(self, "vision", unknown == "passthrough" or any(
-                item.transport == "image" and item.status == "supported" for item in capabilities
-            ))
-        elif self.vision is None:
-            object.__setattr__(self, "vision", False)
-        if type(self.vision) is not bool:
-            raise ValueError("OpenAI model vision must be bool")
+        capabilities = normalize_input_capabilities(
+            () if self.input_capabilities is None else self.input_capabilities,
+            resolve_transport=lambda mime: openai_input_transport(mime, "binary", model),
+        )
+        unknown = self.unknown_inputs if self.unknown_inputs is not None else "reject"
+        if unknown not in {"reject", "passthrough"}:
+            raise ValueError("OpenAI unknown_inputs policy is invalid")
+        object.__setattr__(self, "input_capabilities", capabilities)
+        object.__setattr__(self, "unknown_inputs", unknown)
         if self.connection_resolver is not None and not callable(
             self.connection_resolver
         ):
@@ -266,14 +254,11 @@ class _OpenAIModelBinding:
             "model_identity": self.model_identity,
             "settings": settings,
         }
-        if self.input_capabilities is not None:
-            result["inputs"] = {
-                "endpoint": "openai-chat",
-                "unknown": self.unknown_inputs,
-                "capabilities": [item.to_payload() for item in self.input_capabilities],
-            }
-        else:
-            result["vision"] = self.vision
+        result["inputs"] = {
+            "endpoint": "openai-chat",
+            "unknown": self.unknown_inputs,
+            "capabilities": [item.to_payload() for item in self.input_capabilities],
+        }
         return result
 
     def materialize(self) -> Model:
@@ -424,13 +409,11 @@ class _RetryingModel(WrapperModel):
         max_retries: int,
         retry_delay: "int | float",
         *,
-        vision: bool = False,
         input_binding: ModelBinding | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._max_retries = max_retries
         self._retry_delay = retry_delay
-        self._vision = vision
         self._input_binding = input_binding
 
     async def request(
@@ -441,8 +424,6 @@ class _RetryingModel(WrapperModel):
     ) -> ModelResponse:
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
-        else:
-            _validate_vision_input(messages, vision=self._vision)
         attempt = 0
         while True:
             try:
@@ -472,8 +453,6 @@ class _RetryingModel(WrapperModel):
     ) -> AsyncGenerator[StreamedResponse, None]:
         if self._input_binding is not None:
             validate_model_inputs(self._input_binding, messages)
-        else:
-            _validate_vision_input(messages, vision=self._vision)
         attempt = 0
         while True:
             entered = False
@@ -501,45 +480,6 @@ class _RetryingModel(WrapperModel):
                     attempt,
                 )
                 await asyncio.sleep(self._retry_delay)
-
-
-def _validate_vision_input(
-    messages: Sequence[object],
-    *,
-    vision: bool,
-) -> None:
-    if vision:
-        return
-    if any(
-        _contains_image_content(part.content)
-        for message in messages
-        if isinstance(message, ModelRequest)
-        for part in message.parts
-        if hasattr(part, "content")
-    ):
-        _logger.warning("OpenAI model rejected image input: vision=false")
-        raise AIError(
-            ErrorCode.REQUEST_FIELD_INVALID,
-            retryable=False,
-            safe_details={"reason": "image_input_not_supported"},
-        )
-
-
-def _contains_image_content(value: object) -> bool:
-    if isinstance(value, BinaryContent):
-        return value.media_type.lower().startswith("image/")
-    if isinstance(value, ImageUrl):
-        return True
-    if isinstance(value, UploadedFile):
-        return value.media_type.lower().startswith("image/")
-    if isinstance(value, Mapping):
-        return any(_contains_image_content(item) for item in value.values())
-    if isinstance(value, Sequence) and not isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        return any(_contains_image_content(item) for item in value)
-    return False
 
 
 def _retryable_model_error(error: ModelAPIError) -> bool:

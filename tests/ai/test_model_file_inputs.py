@@ -13,7 +13,7 @@ from pydantic_ai.messages import (
     AudioUrl, BinaryContent, DocumentUrl, ImageUrl, ModelRequest,
     ToolReturnPart, UploadedFile, UserPromptPart,
 )
-from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.core import JsonValue
@@ -59,12 +59,31 @@ def test_declared_file_support_is_identical_for_bytes_urls_and_handles(status: s
 
 @pytest.mark.parametrize("vision", (False, True))
 def test_legacy_contract_and_non_image_admission_survive_restore(vision: bool) -> None:
-    registry = ModelRegistry.openai(model="gpt-file-test", vision=vision)
+    class HistoricalBinding:
+        route_id = "default"
+        provider = "openai"
+        model_identity = "openai:gpt-file-test"
+        contract = {"provider": "openai", "model_identity": model_identity,
+                    "vision": vision, "settings": {}}
+
+        def materialize(self) -> Model:
+            return _RetryingModel(TestModel(), 0, 0, input_binding=self)
+
+    registry = ModelRegistry()
+    registry.register(HistoricalBinding())
     resolver = registry.capture()
     original = resolver.resolve("default")
     stored = json.loads(json.dumps(dict(original.contract)))
     assert stored == {"provider": "openai", "model_identity": "openai:gpt-file-test", "vision": vision, "settings": {}}
     restored = resolver.restore(stored, route_id="default")
+    assert dict(restored.contract) == stored
+    for field, changed in (
+        ("provider", "other"), ("model_identity", "openai:other"),
+        ("settings", {"max_tokens": 1}), ("vision", not vision),
+    ):
+        with pytest.raises(AIError) as raised:
+            resolver.restore({**stored, field: changed}, route_id="default")
+        assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
     decisions = validate_model_inputs(restored, [
         BinaryContent(b"content", media_type="text/plain"),
         BinaryContent(b"%PDF", media_type="application/pdf"),
@@ -173,10 +192,25 @@ def test_explicit_image_support_is_authoritative_without_legacy_vision() -> None
         validate_model_inputs(binding, ImageUrl("https://file.invalid/image.jpeg"))
 
 
+def test_default_binding_rejects_unknown_file_inputs() -> None:
+    binding = ModelRegistry.openai(model="gpt-file-test").capture().resolve("default")
+    assert binding.contract["inputs"] == {
+        "endpoint": "openai-chat", "unknown": "reject", "capabilities": [],
+    }
+    for mime in ("application/pdf", "text/plain", "image/png", "application/x-custom"):
+        assert not decide_model_input(binding, mime).allowed
+
+
 @pytest.mark.parametrize("vision", (False, True))
-def test_new_declarations_cannot_mix_with_legacy_vision_policy(vision: bool) -> None:
-    with pytest.raises(ValueError):
-        _binding(ModelInputCapability("image/png"), vision=vision)
+@pytest.mark.parametrize("unknown", ("reject", "passthrough"))
+def test_current_input_contract_does_not_reinterpret_historical_policy(vision: bool, unknown: str) -> None:
+    resolver = ModelRegistry.openai(model="gpt-file-test", unknown_inputs=unknown).capture()
+    stored = {"provider": "openai", "model_identity": "openai:gpt-file-test", "vision": vision, "settings": {}}
+    original = json.dumps(stored, sort_keys=True)
+    with pytest.raises(AIError) as raised:
+        resolver.restore(stored, route_id="default")
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+    assert json.dumps(stored, sort_keys=True) == original
 
 
 @pytest.mark.parametrize("content,reason", (
@@ -212,7 +246,6 @@ def test_malformed_captured_input_semantics_fail_closed(value: object) -> None:
     class Binding:
         provider = "openai"
         model_identity = "openai:test"
-        vision = True
         contract: Mapping[str, JsonValue] = {"inputs": value}
     with pytest.raises(AIError) as raised:
         validate_model_input(Binding(), "application/pdf")
@@ -298,7 +331,6 @@ def test_custom_legacy_binding_requires_no_new_protocol_and_keeps_non_image_inpu
     class Binding:
         provider = "test"
         model_identity = "test:local"
-        vision = False
         contract: Mapping[str, JsonValue] = {"provider": "test", "vision": False}
     binding = Binding()
     assert validate_model_inputs(binding, None) == ()
@@ -380,3 +412,20 @@ def test_text_url_validation_uses_inline_encoding_without_document_format_lookup
     assert decision.allowed and decision.verified
     assert decision.transport == "text-inline"
     assert content.media_type == mime
+
+
+@pytest.mark.parametrize("contract", ({}, {"vision": None}, {"vision": "false"}, {"vision": 0}))
+def test_file_policy_requires_explicit_current_or_historical_semantics(contract: dict[str, JsonValue]) -> None:
+    class Binding:
+        provider = "custom"
+        model_identity = "custom:local"
+
+        def __init__(self) -> None:
+            self.contract = contract
+
+    binding = Binding()
+    assert validate_model_inputs(binding, "ordinary text") == ()
+    with pytest.raises(AIError) as raised:
+        validate_model_inputs(binding, BinaryContent(b"document", media_type="application/x-custom"))
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+    assert raised.value.safe_details["reason"] == "model_input_contract_invalid"

@@ -131,7 +131,6 @@ class _ProbeBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:asset-stdio"
-    vision = False
     contract: dict[str, JsonValue] = {"provider": "test", "model": "asset-stdio"}
 
     def __init__(

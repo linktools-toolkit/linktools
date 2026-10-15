@@ -27,7 +27,6 @@ class ModelRegistry:
         cls,
         *,
         model: str,
-        vision: bool | None = None,
         input_capabilities: Sequence[ModelInputCapability] | None = None,
         unknown_inputs: UnknownModelInputs | None = None,
         base_url: "str | None" = None,
@@ -40,16 +39,13 @@ class ModelRegistry:
     ) -> "ModelRegistry":
         """Create the default Chat route.
 
-        Omitting input declarations retains the vision-only contract. Supplying
-        declarations, even an empty sequence, rejects unknown file inputs unless
-        passthrough is explicitly selected. Do not combine declarations with the
-        legacy vision argument. Other resource budgets still apply.
+        Unknown file inputs are rejected unless passthrough is explicitly
+        selected. Other resource budgets still apply.
         """
         registry = cls()
         registry.register_openai(
             "default",
             model=model,
-            vision=vision,
             input_capabilities=input_capabilities,
             unknown_inputs=unknown_inputs,
             base_url=base_url,
@@ -74,7 +70,6 @@ class ModelRegistry:
         route_id: str,
         *,
         model: str,
-        vision: bool | None = None,
         input_capabilities: Sequence[ModelInputCapability] | None = None,
         unknown_inputs: UnknownModelInputs | None = None,
         base_url: "str | None" = None,
@@ -91,7 +86,6 @@ class ModelRegistry:
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
-                vision=vision,
                 input_capabilities=input_capabilities,
                 unknown_inputs=unknown_inputs,
                 base_url=base_url,
@@ -186,10 +180,6 @@ class _ModelAliasBinding:
     @property
     def model_identity(self) -> str:
         return self._target.model_identity
-
-    @property
-    def vision(self) -> bool:
-        return self._target.vision
 
     @property
     def contract(self) -> Mapping[str, JsonValue]:

@@ -108,3 +108,38 @@ def test_web_messages_render_safe_markdown_and_stored_input() -> None:
     script = Path(__file__).with_name("web_console_messages.mjs")
     result = subprocess.run([node, str(script), str(assets)], capture_output=True, text=True, timeout=20, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_web_settings_preserve_full_input_policy_and_unverified_status() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    source = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets/app.js"
+    script = r'''
+import {readFileSync} from 'node:fs';
+import assert from 'node:assert/strict';
+const source=readFileSync(process.argv[1],'utf8');
+const settings=source.slice(source.indexOf('function showSettings()'),source.indexOf('async function bootstrap()'));
+const element=(tag,classes='',text='')=>({tag,text,children:[],append(...children){this.children.push(...children);}});
+const nodes={'settings-content':element('div'),'settings-dialog':{showModal(){this.open=true;}}};
+const $=id=>nodes[id],clear=id=>{nodes[id].children=[];};
+const properties=value=>({tag:'dl',value});
+const inputs={endpoint:'openai-chat',unknown:'passthrough',capabilities:[
+  {media_type:'image/png',status:'unknown',transport:'image',max_bytes:1234},
+  {media_type:'application/x-private',status:'unsupported'},
+]};
+const state={config:{model:'opaque',inputs,capabilities:[]}};
+const showSettings=new Function('state','$','clear','element','properties','json',settings+';return showSettings;')(state,$,clear,element,properties,JSON.stringify);
+showSettings();
+assert.equal(nodes['settings-dialog'].open,true);
+assert.equal('Vision' in nodes['settings-content'].children[0].value,false);
+const card=nodes['settings-content'].children[1];
+assert.deepEqual(JSON.parse(card.children.find(item=>item.tag==='pre').text),inputs);
+assert.match(card.children.find(item=>item.tag==='p').text,/remain unverified/);
+state.config.inputs=null;
+showSettings();
+assert.equal(nodes['settings-content'].children.length,3);
+assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag==='pre').text,'No model configured');
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", script, str(source)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

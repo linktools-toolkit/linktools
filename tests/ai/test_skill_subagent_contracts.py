@@ -20,7 +20,9 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import ModelRegistry, validate_model_inputs
+from pydantic_ai.messages import BinaryContent
+from pydantic_ai.models.test import TestModel
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import (
     AgentSpec,
@@ -72,14 +74,27 @@ def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
     }
 
 
-def test_v1_binding_restores_from_current_contract() -> None:
+def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     binding_contract = AgentBindingContract.from_payload(payload)
-    compiler = _compiler(
-        {
+
+    class HistoricalBinding:
+        route_id = "default"
+        provider = "openai"
+        model_identity = "openai:gpt-test"
+        contract = dict(payload["model_contract"])
+
+        def materialize(self) -> TestModel:
+            return TestModel()
+
+    registry = ModelRegistry()
+    registry.register(HistoricalBinding())
+    compiler = AgentCompiler(
+        model_resolver=registry.capture(), candidates=(),
+        agents={
             "parent": AgentSpec("parent", allow_subagents=("child",)),
             "child": AgentSpec("child", allow_subagents=()),
-        }
+        },
     )
 
     restored = compiler.restore(binding_contract)
@@ -92,6 +107,12 @@ def test_v1_binding_restores_from_current_contract() -> None:
         "revision": 1,
     }
     assert restored.binding_contract.to_payload() == payload
+    decisions = validate_model_inputs(restored.compiled_agent.model,
+                                     BinaryContent(b"document", media_type="text/plain"))
+    assert decisions[0].allowed and not decisions[0].verified
+    with pytest.raises(AIError):
+        validate_model_inputs(restored.compiled_agent.model,
+                              BinaryContent(b"image", media_type="image/png"))
 
 
 

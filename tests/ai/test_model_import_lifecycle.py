@@ -23,8 +23,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
             route_id = "offline"
             provider = "test"
             model_identity = "test:offline"
-            vision = False
-            contract = {"provider": provider, "model_identity": model_identity}
+            contract = {"provider": provider, "model_identity": model_identity, "vision": False}
 
             def materialize(self) -> TestModel:
                 return TestModel(custom_output_text="offline answer")
@@ -46,7 +45,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
         assert dict(selected.contract) == {
             "provider": "openai",
             "model_identity": "openai:gpt-test",
-            "vision": False,
+            "inputs": {"endpoint": "openai-chat", "unknown": "reject", "capabilities": []},
             "settings": {},
         }
     ''')

@@ -35,7 +35,6 @@ class _ToolModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:session-tool"
-    vision = False
     contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "session-tool",
