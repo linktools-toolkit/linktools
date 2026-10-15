@@ -4,6 +4,8 @@
 
 import asyncio
 from types import SimpleNamespace
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
 
@@ -342,8 +344,8 @@ async def test_execution_service_caller_cancel_detaches_owned_finalizer_until_pr
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def finalizer(execution_id: str, request: object) -> object:
-        del execution_id, request
+    async def finalizer(execution_id: str, request: object, *, capture_metric: object) -> object:
+        del execution_id, request, capture_metric
         started.set()
         await release.wait()
         return SimpleNamespace(cancelled=True)
@@ -504,3 +506,96 @@ async def test_task_launcher_shutdown_drains_runner_cancelled_leftover() -> None
     release.set()
     await shutdown
     assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_execution_cancel_metric_wait_follows_finalizer_and_consumer_release() -> None:
+    service = _execution_service()
+    consumers = 0
+    handoff_done = False
+    metric_entered = asyncio.Event()
+    metric_tasks: list[asyncio.Task[object] | None] = []
+    committed = False
+
+    @asynccontextmanager
+    async def consumer(execution_id: str, tenant_id: str) -> AsyncIterator[None]:
+        nonlocal consumers
+        consumers += 1
+        try:
+            yield
+        finally:
+            consumers -= 1
+
+    async def deliver() -> None:
+        assert consumers == 0
+        assert handoff_done
+        metric_tasks.append(asyncio.current_task())
+        metric_entered.set()
+        await asyncio.Event().wait()
+
+    async def cancel_authorized(execution_id: str, request: object, *,
+                                capture_metric: Callable[[Callable[[], Awaitable[None]]], None]) -> object:
+        nonlocal committed
+        if not committed:
+            committed = True
+            capture_metric(deliver)
+        return SimpleNamespace(cancelled=True)
+
+    async def handoff(execution_id: str, tenant_id: str) -> None:
+        nonlocal handoff_done
+        handoff_done = True
+
+    service._execution_consumer = consumer
+    service.cancel_authorized = cancel_authorized
+    service._request_handoff_if_terminal = handoff
+    request = SimpleNamespace(principal=SimpleNamespace(tenant_id="tenant"))
+    caller = asyncio.create_task(service.cancel("execution", request))
+    await asyncio.wait_for(metric_entered.wait(), timeout=1)
+    assert metric_tasks == [caller]
+    assert committed
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    repeated = await service.cancel("execution", request)
+    assert repeated.cancelled
+    assert len(metric_tasks) == 1
+    assert service._detached_cancel_finalizers == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", (1, 2))
+async def test_detached_execution_cancel_finalizer_does_not_deliver_metrics(cancel_count: int) -> None:
+    service = _execution_service()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    handoff_done = asyncio.Event()
+    delivered = False
+
+    async def deliver() -> None:
+        nonlocal delivered
+        delivered = True
+
+    async def cancel_authorized(execution_id: str, request: object, *,
+                                capture_metric: Callable[[Callable[[], Awaitable[None]]], None]) -> object:
+        entered.set()
+        await release.wait()
+        capture_metric(deliver)
+        return SimpleNamespace(cancelled=True)
+
+    async def handoff(execution_id: str, tenant_id: str) -> None:
+        handoff_done.set()
+
+    service.cancel_authorized = cancel_authorized
+    service._request_handoff_if_terminal = handoff
+    request = SimpleNamespace(principal=SimpleNamespace(tenant_id="tenant"))
+    caller = asyncio.create_task(service.cancel("execution", request))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    for _ in range(cancel_count):
+        caller.cancel()
+        await asyncio.sleep(0)
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    await asyncio.wait_for(service.preflight_close(), timeout=1)
+    assert handoff_done.is_set()
+    assert not delivered

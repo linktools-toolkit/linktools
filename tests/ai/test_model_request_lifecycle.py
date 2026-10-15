@@ -874,21 +874,11 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
                 raise ValueError("compaction provider failure")
             return ModelResponse(parts=[TextPart("summary")])
 
-        async def record(
-            _context: RunContext[Any],
-            fact: ModelRequestFact,
-            phase: str,
-            _model: Model,
-            _response: ModelResponse | None,
-            _error: BaseException | None,
-            _messages: object,
-            _model_settings: object,
-            _parameters: object,
-            _streaming: bool,
-            _source_messages: object,
-            _client_requests: object = None,
-        ) -> None:
-            facts.append((phase, fact))
+        async def publish(event_type: ExecutionEventType, payload: JsonValue) -> None:
+            phase = "started" if event_type is ExecutionEventType.MODEL_REQUEST_STARTED else (
+                "completed" if outcome == "succeeded" else "failed"
+            )
+            facts.append((phase, journal.current(1)))
             if phase in {"completed", "failed"}:
                 finish_entered.set()
                 await release_finish.wait()
@@ -907,12 +897,22 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
             execution_id="execution",
             agent_run_id="run",
         )
+        store = StagingAgentRunStore()
+        run_recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
+        await run_recorder.register_agent_run(AgentRunRecord(
+            "run", agent_conversation_id="conversation", agent_id="agent",
+        ))
+        capability = ModelObservationCapability(
+            None, source_namespace="workspace", tenant_id="tenant",
+            execution_id="execution", session_id=None, agent_run_id="run", agent_id="agent",
+            journal=journal, interaction_recorder=run_recorder, event_sink=publish,
+        )
         wrapped = _ObservedCompactionModel(
             model,
             ctx=context,  # type: ignore[arg-type]
             journal=journal,
             observer=None,
-            recorder=record,
+            recorder=capability.record_external_model_request,
             source_messages=(),
         )
         task = asyncio.create_task(
@@ -932,6 +932,8 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
         expected_phase = "completed" if outcome == "succeeded" else "failed"
         assert [phase for phase, _fact in facts] == ["started", expected_phase]
         assert facts[-1][1].status == expected_status
+        values = await store.list_model_interactions(agent_run_id="run")
+        assert [(value.model_request_seq, value.status) for value in values] == [(1, expected_status)]
 
     asyncio.run(scenario())
 

@@ -76,9 +76,10 @@ from ..storage import (
     payload_fits_inline,
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
-from ._execution import CancelEffectOutcome, ExecutionStartIdentity
+from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
 from ._metrics import (
-    _record_execution_terminal,
+    _capture_execution_terminal,
+    _record_metric_observation,
     _record_storage_operation,
     _release_metric_execution_context,
 )
@@ -635,16 +636,17 @@ class LocalExecutionBackend:
                 continue
             return value, cancellation
 
-    def _record_committed_terminal(
+    async def _record_committed_terminal(
         self,
         committed: ExecutionTerminalCommitResult,
         *,
         session_id: str | None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> None:
         recorder = self._metric_recorder
         if recorder is None:
             return
-        _record_execution_terminal(
+        observation = _capture_execution_terminal(
             recorder,
             source_namespace=self._namespace,
             tenant_id=self._tenant_id,
@@ -655,6 +657,14 @@ class LocalExecutionBackend:
             recorder,
             committed.execution.execution_id,
         )
+
+        async def deliver() -> None:
+            await _record_metric_observation(recorder, observation)
+
+        if capture_metric is not None:
+            capture_metric(deliver)
+        else:
+            await deliver()
 
     async def _commit_terminal_checkpoint_owned(
         self,
@@ -686,7 +696,6 @@ class LocalExecutionBackend:
             durable_seq=committed.execution.event_seq,
         )
         self._live_broker.complete(execution_id)
-        self._record_committed_terminal(committed, session_id=session_id)
         return committed
 
     async def commit_terminal_checkpoint(
@@ -695,6 +704,7 @@ class LocalExecutionBackend:
         *,
         session_id: str | None,
         expected_execution: ExecutionRecord | None = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionTerminalCommitResult:
         task = asyncio.create_task(
             self._commit_terminal_checkpoint_owned(
@@ -708,6 +718,9 @@ class LocalExecutionBackend:
             task,
             label="terminal",
             execution_id=commit.execution.execution_id,
+        )
+        await self._record_committed_terminal(
+            committed, session_id=session_id, capture_metric=capture_metric,
         )
         if cancellation is not None:
             raise cancellation
@@ -2046,20 +2059,25 @@ class LocalExecutionBackend:
                     error_diagnostics=_execution_error_diagnostics(error),
                 )
                 return await self._reconcile_handoff(checkpoint)
-            execution = await self._commit_reconciled_terminal(checkpoint)
-            await self._validate_committed_handoff(checkpoint)
-            if execution.session_id is not None:
-                await self._conversation.sessions.release_execution(
-                    execution.session_id,
-                    tenant_id=self._tenant_id,
-                    execution_id=execution.execution_id,
+
+            async def finish_handoff(execution: ExecutionRecord) -> None:
+                await self._validate_committed_handoff(checkpoint)
+                if execution.session_id is not None:
+                    await self._conversation.sessions.release_execution(
+                        execution.session_id,
+                        tenant_id=self._tenant_id,
+                        execution_id=execution.execution_id,
+                    )
+                await self._complete_handoff(checkpoint)
+                self._publish_terminal_event(
+                    execution.execution_id,
+                    event_type=outcome.terminal_event_type,
+                    payload=dict(outcome.terminal_event_payload),
+                    durable_seq=execution.event_seq,
                 )
-            await self._complete_handoff(checkpoint)
-            self._publish_terminal_event(
-                execution.execution_id,
-                event_type=outcome.terminal_event_type,
-                payload=dict(outcome.terminal_event_payload),
-                durable_seq=execution.event_seq,
+
+            execution = await self._commit_reconciled_terminal(
+                checkpoint, finish=finish_handoff,
             )
             _logger.info(
                 "recovery handoff completed: execution=%s",
@@ -2405,6 +2423,8 @@ class LocalExecutionBackend:
     async def _commit_reconciled_terminal(
         self,
         checkpoint: RecoveryCheckpoint,
+        *,
+        finish: Callable[[ExecutionRecord], Awaitable[None]],
     ) -> ExecutionRecord:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
@@ -2423,6 +2443,7 @@ class LocalExecutionBackend:
         }:
             if current.status is not outcome.terminal_status:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await finish(current)
             return current
         execution_ref = None
         if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
@@ -2488,6 +2509,13 @@ class LocalExecutionBackend:
             outcome.usage,
             outcome.result_created_at,
         )
+        handoff_started = False
+
+        async def finish_handoff(committed: ExecutionTerminalCommitResult) -> None:
+            nonlocal handoff_started
+            handoff_started = True
+            await finish(committed.execution)
+
         try:
             terminal_agent_run_id = handoff.source_agent_run_id
             if terminal_agent_run_id is None and current.agent_run_seq > 0:
@@ -2508,9 +2536,12 @@ class LocalExecutionBackend:
                     dict(outcome.terminal_event_payload),
                 ),
                 agent_run_id=terminal_agent_run_id,
+                handoff=finish_handoff,
             )
             current = committed.execution
         except AIError as error:
+            if handoff_started:
+                raise
             if error.code not in {
                 ErrorCode.STORAGE_CONFLICT,
                 ErrorCode.EXECUTION_RESULT_CONFLICT,
@@ -2523,6 +2554,7 @@ class LocalExecutionBackend:
             if latest is None or latest.status is not outcome.terminal_status:
                 raise
             current = latest
+            await finish(current)
         _logger.info(
             "recovery execution terminal committed: execution=%s status=%s",
             current.execution_id,
@@ -3597,7 +3629,7 @@ class LocalExecutionBackend:
             )
             raise
         finally:
-            _record_storage_operation(
+            await _record_storage_operation(
                 metric_recorder,
                 observation_id=metric_id,
                 started_at_ns=metric_started,
@@ -5051,20 +5083,24 @@ class LocalExecutionBackend:
             ),
         )
         terminal_commit = replace(terminal_commit, producer_generation=producer_generation)
+
+        async def publish_terminal(committed: ExecutionTerminalCommitResult) -> None:
+            self._publish_terminal_event(
+                current.execution_id,
+                event_type=terminal_commit.terminal_event_type,
+                payload=dict(terminal_commit.terminal_event_payload),
+                durable_seq=committed.execution.event_seq,
+            )
+
         committed = await self._commit_execution_terminal_checkpoint(
             current,
             terminal_commit,
             agent_run_id=agent_run_id,
+            handoff=publish_terminal,
             expected_cursor=expected_cursor,
             conversation_agent_run=conversation_agent_run,
             conversation_checkpoint=conversation_checkpoint,
             recovery_checkpoint=recovery_checkpoint,
-        )
-        self._publish_terminal_event(
-            current.execution_id,
-            event_type=terminal_commit.terminal_event_type,
-            payload=dict(terminal_commit.terminal_event_payload),
-            durable_seq=committed.execution.event_seq,
         )
         _logger.info(
             "execution terminal committed: execution=%s status=%s",
@@ -5200,22 +5236,25 @@ class LocalExecutionBackend:
             expected_cursor = await self._expected_session_cursor(current)
             if conversation_agent_run is None or conversation_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        async def publish_terminal(committed: ExecutionTerminalCommitResult) -> None:
+            self._publish_terminal_event(
+                current.execution_id,
+                event_type=commit.terminal_event_type,
+                payload=dict(commit.terminal_event_payload),
+                durable_seq=committed.execution.event_seq,
+            )
+
         committed = await self._commit_execution_terminal_checkpoint(
             current,
             commit,
             agent_run_id=agent_run_id,
+            handoff=publish_terminal,
             expected_cursor=expected_cursor,
             conversation_agent_run=conversation_agent_run,
             conversation_checkpoint=conversation_checkpoint,
             recovery_checkpoint=target,
             recovery_run=recovery_run,
             recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
-        )
-        self._publish_terminal_event(
-            current.execution_id,
-            event_type=commit.terminal_event_type,
-            payload=dict(commit.terminal_event_payload),
-            durable_seq=committed.execution.event_seq,
         )
         _logger.info(
             "same-group terminal checkpoint committed: execution=%s status=%s",
@@ -5230,6 +5269,7 @@ class LocalExecutionBackend:
         commit: ExecutionTerminalCommit,
         *,
         agent_run_id: str | None,
+        handoff: Callable[[ExecutionTerminalCommitResult], Awaitable[None]] | None = None,
         expected_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
@@ -5355,10 +5395,6 @@ class LocalExecutionBackend:
                                 observed,
                                 commit.result,
                             )
-                            self._record_committed_terminal(
-                                committed,
-                                session_id=current.session_id,
-                            )
                             self._pending_audit_events.pop(
                                 current.execution_id,
                                 None,
@@ -5391,6 +5427,11 @@ class LocalExecutionBackend:
             task,
             label="terminal",
             execution_id=current.execution_id,
+        )
+        if handoff is not None:
+            await handoff(committed)
+        await self._record_committed_terminal(
+            committed, session_id=current.session_id,
         )
         if cancellation is not None:
             raise cancellation
@@ -5475,7 +5516,6 @@ class LocalExecutionBackend:
             audit_events=pending_audit,
             background_tasks=self._execution_task_set(current.execution_id),
         )
-        self._record_committed_terminal(committed, session_id=current.session_id)
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
 

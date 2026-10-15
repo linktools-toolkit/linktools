@@ -294,6 +294,9 @@ class ExecutionBackend(Protocol):
     ) -> OperationLedgerRecord: ...
 
 
+_TerminalMetricDelivery = Callable[[], Awaitable[None]]
+
+
 class _ExecutionRuntimePort(ExecutionBackend, Protocol):
     async def commit_terminal_checkpoint(
         self,
@@ -301,6 +304,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         *,
         session_id: str | None,
         expected_execution: ExecutionRecord | None = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionTerminalCommitResult: ...
 
     async def verify_terminal_projection(
@@ -1933,46 +1937,58 @@ class DefaultExecutionService:
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
-        if session_id is None:
-            return await self._start_unlocked(
-                binding_digest,
-                request,
-                session_id=session_id,
-                session_agent_id=session_agent_id,
-                previous_execution_id=previous_execution_id,
-                fork_base_execution_id=fork_base_execution_id,
-                conversation_agent_run_id=conversation_agent_run_id,
-                parent_execution_id=parent_execution_id,
-                root_execution_id=root_execution_id,
-                parent_invocation_id=parent_invocation_id,
-                lineage_kind=lineage_kind,
-                scope=scope,
-                prepare_local_stream=prepare_local_stream,
-                dependency_hold_id=dependency_hold_id,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
-                binding_contract=binding_contract,
-            )
-        async with self._session_guard(request.principal.tenant_id, session_id):
-            return await self._start_unlocked(
-                binding_digest,
-                request,
-                session_id=session_id,
-                session_agent_id=session_agent_id,
-                previous_execution_id=previous_execution_id,
-                fork_base_execution_id=fork_base_execution_id,
-                conversation_agent_run_id=conversation_agent_run_id,
-                parent_execution_id=parent_execution_id,
-                root_execution_id=root_execution_id,
-                parent_invocation_id=parent_invocation_id,
-                lineage_kind=lineage_kind,
-                scope=scope,
-                prepare_local_stream=prepare_local_stream,
-                dependency_hold_id=dependency_hold_id,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
-                binding_contract=binding_contract,
-            )
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
+        try:
+            if session_id is None:
+                return await self._start_unlocked(
+                    binding_digest,
+                    request,
+                    session_id=session_id,
+                    session_agent_id=session_agent_id,
+                    previous_execution_id=previous_execution_id,
+                    fork_base_execution_id=fork_base_execution_id,
+                    conversation_agent_run_id=conversation_agent_run_id,
+                    parent_execution_id=parent_execution_id,
+                    root_execution_id=root_execution_id,
+                    parent_invocation_id=parent_invocation_id,
+                    lineage_kind=lineage_kind,
+                    scope=scope,
+                    prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                    binding_contract=binding_contract,
+                    capture_metric=capture_metric,
+                )
+            async with self._session_guard(request.principal.tenant_id, session_id):
+                return await self._start_unlocked(
+                    binding_digest,
+                    request,
+                    session_id=session_id,
+                    session_agent_id=session_agent_id,
+                    previous_execution_id=previous_execution_id,
+                    fork_base_execution_id=fork_base_execution_id,
+                    conversation_agent_run_id=conversation_agent_run_id,
+                    parent_execution_id=parent_execution_id,
+                    root_execution_id=root_execution_id,
+                    parent_invocation_id=parent_invocation_id,
+                    lineage_kind=lineage_kind,
+                    scope=scope,
+                    prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                    binding_contract=binding_contract,
+                    capture_metric=capture_metric,
+                )
+        finally:
+            if metric_delivery is not None:
+                await metric_delivery()
 
     async def _start_unlocked(
         self,
@@ -1994,6 +2010,7 @@ class DefaultExecutionService:
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -2130,6 +2147,7 @@ class DefaultExecutionService:
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
+                    capture_metric=capture_metric,
                 )
                 return ExecutionHandle(existing.resource_id)
             if existing.status in {
@@ -2363,6 +2381,7 @@ class DefaultExecutionService:
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
+                    capture_metric=capture_metric,
                 )
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
@@ -2419,6 +2438,7 @@ class DefaultExecutionService:
             request_digest=request_digest,
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
+            capture_metric=capture_metric,
         )
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
@@ -2455,6 +2475,7 @@ class DefaultExecutionService:
         request_digest: str,
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2473,6 +2494,7 @@ class DefaultExecutionService:
                     execution,
                     identity=identity,
                     error=error,
+                    capture_metric=capture_metric,
                 )
             raise
         if started is None:
@@ -2506,6 +2528,7 @@ class DefaultExecutionService:
         *,
         identity: ExecutionStartIdentity,
         error: AIError,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionRecord:
         if error.code not in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2529,6 +2552,13 @@ class DefaultExecutionService:
             or idempotency.request_digest != identity.request_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metric_delivery: _TerminalMetricDelivery | None = None
+        cancellation: asyncio.CancelledError | None = None
+
+        def capture_terminal_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
         if current.status in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
@@ -2589,7 +2619,31 @@ class DefaultExecutionService:
                     ),
                     session_id=None,
                     expected_execution=current,
+                    capture_metric=capture_terminal_metric,
                 )
+            except asyncio.CancelledError as cancelled:
+                cancellation = cancelled
+                try:
+                    observed = await self._state.executions.get(
+                        current.execution_id,
+                        tenant_id=self._state.executions.tenant_id,
+                    )
+                    observed_identity = await self._state.idempotency.get(
+                        identity.scope,
+                        identity.idempotency_key_digest,
+                        tenant_id=self._state.executions.tenant_id,
+                    )
+                except Exception as read_error:
+                    raise cancelled from read_error
+                if (
+                    observed is None
+                    or observed.status is not ExecutionStatus.FAILED
+                    or observed.error_code != error.code.value
+                    or observed_identity is None
+                    or observed_identity.status is not IdempotencyStatus.FAILED
+                ):
+                    raise
+                terminal = observed
             except AIError as commit_error:
                 if commit_error.code not in {
                     ErrorCode.STORAGE_CONFLICT,
@@ -2621,6 +2675,13 @@ class DefaultExecutionService:
             terminal.execution_id,
             error.code.value,
         )
+        if metric_delivery is not None:
+            if capture_metric is not None:
+                capture_metric(metric_delivery)
+            else:
+                await metric_delivery()
+        if cancellation is not None:
+            raise cancellation
         return terminal
 
     async def _launch_started(
@@ -3109,29 +3170,45 @@ class DefaultExecutionService:
     async def cancel(
         self, execution_id: str, request: CancelExecutionRequest
     ) -> CancelExecutionResult:
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
         async with self._execution_consumer(execution_id, request.principal.tenant_id):
             finalizer = asyncio.create_task(
-                self._cancel_finalizer_with_handoff(execution_id, request),
+                self._cancel_finalizer_with_handoff(
+                    execution_id, request, capture_metric=capture_metric,
+                ),
                 name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
             )
             try:
-                return await asyncio.shield(finalizer)
+                result = await asyncio.shield(finalizer)
             except asyncio.CancelledError:
                 if finalizer.done():
-                    return finalizer.result()
-                self._detach_cancel_finalizer(finalizer, execution_id)
-                raise
+                    result = finalizer.result()
+                else:
+                    self._detach_cancel_finalizer(finalizer, execution_id)
+                    raise
+        if metric_delivery is not None:
+            await metric_delivery()
+        return result
 
     async def _cancel_finalizer_with_handoff(
         self,
         execution_id: str,
         request: CancelExecutionRequest,
+        *,
+        capture_metric: Callable[[_TerminalMetricDelivery], None],
     ) -> CancelExecutionResult:
         async with self._execution_consumer(
             execution_id,
             request.principal.tenant_id,
         ):
-            result = await self.cancel_authorized(execution_id, request)
+            result = await self.cancel_authorized(
+                execution_id, request, capture_metric=capture_metric,
+            )
             await self._request_handoff_if_terminal(
                 execution_id,
                 request.principal.tenant_id,
@@ -3205,7 +3282,8 @@ class DefaultExecutionService:
             )
 
     async def _cancel(
-        self, execution_id: str, request: CancelExecutionRequest
+        self, execution_id: str, request: CancelExecutionRequest,
+        *, capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
         execution = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL
@@ -3288,6 +3366,12 @@ class DefaultExecutionService:
                 return resolved
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_terminal_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
         try:
             if execution.status is ExecutionStatus.CANCELLING:
                 cancelling = execution
@@ -3337,6 +3421,7 @@ class DefaultExecutionService:
                     return await self._cancel_recovery_required(
                         recovery_current,
                         request,
+                        capture_metric=capture_metric,
                     )
                 resolved = await self._resolve_cancel_race(
                     execution_id, request.principal.tenant_id, operation
@@ -3505,6 +3590,7 @@ class DefaultExecutionService:
                     terminal_commit,
                     session_id=cancelling_current.session_id,
                     expected_execution=cancelling_current,
+                    capture_metric=capture_terminal_metric,
                 )
             except AIError as error:
                 if error.code not in {
@@ -3546,6 +3632,7 @@ class DefaultExecutionService:
                 return await self._cancel_recovery_required(
                     recovery_current,
                     request,
+                    capture_metric=capture_metric,
                 )
             resolved = await self._resolve_cancel_race(
                 execution_id, request.principal.tenant_id, operation
@@ -3581,12 +3668,20 @@ class DefaultExecutionService:
                     operation.operation_id,
                 )
             raise
+        finally:
+            if metric_delivery is not None:
+                if capture_metric is not None:
+                    capture_metric(metric_delivery)
+                else:
+                    await metric_delivery()
         return CancelExecutionResult(execution_id, True)
 
     async def cancel_authorized(
         self,
         execution_id: str,
         request: CancelExecutionRequest,
+        *,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
         execution = await self._load_authorized(
             execution_id,
@@ -3594,8 +3689,10 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_CANCEL,
         )
         if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-            return await self._cancel_recovery_required(execution, request)
-        return await self._cancel(execution_id, request)
+            return await self._cancel_recovery_required(
+                execution, request, capture_metric=capture_metric,
+            )
+        return await self._cancel(execution_id, request, capture_metric=capture_metric)
 
     async def recovery_effects(
         self,
@@ -3691,6 +3788,8 @@ class DefaultExecutionService:
         self,
         execution: ExecutionRecord,
         request: CancelExecutionRequest,
+        *,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
         operation_digest = canonical_sha256(
             {
@@ -3732,7 +3831,9 @@ class DefaultExecutionService:
                 AuthorizationAction.EXECUTION_RECOVER,
             )
             if latest.status is not ExecutionStatus.RECOVERY_REQUIRED:
-                return await self._cancel(execution.execution_id, request)
+                return await self._cancel(
+                    execution.execution_id, request, capture_metric=capture_metric,
+                )
             raise
         if (
             current.request_digest != operation_digest

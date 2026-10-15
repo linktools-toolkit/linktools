@@ -56,7 +56,7 @@ from .service_api import (
 if TYPE_CHECKING:
     from pydantic import BaseModel
     from ._agent import Agent, Execution, Session
-    from ._metrics import MetricBufferStatus, MetricFlushResult
+    from ..observe import MetricBufferStatus, MetricFlushResult
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")

@@ -201,11 +201,17 @@ def _crash_session_process(
     async def commit_reconciled(
         self: LocalExecutionBackend,
         checkpoint: Any,
+        *,
+        finish: Any,
     ) -> Any:
-        result = await original_commit_reconciled(self, checkpoint)
-        if phase == "terminal_before_handoff_complete":
-            os._exit(91)
-        return result
+        async def finish_after_crash(execution: Any) -> None:
+            if phase == "terminal_before_handoff_complete":
+                os._exit(91)
+            await finish(execution)
+
+        return await original_commit_reconciled(
+            self, checkpoint, finish=finish_after_crash,
+        )
 
     RuntimeToolOperationBridge.complete = complete
     RuntimeStateCommands.commit_agent_attempt_checkpoint = activate

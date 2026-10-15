@@ -117,7 +117,13 @@ from ._object_sql import SqlObjectStore, build_object_sql_metadata
 from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
+from ._write_cache import WriteCache, WriteCacheFlushResult, WriteCacheScope, WriteCacheStatus
+
 __all__ = [
+    "WriteCache",
+    "WriteCacheFlushResult",
+    "WriteCacheScope",
+    "WriteCacheStatus",
     "TABLE_PREFIX",
     "AtomicBatchStorageWriter",
     "BatchStorageReader",

@@ -288,6 +288,7 @@ async def test_real_control_handoff_retains_finalizer_after_deadline() -> None:
 
     bundle = _Bundle()
     service = object.__new__(DefaultTaskGraphService)
+    service._metric_projector = None
     entered = asyncio.Event()
     release = asyncio.Event()
     completed = asyncio.Event()

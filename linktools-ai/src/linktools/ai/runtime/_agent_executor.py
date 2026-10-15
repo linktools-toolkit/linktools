@@ -350,31 +350,34 @@ class AgentExecutor:
                 primary_error = mapped
                 raise mapped from error
         finally:
-            self._record_agent_run(
+            observation = self._capture_agent_run(
                 scope,
                 metric_id=metric_id,
                 metric_started=metric_started,
                 result=result,
                 primary_error=primary_error,
             )
-            if scope.usage_sink is not None:
-                usage = (
-                    result.usage
-                    if isinstance(result, AgentExecutionResult)
-                    else _usage_metrics(run_usage)
-                )
-                try:
-                    scope.usage_sink(usage)
-                except Exception:
-                    if primary_error is None:
-                        raise
-                    _logger.error(
-                        "usage sink failed after agent execution failure: step=%s",
-                        scope.agent_run_id,
-                        exc_info=False,
+            try:
+                if scope.usage_sink is not None:
+                    usage = (
+                        result.usage
+                        if isinstance(result, AgentExecutionResult)
+                        else _usage_metrics(run_usage)
                     )
+                    try:
+                        scope.usage_sink(usage)
+                    except Exception:
+                        if primary_error is None:
+                            raise
+                        _logger.error(
+                            "usage sink failed after agent execution failure: step=%s",
+                            scope.agent_run_id,
+                            exc_info=False,
+                        )
+            finally:
+                await self._record_agent_run(observation)
 
-    def _record_agent_run(
+    def _capture_agent_run(
         self,
         scope: _AgentRunScope,
         *,
@@ -382,7 +385,7 @@ class AgentExecutor:
         metric_started: int | None,
         result: AgentExecutionOutcome | None,
         primary_error: BaseException | None,
-    ) -> None:
+    ) -> Observation | None:
         if self._metrics is None or metric_id is None or metric_started is None:
             return
         if isinstance(primary_error, asyncio.CancelledError):
@@ -408,27 +411,33 @@ class AgentExecutor:
         if scope.context.session_id is not None:
             correlation["session_id"] = scope.context.session_id
         try:
-            self._metrics.try_record(
-                Observation(
-                    version=1,
-                    observation_id=metric_id,
-                    kind="linktools.agent.run",
-                    occurred_at=datetime.now(timezone.utc),
-                    source_namespace=scope.context.namespace,
-                    tenant_id=scope.context.principal.tenant_id,
-                    status=status,
-                    error_code=error_code,
-                    correlation=correlation,
-                    dimensions={"agent_id": scope.binding.compiled_agent.spec.id},
-                    measurements=(
-                        MetricMeasurement(
-                            "latency_ns",
-                            1,
-                            monotonic_ns() - metric_started,
-                        ),
+            return Observation(
+                version=1,
+                observation_id=metric_id,
+                kind="linktools.agent.run",
+                occurred_at=datetime.now(timezone.utc),
+                source_namespace=scope.context.namespace,
+                tenant_id=scope.context.principal.tenant_id,
+                status=status,
+                error_code=error_code,
+                correlation=correlation,
+                dimensions={"agent_id": scope.binding.compiled_agent.spec.id},
+                measurements=(
+                    MetricMeasurement(
+                        "latency_ns",
+                        1,
+                        monotonic_ns() - metric_started,
                     ),
-                )
+                ),
             )
+        except Exception:
+            _logger.exception("agent metric observation rejected")
+
+    async def _record_agent_run(self, observation: Observation | None) -> None:
+        if self._metrics is None or observation is None:
+            return
+        try:
+            await self._metrics.try_record(observation)
         except Exception:
             _logger.exception("agent metric observation rejected")
 

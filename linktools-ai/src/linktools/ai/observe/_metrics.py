@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
+from ..storage import WriteCache
 from ._codec import (
     same_definition_contract,
     observation_envelope,
@@ -24,6 +25,7 @@ from ._model import (
     MetricMeasurement,
     MetricQuery,
     MetricQueryResult,
+    MetricRecorder,
     MetricSource,
     MetricSourceKind,
     MetricType,
@@ -48,31 +50,54 @@ _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 class Metrics:
     """Metrics dataset facade without a user-visible lifecycle."""
 
-    def __init__(self, store: MetricStore, *, namespace: str = "default") -> None:
+    def __init__(
+        self, store: MetricStore, *, namespace: str = "default",
+        write_cache: WriteCache | None = None,
+    ) -> None:
+        if write_cache is not None and not isinstance(write_cache, WriteCache):
+            raise TypeError("write_cache must be WriteCache")
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
+        self._write_cache = write_cache
+
+    def recorder(self) -> MetricRecorder:
+        """Open an independently owned automatic-recording lifetime."""
+        from ._recorder import _MetricRecorder
+
+        return _MetricRecorder(self, self._write_cache)
 
     @property
     def namespace(self) -> str:
         return self._namespace
 
     @classmethod
-    def in_memory(cls, *, namespace: str = "default") -> Metrics:
-        return cls(InMemoryMetricStore(), namespace=namespace)
+    def in_memory(
+        cls, *, namespace: str = "default", write_cache: WriteCache | None = None,
+    ) -> Metrics:
+        return cls(InMemoryMetricStore(), namespace=namespace, write_cache=write_cache)
 
     @classmethod
-    def sqlite(cls, path: str | Path, *, namespace: str = "default") -> Metrics:
-        return cls(SQLiteMetricStore(path), namespace=namespace)
+    def sqlite(
+        cls, path: str | Path, *, namespace: str = "default",
+        write_cache: WriteCache | None = None,
+    ) -> Metrics:
+        return cls(SQLiteMetricStore(path), namespace=namespace, write_cache=write_cache)
 
     @classmethod
-    def sql(cls, engine: AsyncEngine, *, namespace: str = "default") -> Metrics:
+    def sql(
+        cls, engine: AsyncEngine, *, namespace: str = "default",
+        write_cache: WriteCache | None = None,
+    ) -> Metrics:
         from ._sql import SqlMetricStore
 
-        return cls(SqlMetricStore(engine), namespace=namespace)
+        return cls(SqlMetricStore(engine), namespace=namespace, write_cache=write_cache)
 
     @classmethod
-    def from_store(cls, store: MetricStore, *, namespace: str = "default") -> Metrics:
-        return cls(store, namespace=namespace)
+    def from_store(
+        cls, store: MetricStore, *, namespace: str = "default",
+        write_cache: WriteCache | None = None,
+    ) -> Metrics:
+        return cls(store, namespace=namespace, write_cache=write_cache)
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):

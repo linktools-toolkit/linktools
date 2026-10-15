@@ -565,11 +565,43 @@ class MetricQueryResult:
     points: tuple[MetricPoint, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MetricBufferStatus:
+    enabled: bool
+    accepting: bool
+    accepted: int
+    persisted: int
+    pending: int
+    rejected: int
+    lost: int
+    write_failures: int
+    queue_size: int = 0
+    queue_capacity: int = 0
+    high_watermark: int = 0
+    last_failure_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricFlushResult:
+    completed: bool
+    status: MetricBufferStatus
+
+
 class MetricRecorder(Protocol):
-    def try_record(self, observation: Observation) -> bool: ...
+    async def try_record(self, observation: Observation) -> bool:
+        """Return admission success, never a durable business receipt."""
+        ...
+
+    def status(self) -> MetricBufferStatus: ...
+
+    async def flush(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult: ...
+
+    async def close(self) -> None: ...
 
 
 __all__ = [
+    "MetricBufferStatus",
+    "MetricFlushResult",
     "MetricAggregation",
     "MetricDefinition",
     "MetricMeasurement",
