@@ -262,31 +262,48 @@ class SqlAssetBackend:
 
     async def load_metadata(self, after_revision: StorageRevision | None) -> MetadataLoad[AssetKey, AssetInfo]:
         self._ensure_ready()
-        current = int((await self.head_revision()).value)
-        if after_revision is not None and int(after_revision.value) == current:
-            return MetadataLoad(MetadataLoadMode.PATCH, StorageRevision(str(current)), ())
+        after = None if after_revision is None else int(after_revision.value)
+        heads = self._metadata.tables["ai_asset_heads"]
         entries = self._metadata.tables["ai_asset_entries"]
         session = self._context.sessions()
         try:
-            from sqlalchemy import select
+            from sqlalchemy import null, select
 
+            # One statement binds the head and entries to the same database
+            # snapshot. Mutually exclusive branches avoid scanning entries when
+            # the head is unchanged, including on SQLite's nested-loop join.
+            statement = (
+                select(heads.c.store_revision, entries.c.key_digest, entries.c.payload_json)
+                .select_from(heads.outerjoin(entries, heads.c.namespace_digest == entries.c.namespace_digest))
+                .where(heads.c.namespace_digest == self._namespace_digest.hex())
+            )
+            if after is not None:
+                statement = statement.where(heads.c.store_revision != after).union_all(
+                    select(heads.c.store_revision, null(), null()).where(
+                        heads.c.namespace_digest == self._namespace_digest.hex(),
+                        heads.c.store_revision == after,
+                    )
+                )
             rows = (
                 (
-                    await self._context.run_statement(session.execute(
-                        select(entries).where(entries.c.namespace_digest == self._namespace_digest.hex())
-                    ))
+                    await self._context.run_statement(session.execute(statement))
                 )
                 .mappings()
                 .all()
             )
         finally:
             await session.close()
+        if not rows:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current = int(rows[0]["store_revision"])
+        if after == current:
+            return MetadataLoad(MetadataLoadMode.PATCH, StorageRevision(str(current)), ())
         return MetadataLoad(
             MetadataLoadMode.REPLACE,
             StorageRevision(str(current)),
             tuple(
                 MetadataChange(_key_from_data(row["payload_json"]), _info_from_data(row["payload_json"]))
-                for row in rows
+                for row in rows if row["key_digest"] is not None
             ),
         )
 

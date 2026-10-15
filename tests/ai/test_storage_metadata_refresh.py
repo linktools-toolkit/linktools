@@ -42,6 +42,37 @@ class _PausedMetadataBackend(InMemoryAssetBackend):
 
 
 @pytest.mark.asyncio
+async def test_cold_metadata_readers_share_one_source_observation() -> None:
+    class Backend(InMemoryAssetBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.head_reads = 0
+            self.metadata_reads = 0
+
+        async def head_revision(self) -> StorageRevision | None:
+            self.head_reads += 1
+            return await super().head_revision()
+
+        async def load_metadata(
+            self, after_revision: StorageRevision | None = None,
+        ) -> MetadataLoad[AssetKey, AssetInfo]:
+            self.metadata_reads += 1
+            return await super().load_metadata(after_revision)
+
+    backend = Backend()
+    key = AssetKey("test", "concurrent-read")
+    written = await backend.put(key, b"value")
+    view = LayerMetadataView(backend, LayerRefreshPolicy.REVISIONED)
+    try:
+        values = await asyncio.gather(*(view.refresh() for _ in range(16)))
+        assert all(value.entries[key] == written.info for value in values)
+        assert backend.metadata_reads == 1
+        assert backend.head_reads == 0
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("active_waiter", (False, True))
 @pytest.mark.parametrize("fails", (False, True))
 async def test_cancelled_metadata_waiter_retains_shared_result_and_error_ownership(

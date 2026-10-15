@@ -26,9 +26,9 @@ from ._files import sync_directory
 ContentCacheKey: TypeAlias = str
 
 
-def _content_charge(content: bytes) -> int:
+def _content_charge(size: int) -> int:
     """Charge at least one byte so zero-length entries remain capacity-bounded."""
-    return max(1, len(content))
+    return max(1, size)
 
 
 class ContentCache(Protocol):
@@ -107,13 +107,13 @@ class InMemoryContentCache:
             return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
-        charge = _content_charge(content)
+        charge = _content_charge(len(content))
         if charge > self.max_bytes:
             return
         async with self._lock:
             previous = self._items.pop(key, None)
             if previous is not None:
-                self._size -= _content_charge(previous)
+                self._size -= _content_charge(len(previous))
             self._items[key] = content
             self._size += charge
             while (
@@ -121,13 +121,13 @@ class InMemoryContentCache:
                 or (self.max_size is not None and len(self._items) > self.max_size)
             ) and self._items:
                 _, removed = self._items.popitem(last=False)
-                self._size -= _content_charge(removed)
+                self._size -= _content_charge(len(removed))
 
     async def delete(self, key: ContentCacheKey) -> None:
         async with self._lock:
             previous = self._items.pop(key, None)
             if previous is not None:
-                self._size -= _content_charge(previous)
+                self._size -= _content_charge(len(previous))
 
     async def contains_many(
         self,
@@ -146,6 +146,7 @@ class FilesystemContentCache:
     including when the caller is cancelled. Lock waiters occupy no workers.
     The index is built on the first write attempt whose scan succeeds. Earlier
     reads remain available without accounting. ``contains_many`` reads no content.
+    Empty entries consume one byte of budget so their count remains bounded.
     """
 
     def __init__(self, root: "str | Path", *, max_bytes: int) -> None:
@@ -187,7 +188,7 @@ class FilesystemContentCache:
         return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
-        if len(content) > self.max_bytes:
+        if _content_charge(len(content)) > self.max_bytes:
             return
         await self._mutate(lambda: self._put(key, content))
 
@@ -199,8 +200,9 @@ class FilesystemContentCache:
         previous = self._entries.pop(name, None)
         if previous is not None:
             self._total -= previous[0]
-        self._entries[name] = (len(content),)
-        self._total += len(content)
+        charge = _content_charge(len(content))
+        self._entries[name] = (charge,)
+        self._total += charge
         while self._total > self.max_bytes and self._entries:
             victim, entry = next(iter(self._entries.items()))
             (self.root / victim).unlink(missing_ok=True)
@@ -259,8 +261,9 @@ class FilesystemContentCache:
         self._entries.clear()
         self._total = 0
         for name, size in entries:
-            self._entries[name] = (size,)
-            self._total += size
+            charge = _content_charge(size)
+            self._entries[name] = (charge,)
+            self._total += charge
         self._indexed = True
         return True
 

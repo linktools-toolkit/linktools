@@ -78,6 +78,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
         self._state: MetadataState[KeyT, InfoT] | None = None
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task[MetadataState[KeyT, InfoT]] | None = None
+        self._refresh_started = False
         self._generation = 0
 
     @property
@@ -135,8 +136,10 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
         async with self._lock:
             if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
                 return self._state, False
-            shared = self._refresh_task is not None
+            # Readers admitted before source I/O starts share a fresh observation.
+            shared = self._refresh_task is not None and self._refresh_started
             if self._refresh_task is None:
+                self._refresh_started = False
                 task = asyncio.create_task(self._load())
                 self._refresh_task = task
 
@@ -158,6 +161,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
                         self._refresh_task = None
 
     async def _load(self) -> 'MetadataState[KeyT, InfoT]':
+        self._refresh_started = True
         generation = self._generation
         if self.policy is LayerRefreshPolicy.ALWAYS:
             after = None
