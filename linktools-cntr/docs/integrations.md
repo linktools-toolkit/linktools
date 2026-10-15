@@ -176,14 +176,14 @@ multiple uses copy declarations without modifying the original values.
 Extension URLs are declarative; `extensions` is a list/tuple, not a callback:
 
 ```python
-from linktools import utils
-from linktools.core import ConfigLazy
+from linktools.cntr.ext import Authelia, Flare, load_nginx_url
+from linktools.core import ConfigRef
 
 extensions=[
-    Flare.public("Mihomo", "server", "Dashboard", url=ConfigLazy(lambda config: utils.join_url(
-        "/ui/metacubexd/#/setup",
-        queries={"hostname": config.get("MIHOMO_DOMAIN")},
-    ))),
+    Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
+        self, None, "ui", "metacubexd", "#", "setup",
+        queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
+    )),
     Authelia.oidc(("{url}", "/callback", "http://portainer.local:9000")),
 ]
 ```
@@ -195,11 +195,15 @@ its existing trailing slash, whereas `/` explicitly selects the origin root with
 a trailing slash. Absolute URLs stay unchanged. No other placeholder or ordinary
 configuration field is formatted; nginx regexes and `{{port}}` stay literal.
 
-Values remain lazy until consumed. Constructing a relative URL may resolve its
-query values locally before discovering that its site is disabled; they are not
-logged. Relative URLs from a disabled site become empty. Explicit absolute URLs
-remain independent. Flare None/empty URLs stay disabled; OIDC skips empty strings
-but still rejects non-string values and scheme-relative `//host` callbacks.
+Values remain lazy until consumed. Use `load_nginx_url` for site-dependent URLs
+with query values: it checks the site's URL before resolving `queries`, so a
+disabled site leaves those values unread. The example omits the site reference
+with `None`, which requires exactly one declared site. A custom `ConfigLazy`
+that constructs a relative URL may resolve its query values before the endpoint
+discovers that its site is disabled. Relative URLs from a disabled site become
+empty; explicit absolute URLs remain independent. Flare None/empty URLs stay
+disabled; OIDC skips empty strings but still rejects non-string values and
+scheme-relative `//host` callbacks.
 OIDC never follows reverse-proxy authentication switches or adds implicit callbacks.
 Existing extension lists, tuples and top-level generators remain supported.
 
