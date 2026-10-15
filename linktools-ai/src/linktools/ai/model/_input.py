@@ -4,9 +4,10 @@
 
 import codecs
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from pydantic_ai.messages import (
+    AudioMediaType, DocumentMediaType, ImageMediaType, VideoMediaType,
     AudioUrl, BinaryContent, DocumentUrl, ImageUrl, ModelRequest,
     ToolReturnPart, UploadedFile, UserPromptPart, VideoUrl,
 )
@@ -18,6 +19,27 @@ if TYPE_CHECKING:
     from ._contract import ModelBinding
 
 _INPUT_KINDS = frozenset({"binary", "image-url", "audio-url", "document-url", "video-url", "uploaded"})
+
+
+def expand_input_types(values: Sequence[str]) -> tuple[str, ...]:
+    """Resolve authoring categories once; captured contracts contain only MIME patterns."""
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise ValueError("input_types must be a sequence of strings")
+    categories = {
+        "image": ImageMediaType, "audio": AudioMediaType,
+        "document": DocumentMediaType, "video": VideoMediaType,
+    }
+    mime_types: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("input_types must contain only strings")
+        if value in categories:
+            mime_types.extend(get_args(categories[value]))
+        elif value.startswith("mime:"):
+            mime_types.append(value[len("mime:"):])
+        else:
+            raise ValueError("input_types entries must be image, audio, document, video, or mime:<MIME type>")
+    return normalize_input_mime_types(mime_types)
 
 
 def normalize_input_mime_types(values: Sequence[str]) -> tuple[str, ...]:
@@ -127,7 +149,7 @@ def _mime_type(value: str, *, allow_family: bool = False) -> str:
         raise ValueError("model input mime_type must be a MIME type")
     value = value.strip().lower()
     parts = value.split("/")
-    if len(parts) != 2 or any(not part for part in parts) or any(c.isspace() for c in value) or ";" in value:
+    if len(parts) != 2 or any(not part for part in parts) or any(c.isspace() for c in value) or ";" in value or ":" in value:
         raise ValueError("model input mime_type must be a MIME type")
     if "*" in value and not (allow_family and parts[1] == "*" and "*" not in parts[0]):
         raise ValueError("model input mime_type must be an exact MIME type or a type/* declaration")

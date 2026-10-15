@@ -57,14 +57,17 @@ PDF and Office files are not automatically converted or parsed as text.
   rendered, extracted, renamed, or unpacked. Use a selected trusted Skill and
   deployed CLI, or the host's existing authorized preparation stage.
 
-All new model bindings use one `input_mime_types` allowlist. Its empty default
-rejects attachments; ordinary prompt text is unaffected. Exact MIME types and
-`type/*` families are allowed. Unmatched attachments are rejected. A match does
-not bypass SDK encoding, Sandbox authorization, resource limits, or permissions.
+All new model bindings use one `input_types` string list. Its empty default
+rejects attachments; ordinary prompt text is unaffected. The names `image`,
+`audio`, `document`, and `video` expand to the corresponding SDK Literal MIME
+sets. Use `mime:` for exact MIME types or `type/*` families. There is no `text`
+category; a text file can use `mime:text/plain`. Unmatched attachments are
+rejected. A match does not bypass SDK encoding, Sandbox authorization, resource
+limits, or permissions.
 
 The `vision` API argument and CLI flag are removed. Legacy environment or
 workspace settings produce migration errors and must be replaced with
-`input_mime_types`. Recovering a historical execution requires a binding whose
+`input_types`. Recovering a historical execution requires a binding whose
 contract matches its persisted historical contract; an ordinary new binding
 cannot substitute its empty allowlist for that contract.
 
@@ -75,15 +78,20 @@ from linktools.ai.model import ModelRegistry
 
 models = ModelRegistry.openai(
     model="your-model",
-    input_mime_types=["image/png", "application/pdf", "text/csv"],
+    input_types=["image", "document", "mime:audio/*", "mime:text/csv"],
 )
 ```
 
-The host is responsible for verifying that its provider/model accepts the listed
-MIME types. The allowlist grants application permission, not verified provider
-support. Transport selection remains internal; there is no separate status,
-transport, unknown-input, or per-MIME byte-limit configuration. The adapter still
-checks whether the actual SDK input can be encoded.
+Python and YAML use the same token list. Category expansion is resolved at
+capture into the canonical `input_mime_types` list; restore uses those stored
+MIME values without repeating category expansion against the current SDK.
+A category includes the SDK's known types, whereas `mime:audio/*` permits the
+whole audio family. Custom MIME values remain available through `mime:`.
+
+The host is responsible for verifying that its provider/model accepts the
+permitted MIME types. Transport selection remains internal; there is no separate
+status, transport, unknown-input, or per-MIME byte-limit configuration. The
+adapter still checks whether the actual SDK input can be encoded.
 
 ## Read contract
 

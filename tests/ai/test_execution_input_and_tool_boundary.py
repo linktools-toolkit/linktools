@@ -174,7 +174,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
         )
         from linktools.ai.model import ModelRegistry
         model = ModelRegistry.openai(
-            model="test", input_mime_types=("text/plain",),
+            model="test", input_types=("mime:text/plain",),
         ).capture().resolve("default")
         binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))
         prepared = await service._freeze_input(canonical, binding)

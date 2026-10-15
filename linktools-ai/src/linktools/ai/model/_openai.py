@@ -6,7 +6,7 @@ import asyncio
 import math
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from types import TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
@@ -31,7 +31,7 @@ from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request
 from ._contract import ModelBinding
-from ._input import normalize_input_mime_types, validate_model_inputs
+from ._input import expand_input_types, validate_model_inputs
 
 _logger = environ.get_logger("ai.model.openai")
 _CLIENT_REQUEST_ENTRY = "linktools.model.client_request_entry"
@@ -206,13 +206,14 @@ class _OpenAIModelBinding:
         compare=False,
     )
 
-    input_mime_types: Sequence[str] = ()
+    input_types: InitVar[Sequence[str]] = ()
+    _input_mime_types: tuple[str, ...] = field(init=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, input_types: Sequence[str]) -> None:
         model = self.model.strip().removeprefix("openai:")
         if not self.route_id.strip() or not model:
             raise ValueError("OpenAI model binding is incomplete")
-        object.__setattr__(self, "input_mime_types", normalize_input_mime_types(self.input_mime_types))
+        object.__setattr__(self, "_input_mime_types", expand_input_types(input_types))
         if self.connection_resolver is not None and not callable(
             self.connection_resolver
         ):
@@ -244,7 +245,7 @@ class _OpenAIModelBinding:
             "model_identity": self.model_identity,
             "settings": settings,
         }
-        result["input_mime_types"] = list(self.input_mime_types)
+        result["input_mime_types"] = list(self._input_mime_types)
         return result
 
     def materialize(self) -> Model:

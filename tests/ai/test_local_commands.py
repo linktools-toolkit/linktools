@@ -201,13 +201,16 @@ assert not loaded, loaded
     assert expected_output in result.stdout
 
 
-def test_local_input_mime_types_preserve_workspace_allowlist(tmp_path: Path) -> None:
+def test_local_input_types_expand_workspace_categories(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path, {
         "model": "opaque-model",
-        "input_mime_types": ["application/pdf", "application/x-private", "image/*"],
+        "input_types": ["audio", "mime:application/x-private", "mime:image/*"],
     })
     binding = _local_runtime_models(workspace, Namespace(model=None, base_url=None, api_key=None)).capture().resolve("default")
-    assert binding.contract["input_mime_types"] == ["application/pdf", "application/x-private", "image/*"]
+    from typing import get_args
+    from linktools.ai.model import AudioMediaType
+
+    assert binding.contract["input_mime_types"] == sorted({*get_args(AudioMediaType), "application/x-private", "image/*"})
     assert "vision" not in binding.contract
     assert "inputs" not in binding.contract
 
@@ -232,16 +235,17 @@ def test_local_legacy_vision_settings_require_migration(monkeypatch: pytest.Monk
         config.set("OPENAI_VISION", value)
     else:
         monkeypatch.setenv(source, value)
-    with pytest.raises(AIError, match="input_mime_types") as raised:
+    with pytest.raises(AIError, match="input_types") as raised:
         _local_runtime_models(workspace, Namespace(model="opaque", base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
 @pytest.mark.parametrize("config", [
-    {"input_mime_types": None}, {"input_mime_types": {}},
-    {"input_mime_types": "image/png"}, {"input_mime_types": [123]},
-    {"input_mime_types": ["not-mime"]}, {"input_mime_types": ["*/*"]},
-    {"input_mime_types": [{"mime_type": "image/png"}]},
+    {"input_types": None}, {"input_types": {}},
+    {"input_types": "audio"}, {"input_types": [123]},
+    {"input_types": ["text"]}, {"input_types": ["image/png"]},
+    {"input_types": ["mime:*/*"]}, {"input_types": ["mime:"]},
+    {"input_types": [{"mime_type": "image/png"}]},
     {"input_capabilities": []}, {"unknown_inputs": "passthrough"},
 ])
 def test_local_input_invalid_configuration_fails_closed(tmp_path: Path, config: dict) -> None:
@@ -250,6 +254,16 @@ def test_local_input_invalid_configuration_fails_closed(tmp_path: Path, config: 
     with pytest.raises(AIError) as raised:
         _local_runtime_models(Workspace(tmp_path, config), Namespace(model="opaque", base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+def test_local_obsolete_input_field_does_not_silently_drop_permissions(tmp_path: Path) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    workspace = Workspace(tmp_path, {"input_mime_types": ["image/png"]})
+    with pytest.raises(AIError) as raised:
+        _local_runtime_models(workspace, Namespace(model="opaque", base_url=None, api_key=None))
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+    assert raised.value.safe_details["reason"] == "model_input_configuration_invalid"
 
 
 def test_local_missing_model_keeps_dependency_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

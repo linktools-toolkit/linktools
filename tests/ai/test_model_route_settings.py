@@ -78,7 +78,7 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
 
 def _input_binding(*, allow_files: bool = False) -> ModelBinding:
     return ModelRegistry.openai(
-        model="gpt-test", input_mime_types=("image/*", "application/*", "text/*") if allow_files else (),
+        model="gpt-test", input_types=("mime:image/*", "mime:application/*", "mime:text/*") if allow_files else (),
     ).capture().resolve("default")
 
 

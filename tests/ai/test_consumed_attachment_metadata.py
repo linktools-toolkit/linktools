@@ -338,7 +338,7 @@ async def test_openai_requests_keep_unified_metadata_and_drop_only_consumed_byte
 
     monkeypatch.setattr(_openai, "DefaultAsyncHttpxClient", client)
     binding = ModelRegistry.openai(
-        model="gpt-file-test", input_mime_types=("image/png",),
+        model="gpt-file-test", input_types=("mime:image/png",),
         api_key="test-key", base_url="https://file.invalid/v1", max_retries=0,
     ).capture().resolve("default")
     request = _bound_request(("evidence.png",))

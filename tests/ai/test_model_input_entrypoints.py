@@ -18,10 +18,18 @@ def test_default_runtime_reads_workspace_inputs_and_environment_model(
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     config = tmp_path / ".linktools" / "config.yaml"
     config.parent.mkdir()
-    config.write_text("input_mime_types:\n  - image/png\n")
+    config.write_text("input_types:\n  - audio\n  - document\n  - mime:audio/*\n  - mime:application/pdf\n")
     binding = _local_models(Workspace.load(tmp_path)).capture().resolve("default")
     assert binding.model_identity == "openai:testing/inputs"
-    assert binding.contract["input_mime_types"] == ["image/png"]
+    from linktools.ai.model import ModelRegistry
+
+    authored = ModelRegistry.openai(
+        model="testing/inputs",
+        input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
+    ).capture().resolve("default")
+    assert binding.contract == authored.contract
+    assert "audio/*" in binding.contract["input_mime_types"]
+    assert "application/pdf" in binding.contract["input_mime_types"]
 
 
 
@@ -31,7 +39,7 @@ def test_default_runtime_rejects_invalid_legacy_environment(
 ) -> None:
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
-    with pytest.raises(AIError, match="input_mime_types") as raised:
+    with pytest.raises(AIError, match="input_types") as raised:
         _local_models(Workspace.load(tmp_path))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details == {"reason": "legacy_vision_configuration"}

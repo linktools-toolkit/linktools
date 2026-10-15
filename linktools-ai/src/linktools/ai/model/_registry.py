@@ -26,7 +26,7 @@ class ModelRegistry:
         cls,
         *,
         model: str,
-        input_mime_types: Sequence[str] = (),
+        input_types: Sequence[str] = (),
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -37,13 +37,15 @@ class ModelRegistry:
     ) -> "ModelRegistry":
         """Create the default Chat route.
 
-        Only declared MIME types are allowed. Other resource budgets still apply.
+        input_types accepts image/audio/document/video SDK categories and
+        mime:<MIME type> patterns. Only their expanded MIME types are allowed;
+        provider encoding checks and resource budgets still apply.
         """
         registry = cls()
         registry.register_openai(
             "default",
             model=model,
-            input_mime_types=input_mime_types,
+            input_types=input_types,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
@@ -66,7 +68,7 @@ class ModelRegistry:
         route_id: str,
         *,
         model: str,
-        input_mime_types: Sequence[str] = (),
+        input_types: Sequence[str] = (),
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -81,7 +83,7 @@ class ModelRegistry:
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
-                input_mime_types=input_mime_types,
+                input_types=input_types,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,

@@ -535,7 +535,7 @@ def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyP
     config_dir = tmp_path / ".linktools"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(
-        "model: opaque-model\ninput_mime_types:\n  - image/png\n"
+        "model: opaque-model\ninput_types:\n  - image\n  - mime:audio/*\n"
     )
 
     class Server:
@@ -546,7 +546,10 @@ def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyP
             async with client(self.config.app) as http:
                 response = await http.get("/api/config")
                 assert "vision" not in response.json()
-                assert response.json()["input_mime_types"] == ["image/png"]
+                from typing import get_args
+                from linktools.ai.model import ImageMediaType
+
+                assert response.json()["input_mime_types"] == sorted({*get_args(ImageMediaType), "audio/*"})
                 assert "inputs" not in response.json()
 
 
@@ -562,7 +565,7 @@ def test_web_read_only_rejects_legacy_input_configuration(monkeypatch: pytest.Mo
 
     monkeypatch.setenv("OPENAI_VISION", "false")
     args = command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
-    with pytest.raises(CommandError, match="input_mime_types"):
+    with pytest.raises(CommandError, match="input_types"):
         command.run(args)
 
 

@@ -53,6 +53,7 @@ class Command(BaseCommand):
 
             _local_input_config(workspace)
             models = _local_runtime_models(workspace, args) if model else None
+            # Show resolved MIME permissions, not the authoring category labels.
             input_mime_types = models.capture().resolve("default").contract.get("input_mime_types") if models is not None else None
             async with AsyncExitStack() as stack:
                 runtime = None

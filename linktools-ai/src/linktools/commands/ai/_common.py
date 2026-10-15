@@ -110,21 +110,21 @@ def _local_input_config(
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
             "Legacy vision configuration was removed; remove vision/OPENAI_VISION "
-            "and configure input_mime_types in .linktools/config.yaml",
+            "and configure input_types in .linktools/config.yaml",
             retryable=False,
             safe_details={"reason": "legacy_vision_configuration"},
         )
     try:
-        if "input_capabilities" in workspace.config or "unknown_inputs" in workspace.config:
-            raise ValueError("use input_mime_types")
-        values = workspace.config.get("input_mime_types", [])
+        if any(key in workspace.config for key in ("input_capabilities", "unknown_inputs", "input_mime_types")):
+            raise ValueError("use input_types")
+        values = workspace.config.get("input_types", [])
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
-            raise ValueError("input_mime_types must be a list of MIME strings")
+            raise ValueError("input_types must be a list of input type strings")
         return tuple(values)
     except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid workspace input_mime_types configuration",
+            "Invalid workspace input_types configuration",
             retryable=False,
             safe_details={"reason": "model_input_configuration_invalid"},
         ) from error
@@ -139,7 +139,7 @@ def _local_models(
 ) -> "ModelRegistry":
     from linktools.ai.model import ModelRegistry
 
-    input_mime_types = _local_input_config(workspace)
+    input_types = _local_input_config(workspace)
     configured = workspace.config.get("model")
     selected_model = (
         model.strip()
@@ -154,7 +154,7 @@ def _local_models(
     try:
         return ModelRegistry.openai(
             model=selected_model,
-            input_mime_types=input_mime_types,
+            input_types=input_types,
             base_url=(
                 base_url
                 if base_url is not None
@@ -169,7 +169,7 @@ def _local_models(
     except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid local model configuration; check input_mime_types and connection settings",
+            "Invalid local model configuration; check input_types and connection settings",
             retryable=False,
             safe_details={"reason": "model_configuration_invalid"},
         ) from error

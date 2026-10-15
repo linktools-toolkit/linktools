@@ -31,21 +31,29 @@ environment prefix. Model file-input policy uses the existing workspace file
 
 ```yaml
 model: your-model
-input_mime_types:
-  - image/png
-  - application/pdf
+input_types:
+  - image
+  - document
+  - mime:audio/*
+  - mime:application/pdf
 ```
 
-Omitting `input_mime_types` means an empty attachment allowlist. Plain prompt text
-is unaffected; attachments must match an exact MIME type or a `type/*` family.
-The console shows the captured `input_mime_types` list. Matching permits an input
-but does not verify provider support; SDK encoding and resource limits still
-apply. Without a configured model, settings report that no model is configured.
+Omitting `input_types` means an empty attachment allowlist. The names `image`,
+`audio`, `document`, and `video` expand to the corresponding SDK Literal sets.
+Use `mime:` for explicit MIME values or `type/*` families; bare MIME strings and
+`text` are not categories. Plain prompt text is unaffected.
+
+The console's "Captured input MIME types" panel shows the expanded, normalized
+`input_mime_types` list from the captured contract. It does not show the original
+authoring tokens. These stored MIME permissions are not re-expanded at restore.
+A match permits an input but does not verify provider support; SDK encoding and
+resource limits still apply. Without a configured model, settings report that
+no model is configured.
 
 The old `--vision` flag is removed. Remove `OPENAI_VISION` and
 `LINKTOOLS_OPENAI_VISION` from environment/persisted configuration and workspace
 `vision` settings; any remaining value, even false or empty, produces a migration
-error instead of an implicit fallback. Use `input_mime_types` explicitly.
+error instead of an implicit fallback. Use `input_types` explicitly.
 
 ```bash
 ai-web --project /path/to/project --read-only

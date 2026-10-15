@@ -676,49 +676,60 @@ reservation when their durable contract requires it. Model transport retries
 use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
 to `tool_retries=10`, and output correction defaults to `output_retries=3`.
 
-Model attachments use one MIME allowlist, `input_mime_types`, which defaults to
-an empty list. Plain prompt text is unaffected. Attachments must match an exact
-MIME type or a `type/*` family; unmatched attachments are rejected. The normalized
-list is captured as the model contract's top-level `input_mime_types` field and
-contributes to its digest:
+Model attachments use one string list, `input_types`, which defaults to empty.
+Plain prompt text is unaffected; there is no `text` category. The built-in names
+`image`, `audio`, `document`, and `video` expand to their corresponding Pydantic AI
+MIME Literal values. Use a `mime:` prefix for an explicit MIME type or `type/*`
+family. Attachments that do not match the resulting MIME allowlist are rejected:
 
 ```python
 from linktools.ai.model import ModelRegistry
 
 models = ModelRegistry.openai(
     model="your-model",
-    input_mime_types=["image/*", "application/pdf"],
+    input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
 )
 ```
 
-For `lt ai run`, `lt ai acp`, and `lt ai web`, use the existing
-`.linktools/config.yaml` workspace configuration:
+For `lt ai run`, `lt ai acp`, and `lt ai web`, the existing
+`.linktools/config.yaml` uses the same strings:
 
 ```yaml
 model: your-model
-input_mime_types:
-  - image/*
-  - application/pdf
+input_types:
+  - audio
+  - document
+  - mime:audio/*
+  - mime:application/pdf
 ```
 
 The model package directly re-exports Pydantic AI's `AudioMediaType`,
 `ImageMediaType`, `DocumentMediaType`, and `VideoMediaType` Literal types with
-their SDK names and identity. MIME values remain open strings, including custom
-MIME types. `*/*` and partial wildcards are not accepted; actual attachments need
-concrete MIME types.
+their SDK names and identity. Category expansion uses those SDK sets, rather
+than treating a category as a wildcard. For example, `audio` means the SDK's
+known audio MIME values; `mime:audio/*` permits the whole audio family.
+Custom values such as `mime:application/x-private` remain supported. Bare MIME
+strings, `mime:*/*`, and partial wildcards are not accepted; actual attachments
+still need concrete MIME types. Text files can be selected explicitly, for
+example with `mime:text/plain`, without changing ordinary prompt text handling.
 
-This allowlist declares what the application permits. It does not guarantee
-that the provider or model supports those formats. LinkTools does not infer or
-probe real provider support from model names. SDK encoding restrictions and
-existing resource limits still apply. Transport selection is internal, with no
-status, transport, passthrough, or per-MIME byte-limit configuration. Web settings
-show the captured `input_mime_types` list.
+Capture expands categories, normalizes, deduplicates, and sorts the MIME values.
+The model contract stores only that resolved `input_mime_types` list, which
+contributes to its digest. Restore uses the stored list without expanding it
+again against a potentially different SDK. `input_mime_types` is the captured
+contract/display field, not the Python or YAML authoring argument. Web settings
+show the actual captured MIME values rather than the authoring category labels.
+
+The allowlist declares application permission, not guaranteed provider support.
+SDK encoding restrictions and existing resource limits still apply. Transport
+selection is internal; no extra status, transport, passthrough, or per-MIME
+byte-limit configuration is needed.
 
 The old `vision` API argument and `--vision` flag have been removed.
 Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and
 persisted configuration, and remove workspace `vision` settings; their presence
 is a migration error, even when false or empty. There is no implicit mapping to
-new declarations. Recovering a historical execution requires an explicitly
+`input_types`. Recovering a historical execution requires an explicitly
 registered binding matching its persisted historical contract. Historical input
 semantics are retained only at that restore boundary; a new binding with omitted
 declarations cannot recover them or replace them with its empty allowlist contract.

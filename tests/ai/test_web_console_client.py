@@ -133,6 +133,8 @@ assert.equal(nodes['settings-dialog'].open,true);
 assert.equal('Vision' in nodes['settings-content'].children[0].value,false);
 const card=nodes['settings-content'].children[1];
 assert.deepEqual(JSON.parse(card.children.find(item=>item.tag==='pre').text),inputs);
+assert.equal(card.children.find(item=>item.tag==='h3').text,'Captured input MIME types');
+assert.match(card.children.find(item=>item.tag==='p').text,/expanded when the model is captured/);
 assert.match(card.children.find(item=>item.tag==='p').text,/provider support has not been verified/);
 state.config.input_mime_types=null;
 showSettings();

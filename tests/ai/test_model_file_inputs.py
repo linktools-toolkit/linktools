@@ -24,7 +24,7 @@ from linktools.ai.model._openai import _RetryingModel
 
 
 def _binding(*mime_types: str, **kwargs: object) -> ModelBinding:
-    return ModelRegistry.openai(model="gpt-file-test", input_mime_types=mime_types, **kwargs).capture().resolve("default")
+    return ModelRegistry.openai(model="gpt-file-test", input_types=tuple("mime:" + item for item in mime_types), **kwargs).capture().resolve("default")
 
 
 @pytest.mark.parametrize("mime", ("application/pdf", "text/plain", "image/png", "audio/wav"))
@@ -43,16 +43,16 @@ def test_family_allowlist_matches_only_its_mime_family(pattern: str, mime: str) 
         validate_model_input(binding, "audio/wav")
 
 
-@pytest.mark.parametrize("values", (None, "image/png", [None], ["*/*"], ["image/p*"], ["image"], ["image/png;foo=bar"]))
+@pytest.mark.parametrize("values", (None, "image/png", [None], ["mime:*/*"], ["mime:image/p*"], ["text"], ["mime:image/png;foo=bar"]))
 def test_invalid_mime_declarations_fail_at_capture(values: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        ModelRegistry.openai(model="test", input_mime_types=values)
+        ModelRegistry.openai(model="test", input_types=values)
 
 
 def test_captured_allowlist_is_normalized_immutable_and_restores_strictly() -> None:
-    values = [" IMAGE/PNG ", "image/png", "text/*"]
-    resolver = ModelRegistry.openai(model="test", input_mime_types=values).capture()
-    values.append("application/pdf")
+    values = ["mime: IMAGE/PNG ", "mime:image/png", "mime:text/*"]
+    resolver = ModelRegistry.openai(model="test", input_types=values).capture()
+    values.append("mime:application/pdf")
     original = resolver.resolve("default")
     assert original.contract["input_mime_types"] == ["image/png", "text/*"]
     stored = json.loads(json.dumps(original.contract))
@@ -226,8 +226,93 @@ def test_committed_openai_vision_payload_restores_only_matching_host_binding(vis
 
     current = ModelRegistry.openai(
         model="gpt-file-test", max_tokens=2048,
-        input_mime_types=("image/*",) if vision else (),
+        input_types=("mime:image/*",) if vision else (),
     ).capture()
     with pytest.raises(AIError) as raised:
         current.restore(stored, route_id="default")
     assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+
+
+@pytest.mark.parametrize("category,alias_name", (
+    ("image", "ImageMediaType"), ("audio", "AudioMediaType"),
+    ("document", "DocumentMediaType"), ("video", "VideoMediaType"),
+))
+def test_input_categories_capture_the_official_sdk_mime_set(category: str, alias_name: str) -> None:
+    from typing import get_args
+    import pydantic_ai.messages as messages
+
+    binding = ModelRegistry.openai(model="test", input_types=[category]).capture().resolve("default")
+    assert binding.contract["input_mime_types"] == sorted(set(get_args(getattr(messages, alias_name))))
+
+
+def test_categories_explicit_mime_and_duplicates_share_canonical_contract() -> None:
+    from typing import get_args
+    from pydantic_ai.messages import ImageMediaType, DocumentMediaType
+
+    registry = ModelRegistry.openai(model="test", input_types=[
+        "image", "document", "mime:audio/*", "mime:image/png", "image", "mime:application/x-private",
+    ])
+    resolver = registry.capture()
+    expected = sorted(set((*get_args(ImageMediaType), *get_args(DocumentMediaType), "audio/*", "application/x-private")))
+    explicit = ModelRegistry.openai(model="test", input_types=["mime:" + mime for mime in expected]).capture()
+    binding = resolver.resolve("default")
+    assert binding.contract["input_mime_types"] == expected
+    assert binding.contract == explicit.resolve("default").contract
+    assert resolver.restore(json.loads(json.dumps(binding.contract)), route_id="default").contract == binding.contract
+    assert validate_model_input(binding, "audio/wav") is None
+    assert validate_model_input(binding, "application/x-private", input_kind="uploaded") is None
+
+
+@pytest.mark.parametrize("value", ("ImageMediaType", "image/png", "text", "IMAGE", "mime:", "mime:mime:audio/*", 1, None))
+def test_authoring_rejects_unknown_tokens_without_coercion(value: object) -> None:
+    with pytest.raises(ValueError):
+        ModelRegistry.openai(model="test", input_types=[value])
+
+
+def test_authoring_rejects_literal_type_objects() -> None:
+    from typing import Literal
+    from pydantic_ai.messages import ImageMediaType
+
+    for value in (ImageMediaType, Literal["application/x-private"]):
+        with pytest.raises(ValueError):
+            ModelRegistry.openai(model="test", input_types=[value])
+
+
+@pytest.mark.parametrize("value", ("image", "ImageMediaType", "mime:audio/*", "mime:application/pdf"))
+def test_captured_contract_does_not_expand_authoring_tokens(value: str) -> None:
+    class Binding:
+        provider = "test"
+        model_identity = "test:local"
+        contract = {"input_mime_types": [value]}
+
+    with pytest.raises(AIError) as raised:
+        validate_model_input(Binding(), "image/png")
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+def test_captured_mime_list_is_not_reexpanded_after_sdk_category_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typing import Literal
+    from linktools.ai.model import _input
+
+    original = ModelRegistry.openai(model="test", input_types=["image"]).capture().resolve("default")
+    stored = json.loads(json.dumps(original.contract))
+    monkeypatch.setattr(_input, "ImageMediaType", Literal["image/png", "image/x-future"])
+    assert original.contract == stored
+    assert validate_model_input(original, "image/jpeg") is None
+    current = ModelRegistry.openai(model="test", input_types=["image"]).capture()
+    with pytest.raises(AIError) as raised:
+        current.restore(stored, route_id="default")
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+
+
+def test_captured_contract_rejects_sdk_literal_objects() -> None:
+    from pydantic_ai.messages import ImageMediaType
+
+    class Binding:
+        provider = "test"
+        model_identity = "test:local"
+        contract = {"input_mime_types": [ImageMediaType]}
+
+    with pytest.raises(AIError) as raised:
+        validate_model_input(Binding(), "image/png")
+    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID

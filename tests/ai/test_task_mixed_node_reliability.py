@@ -252,7 +252,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
 class _TaskTestModelBinding:
     _input_binding = ModelRegistry.openai(
-        model="gpt-task-test", input_mime_types=("text/plain",),
+        model="gpt-task-test", input_types=("mime:text/plain",),
     ).capture().resolve("default")
     route_id = _input_binding.route_id
     provider = _input_binding.provider
