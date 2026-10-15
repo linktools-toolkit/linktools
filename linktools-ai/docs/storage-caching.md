@@ -117,8 +117,24 @@ source membership and domain retention remain the read authority. Host adapters
 must bound network operation time as well as capacity; a failed backend is a
 miss, but an unbounded network wait still delays the read.
 
-One active `FilesystemContentCache` instance must own a cache directory. Its
-index and capacity accounting are instance-local. Sharing that directory
-between independent instances or worker processes does not provide a shared
-LRU or a global capacity bound. Hosts can use separate stable worker directories
-and account for the sum of their budgets and abandoned-directory cleanup.
+`FilesystemContentCache` instances may share a directory. Mutations use one
+filesystem lock and a recoverable shared usage record; local access order only
+provides eviction candidates, not an independent capacity total. Each instance
+calibrates on its first mutation. Missing, damaged or interrupted accounting is
+rebuilt from managed regular files; unknown files are not evicted.
+
+A successfully published `put` leaves the shared payload charge within that writer's
+`max_bytes`. Budgets remain instance configuration: a smaller writer can shrink
+the cache, and a larger writer can later grow it again. An inactive smaller
+writer does not enforce its limit. Oversized values are skipped; `delete` removes
+only its target and does not shrink unrelated entries. This is not a fixed
+global-minimum quota or exact cross-process LRU.
+
+Normal mutations inspect their target and necessary eviction candidates instead
+of rescanning all content. Initial calibration, interrupted-operation recovery
+and stale-candidate reconciliation have additional directory cost. Reads remain
+unlocked. Cancellation waits for the mutation worker to settle before releasing
+the lock. This disposable cache does not promise persistence through machine
+power loss, and its payload budget is not a limit on physical disk allocation or
+temporary-file peaks. All writers sharing a root must use this coordination
+protocol; old implementations or external edits cannot participate safely.

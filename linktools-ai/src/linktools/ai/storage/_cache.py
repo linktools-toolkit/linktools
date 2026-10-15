@@ -14,7 +14,10 @@ preload uses it to avoid reading whole files just to decide a cache miss."""
 
 import asyncio
 import hashlib
+import json
 import os
+import re
+import stat
 import tempfile
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -22,6 +25,7 @@ from pathlib import Path
 from typing import Protocol, TypeAlias
 
 from ._files import sync_directory
+from ._lock import FilesystemMutationLock
 
 ContentCacheKey: TypeAlias = str
 
@@ -142,11 +146,15 @@ class InMemoryContentCache:
 class FilesystemContentCache:
     """Bounded second-tier cache with unlocked content reads.
 
-    Mutations retain the async lock until file changes and accounting settle,
-    including when the caller is cancelled. Lock waiters occupy no workers.
-    The index is built on the first write attempt whose scan succeeds. Earlier
-    reads remain available without accounting. ``contains_many`` reads no content.
-    Empty entries consume one byte of budget so their count remains bounded.
+    Writers sharing a root coordinate through one filesystem mutation lock and
+    a recoverable total-charge record. A successful admitted put meets that
+    writer's budget; different instance budgets do not establish a fixed quota.
+    Each instance calibrates on its first mutation, and interrupted mutations
+    trigger recovery. Normal writes stat only the target and eviction candidates.
+    Local access order is approximate across instances, not a global LRU.
+    Empty entries consume one byte of budget. Only recognized regular content
+    files are charged or evicted. This disposable cache does not promise
+    persistence through machine power loss.
     """
 
     def __init__(self, root: "str | Path", *, max_bytes: int) -> None:
@@ -155,11 +163,11 @@ class FilesystemContentCache:
         self.root = Path(root).resolve()
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
-        self._indexed = False
         # Tuple values are intentionally replaced on writes. Identity lets an
         # unlocked read detect that a newer entry replaced the one it observed.
         self._entries: OrderedDict[str, tuple[int]] = OrderedDict()
         self._total = 0
+        self._indexed = False
 
     @staticmethod
     def _name(key: ContentCacheKey) -> str:
@@ -178,7 +186,6 @@ class FilesystemContentCache:
             async with self._lock:
                 if observed is not None and self._entries.get(path.name) is observed:
                     del self._entries[path.name]
-                    self._total -= observed[0]
             return None
         except OSError:
             return None
@@ -193,38 +200,148 @@ class FilesystemContentCache:
         await self._mutate(lambda: self._put(key, content))
 
     def _put(self, key: ContentCacheKey, content: bytes) -> None:
-        if not self._ensure_index():
-            return
-        self._put_sync(key, content)
-        name = self._name(key)
-        previous = self._entries.pop(name, None)
-        if previous is not None:
-            self._total -= previous[0]
-        charge = _content_charge(len(content))
-        self._entries[name] = (charge,)
-        self._total += charge
-        while self._total > self.max_bytes and self._entries:
-            victim, entry = next(iter(self._entries.items()))
-            (self.root / victim).unlink(missing_ok=True)
-            self._entries.pop(victim)
-            self._total -= entry[0]
+        try:
+            if not self._begin_mutation():
+                return
+            name = self._name(key)
+            previous = self._file_charge(self.root / name)
+            if previous is None:
+                self._write_control(dirty=False)
+                return
+            charge = _content_charge(len(content))
+            self._evict(self.max_bytes - charge + previous, exclude=name)
+            self._put_sync(key, content)
+            self._entries.pop(name, None)
+            self._entries[name] = (charge,)
+            self._total += charge - previous
+            self._write_control(dirty=False)
+        except OSError:
+            # Dirty accounting survives failures before or after publication.
+            # The next writer must reconcile actual files before changing them.
+            self._indexed = False
+            self._ensure_index()
 
     async def delete(self, key: ContentCacheKey) -> None:
         await self._mutate(lambda: self._delete_sync(key))
 
     def _delete_sync(self, key: ContentCacheKey) -> None:
-        name = self._name(key)
         try:
-            (self.root / name).unlink(missing_ok=True)
+            if not self._begin_mutation():
+                return
+            name = self._name(key)
+            path = self.root / name
+            previous = self._file_charge(path)
+            if previous:
+                path.unlink()
+                self._total -= previous
+            self._entries.pop(name, None)
+            self._write_control(dirty=False)
         except OSError:
-            return
-        previous = self._entries.pop(name, None)
-        if previous is not None:
-            self._total -= previous[0]
+            self._indexed = False
+            self._ensure_index()
+
+    def _file_charge(self, path: Path) -> "int | None":
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return 0
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        return _content_charge(info.st_size)
+
+    def _evict(self, limit: int, *, exclude: str) -> None:
+        refreshed = False
+        while self._total > limit:
+            victim = next((name for name in self._entries if name != exclude), None)
+            if victim is None:
+                if refreshed:
+                    raise OSError("cache accounting has no remaining eviction candidates")
+                self._refresh_candidates()
+                refreshed = True
+                continue
+            self._entries.pop(victim)
+            path = self.root / victim
+            charge = self._file_charge(path)
+            if charge:
+                path.unlink()
+                self._total -= charge
+            elif not refreshed:
+                # One stale candidate can mean another writer replaced the
+                # whole local set. Reconcile names once, not a stat per miss.
+                self._refresh_candidates()
+                self._entries.pop(victim, None)
+                refreshed = True
+
+    def _refresh_candidates(self) -> None:
+        with os.scandir(self.root) as items:
+            names = dict.fromkeys(
+                item.name for item in items
+                if re.fullmatch(r"[0-9a-f]{64}", item.name) is not None
+            )
+        entries = OrderedDict(
+            (name, entry) for name, entry in self._entries.items() if name in names
+        )
+        entries.update((name, (0,)) for name in names if name not in entries)
+        self._entries = entries
+
+    def _begin_mutation(self) -> bool:
+        temporary = self.root / ".content-cache.control.tmp"
+        charge = self._file_charge(temporary)
+        if charge is None:
+            raise OSError("cache control temporary is not a regular file")
+        if charge:
+            temporary.unlink()
+        control = self._read_control()
+        if not self._indexed or control is None or control[1]:
+            if not self._ensure_index():
+                return False
+        else:
+            self._total = control[0]
+        self._write_control(dirty=True)
+        self._indexed = True
+        return True
+
+    def _read_control(self) -> "tuple[int, bool] | None":
+        path = self.root / ".content-cache.control"
+        charge = self._file_charge(path)
+        if charge is None:
+            raise OSError("cache control is not a regular file")
+        if not charge:
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(4097)
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError, RecursionError):
+            return None
+        if (
+            len(raw) > 4096
+            or not isinstance(value, dict)
+            or set(value) != {"total", "dirty"}
+            or type(value["total"]) is not int
+            or value["total"] < 0
+            or type(value["dirty"]) is not bool
+        ):
+            return None
+        return value["total"], value["dirty"]
+
+    def _write_control(self, *, dirty: bool) -> None:
+        # A fixed reserved temporary cannot accumulate if a writer dies before
+        # publishing dirty. Its lifetime is protected by the root mutation lock.
+        temporary = self.root / ".content-cache.control.tmp"
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(json.dumps(
+                    {"total": self._total, "dirty": dirty}, separators=(",", ":"),
+                ).encode("utf-8"))
+            os.replace(temporary, self.root / ".content-cache.control")
+        finally:
+            temporary.unlink(missing_ok=True)
 
     async def _mutate(self, operation: Callable[[], None]) -> None:
-        async with self._lock:
-            worker = asyncio.create_task(asyncio.to_thread(operation))
+        async with self._lock, FilesystemMutationLock(self.root / ".content-cache.lock"):
+            worker = asyncio.create_task(asyncio.to_thread(self._run_mutation, operation))
             cancelled = False
             try:
                 while not worker.done():
@@ -236,6 +353,16 @@ class FilesystemContentCache:
             finally:
                 if cancelled:
                     raise asyncio.CancelledError
+
+    def _run_mutation(self, operation: Callable[[], None]) -> None:
+        try:
+            operation()
+        finally:
+            # Other writers can repeatedly delete our newest entries without
+            # causing capacity pressure. Bound retained heat independently of
+            # that shared total; names can be rediscovered when eviction needs it.
+            while len(self._entries) > self.max_bytes:
+                self._entries.popitem(last=False)
 
     async def contains_many(
         self,
@@ -252,34 +379,46 @@ class FilesystemContentCache:
         return frozenset(paths[name] for name in names)
 
     def _ensure_index(self) -> bool:
-        if self._indexed:
-            return True
         try:
-            entries = self._scan_index()
+            entries = dict(self._scan_index())
         except OSError:
             return False
-        self._entries.clear()
-        self._total = 0
-        for name, size in entries:
-            charge = _content_charge(size)
-            self._entries[name] = (charge,)
-            self._total += charge
-        self._indexed = True
+        # Reads started before this scan must not mutate its fresh accounting.
+        ordered = tuple(name for name in self._entries if name in entries)
+        ordered += tuple(name for name in entries if name not in self._entries)
+        self._entries = OrderedDict(
+            (name, (_content_charge(entries[name]),)) for name in ordered
+        )
+        self._total = sum(entry[0] for entry in self._entries.values())
         return True
 
     def _scan_index(self) -> "tuple[tuple[str, int], ...]":
-        if not self.root.exists():
-            return ()
-        return tuple(
-            (item.name, item.stat().st_size)
-            for item in self.root.iterdir()
-            if item.is_file()
-        )
+        entries: list[tuple[str, int]] = []
+        with os.scandir(self.root) as items:
+            for item in items:
+                content_file = re.fullmatch(r"[0-9a-f]{64}", item.name) is not None
+                temporary_file = re.fullmatch(
+                    r"\.content-cache-[0-9a-f]{64}\.[a-z0-9_]+\.tmp", item.name,
+                ) is not None
+                if not (content_file or temporary_file):
+                    continue
+                info = item.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if temporary_file:
+                    # The root lock covers every legitimate writer's temporary
+                    # file lifetime, so these can only belong to dead writers.
+                    os.unlink(item.path)
+                else:
+                    entries.append((item.name, info.st_size))
+        return tuple(entries)
 
     def _put_sync(self, key: ContentCacheKey, content: bytes) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(key)
-        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=self.root)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".content-cache-{path.name}.", suffix=".tmp", dir=self.root,
+        )
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(content)

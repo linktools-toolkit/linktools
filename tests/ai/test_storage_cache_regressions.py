@@ -3,6 +3,7 @@
 """Filesystem content cache accounting and cancellation behavior."""
 
 import asyncio
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -12,7 +13,12 @@ from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache
 
 
 def _disk_charge(root: Path) -> int:
-    return sum(max(1, path.stat().st_size) for path in root.iterdir() if path.is_file())
+    return sum(
+        max(1, path.stat().st_size)
+        for path in root.iterdir()
+        if re.fullmatch(r"[0-9a-f]{64}", path.name)
+        and not path.is_symlink() and path.is_file()
+    )
 
 
 @pytest.mark.asyncio
@@ -39,7 +45,7 @@ async def test_empty_filesystem_entries_consume_capacity(tmp_path: Path, reopen:
     retained = await cache.contains_many(("a", "b", "c"))
     assert "c" in retained
     assert len(retained) == 2
-    assert len(tuple(tmp_path.iterdir())) == 2
+    assert _disk_charge(tmp_path) == 2
     await cache.delete("c")
     await cache.put("d", b"")
     assert len(await cache.contains_many(("a", "b", "c", "d"))) == 2
@@ -67,7 +73,7 @@ async def test_preindex_delete_does_not_corrupt_capacity_accounting(
 
 
 @pytest.mark.asyncio
-async def test_failed_index_scan_does_not_mark_cache_indexed(
+async def test_failed_index_scan_abandons_write_and_can_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -79,11 +85,10 @@ async def test_failed_index_scan_does_not_mark_cache_indexed(
 
     monkeypatch.setattr(cache, "_scan_index", fail_scan)
     await cache.put("key", b"value")
-    assert cache._indexed is False
-    assert not tuple(tmp_path.iterdir())
+    assert await cache.get("key") is None
+    assert _disk_charge(tmp_path) == 0
     monkeypatch.setattr(cache, "_scan_index", original_scan)
     await cache.put("key", b"value")
-    assert cache._indexed is True
     assert await cache.get("key") == b"value"
 
 
