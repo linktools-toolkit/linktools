@@ -31,8 +31,7 @@ from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request
 from ._contract import ModelBinding
-from ._input import ModelInputCapability, UnknownModelInputs, normalize_input_capabilities, validate_model_inputs
-from ._openai_input import openai_input_transport
+from ._input import normalize_input_mime_types, validate_model_inputs
 
 _logger = environ.get_logger("ai.model.openai")
 _CLIENT_REQUEST_ENTRY = "linktools.model.client_request_entry"
@@ -207,22 +206,13 @@ class _OpenAIModelBinding:
         compare=False,
     )
 
-    input_capabilities: Sequence[ModelInputCapability] | None = None
-    unknown_inputs: UnknownModelInputs | None = None
+    input_mime_types: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         model = self.model.strip().removeprefix("openai:")
         if not self.route_id.strip() or not model:
             raise ValueError("OpenAI model binding is incomplete")
-        capabilities = normalize_input_capabilities(
-            () if self.input_capabilities is None else self.input_capabilities,
-            resolve_transport=lambda mime: openai_input_transport(mime, "binary", model),
-        )
-        unknown = self.unknown_inputs if self.unknown_inputs is not None else "reject"
-        if unknown not in {"reject", "passthrough"}:
-            raise ValueError("OpenAI unknown_inputs policy is invalid")
-        object.__setattr__(self, "input_capabilities", capabilities)
-        object.__setattr__(self, "unknown_inputs", unknown)
+        object.__setattr__(self, "input_mime_types", normalize_input_mime_types(self.input_mime_types))
         if self.connection_resolver is not None and not callable(
             self.connection_resolver
         ):
@@ -254,11 +244,7 @@ class _OpenAIModelBinding:
             "model_identity": self.model_identity,
             "settings": settings,
         }
-        result["inputs"] = {
-            "endpoint": "openai-chat",
-            "unknown": self.unknown_inputs,
-            "capabilities": [item.to_payload() for item in self.input_capabilities],
-        }
+        result["input_mime_types"] = list(self.input_mime_types)
         return result
 
     def materialize(self) -> Model:

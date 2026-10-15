@@ -137,7 +137,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     assert isinstance(result, ToolReturn)
     expected = {
         "path": "evidence.png",
-        "media_type": "image/png",
+        "mime_type": "image/png",
         "size": 3,
         "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
     }
@@ -145,6 +145,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     assert result.content is not None
     binary = [item for item in result.content if isinstance(item, BinaryContent)]
     assert len(binary) == 2
+    assert all(item.media_type == "image/png" for item in binary)
     assert binary[0].identifier != binary[1].identifier
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png", "evidence.png"]
@@ -170,7 +171,7 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
         "files": [
             {
                 "path": path,
-                "media_type": "image/png",
+                "mime_type": "image/png",
                 "size": 3,
                 "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
             }

@@ -586,7 +586,7 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
         score_view = (await run.scores()).items[0]
         bundle = await runtime.evaluations.read_evidence(score_view.evidence_ref, principal=PRINCIPAL)
         attachment = bundle.attachments[0]
-        assert attachment.media_type == "text/plain"
+        assert attachment.mime_type == "text/plain"
         with pytest.raises(AIError) as raised:
             await runtime.evaluations.read_evidence_attachment(bundle.ref, "ungranted-attachment", principal=PRINCIPAL)
         assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND

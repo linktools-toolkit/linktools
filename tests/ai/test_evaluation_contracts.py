@@ -224,7 +224,7 @@ def test_runtime_attachment_semantics_do_not_depend_on_storage_locator() -> None
     relocated = EvidenceAttachmentRef("image", "image/png", ObjectRef("two", "content/two", "a" * 64, 3))
     assert first.to_mapping() == relocated.to_mapping()
     assert first.to_mapping() == {
-        "kind": "runtime_content", "attachment_id": "image", "media_type": "image/png", "digest": "a" * 64, "size": 3,
+        "kind": "runtime_content", "attachment_id": "image", "mime_type": "image/png", "digest": "a" * 64, "size": 3,
     }
 
 

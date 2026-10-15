@@ -400,7 +400,7 @@ def _tool_file_occurrences(
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous_input_index = input_index
         media_type = raw.get("media_type")
-        if source == "read_file" and "mime_type" in raw:
+        if "mime_type" in raw:
             if "media_type" in raw and media_type != raw["mime_type"]:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             media_type = raw["mime_type"]

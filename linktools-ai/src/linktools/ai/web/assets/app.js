@@ -974,7 +974,7 @@ async function exportResult() {
 function showSettings() {
   clear('settings-content'); const config=state.config;if(!config)return;
   $('settings-content').append(properties({Workspace:config.workspace,'Asset root':config.asset_root,Namespace:config.namespace,Model:config.model || 'Not configured','API key':config.api_key_configured?'Configured':'Not configured','Base URL':config.base_url_configured?'Configured':'Default','Runtime DB':config.runtime_db,'Object store':config.object_store,'Metrics DB':config.metrics_db,Mode:config.read_only?'Read-only':'Local execution'}));
-  const inputs=element('div','detail-card');inputs.append(element('h3','','Model input declarations'),element('p','','Caller-declared policy; provider support has not been verified. Unknown inputs admitted by passthrough remain unverified.'),element('pre','json',config.inputs?json(config.inputs):'No model configured'));$('settings-content').append(inputs);
+  const inputs=element('div','detail-card');inputs.append(element('h3','','Model input declarations'),element('p','','Only matching attachment MIME types are allowed. Plain text is unaffected; provider support has not been verified.'),element('pre','json',config.input_mime_types?json(config.input_mime_types):'No model configured'));$('settings-content').append(inputs);
   const card=element('div','detail-card');card.append(element('h3','','Captured capabilities'));config.capabilities.forEach(item=>card.append(element('p','',`${item.kind} · ${item.id} · revision ${item.revision}`)));if(!config.capabilities.length)card.append(element('p','','Capability composition is loaded when an execution Runtime starts.'));$('settings-content').append(card);$('settings-dialog').showModal();
 }
 async function bootstrap() {

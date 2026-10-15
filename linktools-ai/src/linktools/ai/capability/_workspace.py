@@ -18,7 +18,7 @@ from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, Use
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..core import PromptLimits
-from ..model import ModelBinding, decide_model_input, validate_model_input, validate_model_inputs
+from ..model import ModelBinding, validate_model_input, validate_model_inputs
 from ..errors import AIError, ErrorCode
 from ..workspace import (
     SandboxOperationRejected,
@@ -71,7 +71,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
-    )),
+    ), revision=2),
     WorkspaceToolDeclaration("create_directory", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
@@ -112,7 +112,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v2",
-    ), revision=2),
+    ), revision=3),
     WorkspaceToolDeclaration("search_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
@@ -343,9 +343,7 @@ class _WorkspaceToolSurface:
                     },
                 )
             if self._model_binding is not None:
-                decision = decide_model_input(self._model_binding, media_type)
-                if not decision.allowed and decision.reason != "model_input_size_unknown":
-                    decision.require_allowed()
+                validate_model_input(self._model_binding, media_type)
             remaining = self._limits.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -358,7 +356,7 @@ class _WorkspaceToolSurface:
             metadata.append(
                 {
                     "path": path,
-                    "media_type": media_type,
+                    "mime_type": media_type,
                     "size": len(body),
                     "sha256": hashlib.sha256(body).hexdigest(),
                 }
@@ -471,7 +469,7 @@ class _WorkspaceToolSurface:
                     raise AIError(ErrorCode.STORAGE_CONFLICT,
                                   safe_details={"reason": "file_changed"})
                 source_bytes += cast(int, text.pop("bytes_read"))
-                text.update(input_index=index, mime_type=fact["media_type"],
+                text.update(input_index=index, mime_type=fact["mime_type"],
                             type_source=fact["type_source"])
                 if "detection_reason" in fact:
                     text["detection_reason"] = fact["detection_reason"]
@@ -480,7 +478,7 @@ class _WorkspaceToolSurface:
                 output_bytes += text_bytes
                 texts.append(text)
                 continue
-            media_type = fact["media_type"]
+            media_type = fact["mime_type"]
             if not isinstance(media_type, str) or not media_type:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
                               safe_details={"reason": "media_type_unknown"})
@@ -491,21 +489,24 @@ class _WorkspaceToolSurface:
             if size > remaining or size > source_budget - source_bytes:
                 raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
                               safe_details={"reason": "file_batch_bytes_limit"})
-            decision = None
             if self._model_binding is not None:
-                decision = validate_model_input(self._model_binding, media_type, size=size)
+                try:
+                    validate_model_input(self._model_binding, media_type)
+                except AIError as error:
+                    raise _file_input_error(error, item, media_type, size) from error
             body = await session.read_bytes(item, max_bytes=remaining,
                                             expected_state=cast(str, fact["state"]))
             binary = BinaryContent(data=body, media_type=media_type)
             if self._model_binding is not None:
-                validate_model_inputs(self._model_binding, (binary,))
+                try:
+                    validate_model_inputs(self._model_binding, (binary,))
+                except AIError as error:
+                    raise _file_input_error(error, item, media_type, size) from error
             total_bytes += len(body)
             source_bytes += len(body)
             files.append({"path": item, "input_index": index,
                           "mime_type": media_type, "type_source": fact["type_source"],
-                          "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
-                          "transport": decision.transport if decision else "unverified",
-                          "verified": decision.verified if decision else False})
+                          "size": len(body), "sha256": hashlib.sha256(body).hexdigest()})
             if "detection_reason" in fact:
                 files[-1]["detection_reason"] = fact["detection_reason"]
             content.append(binary)
@@ -891,12 +892,9 @@ def _workspace_tool(
 
 
 _FILE_REASON_MESSAGES = {
-    'model_input_unknown': 'This model route has no verified support declaration for this file type and transport. Choose a configured compatible route or an authorized conversion.',
     'model_input_not_supported': 'This model route explicitly does not support this file type. Choose a compatible route or an authorized conversion.',
     'input_encoding_not_supported': 'The current provider endpoint cannot encode this input. Use a supported transport or an authorized conversion.',
-    'model_input_media_type_unknown': 'The input has no known media type. Provide a recognized file type or explicitly convert it with an authorized tool.',
-    'model_input_size_unknown': 'This route requires a known input size. Use a bounded local file instead of an unmeasured reference.',
-    'model_input_size_exceeded': 'The file exceeds this model route’s byte limit. Use a smaller supported file or an authorized split/conversion.',
+    'model_input_mime_type_unknown': 'The input has no known media type. Provide a recognized file type or explicitly convert it with an authorized tool.',
     'uploaded_file_provider_mismatch': 'The uploaded file belongs to a different provider. Use a file reference for this provider or an authorized local copy.',
     'text_input_not_utf8': 'Whole-file text input must be valid UTF-8. Use a bounded text preview to inspect decoding loss, or explicitly convert the source.',
     'file_batch_timeout': 'The file batch exceeded its time budget. Retry with fewer files or a smaller text range.',
@@ -922,6 +920,18 @@ _FILE_REASON_MESSAGES = {
     'multiple_matches': 'old_text occurs more than once. Include enough surrounding text to identify exactly one match.',
     'invalid_text': 'The source contains binary content that cannot be safely edited as text. Use an authorized format-specific editor.',
 }
+
+
+
+def _file_input_error(error: AIError, path: str, mime_type: str, size: int) -> AIError:
+    details = dict(error.safe_details)
+    details.update(mime_type=mime_type, size=size)
+    # Only logical workspace-relative paths may enter model-visible failures.
+    if path and not path.startswith("/") and "\\" not in path and ":" not in path and ".." not in path.split("/"):
+        details["path"] = path
+    return AIError(error.code, category=error.category, retryable=error.retryable,
+                   operation_id=error.operation_id, safe_details=details,
+                   diagnostics=error.diagnostics)
 
 
 def _workspace_tool_rejected(
@@ -955,6 +965,11 @@ def _workspace_tool_rejected(
         name,
         error.code.value,
     )
+    if name == "read_file" and "size" in error.safe_details and "mime_type" in error.safe_details:
+        facts = {key: value[:160] if isinstance(value, str) else value
+                 for key, value in error.safe_details.items()
+                 if key in {"path", "size", "mime_type", "reason"}}
+        message += " File: " + json.dumps(facts, ensure_ascii=False)
     return ToolCallRetry(message)
 
 

@@ -38,7 +38,7 @@ from linktools.ai.core import (
     idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.model import ModelInputCapability, ModelRegistry
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
@@ -252,7 +252,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
 class _TaskTestModelBinding:
     _input_binding = ModelRegistry.openai(
-        model="gpt-task-test", input_capabilities=(ModelInputCapability("text/plain"),),
+        model="gpt-task-test", input_mime_types=("text/plain",),
     ).capture().resolve("default")
     route_id = _input_binding.route_id
     provider = _input_binding.provider

@@ -172,9 +172,9 @@ async def test_execution_freezes_materialized_input_once() -> None:
         canonical = await service._canonicalize_request(
             _request(files=("evidence.txt",))
         )
-        from linktools.ai.model import ModelInputCapability, ModelRegistry
+        from linktools.ai.model import ModelRegistry
         model = ModelRegistry.openai(
-            model="test", input_capabilities=(ModelInputCapability("text/plain"),),
+            model="test", input_mime_types=("text/plain",),
         ).capture().resolve("default")
         binding = SimpleNamespace(compiled_agent=SimpleNamespace(model=model))
         prepared = await service._freeze_input(canonical, binding)

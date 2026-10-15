@@ -31,27 +31,21 @@ environment prefix. Model file-input policy uses the existing workspace file
 
 ```yaml
 model: your-model
-input_capabilities:
-  - media_type: image/png
-    status: supported
-    max_bytes: 5000000
-  - media_type: application/pdf
-    status: unknown
-unknown_inputs: passthrough
+input_mime_types:
+  - image/png
+  - application/pdf
 ```
 
-Omitted declarations mean an empty capability list and `unknown_inputs: reject`.
-The console shows the full captured `inputs` contract, including each declaration's
-status, resolved transport, and byte limit. These are caller declarations, not
-verified provider support. Unknown inputs admitted through `passthrough` remain
-unverified, and transport/resource limits still apply. Without a configured model,
-settings report that no model is configured rather than inventing a binding.
+Omitting `input_mime_types` means an empty attachment allowlist. Plain prompt text
+is unaffected; attachments must match an exact MIME type or a `type/*` family.
+The console shows the captured `input_mime_types` list. Matching permits an input
+but does not verify provider support; SDK encoding and resource limits still
+apply. Without a configured model, settings report that no model is configured.
 
 The old `--vision` flag is removed. Remove `OPENAI_VISION` and
 `LINKTOOLS_OPENAI_VISION` from environment/persisted configuration and workspace
 `vision` settings; any remaining value, even false or empty, produces a migration
-error instead of an implicit fallback. Use `input_capabilities` and
-`unknown_inputs` explicitly.
+error instead of an implicit fallback. Use `input_mime_types` explicitly.
 
 ```bash
 ai-web --project /path/to/project --read-only
@@ -157,7 +151,7 @@ place; diagnostic exception messages remain redacted to protect credentials.
 | Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, paged SDK history/transcript, original client requests/responses, SDK prompt architecture, duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
 | Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | RuntimeHistory `trace` and filtered `history` |
 | Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
-| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, full inputs contract, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
+| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, captured input_mime_types allowlist, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
 
 Retry, fork, recovery and external-effect resolution are explicit actions in the

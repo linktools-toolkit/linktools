@@ -27,7 +27,7 @@ assert.match(renderMarkdown('![a < b](https://example.com/image.png)'),/a &lt; b
 assert.doesNotMatch(renderMarkdown('![a](https://example.com/image.png)'),/<img\b/);
 
 assert.deepEqual(inputPresentation('**source**'),{text:'**source**',attachments:[],structured:false});
-const canonical={version:1,prompt:{kind:'text',text:'Question **bold**'},files:[{path:'src/example.py',media_type:'text/plain',size:12}],attachments:[]};
+const canonical={version:1,prompt:{kind:'text',text:'Question **bold**'},files:[{path:'src/example.py',mime_type:'text/plain',size:12}],attachments:[]};
 assert.equal(inputPresentation(canonical).text,'Question **bold**');
 assert.deepEqual(inputPresentation(canonical).attachments,['src/example.py · text/plain · 12 bytes']);
 const nested={version:1,prompt:{kind:'items',items:[{kind:'text',text:'First'},{kind:'native',codec:'user-content-v1',value:{items:[{kind:'text-content',content:'Second',metadata:{text:'not a prompt'}},{kind:'image-url',url:'https://example.com/picture',media_type:'image/png'}]}},{kind:'binary',media_type:'application/pdf',size:40} ]}};

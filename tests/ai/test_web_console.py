@@ -511,7 +511,7 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
             async with client(self.config.app) as http:
                 response = await http.get("/api/config")
                 assert response.json()["read_only"]
-                assert response.json()["inputs"] is None
+                assert response.json()["input_mime_types"] is None
                 assert "vision" not in response.json()
                 assert response.json()["api_key_configured"]
                 assert "secret-key-value" not in response.text
@@ -528,16 +528,14 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
     assert not (tmp_path / ".linktools").exists()
 
 
-@pytest.mark.parametrize("unknown", ["reject", "passthrough"])
-def test_web_settings_show_complete_captured_inputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unknown: str) -> None:
+def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import linktools.commands.ai.web as web_command
     import uvicorn
 
     config_dir = tmp_path / ".linktools"
     config_dir.mkdir()
     (config_dir / "config.yaml").write_text(
-        "model: opaque-model\nunknown_inputs: " + unknown + "\n"
-        "input_capabilities:\n  - media_type: image/png\n    status: unknown\n    max_bytes: 1234\n"
+        "model: opaque-model\ninput_mime_types:\n  - image/png\n"
     )
 
     class Server:
@@ -548,10 +546,9 @@ def test_web_settings_show_complete_captured_inputs(monkeypatch: pytest.MonkeyPa
             async with client(self.config.app) as http:
                 response = await http.get("/api/config")
                 assert "vision" not in response.json()
-                assert response.json()["inputs"] == {
-                    "endpoint": "openai-chat", "unknown": unknown,
-                    "capabilities": [{"media_type": "image/png", "status": "unknown", "transport": "image", "max_bytes": 1234}],
-                }
+                assert response.json()["input_mime_types"] == ["image/png"]
+                assert "inputs" not in response.json()
+
 
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
@@ -565,7 +562,7 @@ def test_web_read_only_rejects_legacy_input_configuration(monkeypatch: pytest.Mo
 
     monkeypatch.setenv("OPENAI_VISION", "false")
     args = command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
-    with pytest.raises(CommandError, match="input_capabilities and unknown_inputs"):
+    with pytest.raises(CommandError, match="input_mime_types"):
         command.run(args)
 
 

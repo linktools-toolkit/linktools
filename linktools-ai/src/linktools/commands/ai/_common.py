@@ -8,7 +8,7 @@ from argparse import Namespace
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
@@ -30,7 +30,7 @@ ResultT = TypeVar("ResultT")
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
-    from linktools.ai.model import ModelInputCapability, ModelRegistry, UnknownModelInputs
+    from linktools.ai.model import ModelRegistry
     from linktools.ai.runtime import Runtime, RuntimeStorage
 
 OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
@@ -98,8 +98,7 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
 
 def _local_input_config(
     workspace: Workspace,
-) -> "tuple[tuple[ModelInputCapability, ...], UnknownModelInputs]":
-    from linktools.ai.model import ModelInputCapability
+) -> tuple[str, ...]:
 
     missing = object()
     if (
@@ -111,22 +110,21 @@ def _local_input_config(
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
             "Legacy vision configuration was removed; remove vision/OPENAI_VISION "
-            "and configure input_capabilities and unknown_inputs in .linktools/config.yaml",
+            "and configure input_mime_types in .linktools/config.yaml",
             retryable=False,
             safe_details={"reason": "legacy_vision_configuration"},
         )
     try:
-        values = workspace.config.get("input_capabilities", [])
-        unknown = workspace.config.get("unknown_inputs", "reject")
-        if not isinstance(values, list) or not all(isinstance(item, dict) for item in values):
-            raise ValueError("input_capabilities must be a list of declarations")
-        if unknown not in ("reject", "passthrough"):
-            raise ValueError("unknown_inputs must be reject or passthrough")
-        return tuple(ModelInputCapability(**item) for item in values), cast("UnknownModelInputs", unknown)
+        if "input_capabilities" in workspace.config or "unknown_inputs" in workspace.config:
+            raise ValueError("use input_mime_types")
+        values = workspace.config.get("input_mime_types", [])
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            raise ValueError("input_mime_types must be a list of MIME strings")
+        return tuple(values)
     except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid workspace input_capabilities or unknown_inputs configuration",
+            "Invalid workspace input_mime_types configuration",
             retryable=False,
             safe_details={"reason": "model_input_configuration_invalid"},
         ) from error
@@ -141,7 +139,7 @@ def _local_models(
 ) -> "ModelRegistry":
     from linktools.ai.model import ModelRegistry
 
-    input_capabilities, unknown_inputs = _local_input_config(workspace)
+    input_mime_types = _local_input_config(workspace)
     configured = workspace.config.get("model")
     selected_model = (
         model.strip()
@@ -156,8 +154,7 @@ def _local_models(
     try:
         return ModelRegistry.openai(
             model=selected_model,
-            input_capabilities=input_capabilities,
-            unknown_inputs=unknown_inputs,
+            input_mime_types=input_mime_types,
             base_url=(
                 base_url
                 if base_url is not None
@@ -172,7 +169,7 @@ def _local_models(
     except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.MODEL_CONFIG_INVALID,
-            "Invalid local model configuration; check input_capabilities, unknown_inputs, and connection settings",
+            "Invalid local model configuration; check input_mime_types and connection settings",
             retryable=False,
             safe_details={"reason": "model_configuration_invalid"},
         ) from error

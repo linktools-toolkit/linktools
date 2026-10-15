@@ -33,7 +33,7 @@ class _Session:
         assert path == "note.txt"
         assert max_bytes is None or max_bytes >= 4
         return {
-            "path": path, "is_text": True, "media_type": "text/plain",
+            "path": path, "is_text": True, "mime_type": "text/plain",
             "type_source": "content", "size": 4, "state": "note-v1", "bytes_read": 4,
         }
 

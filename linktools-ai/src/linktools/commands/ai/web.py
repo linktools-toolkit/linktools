@@ -53,7 +53,7 @@ class Command(BaseCommand):
 
             _local_input_config(workspace)
             models = _local_runtime_models(workspace, args) if model else None
-            inputs = models.capture().resolve("default").contract.get("inputs") if models is not None else None
+            input_mime_types = models.capture().resolve("default").contract.get("input_mime_types") if models is not None else None
             async with AsyncExitStack() as stack:
                 runtime = None
                 history = None
@@ -83,7 +83,7 @@ class Command(BaseCommand):
                     "runtime_db": {"path": str(root / "runtime.db"), "exists": (root / "runtime.db").exists()},
                     "object_store": {"path": str(root / "objects"), "exists": (root / "objects").exists()},
                     "metrics_db": {"path": str(root / "metrics.db"), "exists": (root / "metrics.db").exists()},
-                    "model": model or None, "inputs": inputs,
+                    "model": model or None, "input_mime_types": input_mime_types,
                     "base_url_configured": bool(args.base_url or os.getenv("OPENAI_BASE_URL", "").strip()),
                     "api_key_configured": bool(args.api_key or os.getenv("OPENAI_API_KEY", "").strip()),
                 }

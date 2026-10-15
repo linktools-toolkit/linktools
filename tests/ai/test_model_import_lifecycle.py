@@ -35,7 +35,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
         decisions = validate_model_inputs(
             binding, BinaryContent(b"offline file", media_type="application/x-offline")
         )
-        assert decisions[0].allowed and decisions[0].transport is None
+        assert decisions is None
         assert not any(name == "openai" or name.startswith("openai.") for name in sys.modules)
 
         assert model_binding_error(RuntimeError("unclassified")) is None
@@ -45,7 +45,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
         assert dict(selected.contract) == {
             "provider": "openai",
             "model_identity": "openai:gpt-test",
-            "inputs": {"endpoint": "openai-chat", "unknown": "reject", "capabilities": []},
+            "input_mime_types": [],
             "settings": {},
         }
     ''')

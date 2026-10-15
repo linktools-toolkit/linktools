@@ -78,6 +78,7 @@ assert.match(layers['Fixed Instructions (F0/F1)'],/sources: workspace/);
 assert.match(layers['Dynamic Instructions (O)'],/sources: repository/);
 assert.equal(layers['Conversation Context'],'1 message(s) · 1 part(s) · user-prompt=1');
 assert.equal(layers['Input Attachments'],'1 attachment · image/png');
+assert.equal(Object.fromEntries(promptLayers({messages:[{parts:[{part_kind:'user-prompt',content:[{mime_type:'application/pdf',size:12,digest:'b'.repeat(64)}]}]}]}))['Input Attachments'],'1 attachment · application/pdf');
 assert.equal(layers['Tool Contract'],'1 function · 0 native · 1 revealed · 0 deferred capabilities');
 assert.equal(layers['Model Output Contract'],'mode=text · text output=yes · image output=no');
 assert.doesNotMatch(JSON.stringify(layers),/duplicate instruction mirror|real system prompt|fixed workspace guidance|repository overlay/);
@@ -110,7 +111,7 @@ def test_web_messages_render_safe_markdown_and_stored_input() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_web_settings_preserve_full_input_policy_and_unverified_status() -> None:
+def test_web_settings_preserve_mime_allowlist_and_provider_uncertainty() -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the optional Web client tests")
@@ -124,19 +125,16 @@ const element=(tag,classes='',text='')=>({tag,text,children:[],append(...childre
 const nodes={'settings-content':element('div'),'settings-dialog':{showModal(){this.open=true;}}};
 const $=id=>nodes[id],clear=id=>{nodes[id].children=[];};
 const properties=value=>({tag:'dl',value});
-const inputs={endpoint:'openai-chat',unknown:'passthrough',capabilities:[
-  {media_type:'image/png',status:'unknown',transport:'image',max_bytes:1234},
-  {media_type:'application/x-private',status:'unsupported'},
-]};
-const state={config:{model:'opaque',inputs,capabilities:[]}};
+const inputs=['image/*','application/x-private'];
+const state={config:{model:'opaque',input_mime_types:inputs,capabilities:[]}};
 const showSettings=new Function('state','$','clear','element','properties','json',settings+';return showSettings;')(state,$,clear,element,properties,JSON.stringify);
 showSettings();
 assert.equal(nodes['settings-dialog'].open,true);
 assert.equal('Vision' in nodes['settings-content'].children[0].value,false);
 const card=nodes['settings-content'].children[1];
 assert.deepEqual(JSON.parse(card.children.find(item=>item.tag==='pre').text),inputs);
-assert.match(card.children.find(item=>item.tag==='p').text,/remain unverified/);
-state.config.inputs=null;
+assert.match(card.children.find(item=>item.tag==='p').text,/provider support has not been verified/);
+state.config.input_mime_types=null;
 showSettings();
 assert.equal(nodes['settings-content'].children.length,3);
 assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag==='pre').text,'No model configured');

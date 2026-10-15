@@ -116,23 +116,23 @@ def _facts(sample: bytes, name: str, size: int) -> dict[str, JsonValue]:
         sample_text = sum(byte == 0 or byte < 9 or 13 < byte < 32 for byte in sample) <= max(1, len(sample) // 100)
     opaque = detected in {None, "application/octet-stream", "application/x-empty", "inode/x-empty"}
     is_text = size == 0 or text_content or (opaque and sample_text and (extension is None or text_extension or Path(name).suffix.lower() == ".log"))
-    media_type = detected or extension or ("text/plain" if is_text else "application/octet-stream")
+    mime_type = detected or extension or ("text/plain" if is_text else "application/octet-stream")
     source = "content" if detected else ("extension" if extension else "unknown")
     # Generic text recognition does not identify a structured text subtype.
     # Preserve the extension hint without claiming content validation of it.
     generic_text_hint = detected == "text/plain" and text_extension and extension != detected
     if generic_text_hint:
-        media_type, source = extension, "extension"
+        mime_type, source = extension, "extension"
     if detected and extension and detected != extension and not generic_text_hint:
         source = "conflict"
     if size == 0 and is_text:
-        media_type = extension if text_extension else "text/plain"
+        mime_type = extension if text_extension else "text/plain"
     result: dict[str, JsonValue] = {
-        "media_type": media_type, "type_source": source, "size": size,
+        "mime_type": mime_type, "type_source": source, "size": size,
         "is_text": is_text, "bytes_read": len(sample),
     }
     if extension is not None:
-        result["extension_media_type"] = extension
+        result["extension_mime_type"] = extension
     if reason is not None:
         result["detection_reason"] = reason
     return result

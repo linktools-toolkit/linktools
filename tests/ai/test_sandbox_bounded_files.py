@@ -148,7 +148,7 @@ async def test_content_conflicts_and_container_types_are_not_guessed(
     session = await LocalSandbox().open(root=tmp_path)
     try:
         facts = await session.inspect_file("claim.png")
-        assert facts["media_type"] == "application/zip"
+        assert facts["mime_type"] == "application/zip"
         assert facts["type_source"] == "conflict" and not facts["is_text"]
         assert len(seen[0]) == 8192
         assert facts["bytes_read"] == 8192
@@ -272,7 +272,7 @@ async def test_installed_libmagic_detects_bytes_despite_filename(tmp_path: Path)
     session = await LocalSandbox().open(root=tmp_path)
     try:
         facts = await session.inspect_file("misnamed.png")
-        assert facts["media_type"] == "application/pdf"
+        assert facts["mime_type"] == "application/pdf"
         assert facts["type_source"] == "conflict"
         assert not facts["is_text"]
     finally:
@@ -405,7 +405,7 @@ async def test_system_libmagic_buffer_facts_with_validation_adapter(
         for name, raw, media_type, is_text in fixtures:
             (tmp_path / name).write_bytes(raw)
             result = await session.inspect_file(name)
-            assert result["media_type"] in ((media_type,) if isinstance(media_type, str) else media_type)
+            assert result["mime_type"] in ((media_type,) if isinstance(media_type, str) else media_type)
             assert result["is_text"] is is_text
             assert result["bytes_read"] == min(len(raw), 8192)
         assert max(probes) == 8192
@@ -482,7 +482,7 @@ async def test_missing_magic_import_is_checked_once_and_keeps_extension_hints(
     monkeypatch.setattr(builtins, "__import__", missing_import)
     for _ in range(3):
         facts = _file_io._facts(b"header", "image.png", 6)
-        assert facts["media_type"] == "image/png"
+        assert facts["mime_type"] == "image/png"
         assert facts["type_source"] == "extension"
         assert "detection_reason" not in facts
     assert attempts == 1
@@ -578,5 +578,7 @@ async def test_generic_text_hints_do_not_hide_structured_content_conflicts(
     monkeypatch.setitem(sys.modules, "magic", SimpleNamespace(Magic=Detector))
     result = _file_io._facts(b"text", name, 4)
     assert result["is_text"]
-    assert result["media_type"] == expected_type
+    assert result["mime_type"] == expected_type
     assert result["type_source"] == expected_source
+    if expected_source == "conflict":
+        assert result["extension_mime_type"] == "application/json"

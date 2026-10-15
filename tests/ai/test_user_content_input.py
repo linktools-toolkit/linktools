@@ -120,7 +120,7 @@ async def test_workspace_file_input_is_materialized_in_prompt_order() -> None:
     try:
         prompt = (
             "before",
-            WorkspaceFileInput("evidence.txt", "text/plain", "source-1"),
+            WorkspaceFileInput("evidence.txt", mime_type="text/plain", identifier="source-1"),
             "after",
         )
         canonical = await materializer.canonicalize_input(prompt)
@@ -156,12 +156,27 @@ async def test_workspace_file_input_is_materialized_in_prompt_order() -> None:
 
 
 def test_workspace_file_task_prompt_round_trips_without_reading() -> None:
-    prompt = ("inspect", WorkspaceFileInput("evidence.txt", identifier="source-1"))
+    prompt = ("inspect", WorkspaceFileInput("evidence.txt", mime_type="text/plain", identifier="source-1"))
 
     draft = task_prompt_draft(prompt)
     restored = decode_task_prompt_draft(draft)
 
     assert restored == prompt
+    assert restored[1].mime_type == "text/plain"
+    assert draft["items"][1] == {
+        "kind": "workspace-file", "path": "evidence.txt",
+        "media_type": "text/plain", "identifier": "source-1",
+    }
+
+
+def test_stored_workspace_file_prompt_decodes_to_mime_type() -> None:
+    item = {"kind": "workspace-file", "path": "evidence.txt",
+            "media_type": "text/plain", "identifier": "source-1"}
+    stored = {"kind": "task-user-content-v1", "items": [item],
+              "intent": [item]}
+    restored = decode_task_prompt_draft(stored)
+    assert restored == (WorkspaceFileInput("evidence.txt", mime_type="text/plain", identifier="source-1"),)
+    assert task_prompt_draft(restored) == stored
 
 
 @pytest.mark.asyncio

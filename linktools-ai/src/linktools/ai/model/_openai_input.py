@@ -5,20 +5,20 @@
 from pydantic_ai.messages import BinaryContent, DocumentUrl
 
 
-def openai_input_transport(media_type: str, input_kind: str, model: str) -> str | None:
+def openai_input_transport(mime_type: str, input_kind: str, model: str) -> str | None:
     """Return the actual SDK wire transport, or None when it cannot encode it."""
     if input_kind == "uploaded":
-        return None if media_type.startswith("image/") else "file-block"
+        return None if mime_type.startswith("image/") else "file-block"
     if input_kind == "image-url":
         return "image"
     if input_kind == "video-url":
         return None
-    probe = BinaryContent(b"", media_type=media_type)
+    probe = BinaryContent(b"", media_type=mime_type)
     if input_kind == "audio-url":
         return "audio" if _audio_supported(probe) else None
     if input_kind not in {"binary", "document-url"}:
         return None
-    if _text_like(media_type):
+    if _text_like(mime_type):
         return "text-inline"
     if input_kind == "binary" and probe.is_image:
         return "image"
@@ -31,7 +31,7 @@ def openai_input_transport(media_type: str, input_kind: str, model: str) -> str 
         return None
     if input_kind == "document-url":
         try:
-            DocumentUrl("https://input.invalid/file", media_type=media_type).format
+            DocumentUrl("https://input.invalid/file", media_type=mime_type).format
         except (KeyError, ValueError):
             return None
         return "file-block"
@@ -45,12 +45,12 @@ def _audio_supported(content: BinaryContent) -> bool:
         return False
 
 
-def _text_like(media_type: str) -> bool:
+def _text_like(mime_type: str) -> bool:
     # These MIME families are UTF-8 text blocks in the Chat adapter, not file parts.
     return (
-        media_type.startswith("text/")
-        or media_type in {"application/json", "application/xml", "application/yaml", "application/x-yaml", "application/toml"}
-        or media_type.endswith(("+json", "+xml"))
+        mime_type.startswith("text/")
+        or mime_type in {"application/json", "application/xml", "application/yaml", "application/x-yaml", "application/toml"}
+        or mime_type.endswith(("+json", "+xml"))
     )
 
 

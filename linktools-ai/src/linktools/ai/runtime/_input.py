@@ -278,7 +278,7 @@ class ExecutionInputMaterializer:
             values.append(
                 WorkspaceFileInput(
                     path,
-                    media_type=item.media_type,
+                    mime_type=item.mime_type,
                     identifier=item.identifier,
                 )
             )
@@ -413,7 +413,7 @@ class ExecutionInputMaterializer:
         access = self._access
         if access is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        media_type = item.media_type or self._media_type(
+        media_type = item.mime_type or self._media_type(
             item.path,
             field="user_prompt",
         )
@@ -590,7 +590,7 @@ def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
                 {
                     "kind": "workspace-file",
                     "path": item.path,
-                    "media_type": item.media_type,
+                    "media_type": item.mime_type,
                     "identifier": item.identifier,
                 }
             )
@@ -706,7 +706,7 @@ def captured_input_prompt(original: CanonicalUserInput, accepted: CanonicalUserI
     result: list[UserContent | WorkspaceFileInput] = []
     for item in original:
         if isinstance(item, WorkspaceFileInput):
-            key = (normalize_workspace_input_path(item.path), item.media_type, item.identifier)
+            key = (normalize_workspace_input_path(item.path), item.mime_type, item.identifier)
             matches = occurrences.get(key)
             if matches:
                 result.extend(matches.pop(0))
@@ -833,7 +833,7 @@ def _encode_task_prompt_item(item: UserContent | WorkspaceFileInput) -> JsonValu
         return {
             "kind": "workspace-file",
             "path": item.path,
-            "media_type": item.media_type,
+            "media_type": item.mime_type,
             "identifier": item.identifier,
         }
     return {

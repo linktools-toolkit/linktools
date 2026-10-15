@@ -676,20 +676,18 @@ reservation when their durable contract requires it. Model transport retries
 use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
 to `tool_retries=10`, and output correction defaults to `output_retries=3`.
 
-Model file-input declarations use `input_capabilities` and `unknown_inputs`.
-The default is an empty capability list with `unknown_inputs="reject"`;
-plain prompt text remains usable, but attachments require a declaration or
-explicit passthrough. Declarations are captured in the model's `inputs` contract
-and contribute to its digest:
+Model attachments use one MIME allowlist, `input_mime_types`, which defaults to
+an empty list. Plain prompt text is unaffected. Attachments must match an exact
+MIME type or a `type/*` family; unmatched attachments are rejected. The normalized
+list is captured as the model contract's top-level `input_mime_types` field and
+contributes to its digest:
 
 ```python
-from linktools.ai.model import ModelInputCapability, ModelRegistry
+from linktools.ai.model import ModelRegistry
 
 models = ModelRegistry.openai(
     model="your-model",
-    input_capabilities=(
-        ModelInputCapability("image/*", transport="image", max_bytes=5_000_000),
-    ),
+    input_mime_types=["image/*", "application/pdf"],
 )
 ```
 
@@ -698,47 +696,23 @@ For `lt ai run`, `lt ai acp`, and `lt ai web`, use the existing
 
 ```yaml
 model: your-model
-input_capabilities:
-  - media_type: image/*
-    status: supported
-    transport: image
-    max_bytes: 5000000
+input_mime_types:
+  - image/*
+  - application/pdf
 ```
 
-`status` is `supported`, `unsupported`, or `unknown`. An explicit `transport`
-can select an encoding such as `file-block`; the OpenAI adapter resolves omitted
-transports where known. MIME declarations are not a hard-coded model-support
-allowlist. `passthrough` allows unknown declarations through the available
-transport, and these inputs remain unverified; it does not bypass transport or
-resource limits. LinkTools does not infer or probe real provider support from
-model names or endpoints. The Web settings show the full captured `inputs`
-contract, including unknown policy, status, transport, and byte limits.
+The model package directly re-exports Pydantic AI's `AudioMediaType`,
+`ImageMediaType`, `DocumentMediaType`, and `VideoMediaType` Literal types with
+their SDK names and identity. MIME values remain open strings, including custom
+MIME types. `*/*` and partial wildcards are not accepted; actual attachments need
+concrete MIME types.
 
-Declarations may use an exact MIME type or a `type/*` family, such as
-`image/*`. A family with `supported` or `unknown` status requires an explicit
-transport; wildcard MIME types are not used to infer SDK encoding. `*/*` and
-partial wildcards are not accepted. Actual inputs still need concrete MIME
-types. The examples above configure an image-only allowlist with the default
-unknown-input rejection policy.
-
-`supported` is the host's explicit support/allowance declaration. A decision
-marked `verified` means that it matched such a declaration, not that LinkTools
-has tested every subtype against the live model. The adapter still rejects
-unsupported encodings, including uploaded image handles.
-
-The default unknown policy rejects PDF, audio and other undeclared attachments;
-plain prompt text is unaffected. Matching considers exact MIME rules before
-family rules for the actual SDK transport. An exact rule for another transport
-does not hide an applicable family rule. At each level, an `unsupported` rule
-denies every encoding, as before; otherwise the transport-specific rule applies.
-The selected rule supplies its status and byte limit. For example, an exact
-`image/png` rule can override an `image/*` rule for image encoding. A declaration
-does not bypass the adapter's actual SDK encoding limits. Explicit
-`unknown_inputs="passthrough"` remains available for undeclared inputs. As an
-advanced opt-in, callers can add `ModelInputCapability("application/pdf",
-status="unknown")` and explicitly select passthrough when unverified PDF inputs
-are intended; passthrough also permits other unknown inputs that the adapter can
-encode, rather than limiting the exception to PDF.
+This allowlist declares what the application permits. It does not guarantee
+that the provider or model supports those formats. LinkTools does not infer or
+probe real provider support from model names. SDK encoding restrictions and
+existing resource limits still apply. Transport selection is internal, with no
+status, transport, passthrough, or per-MIME byte-limit configuration. Web settings
+show the captured `input_mime_types` list.
 
 The old `vision` API argument and `--vision` flag have been removed.
 Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and
@@ -747,7 +721,7 @@ is a migration error, even when false or empty. There is no implicit mapping to
 new declarations. Recovering a historical execution requires an explicitly
 registered binding matching its persisted historical contract. Historical input
 semantics are retained only at that restore boundary; a new binding with omitted
-declarations cannot recover them or replace them with its empty/reject contract.
+declarations cannot recover them or replace them with its empty allowlist contract.
 
 Execution file input uses the same durable boundary:
 
@@ -768,7 +742,7 @@ from linktools.ai.core import WorkspaceFileInput
 result = (await agent.run(
     ("Review this evidence:", WorkspaceFileInput(
         "evidence/report.txt",
-        media_type="text/plain",
+        mime_type="text/plain",
         identifier="report-1",
     )),
 )).result

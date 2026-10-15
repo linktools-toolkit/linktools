@@ -68,7 +68,7 @@ class _RecordingSession:
         return await self._record("read_file", path, offset=offset, limit=limit)
 
     async def inspect_file(self, path: str, *, max_bytes=None):
-        return {"path": path, "is_text": True, "media_type": "text/plain",
+        return {"path": path, "is_text": True, "mime_type": "text/plain",
                 "type_source": "extension", "size": 1, "state": "test-state", "bytes_read": 1}
 
     async def read_text(self, path: str, **kwargs):
@@ -230,7 +230,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     )
     assert all(item.kind == "tool" for item in contributions)
     assert {item.id: item.revision for item in contributions} == {
-        item.id: 2 if item.id in {"read_file", "write_file", "search_files"} else 1
+        item.id: 3 if item.id == "read_file" else 2 if item.id in {"attach_files", "write_file", "search_files"} else 1
         for item in contributions
     }
     assert tuple(

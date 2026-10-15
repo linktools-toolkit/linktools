@@ -201,30 +201,20 @@ assert not loaded, loaded
     assert expected_output in result.stdout
 
 
-@pytest.mark.parametrize("unknown", ["reject", "passthrough"])
-def test_local_input_declarations_preserve_complete_workspace_policy(tmp_path: Path, unknown: str) -> None:
+def test_local_input_mime_types_preserve_workspace_allowlist(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path, {
         "model": "opaque-model",
-        "unknown_inputs": unknown,
-        "input_capabilities": [
-            {"media_type": "image/png", "status": "unknown", "max_bytes": 1234},
-            {"media_type": "application/x-private", "status": "supported", "transport": "file-block"},
-            {"media_type": "application/pdf", "status": "unsupported"},
-        ],
+        "input_mime_types": ["application/pdf", "application/x-private", "image/*"],
     })
     binding = _local_runtime_models(workspace, Namespace(model=None, base_url=None, api_key=None)).capture().resolve("default")
-    inputs = binding.contract["inputs"]
-    assert inputs["unknown"] == unknown
-    declarations = {item["media_type"]: item for item in inputs["capabilities"]}
-    assert declarations["image/png"] == {"media_type": "image/png", "status": "unknown", "transport": "image", "max_bytes": 1234}
-    assert declarations["application/x-private"]["transport"] == "file-block"
-    assert declarations["application/pdf"]["status"] == "unsupported"
+    assert binding.contract["input_mime_types"] == ["application/pdf", "application/x-private", "image/*"]
     assert "vision" not in binding.contract
+    assert "inputs" not in binding.contract
 
 
-def test_local_input_default_rejects_unknown_attachments(tmp_path: Path) -> None:
+def test_local_input_default_rejects_attachments(tmp_path: Path) -> None:
     binding = _local_runtime_models(Workspace(tmp_path, {}), Namespace(model="opaque", base_url=None, api_key=None)).capture().resolve("default")
-    assert binding.contract["inputs"] == {"endpoint": "openai-chat", "unknown": "reject", "capabilities": []}
+    assert binding.contract["input_mime_types"] == []
 
 
 @pytest.mark.parametrize("source", ["OPENAI_VISION", "LINKTOOLS_OPENAI_VISION", "workspace", "config"])
@@ -242,20 +232,17 @@ def test_local_legacy_vision_settings_require_migration(monkeypatch: pytest.Monk
         config.set("OPENAI_VISION", value)
     else:
         monkeypatch.setenv(source, value)
-    with pytest.raises(AIError, match="input_capabilities and unknown_inputs") as raised:
+    with pytest.raises(AIError, match="input_mime_types") as raised:
         _local_runtime_models(workspace, Namespace(model="opaque", base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
 @pytest.mark.parametrize("config", [
-    {"input_capabilities": None}, {"input_capabilities": {}},
-    {"input_capabilities": ["image/png"]},
-    {"input_capabilities": [{"media_type": "image/png", "extra": True}]},
-    {"input_capabilities": [{"media_type": "image/png", "max_bytes": 0}]},
-    {"unknown_inputs": None}, {"unknown_inputs": "allow"},
-    {"input_capabilities": [{"media_type": "image/png"}, {"media_type": "image/png", "transport": "image"}]},
-    {"input_capabilities": [{"media_type": "application/x-private"}]},
-    {"input_capabilities": [{"media_type": "image/png", "transport": "custom"}]},
+    {"input_mime_types": None}, {"input_mime_types": {}},
+    {"input_mime_types": "image/png"}, {"input_mime_types": [123]},
+    {"input_mime_types": ["not-mime"]}, {"input_mime_types": ["*/*"]},
+    {"input_mime_types": [{"mime_type": "image/png"}]},
+    {"input_capabilities": []}, {"unknown_inputs": "passthrough"},
 ])
 def test_local_input_invalid_configuration_fails_closed(tmp_path: Path, config: dict) -> None:
     from linktools.ai.errors import AIError, ErrorCode

@@ -4,6 +4,7 @@
 
 import base64
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from pydantic_ai.messages import BinaryContent, ToolReturn
 from linktools.ai.capability import CapabilityGroup, ToolCallRetry, workspace_capabilities
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelInputCapability, ModelRegistry
+from linktools.ai.model import ModelRegistry
 from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy, Workspace
 
 _PNG = base64.b64decode(
@@ -24,10 +25,10 @@ _PNG = base64.b64decode(
 def _binding():
     return ModelRegistry.openai(
         model="explicit-test",
-        input_capabilities=(
-            ModelInputCapability("image/png"),
-            ModelInputCapability("text/plain"),
-            ModelInputCapability("text/csv"),
+        input_mime_types=(
+            "image/png",
+            "text/plain",
+            "text/csv",
         ),
     ).capture().resolve("default")
 
@@ -84,13 +85,13 @@ async def test_unified_read_singleton_array_and_cursor_preserve_text(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_unified_read_explicit_text_attachment_reports_actual_transport(tmp_path: Path) -> None:
+async def test_unified_read_explicit_text_attachment_preserves_mime_type(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("whole text", encoding="utf-8")
     session = await LocalSandbox().open(root=tmp_path)
     try:
         result = await _tools(tmp_path, session)["read_file"].function("notes.txt", as_file=True)
         assert result.return_value["texts"] == []
-        assert result.return_value["files"][0]["transport"] == "text-inline"
+        assert result.return_value["files"][0]["mime_type"] == "text/plain"
         assert result.content[0].data == b"whole text"
     finally:
         await session.close()
@@ -122,9 +123,13 @@ async def test_unified_read_later_failure_returns_no_partial_batch(tmp_path: Pat
     (tmp_path / "image.png").write_bytes(_PNG)
     session = await LocalSandbox().open(root=tmp_path)
     try:
-        denied = ModelRegistry.openai(model="no-inputs", input_capabilities=()).capture().resolve("default")
-        with pytest.raises(ToolCallRetry):
+        denied = ModelRegistry.openai(model="no-inputs", input_mime_types=()).capture().resolve("default")
+        with pytest.raises(ToolCallRetry) as rejected:
             await _tools(tmp_path, session, binding=denied)["read_file"].function(["notes.txt", "image.png"])
+        facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
+        assert facts == {"reason": "model_input_not_supported", "mime_type": "image/png",
+                         "size": len(_PNG), "path": "image.png"}
+        assert "private preview" not in str(rejected.value)
         with pytest.raises(ToolCallRetry):
             await _tools(tmp_path, session)["read_file"].function(["notes.txt", "missing.txt"])
     finally:
@@ -184,15 +189,16 @@ def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: P
     contributions = CapabilityGroup("workspace", workspace=Workspace.load(tmp_path))._contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
-        "read_file": 2, "write_file": 2, "search_files": 2,
+        "read_file": 3, "write_file": 2, "search_files": 2,
     }
-    assert revisions["attach_files"] == revisions["edit_file"] == revisions["list_files"] == 1
+    assert revisions["attach_files"] == 2
+    assert revisions["edit_file"] == revisions["list_files"] == 1
 
 
 @pytest.mark.asyncio
 async def test_legacy_attach_obeys_explicit_model_route_before_publication(tmp_path: Path) -> None:
     (tmp_path / "report.pdf").write_bytes(b"%PDF-1.7\n")
-    binding = ModelRegistry.openai(model="no-files", input_capabilities=()).capture().resolve("default")
+    binding = ModelRegistry.openai(model="no-files", input_mime_types=()).capture().resolve("default")
     session = await LocalSandbox().open(root=tmp_path)
     try:
         with pytest.raises(ToolCallRetry):
@@ -269,11 +275,8 @@ async def test_explicit_skill_cli_converts_new_format_without_core_parser(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reason,expected", [
-    ("model_input_unknown", "no verified support declaration"),
     ("model_input_not_supported", "explicitly does not support"),
     ("input_encoding_not_supported", "endpoint cannot encode"),
-    ("model_input_size_unknown", "known input size"),
-    ("model_input_size_exceeded", "byte limit"),
     ("text_input_not_utf8", "valid UTF-8"),
     ("file_batch_timeout", "time budget"),
     ("file_batch_invalid", "nonempty path array"),
@@ -305,13 +308,53 @@ async def test_generic_text_detection_keeps_structured_text_attachment_hint(tmp_
     import mimetypes
     mimetypes.add_type(mime, Path(name).suffix)
     (tmp_path / name).write_text("key,value\none,two\n", encoding="utf-8")
-    binding = ModelRegistry.openai(model="known-text", input_capabilities=(ModelInputCapability(mime),)).capture().resolve("default")
+    binding = ModelRegistry.openai(model="known-text", input_mime_types=(mime,)).capture().resolve("default")
     session = await LocalSandbox().open(root=tmp_path)
     try:
         value = (await _tools(tmp_path, session, binding=binding)["read_file"].function(name, as_file=True)).return_value
         assert value["files"][0]["mime_type"] == mime
         assert "media_type" not in value["files"][0]
         assert value["files"][0]["type_source"] == "extension"
-        assert value["files"][0]["transport"] == "text-inline"
+        assert value["files"][0]["mime_type"] == mime
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,body,mime_type,as_file", [
+    ("report.pdf", b"%PDF-1.7\n", "application/pdf", False),
+    ("report.docx", b"PK\x03\x04\x00", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", False),
+    ("notes.txt", b"private whole text", "text/plain", True),
+])
+async def test_unsupported_attachment_reports_facts_without_content_or_native_detector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, body: bytes,
+    mime_type: str, as_file: bool,
+) -> None:
+    from linktools.ai.workspace import _file_io
+    monkeypatch.setattr(_file_io, "_magic_available", False)
+    (tmp_path / name).write_bytes(body)
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        denied = ModelRegistry.openai(model="no-inputs").capture().resolve("default")
+        with pytest.raises(ToolCallRetry) as rejected:
+            await _tools(tmp_path, session, binding=denied)["read_file"].function(name, as_file=as_file)
+        facts = json.loads(str(rejected.value).split(" File: ", 1)[1])
+        assert facts == {"reason": "model_input_not_supported", "mime_type": mime_type,
+                         "size": len(body), "path": name}
+        assert str(tmp_path) not in str(rejected.value)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_default_attachment_deny_keeps_bounded_text_preview_available(tmp_path: Path) -> None:
+    (tmp_path / "large.txt").write_text("line\n" * 10000, encoding="utf-8")
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        denied = ModelRegistry.openai(model="no-inputs").capture().resolve("default")
+        result = await _tools(tmp_path, session, binding=denied)["read_file"].function("large.txt", offset=1, limit=2)
+        assert result.return_value["texts"][0]["content"] == "line\nline\n"
+        assert result.return_value["files"] == []
+        assert not result.content
     finally:
         await session.close()

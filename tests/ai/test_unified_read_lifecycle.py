@@ -146,25 +146,32 @@ def test_legacy_attach_files_identity_and_read_strings_are_unchanged() -> None:
     ) == ()
 
 
-def test_stored_read_media_type_keeps_identity_and_facts_without_new_aliases() -> None:
+@pytest.mark.parametrize("tool", ["read_file", "attach_files"])
+def test_stored_file_tool_media_type_keeps_identity_and_facts(tool: str) -> None:
     current = _result()
     legacy = deepcopy(current)
     file = legacy.return_value["files"][0]
     file["media_type"] = file.pop("mime_type")
-    bound_current = _bind(current, "read-call")
-    bound_legacy = _bind(legacy, "read-call")
+    bound_current = _bind(current, "read-call", tool)
+    bound_legacy = _bind(legacy, "read-call", tool)
 
     assert bound_current.content[0].identifier == bound_legacy.content[0].identifier
     assert "media_type" not in bound_current.return_value["files"][0]
     assert "mime_type" not in bound_legacy.return_value["files"][0]
     assert request_attachment_facts(
-        [_request(bound_current, "read-call")], (), accepted_attachment_ids=set(),
+        [_request(bound_current, "read-call", tool)], (), accepted_attachment_ids=set(),
     ) == request_attachment_facts(
-        [_request(bound_legacy, "read-call")], (), accepted_attachment_ids=set(),
+        [_request(bound_legacy, "read-call", tool)], (), accepted_attachment_ids=set(),
     )
-    history = [_request(bound_legacy, "read-call")]
+    history = [_request(bound_legacy, "read-call", tool)]
     encoded = encode_model_messages(history)
     assert encode_model_messages(decode_model_messages(encoded)) == encoded
+
+    conflicting = deepcopy(current)
+    conflicting.return_value["files"][0]["media_type"] = "application/pdf"
+    with pytest.raises(AIError) as error:
+        _bind(conflicting, "read-call", tool)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.parametrize("value", [

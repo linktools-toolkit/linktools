@@ -38,6 +38,13 @@ An extension hint is not verified content.
 Directory listings only give extension hints and never probe every body.
 MIME recognition is not validation, safety approval, or proof of model support.
 
+Bounded text previews do not require attachment permission. Binary files and
+`as_file=True` require the configured model MIME permission and a supported
+provider encoding. A refusal reports the relative path, size, MIME type and
+reason without returning file contents. A batch remains atomic: one refused
+item fails the call, rather than publishing a partial set of attachments.
+PDF and Office files are not automatically converted or parsed as text.
+
 * Text/log/CSV/JSON/XML and other recognized text use bounded UTF-8 previews.
   Invalid UTF-8 is replaced with `lossy=true`; an empty file remains readable.
 * Images, PDF, audio, video, and other binary documents are attached only when the
@@ -50,49 +57,33 @@ MIME recognition is not validation, safety approval, or proof of model support.
   rendered, extracted, renamed, or unpacked. Use a selected trusted Skill and
   deployed CLI, or the host's existing authorized preparation stage.
 
-All new model bindings use `input_capabilities` and `unknown_inputs`. Omitting
-both produces an empty capability list and rejection of unknown file inputs;
-it does not restore an earlier input policy. A compatible route may explicitly
-choose `unknown_inputs="passthrough"`; admitted unknown inputs remain unverified.
-Passthrough cannot override SDK encoding, byte limits, Sandbox authorization,
-or permissions.
+All new model bindings use one `input_mime_types` allowlist. Its empty default
+rejects attachments; ordinary prompt text is unaffected. Exact MIME types and
+`type/*` families are allowed. Unmatched attachments are rejected. A match does
+not bypass SDK encoding, Sandbox authorization, resource limits, or permissions.
 
 The `vision` API argument and CLI flag are removed. Legacy environment or
-workspace settings must be removed and replaced with explicit declarations;
-they produce migration errors rather than becoming a second active policy.
-To recover historical executions, the host must explicitly register a binding
-whose contract matches the persisted historical contract. Only that restore
-boundary retains its historical input semantics; an ordinary new OpenAI binding
-with omitted declarations cannot recover those semantics or substitute its new
-empty/reject contract. Historical image permission is not proof that a remote
-model supports every image MIME.
+workspace settings produce migration errors and must be replaced with
+`input_mime_types`. Recovering a historical execution requires a binding whose
+contract matches its persisted historical contract; an ordinary new binding
+cannot substitute its empty allowlist for that contract.
 
 ### Minimal model declaration
 
 ```python
-from linktools.ai.model import ModelInputCapability, ModelRegistry
+from linktools.ai.model import ModelRegistry
 
 models = ModelRegistry.openai(
-    model="your-verified-model",
-    input_capabilities=(
-        ModelInputCapability("image/png"),
-        ModelInputCapability("application/pdf", max_bytes=8 * 1024 * 1024),
-        ModelInputCapability("text/csv"),
-    ),
+    model="your-model",
+    input_mime_types=["image/png", "application/pdf", "text/csv"],
 )
 ```
 
-The host is responsible for verifying that this provider/model accepts the listed
-MIME types. These declarations are examples, not claims about a named remote
-model. Exact MIME values avoid a wildcard such as image/* falsely asserting every
-codec. Unsupported declarations override passthrough for that MIME. The adapter
-infers transport and captures the resolved meaning; equivalent explicit/default
-transport declarations have the same contract. An advanced route that separately
-supports uploaded CSV file blocks may additionally declare
-`ModelInputCapability("text/csv", transport="file-block")`. The ordinary CSV
-statement only verifies its normal inline transport; it does not silently verify
-a different uploaded-file transport. `unknown_inputs="passthrough"` is explicit,
-unverified compatibility behavior, not a substitute for known support.
+The host is responsible for verifying that its provider/model accepts the listed
+MIME types. The allowlist grants application permission, not verified provider
+support. Transport selection remains internal; there is no separate status,
+transport, unknown-input, or per-MIME byte-limit configuration. The adapter still
+checks whether the actual SDK input can be encoded.
 
 ## Read contract
 
@@ -134,10 +125,12 @@ Runtime occurrence ID, while other inputs retain their caller/SDK identifier.
 URL or absolute-host-path identifiers are not echoed. Paths come from authorized
 structured input metadata, never from parsing arbitrary user text.
 
-The unified `read_file` uses `mime_type` in its `files`/`texts` result entries,
-retaining `input_index` and `sha256` where applicable. Legacy `attach_files` keeps
-its existing `media_type` contract, and old stored read results remain readable.
-SDK content and internal attachment facts retain their own `media_type` field.
+Workspace `inspect_file` facts and current `read_file`/`attach_files` result
+entries use `mime_type`; extension hints use `extension_mime_type`.
+`read_file` retains `input_index` and `sha256` where applicable. `attach_files`
+uses behavior revision 2 for its renamed output field. Old stored tool results
+remain readable without rewriting their fields. SDK content retains its
+`media_type` field at the adapter boundary.
 Runtime binding adds the existing attachment identifier to each new `read_file`
 file entry. These tool results already
 carry the metadata, so the SDK-added user content contains only the binary, not a
@@ -172,9 +165,10 @@ chunks and same-filesystem staging, still requiring O(N) IO and temporary disk.
 
 ## Migration and compatibility
 
-* Model-visible read_file/write_file/search_files change named behavior revision
-  from 1 to 2. New list_files starts at 1; unchanged tools and wire versions do not
-  change. Capture/recompile affected Agent bindings deliberately.
+* Model-visible `read_file` uses behavior revision 3 for unified reads with MIME
+  admission. `write_file`, `search_files`, and `attach_files` use revision 2.
+  New `list_files` starts at 1; unchanged tools and wire versions do not change.
+  Capture/recompile affected Agent bindings deliberately.
 * `attach_files(paths=[...])` becomes `read_file(path=[...])`; explicit whole-text
   attachment becomes `read_file(path=..., as_file=True)`.
 * `find_files("*.png")` becomes `list_files(include_glob="**/*.png")` for its old

@@ -16,8 +16,7 @@ async def run(project: Path) -> object:
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
     models = ModelRegistry.openai(
         model=model,
-        input_capabilities=(),
-        unknown_inputs="reject",
+        input_mime_types=(),
         base_url=os.environ.get("OPENAI_BASE_URL") or None,
         api_key=os.environ.get("OPENAI_API_KEY") or None,
     )

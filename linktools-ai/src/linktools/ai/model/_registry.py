@@ -12,7 +12,6 @@ from pydantic_ai.models import Model
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._contract import ModelBinding, ModelResolver
-from ._input import ModelInputCapability, UnknownModelInputs
 
 _logger = environ.get_logger("ai.model.registry")
 
@@ -27,8 +26,7 @@ class ModelRegistry:
         cls,
         *,
         model: str,
-        input_capabilities: Sequence[ModelInputCapability] | None = None,
-        unknown_inputs: UnknownModelInputs | None = None,
+        input_mime_types: Sequence[str] = (),
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -39,15 +37,13 @@ class ModelRegistry:
     ) -> "ModelRegistry":
         """Create the default Chat route.
 
-        Unknown file inputs are rejected unless passthrough is explicitly
-        selected. Other resource budgets still apply.
+        Only declared MIME types are allowed. Other resource budgets still apply.
         """
         registry = cls()
         registry.register_openai(
             "default",
             model=model,
-            input_capabilities=input_capabilities,
-            unknown_inputs=unknown_inputs,
+            input_mime_types=input_mime_types,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
@@ -70,8 +66,7 @@ class ModelRegistry:
         route_id: str,
         *,
         model: str,
-        input_capabilities: Sequence[ModelInputCapability] | None = None,
-        unknown_inputs: UnknownModelInputs | None = None,
+        input_mime_types: Sequence[str] = (),
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -86,8 +81,7 @@ class ModelRegistry:
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
-                input_capabilities=input_capabilities,
-                unknown_inputs=unknown_inputs,
+                input_mime_types=input_mime_types,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
