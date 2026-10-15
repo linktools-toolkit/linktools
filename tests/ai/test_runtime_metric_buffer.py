@@ -15,6 +15,7 @@ class _BlockingStore:
     def __init__(self) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        self.written = asyncio.Event()
 
     async def put_definition(self, namespace: str, definition: object) -> object:
         del namespace, definition
@@ -36,6 +37,7 @@ class _BlockingStore:
         del namespace, observations
         self.entered.set()
         await self.release.wait()
+        self.written.set()
 
     async def scan_observations(
         self,
@@ -133,3 +135,177 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
     await asyncio.wait_for(buffer.close(), timeout=1)
+    status = buffer.status()
+    assert status.accepting is False
+    assert status.pending == 0
+    assert status.lost == 1
+    assert status.last_failure_code == "CLOSE_TIMEOUT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", ("cancel", "deadline"))
+async def test_metric_buffer_close_settles_observations_being_batched(
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: str,
+) -> None:
+    monkeypatch.setattr(runtime_metrics, "_FLUSH_INTERVAL_SECONDS", 60.0)
+    monkeypatch.setattr(runtime_metrics, "_CLOSE_DEADLINE_SECONDS", 0.01)
+    store = _BlockingStore()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="batch-close")  # type: ignore[arg-type]
+    )
+    assert buffer.try_record(_observation("batched")) is True
+    await asyncio.sleep(0)
+    assert buffer.status().queue_size == 0
+    assert not store.entered.is_set()
+
+    close = asyncio.create_task(buffer.close())
+    if interrupt == "cancel":
+        await asyncio.sleep(0)
+        close.cancel()
+    try:
+        done, _ = await asyncio.wait((close,), timeout=1)
+        assert close in done
+        assert not store.entered.is_set()
+    finally:
+        store.release.set()
+        await asyncio.wait_for(close, timeout=1)
+
+    status = buffer.status()
+    assert status.accepted == status.persisted + status.lost == 1
+    assert status.pending == 0
+    assert status.queue_size == 0
+    assert (await buffer.flush(timeout_seconds=0)).completed is True
+    await buffer.close()
+    assert buffer.status() == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", ("cancel", "deadline"))
+async def test_metric_buffer_close_stops_when_write_completion_races_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: str,
+) -> None:
+    monkeypatch.setattr(runtime_metrics, "_BATCH_SIZE", 1)
+    monkeypatch.setattr(runtime_metrics, "_CLOSE_DEADLINE_SECONDS", 0.01)
+    store = _BlockingStore()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="close-completion")  # type: ignore[arg-type]
+    )
+    assert buffer.try_record(_observation("completing")) is True
+    await asyncio.wait_for(store.entered.wait(), timeout=1)
+    join = buffer._queue.join
+    joining = asyncio.Event()
+
+    async def join_at_write_completion() -> None:
+        try:
+            joining.set()
+            await join()
+        except asyncio.CancelledError:
+            # Complete the real sink while close leaves its drain wait, before
+            # writer cancellation races with wait_for's completed inner task.
+            asyncio.get_running_loop().call_soon(store.release.set)
+            raise
+
+    monkeypatch.setattr(buffer._queue, "join", join_at_write_completion)
+    close = asyncio.create_task(buffer.close())
+    try:
+        await asyncio.wait_for(joining.wait(), timeout=1)
+        if interrupt == "cancel":
+            close.cancel()
+        done, _ = await asyncio.wait((close,), timeout=1)
+        assert close in done
+    finally:
+        if not close.done():
+            assert buffer._writer is not None
+            buffer._writer.cancel()
+        await asyncio.wait_for(close, timeout=1)
+
+    status = buffer.status()
+    assert status.persisted == int(store.written.is_set())
+    assert status.accepted == status.persisted + status.lost == 1
+    assert status.pending == 0
+    assert status.queue_size == 0
+
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_flush_cancellation_preserves_accepted_observations() -> None:
+    store = _BlockingStore()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="flush-cancel")  # type: ignore[arg-type]
+    )
+    assert buffer.try_record(_observation("accepted")) is True
+    await asyncio.wait_for(store.entered.wait(), timeout=1)
+
+    flush = asyncio.create_task(buffer.flush(timeout_seconds=1))
+    await asyncio.sleep(0)
+    flush.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flush
+    assert buffer.status().pending == 1
+    assert buffer.status().lost == 0
+
+    store.release.set()
+    await asyncio.gather(buffer.close(), buffer.close())
+    status = buffer.status()
+    assert status.persisted == 1
+    assert status.pending == 0
+    assert status.lost == 0
+
+
+class _CancellingStore(_BlockingStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelling = asyncio.Event()
+        self.finalize = asyncio.Event()
+        self.observations: list[Observation] = []
+
+    async def put_observations(
+        self,
+        namespace: str,
+        observations: tuple[Observation, ...],
+    ) -> None:
+        self.observations.extend(observations)
+        try:
+            await super().put_observations(namespace, observations)
+        except asyncio.CancelledError:
+            self.cancelling.set()
+            await self.finalize.wait()
+            raise
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_close_settles_inflight_before_queued_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_metrics, "_BATCH_SIZE", 1)
+    monkeypatch.setattr(runtime_metrics, "_WRITE_TIMEOUT_SECONDS", 10.0)
+    monkeypatch.setattr(runtime_metrics, "_CLOSE_DEADLINE_SECONDS", 0.01)
+    store = _CancellingStore()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="close-order")  # type: ignore[arg-type]
+    )
+    first = _observation("inflight")
+    assert buffer.try_record(first) is True
+    await asyncio.wait_for(store.entered.wait(), timeout=1)
+    flush = asyncio.create_task(buffer.flush(timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert buffer.try_record(_observation("queued")) is True
+    close = asyncio.create_task(buffer.close())
+    try:
+        await asyncio.wait_for(store.cancelling.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not close.done()
+        assert not flush.done()
+        assert buffer.status().pending == 2
+        assert buffer.status().lost == 0
+    finally:
+        store.finalize.set()
+        await asyncio.wait_for(asyncio.gather(close, flush), timeout=1)
+
+    assert flush.result().completed is True
+    assert store.observations == [first]
+    assert buffer.status().lost == 2
+    assert buffer.status().pending == 0
+    assert buffer.status().queue_size == 0

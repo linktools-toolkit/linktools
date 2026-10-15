@@ -88,6 +88,7 @@ class _MetricBuffer(MetricRecorder):
             maxsize=_QUEUE_CAPACITY
         )
         self._accepting = True
+        self._stop_requested = False
         self._accepted = 0
         self._persisted = 0
         self._rejected = 0
@@ -267,6 +268,7 @@ class _MetricBuffer(MetricRecorder):
             self._set_failure("CLOSE_FAILED")
             _logger.exception("runtime metric close failed open")
             self._accepting = False
+            self._stop_requested = True
             writer = self._writer
             if writer is not None and not writer.done():
                 writer.cancel()
@@ -290,7 +292,12 @@ class _MetricBuffer(MetricRecorder):
             )
         except asyncio.TimeoutError:
             self._set_failure("CLOSE_TIMEOUT")
-            self._lose_remaining("runtime metric close deadline exceeded")
+            self._stop_requested = True
+            # Settle the owned head before discarding the queued tail, so flush
+            # cannot mistake later losses for completion of its accepted prefix.
+            if not writer.done():
+                writer.cancel()
+                await self._consume_cancelled_writer(writer)
         remaining = max(0.0, _CLOSE_DEADLINE_SECONDS - (monotonic() - started))
         if not writer.done():
             try:
@@ -303,6 +310,7 @@ class _MetricBuffer(MetricRecorder):
                 await asyncio.wait_for(asyncio.shield(writer), timeout=remaining)
             except asyncio.TimeoutError:
                 self._set_failure("CLOSE_TIMEOUT")
+                self._stop_requested = True
                 writer.cancel()
                 await self._consume_cancelled_writer(writer)
         self._consume_writer(writer)
@@ -328,28 +336,30 @@ class _MetricBuffer(MetricRecorder):
             )
 
     async def _run(self) -> None:
-        while True:
+        while not self._stop_requested:
             first = await self._queue.get()
             if first is None:
                 self._queue.task_done()
                 return
             batch = [first]
-            stop_after_batch = False
-            deadline = asyncio.get_running_loop().time() + _FLUSH_INTERVAL_SECONDS
-            while len(batch) < _BATCH_SIZE:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                try:
-                    item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-                if item is None:
-                    self._queue.task_done()
-                    stop_after_batch = True
-                    break
-                batch.append(item)
             try:
+                stop_after_batch = False
+                deadline = asyncio.get_running_loop().time() + _FLUSH_INTERVAL_SECONDS
+                while len(batch) < _BATCH_SIZE and not self._stop_requested:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        break
+                    if item is None:
+                        self._queue.task_done()
+                        stop_after_batch = True
+                        break
+                    batch.append(item)
+                if self._stop_requested:
+                    raise asyncio.CancelledError
                 await self._write(tuple(batch))
             except asyncio.CancelledError:
                 self._lost += len(batch)
