@@ -22,10 +22,36 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("model", "tool", "unknown_tool", "subagent"))
-async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(phase: str) -> None:
+async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
+    phase: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     entered = asyncio.Event()
     cancelled = asyncio.Event()
     finished = asyncio.Event()
+    initial_time = datetime.now(timezone.utc)
+    loop = asyncio.get_running_loop()
+    clock_resumed_at: float | None = None
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            elapsed = 0 if clock_resumed_at is None else loop.time() - clock_resumed_at
+            current_time = initial_time + timedelta(seconds=elapsed)
+            return current_time.replace(tzinfo=None) if tz is None else current_time.astimezone(tz)
+
+    wait_execution = RuntimeAgentTaskRunner._wait_execution
+
+    async def wait_after_work_started(self, *args, **kwargs):
+        nonlocal clock_resumed_at
+        await entered.wait()
+        clock_resumed_at = loop.time()
+        return await wait_execution(self, *args, **kwargs)
+
+    # Exclude setup from the deadline, then let real elapsed time drive the
+    # original wait and cancellation after the intended work has started.
+    for module in ("_agent_task", "_execution", "_local"):
+        monkeypatch.setattr(f"linktools.ai.runtime.{module}.datetime", Clock)
+    monkeypatch.setattr(RuntimeAgentTaskRunner, "_wait_execution", wait_after_work_started)
 
     async def work() -> str:
         entered.set()
@@ -65,7 +91,6 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(ph
             TaskGraph("deadline", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=0.3),)),
             idempotency_key="start",
         )
-        await asyncio.wait_for(entered.wait(), 2)
         result = (await run.wait(timeout_seconds=3)).result
         node, = (await run.state()).node_states
         execution = await runtime.executions.inspect(node.execution_id, principal=runtime.default_principal)
