@@ -134,10 +134,11 @@ without changing their semantics.
 
 ```python
 from linktools.cntr.ext import Authelia, Flare, endpoint, load_nginx_url, load_port_url
+from linktools.core import ConfigRef
 
 return endpoint(
     self,
-    domain=self.get_config_later("APP_DOMAIN"),
+    domain=ConfigRef("APP_DOMAIN"),
     proxy="http://app:8080",
     extensions=[
         Flare.links(
@@ -176,13 +177,13 @@ Extension URLs are declarative; `extensions` is a list/tuple, not a callback:
 
 ```python
 from linktools import utils
-from linktools.runtime import lazy_load
+from linktools.core import ConfigLazy
 
 extensions=[
-    Flare.public("Mihomo", "server", "Dashboard", url=lazy_load(
-        utils.join_url, "/ui/metacubexd/#/setup",
-        queries={"hostname": self.get_config_later("MIHOMO_DOMAIN")},
-    )),
+    Flare.public("Mihomo", "server", "Dashboard", url=ConfigLazy(lambda config: utils.join_url(
+        "/ui/metacubexd/#/setup",
+        queries={"hostname": config.get("MIHOMO_DOMAIN")},
+    ))),
     Authelia.oidc(("{url}", "/callback", "http://portainer.local:9000")),
 ]
 ```
