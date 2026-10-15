@@ -46,3 +46,46 @@ export function inputPresentation(value) {
   }
   return {text:parts.join('\n\n'),attachments,structured:true};
 }
+
+// Offsets index decoded source text, never the captured bytes used for downloads.
+// JSON.parse validates syntax; its numeric/object values are not display sources.
+export function capturedRequest(source) {
+  JSON.parse(source);
+  const tokens=[...source.matchAll(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g)];
+  const ends=new Uint32Array(tokens.length),stack=[];
+  for(let i=0;i<tokens.length;i++) {
+    const token=tokens[i][0];ends[i]=i+1;
+    if(token==='{' || token==='[')stack.push(i);
+    else if(token==='}' || token===']'){const start=stack.pop();ends[start]=i+1;}
+  }
+  const cache=new Map();
+  const range=start=>{
+    if(cache.has(start))return cache.get(start);
+    const first=tokens[start],last=tokens[ends[start]-1],raw=source.slice(first.index,last.index+last[0].length);
+    const kind=first[0]==='{'?'object':first[0]==='['?'array':first[0][0]==='"'?'string':first[0]==='null'?'null':'literal';
+    let members,items;
+    const node={kind,raw,text:kind==='string'?JSON.parse(first[0]):null,
+      fields(){
+        if(kind!=='object')return [];
+        if(members)return members;
+        members=[];
+        for(let i=start+1;i<ends[start]-1;){
+          const key=tokens[i],value=range(i+2),end=ends[i+2];
+          members.push({name:JSON.parse(key[0]),raw:source.slice(key.index,tokens[end-1].index+tokens[end-1][0].length),value});
+          i=end+(tokens[end]?.[0]===','?1:0);
+        }
+        return members;
+      },
+      items(){
+        if(kind!=='array')return [];
+        if(items)return items;
+        items=[];
+        for(let i=start+1;i<ends[start]-1;){items.push(range(i));i=ends[i]+(tokens[ends[i]]?.[0]===','?1:0);}
+        return items;
+      }
+    };
+    cache.set(start,node);return node;
+  };
+  const root=range(0),fields=root.fields(),messages=fields.filter(field=>field.name==='messages');
+  return {source,root,fields,messages};
+}

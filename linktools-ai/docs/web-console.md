@@ -40,38 +40,120 @@ shown as empty/unavailable, without provisioning them through a history read.
 
 ### Finding details and controls
 
-The default **Original request timeline** groups the selected execution's original
-client exchanges by logical request and actual HTTP attempt. Submitted user input
-and live Markdown responses remain visible. **Conversation responses** opens the
-SDK response display. Session state stays visible in both views. Session occupancy comes from its active execution identity; inspecting
-an older turn does not substitute that turn's status for the session's owner.
-**View active execution** opens its details when a different turn is selected.
-Inspecting an older turn or subagent leaves the active conversation observer and
-its Stop/End controls attached to the current owner. Metrics is a separate page
-and does not interrupt that observer. Executions has its own browser and detail
-page; selecting a run there deliberately observes that run. Browser Back/Forward
-restores the corresponding page.
+The default **Conversation** view is the everyday workspace: conversation list,
+Markdown messages and composer. New conversation asks for an Agent first; title
+and working directory are under an optional disclosure. Successful turns do not
+repeat technical status badges or expanded diagnostics. Failures, incomplete
+responses, occupied sessions and unconfirmed cancellation remain visible.
 
-- **Details** opens session metadata and the selected execution's Overview,
-  SDK history, SDK transcript, Original model requests, SDK prompts, Trace, and
-  Recovery panels. Usage,
-  full JSON, result export, parent/subagent links, and detail paging stay here.
-  Inspecting a turn or opening an exact execution reveals the panel. Closing it
-  returns focus to Details without stopping observation or changing selection.
-- **Actions** groups conversation rename/fork/close; execution retry/fork remain
-  beside the selected execution in Details.
-  Stop and **End previous execution and free session** remain directly available
-  outside the collapsed panel. Resume and
-  external-effect decisions remain in Recovery; read-only mode disables writes.
-- **Message options** contains planning, thinking, memory scope and attachments.
-  The send shortcut and earlier-turn paging remain available in the main view.
-- **Execution filters** and **Open exact ID** expand in the execution browser; applied
-  filters, explicit newest-20 scans and list paging retain their original scope.
-  Metrics and Runtime settings keep their sidebar entries.
-- Tool/thinking content and ordinary live activity expand on demand. Failure,
-  recovery, cancellation and input-required events remain visible, as do request
-  errors and observation interruptions. A healthy connection is not presented as
-  a second execution status.
+The primary views are **Conversation**, **Model messages** and **Activity**.
+Model messages opens the selected turn's actual captured input directly: indexed
+role and content rows follow the native `messages` array order. A single request
+and attempt selector switches among loaded captures, without nested request
+cards. Turn and request selectors share one light toolbar; compact turn labels keep
+their full time, status and execution identity in the control's hover/accessibility
+description and the Run details picker. Older turns remain accessible and distinct
+from the active conversation owner. **Request tools (···)** groups **View raw**,
+**Download bytes** and **Inspect request** in one menu. The request details keep model,
+purpose, timing, usage, API identity and the client-capture boundary out of the
+main reading path. HTTP failures remain visible beside the selectors.
+
+Interface titles name their content, buttons name their action, and routine status
+uses one short message. Repeated technical explanations expand on demand; errors,
+read-only limits and recovery confirmations remain explicit. This applies only to
+console-authored text: captured messages, source bytes and tool arguments are
+never rewritten or summarized.
+
+The body is the primary surface: indexed roles align with unchanged message
+content; compact function names and call IDs connect tool calls with their
+separate result items visually, without moving or merging either array item.
+**Fields** beside an item retains structural annotations and additional original
+members. Empty, null, missing, repeated and unknown values stay inspectable;
+Fields expansion and keyboard focus survive capture refresh. The observed
+response remains separate from input. Repeated input arrays are never interleaved
+as new conversation turns. The optional live preview is explicitly a conversation
+display, not the original response bytes.
+
+### Visual reference and implementation status
+
+The following approved layout studies use synthetic captured-request-shaped data.
+They show the current design direction, not a deployed console or a claim that
+these requests reached a provider. The [DeepSeek Harness trajectory reference](https://www.deepseek.com/harness/images/feat-trace-en.webp)
+informs alignment and direct role/content reading only; its session event ledger
+is not substituted for this console's captured HTTP input.
+
+Desktop: a single selection toolbar, aligned role column, body-first typography,
+and contextual details rather than stacked request cards.
+
+![Desktop model-message layout study with two tool calls and HTTP 429](assets/web-console/model-messages-desktop.jpg)
+
+At 500 px, roles sit above their contents while the same selection and request
+tools remain on one row. Message order and content do not change with width.
+
+![500-pixel model-message layout study with original role order](assets/web-console/model-messages-500.jpg)
+
+The production console implements this visual hierarchy, including the shared
+selection toolbar, direct model-message reader, request tools and responsive
+role layout. These images remain design studies, not production screenshots or
+proof of provider receipt. [PR #167](https://github.com/linktools-toolkit/linktools/pull/167)
+records the production-browser acceptance and automated verification for the
+implemented assets. The layout introduces no new message protocol, renderer
+owner, Runtime behavior or source reconstruction.
+
+### Conversation, activity and diagnostics
+
+**Activity** opens the existing recorded event timeline in the main reading
+area. **More → Run details** contains selected-turn diagnostics and actions.
+Their turn picker shares the same explicit execution selection. Reading modes
+hide the composer; the same active Stop control remains beside the primary views.
+Returning to Conversation restores the existing draft and focuses the composer.
+
+Session occupancy comes from the active execution identity. Inspecting an older
+turn never redirects active Stop to that turn. **View active execution** returns
+to the owner. Details also offers **Stop active conversation** when it is
+inspecting a different execution. Opening a diagnostic panel does not stop the
+conversation observer. Metrics is a separate page; Executions has its own run
+browser. Browser Back/Forward restores the corresponding page.
+
+- **Run details** is centered on the selected turn: compact status, elapsed time and
+  request/token usage stay visible, and the default body shows original model
+  requests directly. A single **Inspect** selector replaces stacked tab bars.
+  **All run metadata** keeps full execution/session fields and detailed usage;
+  **Activity & tools** presents recorded events in their original order as a
+  compact timeline. Select an event for its locators, usage, original record,
+  SDK content drilldown and recorded child execution link. Live tree depth and
+  parent execution navigation remain intact; the timeline invents no hierarchy.
+  Parent/conversation links remain beside the selected identity. Closing Details
+  returns focus without stopping observation or changing the selection.
+- **Actions** in Details groups retry with a new prompt, fork and final JSON
+  download. Stop remains directly visible for running work, including the actual
+  active conversation while an older turn is selected. Failure and recovery
+  states remain prominent; **Review recovery** leads directly to the same
+  confirmed Resume/End and external-effect controls. **Recovery & stopped work**
+  is also available from Inspect and Actions, separately from SDK debugging.
+- **Inspect → Advanced SDK debugging** contains **SDK structured records**,
+  **SDK text excerpts** and **SDK preparation snapshot**. These are projections,
+  not final outbound messages. Instructions is labeled as a separate SDK request
+  field rather than another message before a system part; original data and
+  projection order are unchanged. Text excerpts contain only user/assistant text
+  and omit other parts. Each debug view links to captured original requests
+  instead of implying that its display order is the client message order.
+- **More** groups run details, conversation rename/fork/close and recovery entry points.
+  Running work has a direct **Stop** beside Send. Recovery needs and pending
+  cancellation expose **Recovery options**; explicit Resume/End choices remain
+  available after confirming the previous executor has stopped. They never
+  infer process death or silently take ownership.
+- **Options** beside the composer contains planning, thinking, memory scope and
+  workspace files and keyboard/lifecycle hints. Ctrl / Cmd Enter sends. Each message's Markdown source
+  disclosure preserves original source and its copy action.
+- **Tools & settings** contains Executions, Metrics, exact-ID lookup and Runtime
+  capabilities. Execution filters, explicit newest-20 scans, list paging and the
+  full metric query retain their original behavior. A Conversations button
+  returns from other pages. The narrow-screen sidebar closes after navigation
+  and has its own close button and Escape support.
+- Tool/thinking content and ordinary activity expand on demand. Failure,
+  recovery, cancellation, input-required events and observation interruptions
+  remain visible. A healthy connection is not a second execution-status badge.
 
 ### Shared storage and explicit recovery
 
@@ -84,8 +166,8 @@ can run concurrently; a second execution in the same session is rejected with
 SQL startup does not infer that an unfinished execution is abandoned. A stopped
 process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and
 observation never take ownership. After confirming the previous executor has
-stopped, use **End previous execution and free session** beside the session
-status to cancel the old work and release its session in one action. Standalone
+stopped, use **More → End previous execution and free session** in the conversation
+header to cancel the old work and release its session in one action. Standalone
 executions label this action **End stopped execution**. The console requires
 durable `CANCELLING` state or a successful cancellation receipt for the same
 execution before finishing it through Runtime recovery. Unknown external effects
@@ -95,7 +177,7 @@ released session owner. It does not resume model or tool work. Unknown outcomes
 are not reported as complete; another explicit attempt reads the current state
 before continuing. Resolve unknown external effects in **Recovery** if needed.
 
-To continue the original work instead, **Recovery → Resume stopped execution**
+To continue the original work instead, **More → Run details → Inspect → Recovery & stopped work → Resume stopped execution**
 retains the explicit stopped-executor confirmation and may call models or tools.
 **Stop execution** remains available for a running executor. A cancellation
 request may remain `CANCELLING` until the owner finishes or the stopped-execution
@@ -143,7 +225,7 @@ was applied. Selecting a child execution preserves its identity rather than
 treating its events as a root model call. Full JSON details preserve public
 fields that do not fit the compact presentation.
 
-The secondary **SDK prompts** tab summarizes system/fixed/dynamic instructions,
+The **Inspect → SDK preparation snapshot** view summarizes system/fixed/dynamic instructions,
 conversation context, attachment media types, tools and output contracts from
 the framework request snapshot. These are SDK projections, not final native
 client messages. The console never turns these instructions into a purported
@@ -151,7 +233,7 @@ original system/developer message.
 
 ### Original client sources
 
-**Original request timeline** and **Original model requests** share the selected
+**Model messages** in the main view and Run details share the selected
 execution's paged original records. A repeated full input array belongs to its
 request; it is not presented as additional user turns. Each logical request
 retains its execution/run/request identity, purpose, step, output-retry index,
@@ -161,11 +243,27 @@ keep their original identities.
 
 The current built-in capture supports OpenAI Chat completions. It records the
 SDK client's final outbound body after adapter conversion and extra-body merging,
-not proof of provider-server receipt. The request view shows the original UTF-8
-source without JSON parsing or reserialization, retaining native roles, order,
-empty content, tool calls/results, unknown fields, large numbers and duplicate
-keys. It does not reconstruct a provider array from SDK snapshots. The OpenAI
-Responses API and other provider APIs are not claimed as captured by this binding.
+not proof of provider-server receipt. Readable rows preserve decoded string
+content as plain text, including whitespace, without Markdown or HTML rendering.
+Content blocks keep their array order; text blocks are readable, while media and
+unknown structures retain their original source fields without loading external
+resources. Standard tool calls show the captured function name/call ID and unchanged
+arguments compactly; additional members remain literal under Fields, and repeated
+members remain explicitly literal rather than choosing an effective value. Tool calls stay
+under their assistant item; tool results keep their
+own array position and call ID. Empty strings, empty arrays, null and absent
+content remain distinguishable. Unknown roles remain labeled, and original
+additional fields stay available in the same item’s Fields disclosure.
+
+The reader validates JSON syntax and locates source ranges; displayed numbers
+and unknown structures come from those ranges, never parsed-number reserialization.
+Duplicate message fields are shown separately in source order rather than merged;
+repeated member names remain literal instead of guessing an effective value.
+Malformed or unrecognized envelopes show original source with an explicit limit.
+**View raw** preserves the complete UTF-8 source, including escapes, large
+numbers and duplicate keys. Byte downloads bypass this reading projection.
+No provider array is reconstructed from SDK snapshots. The OpenAI Responses API
+and other provider APIs are not claimed as captured by this binding.
 
 The separately labeled response is the original body observed as the SDK consumed
 it, with HTTP status, format/encoding hints and completeness. Received SSE data is
@@ -234,7 +332,7 @@ rather than appended twice. A finished stream is followed by an authoritative
 execution read. Cursor/authorization/integrity failures do not silently become
 success or restart an execution.
 
-SDK history/trace/prompt bodies load only for the visible selected Details tab.
+SDK record/trace/prompt bodies load only for the visible selected Details tab.
 Original client bodies load when the main original timeline or its inspector tab
 is visible; those views share one page cache. Closing or switching views fences
 pending display work. `include_client_requests=true` selects original client

@@ -3,11 +3,15 @@
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
 
 import asyncio
+import faulthandler
 import hashlib
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic
+from types import CoroutineType, GeneratorType
 
 import pytest
 from ._task_test_helpers import (
@@ -45,6 +49,7 @@ from linktools.ai.runtime import (
     ExecutionService,
     Runtime,
     RuntimeStorage,
+    TaskGraphRun,
 )
 from linktools.ai.runtime._agent_task import _agent_task_input_identity
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
@@ -67,6 +72,7 @@ from linktools.ai.task import (
     TaskGraphAdmission,
     TaskGraphLaunch,
     TaskGraphLimits,
+    TaskGraphInfo,
     TaskGraphRequest,
     TaskGraphState,
     TaskGraphView,
@@ -95,6 +101,56 @@ from pydantic_ai.models.test import TestModel
 @pytest.fixture(autouse=True)
 def _reset_task_registry() -> None:
     clear_task_test_state()
+
+
+async def _report_graph_wait_timeout(run: TaskGraphRun[object]) -> None:
+    started = monotonic()
+    print(f"Graph wait timed out: {run.graph_id}", file=sys.stderr)
+    for task in sorted(asyncio.all_tasks(), key=lambda value: value.get_name()):
+        print(f"Async task: {task.get_name()}", file=sys.stderr)
+        pending = task.get_coro()
+        while isinstance(pending, (CoroutineType, GeneratorType)):
+            frame = pending.cr_frame if isinstance(pending, CoroutineType) else pending.gi_frame
+            if frame is not None:
+                print(f"  {frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}", file=sys.stderr)
+            pending = pending.cr_await if isinstance(pending, CoroutineType) else pending.gi_yieldfrom
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+    def consume_result(task: asyncio.Task[TaskGraphInfo]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    probe = asyncio.create_task(run.state(), name="timeout-graph-state")
+    try:
+        done, _ = await asyncio.wait({probe}, timeout=0.5)
+        if not done:
+            print("Post-timeout graph state unavailable: read exceeded 0.5s", file=sys.stderr)
+            return
+        if probe.cancelled():
+            print("Post-timeout graph state unavailable: read cancelled", file=sys.stderr)
+            return
+        snapshot = probe.result()
+        print(
+            f"Post-timeout graph state (+{monotonic() - started:.3f}s): "
+            f"id={snapshot.graph_id} status={snapshot.status.value} event_seq={snapshot.event_seq}",
+            file=sys.stderr,
+        )
+        for node in snapshot.node_states:
+            print(
+                f"Node: id={node.node_id} dependencies={node.dependencies} status={node.status.value} "
+                f"execution_id={node.execution_id} fence={node.fence} "
+                f"lease_expires_at={node.lease_expires_at} error_code={node.error_code}",
+                file=sys.stderr,
+            )
+    finally:
+        if not probe.done():
+            probe.cancel()
+            await asyncio.wait({probe}, timeout=0.1)
+        if probe.done():
+            consume_result(probe)
+        else:
+            print("Post-timeout state read cancellation pending", file=sys.stderr)
+            probe.add_done_callback(consume_result)
 
 
 @pytest.mark.asyncio
@@ -208,7 +264,15 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
             )
         assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
         gate.set()
-        completed = (await run.wait(timeout_seconds=10)).result
+        try:
+            completed = (await run.wait(timeout_seconds=10)).result
+        except AIError as error:
+            if error.code is ErrorCode.WAIT_TIMEOUT:
+                try:
+                    await _report_graph_wait_timeout(run)
+                except Exception as diagnostic_error:
+                    print(f"Graph timeout diagnostic unavailable: {type(diagnostic_error).__name__}", file=sys.stderr)
+            raise
         assert completed.wait_status is TaskStatus.SUCCEEDED
         consumer = next(n for n in completed.node_states if n.node_id == "consumer")
         assert consumer.status is TaskStatus.SUCCEEDED

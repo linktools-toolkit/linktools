@@ -1,9 +1,9 @@
 import {terminal, modelKey, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers, clientAttemptKey, clientBodyBytes, clientBodyText} from './console.js';
-import {renderMarkdown, inputPresentation} from './message.js';
+import {renderMarkdown, inputPresentation, capturedRequest} from './message.js';
 
 const $ = id => document.getElementById(id);
-const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
-  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'overview', conversationMode:'original', nativeTimeline:null, details:[], detailCursor:null, models:new Map(), events:new Map(),
+const state = {config:null, view:'sessions', drafts:new Map(), conversationExecution:null, browserExecution:null, filters:new Map(), list:[], listCursor:null, listSessionReads:new Map(), session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',focusComposerSession:null,
+  execution:null, executionGeneration:0, observedExecution:null, observedInfo:null, observationGeneration:0, observationReadGeneration:0, tab:'models', traceSelection:null, conversationMode:'chat', nativeTimeline:null, readerSelection:null, readerRaw:false, readerCache:null, readerExpanded:new Set(), details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, refreshGeneration:0, sessionReadGeneration:0, sessionAppliedGeneration:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, cancellationNoticeId:null, noticeRevision:0, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
@@ -25,11 +25,11 @@ function button(label, action, className='quiet') {
 function markdownMessage(source, className='') {
   const node=element('div',`message ${className}`), body=element('div','markdown');
   const original=element('details','message-source');
-  original.append(element('summary','','Markdown source'),element('pre','',source));
-  node.append(body,button('Copy Markdown',async()=>{
+  original.append(element('summary','','Markdown source'),button('Copy Markdown',async()=>{
     if(!navigator.clipboard)throw new Error('Clipboard unavailable. Open Markdown source to copy the original text.');
     await navigator.clipboard.writeText(source);
-  },'quiet copy-message'),original);
+  },'quiet copy-message'),element('pre','',source));
+  node.append(body,original);
   body.innerHTML=renderMarkdown(source);
   return node;
 }
@@ -46,6 +46,13 @@ function userMessage(value) {
   return node;
 }
 function clear(id) { $(id).replaceChildren(); }
+function requestFocusWithin(container) {
+  return container.contains(document.activeElement) ? document.activeElement?.dataset?.requestFocus : null;
+}
+function restoreRequestFocus(container,key) {
+  if(!key)return;
+  [...container.querySelectorAll('[data-request-focus]')].find(node=>node.dataset.requestFocus===key)?.focus({preventScroll:true});
+}
 function notice(message='', executionId=null, revision=state.noticeRevision+1) { state.noticeRevision=revision; state.cancellationNoticeId=executionId; $('notice').textContent=message; $('notice').hidden=!message; return revision; }
 function showError(error) {
   if(error.name==='AbortError')return;
@@ -57,11 +64,15 @@ function showError(error) {
 }
 function connection(label, failed=false) { $('connection').textContent=label==='Read-only'?label:`Observation: ${label}`; $('connection').hidden=!failed && label!=='Read-only'; $('connection').classList.toggle('error', failed); }
 function showInspector(open, focus=false) {
+  const closingActivity=!open && state.view==='sessions' && state.conversationMode==='activity';
+  if(closingActivity){state.conversationMode='chat';renderPage();}
+  if(open && state.view==='sessions' && state.conversationMode==='original'){state.conversationMode='chat';renderPage();renderConversation();}
   if(state.view==='sessions')state.conversationInspectorOpen=open;
   if(state.view==='executions')open=true;
   if(!open)++state.detailGeneration;
   $('inspector').hidden=!open;$('inspector-toggle').setAttribute('aria-expanded',String(open));
-  if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$('inspector-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
+  if(!open)$('run-actions').open=false;
+  if(focus){const target=open?(state.view==='executions'?$('execution-meta'):$('inspector-close')):$(closingActivity?'activity-mode':'actions-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
 }
 function renderCurrentState() {
   const owner=state.view==='sessions'?state.session?.active_execution_id:null,info=owner===state.observedExecution?state.observedInfo:state.execution;
@@ -73,6 +84,8 @@ function renderCurrentState() {
   } else if(info)label=`Selected execution: ${info.status}`;
   else if(state.selectedExecution || state.selectedSession)label='Loading…';
   $('current-status').textContent=label;
+  $('current-status').hidden=label==='Session available' && !['CANCELLED','FAILED'].includes(state.observedInfo?.status);
+  $('recovery-shortcut').hidden=!owner || !['RECOVERY_REQUIRED','CANCELLING','START_UNKNOWN'].includes(info?.status);
   $('current-status').classList.toggle('error',state.session?.status==='CLEANUP_REQUIRED' || Boolean(info && (!state.session || owner===info.execution_id) && ['FAILED','START_UNKNOWN','RECOVERY_REQUIRED'].includes(info.status)));
   $('show-active').hidden=!owner || owner===state.selectedExecution;
   $('stop-run').setAttribute('aria-label',`Stop selected execution ${state.selectedExecution || ''}`);
@@ -107,6 +120,7 @@ function setDisabled() {
   const readonly=!state.config || state.config.read_only;
   document.querySelectorAll('[data-view]').forEach(node=>node.disabled=!state.config);
   $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
+  $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
@@ -118,12 +132,24 @@ function setDisabled() {
   $('end-stopped').textContent=state.execution?.session_id ? 'End previous execution and free session' : 'End stopped execution';
   if($('resume-run'))$('resume-run').disabled=readonly || !recoverable || ending || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
   $('export').disabled=!state.execution || !terminal(state.execution.status);
+  $('run-recovery').disabled=!state.execution;
+  $('detail-view').disabled=!state.execution;
+  $('native-mode').disabled=!state.selectedExecution;$('activity-mode').disabled=!state.selectedExecution;
+  $('detail-turn-picker').hidden=state.view!=='sessions';
+  const needsRecovery=['RECOVERY_REQUIRED','START_UNKNOWN','CANCELLING'].includes(state.execution?.status);
+  $('detail-attention').hidden=!needsRecovery && state.execution?.status!=='FAILED';
+  $('detail-attention-text').textContent=state.execution?.status==='FAILED'?`Failed${state.execution.error_code?' · '+state.execution.error_code:''}. Actions offers retry or fork.`:needsRecovery?`${state.execution.status.replaceAll('_',' ')}${state.execution.error_code?' · '+state.execution.error_code:''}. Review the recorded state before continuing.`:'';
+  $('detail-recovery').hidden=!needsRecovery;
+  $('recovery-controls').hidden=state.tab!=='recovery';
+  $('session-details').hidden=state.tab!=='overview' || state.view!=='sessions' || !state.session || state.execution?.session_id!==state.session.session_id;
   const active=state.session?.active_execution_id===state.observedExecution?state.observedInfo:null;
   $('end-active').hidden=readonly || !active || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(active.status) && state.endReadbackId!==active.execution_id;
   $('end-active').disabled=Boolean(active && [...state.actionsPending].some(key=>key.startsWith(`${active.execution_id}:`)));
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
   $('cancel').hidden=readonly || !active || terminal(active.status);
+  $('inspector-active-stop').hidden=readonly || !active || terminal(active.status) || active.execution_id===state.selectedExecution;
+  $('inspector-active-stop').disabled=readonly || !active || state.actionsPending.has(`${active.execution_id}:end-stopped`);
   $('cancel').setAttribute('aria-label',`Stop current execution ${active?.execution_id || ''}`);
   $('stop-run').disabled=ending;$('cancel').disabled=Boolean(active && state.actionsPending.has(`${active.execution_id}:end-stopped`));
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
@@ -132,23 +158,36 @@ function setDisabled() {
 function renderPage() {
   const sessions=state.view==='sessions', executions=state.view==='executions', metrics=state.view==='metrics';
   $('metrics-view').hidden=!metrics;
+  $('conversation-heading').hidden=!sessions || !state.selectedSession;
+  $('page-heading').hidden=sessions && Boolean(state.selectedSession);
+  $('conversations-home').hidden=sessions;
   $('conversation-view').hidden=metrics || sessions && !state.selectedSession;
-  $('conversation-column').hidden=!sessions;
+  $('conversation-column').hidden=!sessions || state.conversationMode==='activity';
+  $('conversation-nav').hidden=!sessions || !state.selectedSession;
+  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
   $('welcome').hidden=!sessions || Boolean(state.selectedSession);
   $('execution-list').hidden=!executions;
   $('browse-panel').hidden=metrics;
   (executions?$('execution-list'):$('sidebar-browse')).append($('browse-panel'));
-  $('composer').hidden=!sessions || !state.selectedSession;
+  $('composer').hidden=!sessions || !state.selectedSession || state.conversationMode!=='chat';
+  $('conversation-column').classList.toggle('reading',state.conversationMode==='original');
+  const cancelHome=$(sessions && state.conversationMode!=='chat'?'reader-actions':'composer-actions');if($('cancel').parentElement!==cancelHome)cancelHome.append($('cancel'));
   $('session-details').hidden=!sessions;
   $('inspector-close').hidden=executions;
-  $('inspector').classList.toggle('execution-page',executions);
-  if(executions)showInspector(true);
+  $('inspector').classList.toggle('execution-page',executions || sessions && state.conversationMode==='activity');
+  if(executions || sessions && state.conversationMode==='activity')showInspector(true);
   $('execution-live').hidden=!executions;
   if($('live'))clear('live');clear('execution-live');renderLive();
 }
+function closeSidebar(focus=false) {
+  $('sidebar').classList.remove('open');$('menu').setAttribute('aria-expanded','false');
+  if(focus)$('menu').focus();
+}
 function setView(view, refreshSelection=true) {
+  $('run-actions').open=false;closeSidebar();
   if(view!==state.view){saveDraft();++state.generation;state.nativeTimeline=null;state.filters.set(state.view,$('filter').value);$('filter').value=state.filters.get(view) || '';state.list=[];clear('list');}
   state.view=view;
+  $('workspace-tools').open=false;
   document.querySelectorAll('[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view===view));
   $('page-title').textContent={sessions:'Conversations',executions:'Executions',metrics:'Metrics'}[view];
   $('execution-filters').hidden=view !== 'executions'; $('filter-form').hidden=view === 'metrics';$('open-tools').hidden=view==='metrics';
@@ -170,6 +209,7 @@ function navigateView(view) {
 async function loadList(more=false) {
   const generation=++state.listGeneration, view=state.view;
   if (view === 'metrics') return;
+  const sessionReadGeneration=view==='sessions'?++state.sessionReadGeneration:0;
   $('list-action').value='paged';setListFilterAvailability();
   const params=new URLSearchParams({limit:'50'});
   if (more && state.listCursor) params.set('cursor',state.listCursor);
@@ -184,6 +224,10 @@ async function loadList(more=false) {
   if(view==='executions'){const count=['agent_id','session_id','parent_execution_id'].filter(key=>params.has(key)).length;$('execution-filter-summary').textContent=`Execution filters${count?' · '+count+' applied':''}`;}
   const key=item => view==='sessions' ? item.session_id:item.execution_id;
   state.list=more ? mergePage(state.list,payload.items,key):payload.items;
+  if(view==='sessions'){
+    if(!more)state.listSessionReads.clear();
+    payload.items.forEach(item=>state.listSessionReads.set(item.session_id,sessionReadGeneration));
+  }
   state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor; $('list-scope').hidden=!payload.recent_only;
   $('list-scope').textContent='Showing recent sessions in read-only mode';
   renderList();
@@ -207,19 +251,28 @@ async function loadRecentExecutions() {
   } finally {state.actionsPending.delete('recent-scan');}
 }
 function renderList() {
+  const focus=$('list').contains(document.activeElement)?document.activeElement?.dataset?.listKey:null;
   clear('list'); const filter=$('filter').value.trim().toLowerCase();
-  const rows=state.list.filter(item => JSON.stringify(item).toLowerCase().includes(filter));
+  const items=state.view==='sessions' ? state.list.map(item=>{
+    if(item.session_id!==state.session?.session_id)return item;
+    // Session revisions cover metadata, while admission/release can keep the same revision.
+    const newer=state.session.revision>item.revision || state.session.revision===item.revision && state.sessionAppliedGeneration>=(state.listSessionReads.get(item.session_id) || 0);
+    return newer?state.session:item;
+  }) : state.list;
+  const rows=items.filter(item => JSON.stringify(item).toLowerCase().includes(filter));
   if (!rows.length) $('list').append(element('p','empty',filter ? 'No matches in loaded rows.':'Nothing here yet.'));
   rows.forEach(item => {
     const session=state.view==='sessions', id=session ? item.session_id:item.execution_id;
     const active=session ? id===state.selectedSession:id===state.selectedExecution;
-    const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);
+    const node=button('',async () => navigate(session ? id:null,session ? null:id),`list-item${active?' active':''}`);node.dataset.listKey=`${state.view}:${id}`;
     node.append(element('span','list-title',session ? item.metadata?.title || short(id) : short(id)));
     const sub=element('span','list-subtitle');
     sub.append(element('i',`status-dot ${item.status==='FAILED'?'failed':item.active_execution_id || !terminal(item.status) && !session ? 'running':''}`));
-    sub.append(element('span','',`${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
+    sub.append(element('span','',session ? `${item.active_execution_id?'Running · ':item.status==='CLOSED'?'Closed · ':''}${item.agent_id || 'Agent'}` : `${item.status} · ${item.agent_id || 'task'} · ${short(id)}`));
+    node.title=`${item.status} · ${item.agent_id || 'task'} · ${id}`;
     node.append(sub); $('list').append(node);
   });
+  if(focus)[...$('list').children].find(node=>node.dataset.listKey===focus)?.focus({preventScroll:true});
 }
 function stopStream() { state.stream?.abort(); state.stream=null; }
 function navigate(sessionId, executionId) {
@@ -268,18 +321,18 @@ function restoreDraft(sessionId) {
 }
 async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const preserveObservation=Boolean(sessionId && sessionId===state.selectedSession);saveDraft();
-  const generation=++state.generation;
+  const generation=++state.generation,focusComposer=state.focusComposerSession===sessionId;state.focusComposerSession=null;
   if(!preserveObservation){stopStream(); ++state.observationGeneration; state.observedExecution=null;state.observedInfo=null; state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();}
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
   restoreDraft(state.selectedSession);
   state.nativeTimeline=null;
   state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
-  const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;
-  $('sidebar').classList.remove('open');renderPage();
+  const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;$('run-actions').open=false;
+  closeSidebar();renderPage();
   if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
-  $('composer').hidden=!sessionId; $('conversation-title').textContent='Loading…';
+  $('conversation-title').textContent='Loading…';
   $('conversation-meta').textContent=''; clear('session-details'); if(!preserveObservation)clear('conversation'); clear('inspector-content');
-  setDisabled(); renderList(); notice(state.config?.read_only ? 'Read-only mode. Start ai web with a configured model to run agents.':'');
+  setDisabled(); renderList(); notice(state.config?.read_only ? 'Read-only. Configure a model at startup to send messages.':'');
   if (!sessionId && !executionId) return;
   try {
     if (sessionId) {
@@ -295,6 +348,7 @@ async function openSelection(sessionId, executionId, {preserveInspector=false}={
     }
     if (executionId) await selectExecution(executionId,generation);
     setDisabled(); renderList();
+    if(focusComposer && generation===state.generation && state.selectedSession===sessionId)$('prompt').focus();
   } catch(error) { if (generation===state.generation) showError(error); }
 }
 async function moreTurns() {
@@ -311,44 +365,53 @@ async function moreTurns() {
     if(generation===state.generation && id===state.selectedSession && noticeRevision===state.noticeRevision)throw error;
   } finally {state.actionsPending.delete(key);$('turns-more').disabled=state.actionsPending.has(`session:${state.selectedSession}:turns`);}
 }
+function renderTurnPickers() {
+  const options=state.turns.map((turn,index)=>({id:turn.execution_id,label:`Turn ${index+1} · ${date(turn.created_at)} · ${turn.status} · ${short(turn.execution_id)}`}));
+  if(state.selectedExecution && !options.some(option=>option.id===state.selectedExecution))options.push({id:state.selectedExecution,label:`Execution ${short(state.selectedExecution)}`});
+  const signature=json(options);
+  for(const id of ['detail-turn','request-turn']) {
+    const select=$(id);
+    if(!select)continue;
+    if(select.dataset.options!==signature){
+      select.replaceChildren();options.forEach(({id:executionId,label})=>{const option=element('option','',id==='request-turn'?(label.startsWith('Turn ')?label.split(' · ')[0]:'Execution'):label);option.value=executionId;option.title=label;option.setAttribute('aria-label',label);select.append(option);});select.dataset.options=signature;
+    }
+    select.value=state.selectedExecution || '';select.title=options.find(option=>option.id===state.selectedExecution)?.label || '';select.disabled=!options.length;
+  }
+}
 function renderConversation({prepend=false}={}) {
-  const liveFocus=document.activeElement?.dataset?.liveFocus;
+  const liveFocus=document.activeElement?.dataset?.liveFocus,requestFocus=requestFocusWithin($('conversation'));
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
-  const follows=previousTop+container.clientHeight>=previousHeight-40;
+  const follows=previousTop+container.clientHeight>=previousHeight-40, original=state.conversationMode==='original';
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
-  $('native-mode').classList.toggle('active',state.conversationMode==='original');
-  $('chat-mode').classList.toggle('active',state.conversationMode==='chat');
-  if(state.timelineError)$('conversation').append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
-  state.turns.forEach(turn => {
+  renderTurnPickers();
+  for(const [id,mode] of [['chat-mode','chat'],['native-mode','original'],['activity-mode','activity']])$(id).classList.toggle('active',state.conversationMode===mode);
+  if(state.timelineError)container.append(element('p','empty',`${state.timelineError} · Inspect retained executions; loaded turns may be incomplete.`));
+  if(original) {
+    const section=element('section','model-requests');renderNativeTimeline(section,{conversation:true});container.append(section);renderTurnPickers();
+  } else state.turns.forEach(turn => {
     const section=element('article','turn');
-    const heading=element('div','turn-heading'); heading.append(element('span','',date(turn.created_at)),element('span','badge',turn.status));
-    heading.append(button('Details',async()=>{showInspector(true,true);await selectExecution(turn.execution_id,state.generation);}));
-    section.append(heading);
     section.append(userMessage(turn.user_input));
-    if(state.conversationMode==='original') {
-      if(turn.execution_id===state.selectedExecution)renderNativeTimeline(section);
-      else section.append(button('View original model requests',async()=>selectExecution(turn.execution_id)));
-    } else {
-    section.append(element('p','muted','Response display · SDK records. Original client arrays are in Original request timeline.'));
     const replies=turn.items.filter(item=>item.item_kind!=='user');
     replies.forEach(item => {
       if (item.item_kind==='assistant') {
-        const label=element('div','message-label'); label.append(element('span','avatar','lt'),element('span','',state.session?.agent_id || 'AGENT'));
-        section.append(label,typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
+        section.append(typeof item.content==='string'?markdownMessage(item.content):rawDetail(item.content,'Structured output'));
       } else if (['tool_call','tool_result','thinking'].includes(item.item_kind)) {
         const detail=element('details','tool-message'); detail.append(element('summary','',`${item.item_kind.replaceAll('_',' ')} · ${item.tool_name || ''}`),element('pre','',text(item.content))); section.append(detail);
       }
     });
-    }
-    if (!turn.conversation_committed) section.append(element('p','muted','History is incomplete; the Runtime has not committed this turn.'));
+    if (!turn.conversation_committed) section.append(element('p','muted','Incomplete turn; history is not yet committed.'));
     if (turn.error_code) section.append(element('p','muted',turn.error_code==='EXECUTION_CANCELLED' ? 'Execution cancelled.' : `${turn.error_code}${Object.keys(turn.safe_error_details || {}).length?' · '+text(turn.safe_error_details):''}`));
-    $('conversation').append(section);
+    const heading=element('div','turn-heading');heading.append(element('span','',date(turn.created_at)));
+    if(turn.status!=='SUCCEEDED')heading.append(element('span','badge',turn.status));
+    section.append(heading);container.append(section);
   });
-  if(state.conversationMode==='original' && state.selectedExecution && !state.turns.some(turn=>turn.execution_id===state.selectedExecution)){const section=element('article','turn');renderNativeTimeline(section);$('conversation').append(section);}
-  if (!state.turns.length && !state.timelineError) $('conversation').append(element('p','empty',state.selectedSession ? 'Ready when you are. Send a message to start this conversation.':'Inspect this execution using the panels on the right.'));
-  const live=element('section','turn'); live.id='live'; $('conversation').append(live); renderLive(liveFocus);
-  container.scrollTop=prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
+  if (!state.turns.length && !state.timelineError && !original)container.append(element('p','empty',state.selectedSession ? 'Send a message to get started.':'Choose an execution to inspect.'));
+  const live=element('section','turn');live.id='live';
+  if(original){const preview=element('details','live-preview');preview.append(element('summary','','Live preview · not original response'),live);container.append(preview);}else container.append(live);
+  renderLive(liveFocus);restoreRequestFocus(container,requestFocus);
+  container.scrollTop=original?previousTop:prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
 }
+
 let liveRenderTimer=null;
 function scheduleLiveRender() {
   if(liveRenderTimer===null)liveRenderTimer=setTimeout(()=>{liveRenderTimer=null;renderLive();},60);
@@ -388,11 +451,13 @@ function observedInfo(info, readGeneration=state.observationReadGeneration) {
   state.observedInfo=info;return info;
 }
 async function selectExecution(id, generation=state.generation) {
-  const executionGeneration=++state.executionGeneration;
+  const executionGeneration=++state.executionGeneration,selectionChanged=id!==state.selectedExecution;
   const readGeneration=id===state.observedExecution?++state.observationReadGeneration:state.observationReadGeneration;
-  if(state.nativeTimeline?.id!==id)state.nativeTimeline=null;
-  state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;setDisabled();clear('inspector-content');renderLive();
+  if(state.nativeTimeline?.id!==id){state.nativeTimeline=null;state.readerSelection=null;state.readerRaw=false;state.readerCache=null;state.readerExpanded.clear();}
+  if(selectionChanged){$('run-actions').open=false;state.traceSelection=null;}
+  state.selectedExecution=id;if(state.view==='sessions')state.conversationExecution=id;else if(state.view==='executions')state.browserExecution=id; state.execution=null;renderTurnPickers();setDisabled();clear('inspector-content');renderLive();
   $('execution-meta').textContent=`Loading ${id}…`;
+  if(selectionChanged && state.view==='sessions' && state.conversationMode==='original')renderConversation();
   try {
   let info=await api(`/api/executions/${enc(id)}`);
   if (generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution) return;
@@ -404,12 +469,21 @@ async function selectExecution(id, generation=state.generation) {
   else await loadDetail(false);
   setDisabled();
   if (generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution) await syncObservation();
-  } catch(error){if(generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution && (id!==state.observedExecution || readGeneration===state.observationReadGeneration))throw error;}
+  } catch(error){
+    if(generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution && (id!==state.observedExecution || readGeneration===state.observationReadGeneration)){
+      if(selectionChanged && state.view==='sessions' && state.conversationMode==='original'){state.nativeTimeline={id,items:[],cursor:null,loading:false,error:error.message,pending:new Map()};renderNativeViews();}
+      throw error;
+    }
+  }
 }
 function renderExecution() {
   const info=state.execution; if (!info) return;
-  renderCurrentState();
-  $('execution-meta').replaceChildren(element('strong','',`${info.agent_id || info.task_id || 'Execution'} · ${info.status}`),element('div','mono',info.execution_id));
+  renderCurrentState();renderTurnPickers();
+  $('detail-title').textContent=info.session_id?'Turn details':'Execution details';
+  const elapsed=info.started_at && info.terminal_at?duration(Math.max(0,new Date(info.terminal_at)-new Date(info.started_at))*1000000):'Duration unavailable';
+  $('execution-meta').replaceChildren(element('strong','',`${info.agent_id || info.task_id || 'Execution'} · ${info.status}`),element('span','run-duration',elapsed));
+  const identity=element('div','mono run-identity',short(info.execution_id));identity.title=info.execution_id;$('execution-meta').append(identity);
+  if(info.usage)$('execution-meta').append(element('p','run-usage',`${info.usage.logical_requests} requests · ${usageLabel(info.usage)}${info.usage.unknown_usage_requests?' · '+info.usage.unknown_usage_requests+' usage unknown':''}`));
   if (info.parent_execution_id) $('execution-meta').append(button('↑ Parent execution',async()=>state.view==='sessions'?selectExecution(info.parent_execution_id):navigate(null,info.parent_execution_id)));
   if(info.session_id && state.view==='executions')$('execution-meta').append(button('Open conversation',async()=>navigate(info.session_id,null)));
 }
@@ -429,46 +503,165 @@ function downloadClientBody(value,name) {
 function nativeBody(value,name,{request=false}={}) {
   const container=element('div');
   if(value.body==null){container.append(element('p','muted',`Original body unavailable · ${value.capture_error || 'not observed'}`));return container;}
-  container.append(button('Download original bytes',async()=>downloadClientBody(value,name)));
+  const download=button('Download original bytes',async()=>downloadClientBody(value,name));download.dataset.requestFocus=name+':download';container.append(download);
   let source;
   try {source=clientBodyText(value);}
   catch(error){container.append(element('p','muted',`Text display unavailable · ${error.message}. Original bytes remain downloadable.`));return container;}
   const full=element('details');full.open=true;
-  full.append(element('summary','',request?'Original outbound request body · native messages array and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text'),element('pre','json',source));
+  const summary=element('summary','',request?'Original outbound request body · native messages array and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text');summary.dataset.requestFocus=name+':body';
+  full.append(summary,element('pre','json',source));
   container.append(full);return container;
 }
-function nativeInteraction(item) {
-  const card=element('section','detail-card');
-  card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose} · ${modelLabel(item.model)}`));
-  if(item.usage)card.append(element('p','',usageLabel(item.usage)));
-  card.append(rawDetail({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code},'Logical request timing and identity'));
-  if(!item.client_requests_included)card.append(element('p','muted','Original client content was not requested.'));
-  else if(item.client_requests===null)card.append(element('p','muted',item.status==='RUNNING'?'Request in progress; original observations are saved at request completion.':'Original client messages were not recorded. SDK snapshots are not used to backfill them.'));
-  else if(!item.client_requests.length)card.append(element('p','muted','No supported client dispatch was observed in this request scope.'));
-  else item.client_requests.forEach((attempt,index)=>{
-    const row=element('section','detail-card'),key=clientAttemptKey(item,index);row.dataset.clientAttempt=key;
-    row.append(element('h4','',`Client attempt ${index+1} · ${attempt.api}`),element('p','muted','SDK client outbound request. Provider-server receipt is not observable here.'),nativeBody(attempt,`${key}-request.bin`,{request:true}));
-    if(attempt.response){
-      const response=attempt.response;
-      row.append(element('h4','',`Observed response · HTTP ${response.status_code} · ${response.complete?'complete':'incomplete'}`),element('p','muted',`${response.format} · ${response.content_encoding || 'identity'} · Only bytes pulled by the SDK were captured; received SSE data is not reconstructed assistant text.`),nativeBody(response,`${key}-response.bin`));
-    } else row.append(element('p','muted','No response was observed for this attempt.'));
-    card.append(row);
-  });
-  if(item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
-  return card;
+function literalSource(raw, label='') {
+  const node=element('div','native-field');if(label)node.append(element('span','native-field-label',label));node.append(element('pre','native-literal',raw));return node;
 }
-function renderNativeTimeline(container) {
+function fieldCounts(node) {
+  const counts=new Map();for(const field of node.fields())counts.set(field.name,(counts.get(field.name)||0)+1);return counts;
+}
+function nativeContent(container,node) {
+  if(node.kind==='string'){container.append(element('pre',node.text?'native-text':'native-empty',node.text || 'content: empty string'));return;}
+  if(node.kind!=='array'){container.append(literalSource(node.raw,'content'));return;}
+  if(!node.items().length){container.append(element('p','native-empty','content: empty array'));return;}
+  node.items().forEach((block,index)=>{
+    const row=element('div','native-block'),types=block.fields().filter(field=>field.name==='type');
+    const type=types.length===1 && types[0].value.kind==='string'?types[0].value.text:null;
+    row.append(element('span','native-field-label',`content[${index}]${type?' · '+type:''}`));
+    if(type==='text'){
+      const counts=fieldCounts(block);
+      for(const field of block.fields()){
+        if(field.name==='type')continue;
+        if(field.name==='text' && counts.get('text')===1 && field.value.kind==='string')row.append(element('pre','native-text',field.value.text));
+        else row.append(literalSource(field.raw));
+      }
+    } else row.append(element('pre','native-literal',block.raw));
+    container.append(row);
+  });
+}
+function nativeToolCalls(container,node,key) {
+  if(node.kind!=='array'){container.append(literalSource(node.raw,'tool_calls'));return;}
+  if(!node.items().length){container.append(element('p','native-empty','tool_calls: empty array'));return;}
+  node.items().forEach((call,index)=>{
+    const row=element('div','native-tool'),fields=call.fields(),counts=fieldCounts(call);
+    const unique=name=>counts.get(name)===1?fields.find(field=>field.name===name)?.value:null;
+    const fn=unique('function'),id=unique('id'),type=unique('type'),members=fn?.fields() || [];
+    const member=name=>members.filter(field=>field.name===name);
+    const names=member('name'),argumentsFields=member('arguments');
+    const compact=fn?.kind==='object' && names.length===1 && names[0].value.kind==='string' && argumentsFields.length===1 && argumentsFields[0].value.kind==='string' && (!counts.has('id') || id?.kind==='string') && (!counts.has('type') || type?.kind==='string' && type.text==='function');
+    const heading=element('div','native-tool-heading');row.append(heading);
+    if(compact){
+      heading.append(element('strong','',names[0].value.text || 'name: empty string'));
+      if(id)heading.append(element('span','native-call-id',id.text || 'id: empty string'));
+      row.append(element('pre',argumentsFields[0].value.text?'native-literal':'native-empty',argumentsFields[0].value.text || 'arguments: empty string'));
+      const extra=readerDetail(`${key}:call:${index}`,'Fields','native-fields');
+      extra.append(element('span','native-field-label',`tool_calls[${index}]`));
+      if(type)extra.append(literalSource(type.raw,'type'));
+      for(const field of fields){
+        if(field.name==='function'){for(const value of members.filter(value=>!['name','arguments'].includes(value.name)))extra.append(literalSource(value.raw,'function'));}
+        else if(!['id','type'].includes(field.name))extra.append(literalSource(field.raw));
+      }
+      heading.append(extra);
+    } else row.append(element('pre','native-literal',call.raw));
+    container.append(row);
+  });
+}
+
+function nativeMessages(container,projection,key) {
+  if(projection.root.kind!=='object' || !projection.messages.length){container.append(element('p','muted','This captured body has no messages field. Its original source is shown without inventing messages.'),element('pre','native-literal',projection.source));return;}
+  if(projection.messages.length>1)container.append(element('p','source-warning','Multiple messages fields were captured. Each field is shown separately in source order; no effective field is guessed.'));
+  projection.messages.forEach((field,group)=>{
+    if(projection.messages.length>1)container.append(element('h3','',`messages field ${group+1}`));
+    if(field.value.kind!=='array'){container.append(literalSource(field.raw,'messages is not an array'));return;}
+    if(!field.value.items().length)container.append(element('p','native-empty','messages: empty array'));
+    field.value.items().forEach((message,index)=>{
+      const row=element('article','native-message'),heading=element('div','native-role'),body=element('div','native-message-body'),fields=message.fields(),counts=fieldCounts(message),roles=fields.filter(item=>item.name==='role');
+      const role=roles.length===1 && roles[0].value.kind==='string'?roles[0].value.text:roles.length>1?'ambiguous role':roles.length?'non-string role':'role absent';
+      heading.dataset.role=role;heading.append(element('span','',index),element('strong','',role));row.append(heading,body);
+      if(message.kind!=='object')body.append(element('pre','native-literal',message.raw));
+      else {
+        if([...counts.values()].some(count=>count>1))body.append(element('p','source-warning','Repeated field names are preserved below; no last value is selected.'));
+        const extra=readerDetail(`${key}:message:${group}:${index}`,'Fields','native-fields');
+        if(!counts.has('content'))(counts.has('tool_calls')?extra:body).append(element('p','native-empty','content field absent'));
+        for(const item of fields){
+          if(item.name==='role' && roles.length===1 && item.value.kind==='string')continue;
+          if(counts.get(item.name)>1){body.append(literalSource(item.raw));continue;}
+          if(item.name==='content')nativeContent(counts.has('tool_calls') && item.value.kind==='string' && !item.value.text?extra:body,item.value);
+          else if(item.name==='tool_calls')nativeToolCalls(body,item.value,`${key}:message:${group}:${index}`);
+          else if(item.name==='tool_call_id' && item.value.kind==='string'){body.classList.add('native-tool-result');body.append(element('span','native-call-id',item.value.text || 'tool_call_id: empty string'));}
+          else extra.append(literalSource(item.raw));
+        }
+        if(extra.children.length>1)body.append(extra);
+      }
+      container.append(row);
+    });
+  });
+}
+function readerDetail(key,label,className) {
+  const detail=element('details',className),summary=element('summary','',label);
+  detail.open=state.readerExpanded.has(key);summary.dataset.requestFocus=key;
+  detail.ontoggle=()=>{if(!detail.isConnected)return;if(detail.open)state.readerExpanded.add(key);else state.readerExpanded.delete(key);};
+  detail.append(summary);return detail;
+}
+function renderNativeTimeline(container,{conversation=false}={}) {
   const view=state.nativeTimeline;
-  container.append(element('h3','','Original request timeline'),element('p','muted','Grouped by logical request and actual client attempt. Each input array is a complete request, not a new conversation turn.'));
+  container.classList.add('native-reader');
+  const toolbar=element('div','native-toolbar');container.append(toolbar);
+  if(conversation){
+    toolbar.id='request-context';
+    const turn=element('select','native-turn');turn.id='request-turn';turn.setAttribute('aria-label','Choose turn for model requests');turn.dataset.requestFocus='reader:turn';
+    turn.onchange=()=>selectExecution(turn.value).catch(showError);toolbar.append(turn);
+  }
   if(!view || view.id!==state.selectedExecution){container.append(element('p','muted','Loading original client records…'));return;}
-  view.items.forEach(item=>container.append(nativeInteraction(item)));
-  if(view.error)container.append(element('p','muted',view.error));
-  else if(!view.items.length)container.append(element('p','muted',view.loading?'Loading original client records…':'No model request records are available.'));
-  const refresh=button('Refresh original requests',async()=>loadNativeTimeline(false,true));refresh.disabled=view.loading;container.append(refresh);
-  if(view.cursor){const more=button('Load more model requests',async()=>loadNativeTimeline(true));more.disabled=view.loading;container.append(more);}
+  const choices=[];
+  for(const item of view.items){
+    const attempts=item.client_requests || [];
+    if(!attempts.length)choices.push({key:modelKey(item)+':unavailable',item,attempt:null,index:0});
+    else attempts.forEach((attempt,index)=>choices.push({key:clientAttemptKey(item,index),item,attempt,index}));
+  }
+  let selected=choices.find(choice=>choice.key===state.readerSelection);
+  if(!selected && state.readerSelection?.endsWith(':unavailable'))selected=choices.find(choice=>modelKey(choice.item)+':unavailable'===state.readerSelection);
+  if(selected)state.readerSelection=selected.key;
+  if(!selected){selected=choices[0];state.readerSelection=selected?.key || null;}
+  const select=element('select','native-request');select.setAttribute('aria-label','Select model request and attempt');select.dataset.requestFocus='reader:selection';
+  choices.forEach(choice=>{const option=element('option','',`Request ${choice.item.model_request_seq} · ${choice.attempt?'Attempt '+(choice.index+1):'not captured'}${choice.item.agent_run_seq>1?' · run '+choice.item.agent_run_seq:''}${choice.item.purpose && choice.item.purpose!=='agent'?' · '+choice.item.purpose:''}${choice.item.execution_id!==view.id?' · '+short(choice.item.execution_id):''}`);option.value=choice.key;select.append(option);});
+  select.value=state.readerSelection || '';select.disabled=!selected;select.onchange=()=>{state.readerExpanded.delete('reader:tools');state.readerSelection=select.value;state.readerCache=null;renderNativeViews();};toolbar.append(select);
+  const status=selected?.attempt?.response?.status_code;
+  if(status>=400 || selected?.item.status && selected.item.status!=='SUCCEEDED')toolbar.append(element('span','native-status',status>=400?`HTTP ${status}`:selected.item.status));
+  const tools=readerDetail('reader:tools','···','native-tools');tools.children[0].setAttribute('aria-label','Request tools');
+  const actions=element('div','native-tool-actions');tools.append(actions);toolbar.append(tools);
+  const closeTools=()=>{tools.open=false;state.readerExpanded.delete('reader:tools');tools.children[0].focus({preventScroll:true});};
+  tools.onkeydown=event=>{if(event.key==='Escape')closeTools();};
+  const raw=button(state.readerRaw?'Read messages':'View raw',async()=>{closeTools();state.readerRaw=!state.readerRaw;renderNativeViews();});raw.dataset.requestFocus='reader:raw';raw.disabled=!selected?.attempt;actions.append(raw);
+  if(selected?.attempt?.body!=null){const download=button('Download bytes',async()=>{downloadClientBody(selected.attempt,`${selected.key}-request.bin`);closeTools();});download.dataset.requestFocus='reader:download';actions.append(download);}
+  if(selected){const info=button('Inspect request',async()=>{const key=modelKey(selected.item)+':metadata';state.readerExpanded.has(key)?state.readerExpanded.delete(key):state.readerExpanded.add(key);closeTools();renderNativeViews();});info.dataset.requestFocus='reader:info';actions.append(info);}
+  if(view.error)container.append(element('p','source-warning',view.error));
+  if(!selected)container.append(element('p','empty',view.loading?'Loading original client records…':'No records for this selection.'));
+  else {
+    const {item,attempt}=selected;
+    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note','SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Only OpenAI Chat is captured; SDK history never fills missing captures.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    const toggleInfo=metadata.ontoggle;metadata.ontoggle=()=>{toggleInfo();if(!metadata.isConnected)return;metadata.hidden=!metadata.open;if(!metadata.open && metadata.contains(document.activeElement))tools.children[0].focus({preventScroll:true});};
+    if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request running; capture is saved on completion.':item.client_requests===null?'Original client messages were not recorded.':'No supported client dispatch was observed.'));
+    else {
+      try {
+        const source=clientBodyText(attempt);
+        if(source===null)throw new Error(attempt.capture_error || 'Original body unavailable');
+        if(state.readerRaw)container.append(element('pre','native-literal native-raw',source));
+        else {
+          if(state.readerCache?.source!==source){state.readerCache={source,projection:capturedRequest(source)};}
+          nativeMessages(container,state.readerCache.projection,selected.key);
+          const envelope=state.readerCache.projection.fields.filter(field=>field.name!=='messages');
+          if(envelope.length){const detail=readerDetail(selected.key+':envelope','Request envelope fields','native-envelope');envelope.forEach(field=>detail.append(literalSource(field.raw)));container.append(detail);}
+        }
+      } catch(error){container.append(element('p','source-warning',`Readable view unavailable: ${error.message}. The original request remains authoritative.`));try {const source=clientBodyText(attempt);if(source!==null)container.append(element('pre','native-literal',source));}catch{}}
+      const response=readerDetail(selected.key+':response',attempt.response?`Observed response · HTTP ${attempt.response.status_code} · ${attempt.response.complete?'complete':'incomplete'}`:'No response observed','native-response');
+      if(attempt.response)response.append(element('p','muted',`${attempt.response.format} · ${attempt.response.content_encoding || 'identity'} · Separate from this request’s input messages. Only bytes pulled by the SDK were captured.`),nativeBody(attempt.response,`${selected.key}-response.bin`));container.append(response);
+    }
+    if(item.execution_id!==state.selectedExecution)container.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
+  }
+  const refresh=button('Refresh requests',async()=>loadNativeTimeline(false,true));refresh.dataset.requestFocus='refresh';refresh.setAttribute('aria-busy',String(view.loading));container.append(refresh);
+  if(view.cursor){const more=button('Load more requests',async()=>loadNativeTimeline(true));more.dataset.requestFocus='more';more.setAttribute('aria-busy',String(view.loading));container.append(more);}
 }
 function renderNativeViews() {
-  if(state.view==='sessions')renderConversation();
+  if(state.view==='sessions' && state.conversationMode==='original')renderConversation();
   if(state.tab==='models' && !$('inspector').hidden && state.nativeTimeline?.id===state.selectedExecution){
     state.details=state.nativeTimeline.items;state.detailCursor=state.nativeTimeline.cursor;renderDetails();$('detail-more').hidden=!state.detailCursor;
   }
@@ -556,15 +749,15 @@ async function refreshNativeRequests(view,generation) {
     }
   }
 }
-async function loadDetail(more=false, selectors={}) {
+async function loadDetail(more=false, selectors={}, reuseNative=false) {
   if (!state.selectedExecution || $('inspector').hidden || state.view==='metrics') return;
   const generation=++state.detailGeneration, selection=state.generation, id=state.selectedExecution, tab=state.tab;
-  if (!more) { state.details=[]; state.detailCursor=null; clear('inspector-content'); }
+  if (!more) { state.details=[]; state.detailCursor=null; $('inspector-content').classList.remove('native-reader');clear('inspector-content'); }
   $('detail-more').hidden=true;
-  document.querySelectorAll('[data-tab]').forEach(node=>node.classList.toggle('active',node.dataset.tab===tab));
+  $('detail-view').value=tab;setDisabled();
   if (tab==='overview') { renderOverview(); return; }
   if (tab==='models') {
-    await loadNativeTimeline(more,!more && !(state.view==='sessions' && state.conversationMode==='original'));
+    await loadNativeTimeline(more,!more && !reuseNative && !(state.view==='sessions' && state.conversationMode==='original'));
     if(generation!==state.detailGeneration || selection!==state.generation || id!==state.selectedExecution || tab!==state.tab)return;
     renderNativeViews();
     if(state.nativeTimeline?.error)showError(new Error(state.nativeTimeline.error));
@@ -583,7 +776,7 @@ async function loadDetail(more=false, selectors={}) {
   } catch(error) { if(generation===state.detailGeneration && selection===state.generation && id===state.selectedExecution && tab===state.tab) showError(error); }
 }
 function renderOverview() {
-  clear('inspector-content'); const info=state.execution; if (!info) return;
+  $('inspector-content').classList.remove('native-reader');clear('inspector-content'); const info=state.execution; if (!info) return;
   $('inspector-content').append(properties({Agent:info.agent_id,Kind:info.binding_kind,Session:info.session_id,Lineage:info.lineage_kind,Created:date(info.created_at),Started:date(info.started_at),Finished:date(info.terminal_at),Error:info.error_code}));
   if(info.usage) { const card=element('div','detail-card'); card.append(element('h3','','Usage'),properties({Requests:info.usage.logical_requests,'Input tokens':info.usage.input_tokens,'Output tokens':info.usage.output_tokens,'Unknown usage':info.usage.unknown_usage_requests}),rawDetail(info.usage)); $('inspector-content').append(card); }
   $('inspector-content').append(rawDetail(info,'Execution metadata'));
@@ -592,37 +785,56 @@ function renderOverview() {
     state.models.forEach(item=>{const card=element('div','detail-card');card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`${item.execution_id} · run ${item.agent_run_seq} · ${item.purpose}`),rawDetail(item));$('inspector-content').append(card);});
   }
 }
+function traceItem(item) {
+  const row=item.payload || {},key=`${item.execution_id}:${item.step_event_seq}`,selected=state.traceSelection===key;
+  const node=element('section','trace-item'),toggle=button('',async()=>{state.traceSelection=selected?null:key;renderDetails();});
+  toggle.className='trace-row';toggle.dataset.requestFocus=`trace:${key}`;toggle.setAttribute('aria-expanded',String(selected));
+  toggle.append(element('span','trace-seq',`#${item.step_event_seq}`),element('span','trace-label',`${(row.kind || 'Step').replaceAll('_',' ').toLowerCase()}${row.tool_name?' · '+row.tool_name:''}`));
+  if(row.status)toggle.append(element('span','trace-status',row.status));
+  toggle.append(element('span','trace-duration',duration(row.duration_ns)));node.append(toggle);
+  if(!selected)return node;
+  const detail=element('div','trace-detail');
+  detail.append(element('p','mono',`${item.execution_id} · ${row.scope || '—'} · run ${row.agent_run_seq ?? '—'} · step ${row.step_index ?? '—'} · request #${row.model_request_seq ?? '—'}`),element('p','muted',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`));
+  const selectors={};['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
+  if(row.call_id)selectors.tool_call_id=row.call_id;
+  const content=button('Read SDK content',async()=>{
+    if(item.execution_id!==state.selectedExecution){
+      const generation=state.generation,selection=selectExecution(item.execution_id),executionGeneration=state.executionGeneration;
+      await selection;
+      if(generation!==state.generation || executionGeneration!==state.executionGeneration || item.execution_id!==state.selectedExecution || state.tab!=='trace')return;
+    }
+    state.tab='history';await loadDetail(false,selectors);
+  });content.dataset.requestFocus=`trace:${key}:content`;detail.append(content);
+  if(row.child_execution_id){const child=button('Open subagent',async()=>state.view==='sessions'?selectExecution(row.child_execution_id):navigate(null,row.child_execution_id));child.dataset.requestFocus=`trace:${key}:child`;detail.append(child);}
+  const raw=rawDetail(item,'Original event record');raw.children[0].dataset.requestFocus=`trace:${key}:raw`;detail.append(raw);node.append(detail);return node;
+}
 function renderDetails() {
+  $('inspector-content').classList.remove('native-reader');
+  const requestFocus=requestFocusWithin($('inspector-content'));
   clear('inspector-content');
+  if(['history','transcript','sdkmodels'].includes(state.tab)) {
+    const note=element('div','source-note');
+    const explanation=state.tab==='history' ? 'SDK structured records, not outbound messages. Instructions is a separate SDK request field, not an earlier system or developer message. Display order is not client message order.' : state.tab==='transcript' ? 'SDK text excerpts only: user text and assistant text. System, instructions, tools and other structured parts are omitted; this is not a complete model request.' : 'SDK preparation snapshot, not the final client request. Categories describe framework input, not outbound message order.';
+    note.append(element('p','',state.tab==='transcript'?'SDK text excerpts, not a complete request.':'SDK records, not outbound messages.'));
+    const about=element('details');about.append(element('summary','','About this SDK view'),element('p','',explanation));note.append(about);
+    note.append(button('View model messages',async()=>{state.tab='models';await loadDetail();}));$('inspector-content').append(note);
+  }
   if(state.tab==='recovery' && !state.config.read_only) {
     const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
     $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
   }
-  if(state.tab==='models' && state.nativeTimeline?.error)$('inspector-content').append(element('p','muted',state.nativeTimeline.error));
-  if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No durable detail is available yet. Live progress can precede committed history; refresh to check again.'));
+  if(state.tab==='models'){renderNativeTimeline($('inspector-content'));restoreRequestFocus($('inspector-content'),requestFocus);return;}
+  if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No committed detail yet; live progress may arrive first.'));
   state.details.forEach(item=>{
     const card=element('div','detail-card');
-    if(state.tab==='models') {
-      card.append(nativeInteraction(item));
-    } else if(state.tab==='sdkmodels') {
-      card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`),element('p','muted','Framework preparation snapshot. This is not the final client message array.'));
+    if(state.tab==='sdkmodels') {
+      card.append(element('h3','',`SDK request snapshot ${item.model_request_seq} · ${item.status}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
       if(item.request && Object.keys(item.request).length && item.content_included!==false){const layers=element('details');layers.append(element('summary','','SDK prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
       else card.append(element('p','muted','SDK Prompt content is not available yet.'));
       card.append(rawDetail(item,'SDK prompt, response projection & metadata'));
     } else if(state.tab==='trace') {
-      const row=item.payload || {}; card.append(element('h3','',`#${item.step_event_seq} · ${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request #'+(row.model_request_seq ?? '—')}`),element('p','',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`),rawDetail(item));
-      const selectors={}; ['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
-      if(row.call_id)selectors.tool_call_id=row.call_id;
-      card.append(button('Read content',async()=>{
-        if(item.execution_id!==state.selectedExecution){
-          const generation=state.generation,selection=selectExecution(item.execution_id),executionGeneration=state.executionGeneration;
-          await selection;
-          if(generation!==state.generation || executionGeneration!==state.executionGeneration || item.execution_id!==state.selectedExecution || state.tab!=='trace')return;
-        }
-        state.tab='history';await loadDetail(false,selectors);
-      }));
-      if(row.child_execution_id)card.append(button('Open subagent',async()=>state.view==='sessions'?selectExecution(row.child_execution_id):navigate(null,row.child_execution_id)));
+      $('inspector-content').append(traceItem(item));return;
     } else if(state.tab==='recovery') {
       card.append(element('h3','',item.tool_name),element('p','',`Effect outcome unknown · ${item.tool_call_id}`),rawDetail(item));
       ['not_applied','applied','failed'].forEach(resolution=>card.append(button(resolution.replaceAll('_',' '),async()=>{
@@ -634,11 +846,16 @@ function renderDetails() {
         catch(error){if(current() && noticeRevision===state.noticeRevision)throw error;}
       })));
     } else {
-      card.append(element('h3','',`${item.item_kind || 'Text'} ${item.tool_name?'· '+item.tool_name:''}`),element('p','',`Message ${item.message_seq} · run ${item.agent_run_seq ?? '—'}${item.execution_id?' · '+short(item.execution_id):''}`),element('pre','json',text(item.content ?? item.text)),rawDetail(item));
+      const instructions=state.tab==='history' && item.item_kind==='instructions';
+      card.classList.toggle('sdk-field',instructions);
+      const title=instructions?'SDK instructions field':state.tab==='transcript'?'SDK text excerpt':`SDK ${item.item_kind || 'unknown'} part${item.tool_name?' · '+item.tool_name:''}`;
+      const locator=instructions?`Request record ${item.message_seq} · field metadata`:`Record ${item.message_seq}${item.part_index!=null?' · part '+item.part_index:''}`;
+      card.append(element('h3','',title),element('p','',`${locator} · run ${item.agent_run_seq ?? '—'}${item.execution_id?' · '+short(item.execution_id):''}`),element('pre','json',text(item.content ?? item.text)),rawDetail(item));
     }
     if(state.tab==='history' && item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
     $('inspector-content').append(card);
   });
+  restoreRequestFocus($('inspector-content'),requestFocus);
 }
 async function refreshSelected() {
   const refreshGeneration=++state.refreshGeneration, generation=state.generation, executionGeneration=state.executionGeneration, sessionId=state.view==='sessions'?state.selectedSession:null, id=state.selectedExecution, noticeRevision=state.noticeRevision, noticeId=state.cancellationNoticeId;
@@ -721,7 +938,7 @@ async function refreshObservation(id, generation) {
     if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
     const turn=state.turns.find(item=>item.execution_id===id);
     if(payload.timeline && turn?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
-    renderConversation();
+    renderConversation();renderList();
   }
   if(state.cancellationNoticeId===id && terminal(info.status)) {
     const session=info.session_id ? (payload && info.session_id===sessionId ? payload.session : (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session) : null;
@@ -820,14 +1037,14 @@ async function sendMessage(event) {
 }
 function openNew() {
   if(!state.config || state.config.read_only)return;
-  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-title').focus();
+  $('new-dialog').dataset.sessionId=crypto.randomUUID();$('create-session').disabled=false;$('new-dialog').showModal();$('new-agent').focus();
 }
 async function createSession(event) {
   event.preventDefault();const button=$('create-session');button.disabled=true;
   const sessionId=$('new-dialog').dataset.sessionId,generation=state.generation,noticeRevision=state.noticeRevision;
   try {
     const session=await mutate('/api/sessions',{session_id:sessionId,title:$('new-title').value,agent_id:$('new-agent').value,cwd:$('new-cwd').value || null});
-    if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();setView('sessions',false);navigate(session.session_id,null);}
+    if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation){$('new-dialog').close();state.conversationMode='chat';state.focusComposerSession=session.session_id;setView('sessions',false);navigate(session.session_id,null);}
     await loadList();
   } catch(error){if($('new-dialog').open && $('new-dialog').dataset.sessionId===sessionId && generation===state.generation && noticeRevision===state.noticeRevision)showError(error);}
   finally {if($('new-dialog').dataset.sessionId===sessionId)button.disabled=false;}
@@ -877,6 +1094,10 @@ async function executionAction(action, {active=false}={}) {
       if(noticeRevision===state.noticeRevision)noticeRevision=notice(result.cancelled?'Cancellation confirmed; checking session release.':`Cancellation requested; terminal outcome is not yet confirmed. If the previous executor has stopped, choose ${$('end-stopped').textContent}.`,id);
       await refreshSelected();
       if(active && current())await refreshObservation(id,state.observationGeneration);
+    }
+    else if(action==='recover') {
+      await refreshSelected();
+      if(current())await syncObservation({refresh:true});
     }
     else {
       const info=await api(`/api/executions/${enc(result.execution_id)}`);
@@ -980,7 +1201,7 @@ async function bootstrap() {
   state.config=await api('/api/config');$('workspace-label').textContent=state.config.workspace || 'Local Runtime';$('memory').value=state.config.memory_scope;
   state.config.capabilities.filter(item=>item.kind==='agent').forEach(item=>{const option=element('option','',item.id);option.value=item.id;$('new-agent').append(option);});
   state.config.metric_names.forEach(name=>{const option=element('option','',name.replace('linktools.',''));option.value=name;$('metric-names').append(option);});
-  if(state.config.read_only){connection('Read-only');notice('Read-only mode. Configure a model when starting ai web to enable conversations.');}
+  if(state.config.read_only){connection('Read-only');notice('Read-only. Configure a model at startup to send messages.');}
   setDisabled();await loadList();await fromHash();
 }
 async function fromHash() {
@@ -1000,26 +1221,42 @@ async function fromHash() {
 window.addEventListener('hashchange',()=>fromHash().catch(showError));window.addEventListener('beforeunload',stopStream);
 $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').onsubmit=createSession;
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
-$('menu').onclick=()=>$('sidebar').classList.toggle('open');
+$('menu').onclick=()=>{const open=$('menu').getAttribute('aria-expanded')!=='true';$('sidebar').classList.toggle('open',open);$('menu').setAttribute('aria-expanded',String(open));};
+$('sidebar-close').onclick=()=>closeSidebar(true);
+window.addEventListener('keydown',event=>{if(event.key==='Escape' && $('menu').getAttribute('aria-expanded')==='true' && !$('new-dialog').open && !$('settings-dialog').open)closeSidebar(true);});
+$('new-title').oninvalid=()=>$('new-options').open=true;
+$('detail-turn').onchange=()=>selectExecution($('detail-turn').value).catch(showError);
+async function openRecovery(active=false) {
+  const id=active?state.session?.active_execution_id:state.selectedExecution;if(!id)return;
+  showInspector(true,true);state.tab='recovery';await selectExecution(id);
+}
+$('open-recovery').onclick=()=>{ $('action-menu').open=false;return openRecovery(Boolean(state.session?.active_execution_id)).catch(showError); };
+$('recovery-shortcut').onclick=()=>openRecovery(true).catch(showError);
 $('options-toggle').onclick=()=>{const open=$('composer-options').hidden;$('composer-options').hidden=!open;$('options-toggle').setAttribute('aria-expanded',String(open));};
-$('inspector-toggle').onclick=()=>{const open=$('inspector').hidden;showInspector(open,true);if(open)loadDetail().catch(showError);};
+$('inspector-toggle').onclick=()=>{$('action-menu').open=false;const open=$('inspector').hidden,reuseNative=state.conversationMode==='original';showInspector(open,true);if(open)return loadDetail(false,{},reuseNative).catch(showError);};
 $('inspector-close').onclick=()=>showInspector(false,true);
 $('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
 $('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
+function closeRunActions(){if($('run-actions').open){$('run-actions').open=false;$('run-actions-toggle').focus();}}
+$('run-actions').onkeydown=event=>{if(event.key==='Escape')closeRunActions();};
+$('run-recovery').onclick=()=>{closeRunActions();return openRecovery().catch(showError);};
+$('detail-recovery').onclick=()=>openRecovery().catch(showError);
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
-$('native-mode').onclick=()=>{state.conversationMode='original';renderConversation();loadNativeTimeline().catch(showError);};
-$('chat-mode').onclick=()=>{state.conversationMode='chat';renderConversation();};
+$('native-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;state.conversationMode='original';showInspector(false);renderPage();renderConversation();$('conversation').scrollTop=0;$('native-mode').focus();return loadNativeTimeline().catch(showError);};
+$('chat-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');$('action-menu').open=false;state.conversationMode='chat';showInspector(false);renderPage();renderConversation();($('prompt').disabled?$('chat-mode'):$('prompt')).focus();};
+$('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');closeRunActions();$('action-menu').open=false;showInspector(true);state.conversationMode='activity';state.tab='trace';renderPage();return loadDetail().catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
-$('settings').onclick=showSettings;$('export').onclick=()=>exportResult().catch(showError);
+$('settings').onclick=showSettings;$('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
-$('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>executionAction('retry').catch(showError);$('fork-run').onclick=()=>executionAction('fork').catch(showError);$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
+$('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
+$('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>navigateView(node.dataset.view));
-document.querySelectorAll('[data-tab]').forEach(node=>node.onclick=()=>{state.tab=node.dataset.tab;loadDetail().catch(showError);});
+$('detail-view').onchange=()=>{state.tab=$('detail-view').value;return loadDetail().catch(showError);};
 document.querySelectorAll('[data-close]').forEach(node=>node.onclick=()=>$(node.dataset.close).close());
 setDisabled();
 bootstrap().catch(showError);
