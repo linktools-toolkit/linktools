@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """SQL Asset metadata binds its revision and entries to one read snapshot."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from linktools.ai.asset import AssetKey, SqlAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import MetadataLoadMode, StorageChange, StorageOperation, StorageRevision
+from linktools.ai.storage import (
+    LayerMetadataView, LayerRefreshPolicy, MetadataLoadMode,
+    StorageChange, StorageOperation, StorageRevision,
+)
 
 
 @pytest.mark.asyncio
@@ -194,5 +198,31 @@ async def test_metadata_missing_namespace_head_is_an_integrity_error(tmp_path: P
             await backend.load_metadata(None)
         assert failed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
+        await backend.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_warm_metadata_reads_share_one_sql_revision_query(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
+    await provision_asset_database(engine)
+    backend = SqlAssetBackend(engine, namespace="warm-reads")
+    await backend.initialize()
+    await backend.put(AssetKey("test", "asset"), b"content")
+    view = LayerMetadataView(backend, LayerRefreshPolicy.REVISIONED)
+    expected = await view.refresh()
+    statements = []
+
+    def capture(_conn, _cursor, sql, _parameters, _context, _many):
+        if sql.lstrip().upper().startswith("SELECT"):
+            statements.append(sql)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        results = await asyncio.gather(*(view.refresh() for _ in range(16)))
+        assert all(result == expected for result in results)
+        assert len(statements) == 1
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
         await backend.close()
         await engine.dispose()
