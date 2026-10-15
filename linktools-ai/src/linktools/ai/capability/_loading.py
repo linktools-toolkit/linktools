@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """Shared Asset capture and loader context for capability groups."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -154,6 +156,7 @@ class CapabilityLoadContext:
         self._versions = dict(versions)
         self._asset_reader = asset_reader
         self._cache: dict[AssetKey, bytes] = {}
+        self._read_locks: dict[AssetKey, asyncio.Lock] = {}
         if (
             not isinstance(group_id, str)
             or not group_id.strip()
@@ -262,25 +265,30 @@ class CapabilityLoadContext:
         requested = tuple(dict.fromkeys(keys))
         if any(key not in self._by_key for key in requested):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        pending = tuple(key for key in requested if key not in self._cache)
-        if pending:
-            refs = self.bind_versions(pending)
-            try:
-                values = await self._store.read_versions(refs)
-            except AIError as error:
-                if error.code in {
-                    ErrorCode.ASSET_VERSION_NOT_FOUND,
-                    ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
-                }:
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-                if (
-                    error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-                    and await self._store.current_revision() != self._source_revision
-                ):
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-                raise
-            for key, data in zip(pending, values, strict=True):
-                self._cache[key] = data
+        async with AsyncExitStack() as stack:
+            pending = tuple(key for key in requested if key not in self._cache)
+            for key in sorted(pending, key=lambda value: (value.kind, value.id)):
+                lock = self._read_locks.setdefault(key, asyncio.Lock())
+                await stack.enter_async_context(lock)
+            pending = tuple(key for key in requested if key not in self._cache)
+            if pending:
+                refs = self.bind_versions(pending)
+                try:
+                    values = await self._store.read_versions(refs)
+                except AIError as error:
+                    if error.code in {
+                        ErrorCode.ASSET_VERSION_NOT_FOUND,
+                        ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
+                    }:
+                        raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+                    if (
+                        error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                        and await self._store.current_revision() != self._source_revision
+                    ):
+                        raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+                    raise
+                for key, data in zip(pending, values, strict=True):
+                    self._cache[key] = data
         return tuple(self._cache[key] for key in keys)
 
     async def verify_source_revision(self) -> None:

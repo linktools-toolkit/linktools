@@ -61,6 +61,22 @@ Snapshot content keys bind to the asset digest; each manifest has its own
 digest and object reference computed from the complete manifest bytes. HTTP
 ETag validators are a separate transport concept.
 
+## Fixed Asset versions
+
+Live `AssetStore` instances backed by an overlay continue to read historical
+versions and verify each reference's size and digest through `read_versions`.
+Calls admitted before the same source read begins can share that observation. Once historical I/O has started, a later independent
+call reads the source again; completed version results are not kept in the byte
+cache. Historical existence cannot be checked separately with the current
+backend contract, so this reduces same-turn duplicate work rather than promising
+warm historical reads without source I/O. Closing the store drains admitted
+version reads before closing their backends.
+
+A capability capture retains its existing immutable-byte memo for that capture
+only. Concurrent first reads of a captured key coordinate its fill; unrelated
+keys can still load independently. This does not share completed values across
+captures or expand the capture's lifetime.
+
 ## Freshness and cancellation
 
 A content key must identify the exact content version. Reading a revision and

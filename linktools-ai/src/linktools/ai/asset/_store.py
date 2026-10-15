@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Raw file AssetStore backed by StorageOverlay."""
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -106,6 +108,12 @@ class AssetContentCache:
         return value[32:]
 
 
+@dataclass(slots=True)
+class _AssetVersionRead:
+    task: asyncio.Task[bytes] | None = None
+    readers: int = 0
+
+
 class AssetStore:
     """Expose Asset files without interpreting their contents."""
 
@@ -119,6 +127,8 @@ class AssetStore:
         if any(not isinstance(backend, AssetBackend) for backend in storage.backends):
             raise TypeError("AssetStore backends must implement AssetBackend")
         self._storage = storage
+        self._version_flights: dict[tuple[int, AssetVersionRef], _AssetVersionRead] = {}
+        self._version_reads: set[asyncio.Future[None]] = set()
         self._ready = False
         self._closing = False
         self._closed = False
@@ -160,10 +170,18 @@ class AssetStore:
             return
         self._closing = True
         self._ready = False
+        cancelled = False
+        while self._version_reads:
+            try:
+                await asyncio.wait(tuple(self._version_reads))
+            except asyncio.CancelledError:
+                cancelled = True
         await self._storage.close()
         self._closing = False
         self._closed = True
         _logger.debug("asset store closed")
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         """Return current effective file metadata and status."""
@@ -387,32 +405,83 @@ class AssetStore:
     ) -> "tuple[bytes, ...]":
         """Read referenced Asset bytes and verify their size and digest."""
         self._ensure_ready()
-        values: list[bytes] = []
-        for ref in refs:
-            if not isinstance(ref, AssetVersionRef):
-                raise TypeError("refs must contain AssetVersionRef values")
-            if ref.layer_id == "primary":
-                backend = self._storage.primary
-            else:
-                matches = tuple(
-                    layer.backend
-                    for layer in self._storage.layers
-                    if layer.id == ref.layer_id
-                )
-                if len(matches) != 1:
-                    raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
-                backend = matches[0]
-            value = await backend.get_at_revision(
-                ref.key,
-                ref.revision,
-            )
-            if value is None:
-                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
-            data = bytes(value)
-            if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values.append(data)
-        return tuple(values)
+        completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._version_reads.add(completed)
+        try:
+            values: list[bytes] = []
+            for ref in refs:
+                if not isinstance(ref, AssetVersionRef):
+                    raise TypeError("refs must contain AssetVersionRef values")
+                if ref.layer_id == "primary":
+                    backend = self._storage.primary
+                else:
+                    matches = tuple(
+                        layer.backend
+                        for layer in self._storage.layers
+                        if layer.id == ref.layer_id
+                    )
+                    if len(matches) != 1:
+                        raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
+                    backend = matches[0]
+                values.append(await self._read_version(backend, ref))
+            return tuple(values)
+        finally:
+            self._version_reads.discard(completed)
+            completed.set_result(None)
+
+    async def _read_version(self, backend: AssetBackend, ref: AssetVersionRef) -> bytes:
+        identity = (id(backend), ref)
+        flight = self._version_flights.get(identity)
+        if flight is None:
+            flight = _AssetVersionRead()
+            self._version_flights[identity] = flight
+            flight.task = asyncio.create_task(self._load_version(backend, ref, flight))
+
+            def finished(task: asyncio.Task[bytes]) -> None:
+                if self._version_flights.get(identity) is flight:
+                    del self._version_flights[identity]
+                if not task.cancelled():
+                    task.exception()
+
+            flight.task.add_done_callback(finished)
+        task = flight.task
+        assert task is not None
+        flight.readers += 1
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if flight.readers == 1:
+                if self._version_flights.get(identity) is flight:
+                    del self._version_flights[identity]
+                task.cancel()
+                # The last reader owns source cleanup, including a backend
+                # that delays or suppresses cancellation while releasing I/O.
+                while not task.done():
+                    try:
+                        await asyncio.wait((task,))
+                    except asyncio.CancelledError:
+                        pass
+                if not task.cancelled():
+                    task.result()
+            raise
+        finally:
+            flight.readers -= 1
+
+    async def _load_version(
+        self, backend: AssetBackend, ref: AssetVersionRef, flight: _AssetVersionRead
+    ) -> bytes:
+        identity = (id(backend), ref)
+        if self._version_flights.get(identity) is flight:
+            del self._version_flights[identity]
+        # Only readers admitted before source I/O starts share this observation.
+        # Historical existence cannot be checked without reading the version.
+        value = await backend.get_at_revision(ref.key, ref.revision)
+        if value is None:
+            raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+        data = bytes(value)
+        if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return data
 
     async def list_info_with_locations(
         self,
