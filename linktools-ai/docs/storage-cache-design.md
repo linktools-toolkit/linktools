@@ -214,7 +214,7 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 ## 8. 缓冲批量写入
 
-首批仅复用 Runtime 已有且明确 best-effort 的 automatic observations，不改变审计、恢复或控制数据的持久保证。以现有 Runtime _MetricBuffer 提炼通用调度与结算；Runtime 保留 Observation 关联字段增强，sink 继续使用 Metrics.record_observations → MetricStore.put_observations。此提炼本身不新增 Runtime 的批写收益，当前已经按128条/100ms批写。
+首批仅复用 Runtime 已有且明确 best-effort 的 automatic observations，不改变审计、恢复或控制数据的持久保证。以现有 Runtime _MetricBuffer 提炼通用调度与结算；Runtime 保留 Observation 关联字段增强，sink 继续使用 Metrics.record_observations → MetricStore.put_observations。自动观测已有批写机制；当前窗口调整为满128条或首条接纳后3秒，先到即提交。后续入队不重置窗口，显式 flush 与正常 close 会主动唤醒部分批次。3秒是正常调度等待上限，不包含 sink 执行耗时；进程崩溃仍可能丢失未结算的内存观测。此调整不改变显式 Metrics.record 或关键业务事务。
 
 ### 唯一公共形状
 

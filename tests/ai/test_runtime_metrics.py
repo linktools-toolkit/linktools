@@ -369,6 +369,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
     )
 
     assert buffer.try_record(_observation("first")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
     assert buffer.try_record(_observation("second")) is True
     assert buffer.try_record(_observation("third")) is False

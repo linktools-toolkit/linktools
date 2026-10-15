@@ -21,7 +21,7 @@ from .state._contracts import ExecutionTerminalCommitResult
 _logger = environ.get_logger("ai.runtime.metrics")
 _QUEUE_CAPACITY = 1024
 _BATCH_SIZE = 128
-_FLUSH_INTERVAL_SECONDS = 0.1
+_FLUSH_INTERVAL_SECONDS = 3.0
 _WRITE_TIMEOUT_SECONDS = 5.0
 _CLOSE_DEADLINE_SECONDS = 10.0
 _WARNING_INTERVAL_SECONDS = 30.0
@@ -84,7 +84,7 @@ class _MetricBuffer(MetricRecorder):
 
     def __init__(self, metrics: Metrics) -> None:
         self._metrics = metrics
-        self._queue: asyncio.Queue[Observation | None] = asyncio.Queue(
+        self._queue: asyncio.Queue[tuple[Observation, float] | None] = asyncio.Queue(
             maxsize=_QUEUE_CAPACITY
         )
         self._accepting = True
@@ -99,6 +99,8 @@ class _MetricBuffer(MetricRecorder):
         self._last_warning_at = 0.0
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
+        self._batch_ready = asyncio.Event()
+        self._flush_target = 0
         self._execution_contexts: dict[str, CorrelationData] = {}
         self._runtime_dimensions: dict[str, str] = {}
         self._runtime_dimensions_configured = False
@@ -165,6 +167,8 @@ class _MetricBuffer(MetricRecorder):
         target = self._accepted
         if self._resolved >= target:
             return MetricFlushResult(True, self.status())
+        self._flush_target = max(self._flush_target, target)
+        self._batch_ready.set()
 
         async def wait_resolved() -> None:
             while self._resolved < target:
@@ -201,11 +205,12 @@ class _MetricBuffer(MetricRecorder):
         if not self._start_writer():
             return False
         try:
-            self._queue.put_nowait(enriched)
+            self._queue.put_nowait((enriched, monotonic()))
         except asyncio.QueueFull:
             self._reject("runtime metric queue full", "QUEUE_FULL")
             return False
         self._accepted += 1
+        self._batch_ready.set()
         self._high_watermark = max(self._high_watermark, self._queue.qsize())
         return True
 
@@ -279,6 +284,7 @@ class _MetricBuffer(MetricRecorder):
 
     async def _close_impl(self) -> None:
         self._accepting = False
+        self._batch_ready.set()
         writer = self._writer
         if writer is None:
             self._execution_contexts.clear()
@@ -341,23 +347,33 @@ class _MetricBuffer(MetricRecorder):
             if first is None:
                 self._queue.task_done()
                 return
-            batch = [first]
+            observation, accepted_at = first
+            batch = [observation]
             try:
                 stop_after_batch = False
-                deadline = asyncio.get_running_loop().time() + _FLUSH_INTERVAL_SECONDS
+                deadline = accepted_at + _FLUSH_INTERVAL_SECONDS
                 while len(batch) < _BATCH_SIZE and not self._stop_requested:
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        break
+                    self._batch_ready.clear()
                     try:
-                        item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
-                    except asyncio.TimeoutError:
-                        break
+                        item = self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        remaining = deadline - monotonic()
+                        if (
+                            remaining <= 0
+                            or not self._accepting
+                            or self._resolved < self._flush_target
+                        ):
+                            break
+                        try:
+                            await asyncio.wait_for(self._batch_ready.wait(), timeout=remaining)
+                        except asyncio.TimeoutError:
+                            break
+                        continue
                     if item is None:
                         self._queue.task_done()
                         stop_after_batch = True
                         break
-                    batch.append(item)
+                    batch.append(item[0])
                 if self._stop_requested:
                     raise asyncio.CancelledError
                 await self._write(tuple(batch))

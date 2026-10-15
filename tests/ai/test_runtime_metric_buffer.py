@@ -84,6 +84,7 @@ async def test_metric_buffer_reports_backpressure_without_raising(
     )
 
     assert buffer.try_record(_observation("first")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
     assert buffer.try_record(_observation("second")) is True
     assert buffer.try_record(_observation("third")) is False
@@ -105,6 +106,7 @@ async def test_metric_buffer_flush_waits_for_accepted_observations() -> None:
         Metrics.from_store(store, namespace="flush")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("accepted")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
     pending = await buffer.flush(timeout_seconds=0)
@@ -132,6 +134,7 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
         Metrics.from_store(store, namespace="close")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("blocked")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
     await asyncio.wait_for(buffer.close(), timeout=1)
@@ -143,38 +146,28 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("interrupt", ("cancel", "deadline"))
-async def test_metric_buffer_close_settles_observations_being_batched(
+async def test_metric_buffer_cancelled_batch_settles_owned_observations(
     monkeypatch: pytest.MonkeyPatch,
-    interrupt: str,
 ) -> None:
     monkeypatch.setattr(runtime_metrics, "_FLUSH_INTERVAL_SECONDS", 60.0)
-    monkeypatch.setattr(runtime_metrics, "_CLOSE_DEADLINE_SECONDS", 0.01)
     store = _BlockingStore()
     buffer = runtime_metrics._MetricBuffer(
-        Metrics.from_store(store, namespace="batch-close")  # type: ignore[arg-type]
+        Metrics.from_store(store, namespace="batch-cancel")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("batched")) is True
     await asyncio.sleep(0)
     assert buffer.status().queue_size == 0
     assert not store.entered.is_set()
 
-    close = asyncio.create_task(buffer.close())
-    if interrupt == "cancel":
-        await asyncio.sleep(0)
-        close.cancel()
-    try:
-        done, _ = await asyncio.wait((close,), timeout=1)
-        assert close in done
-        assert not store.entered.is_set()
-    finally:
-        store.release.set()
-        await asyncio.wait_for(close, timeout=1)
+    assert buffer._writer is not None
+    buffer._writer.cancel()
+    await asyncio.gather(buffer._writer, return_exceptions=True)
+    await buffer.close()
 
     status = buffer.status()
-    assert status.accepted == status.persisted + status.lost == 1
-    assert status.pending == 0
-    assert status.queue_size == 0
+    assert status.accepted == status.lost == 1
+    assert status.persisted == status.pending == status.queue_size == 0
+    assert not store.entered.is_set()
     assert (await buffer.flush(timeout_seconds=0)).completed is True
     await buffer.close()
     assert buffer.status() == status
@@ -193,6 +186,7 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
         Metrics.from_store(store, namespace="close-completion")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("completing")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
     join = buffer._queue.join
     joining = asyncio.Event()
@@ -228,7 +222,6 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
     assert status.queue_size == 0
 
 
-
 @pytest.mark.asyncio
 async def test_metric_buffer_flush_cancellation_preserves_accepted_observations() -> None:
     store = _BlockingStore()
@@ -236,6 +229,7 @@ async def test_metric_buffer_flush_cancellation_preserves_accepted_observations(
         Metrics.from_store(store, namespace="flush-cancel")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("accepted")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
     flush = asyncio.create_task(buffer.flush(timeout_seconds=1))
@@ -288,6 +282,7 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
     )
     first = _observation("inflight")
     assert buffer.try_record(first) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
     flush = asyncio.create_task(buffer.flush(timeout_seconds=1))
     await asyncio.sleep(0)
@@ -309,3 +304,193 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
     assert buffer.status().lost == 2
     assert buffer.status().pending == 0
     assert buffer.status().queue_size == 0
+
+
+class _RecordingStore(_BlockingStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batches: list[tuple[Observation, ...]] = []
+        self.next_batch: asyncio.Queue[tuple[Observation, ...]] = asyncio.Queue()
+
+    async def put_observations(
+        self,
+        namespace: str,
+        observations: tuple[Observation, ...],
+    ) -> None:
+        self.batches.append(observations)
+        self.next_batch.put_nowait(observations)
+        await super().put_observations(namespace, observations)
+
+
+async def _wait_queue_empty(buffer: runtime_metrics._MetricBuffer) -> None:
+    while buffer.status().queue_size:
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_default_batch_reaches_128_before_three_seconds() -> None:
+    assert runtime_metrics._BATCH_SIZE == 128
+    assert runtime_metrics._FLUSH_INTERVAL_SECONDS == 3.0
+    store = _RecordingStore()
+    store.release.set()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="batch-size")  # type: ignore[arg-type]
+    )
+    try:
+        for index in range(127):
+            assert buffer.try_record(_observation(str(index))) is True
+        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        assert not store.entered.is_set()
+        assert buffer.try_record(_observation("127")) is True
+        batch = await asyncio.wait_for(store.next_batch.get(), timeout=1)
+        assert len(batch) == 128
+    finally:
+        await buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_window_stays_with_first_accepted_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(runtime_metrics, "monotonic", lambda: clock[0])
+    store = _RecordingStore()
+    store.release.set()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="batch-window")  # type: ignore[arg-type]
+    )
+    try:
+        assert buffer.try_record(_observation("first")) is True
+        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        clock[0] = 2.9
+        assert buffer.try_record(_observation("second")) is True
+        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        assert not store.entered.is_set()
+        clock[0] = 3.0
+        assert buffer.try_record(_observation("third")) is True
+        batch = await asyncio.wait_for(store.next_batch.get(), timeout=0.05)
+        assert tuple(item.observation_id for item in batch) == ("first", "second", "third")
+    finally:
+        await buffer.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("flush", "close"))
+async def test_metric_buffer_explicit_drain_wakes_partial_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    monkeypatch.setattr(runtime_metrics, "_FLUSH_INTERVAL_SECONDS", 60.0)
+    store = _RecordingStore()
+    store.release.set()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="explicit-drain")  # type: ignore[arg-type]
+    )
+    try:
+        assert buffer.try_record(_observation("partial")) is True
+        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        if operation == "flush":
+            result = await buffer.flush(timeout_seconds=0.05)
+            assert result.completed is True
+        else:
+            closing = asyncio.create_task(buffer.close())
+            done, _ = await asyncio.wait((closing,), timeout=0.05)
+            if closing not in done:
+                closing.cancel()
+                await closing
+            assert closing in done
+        assert buffer.status().persisted == 1
+        assert buffer.status().pending == 0
+    finally:
+        await buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_expired_queued_batch_does_not_start_another_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(runtime_metrics, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime_metrics, "_BATCH_SIZE", 2)
+    store = _RecordingStore()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="queued-window")  # type: ignore[arg-type]
+    )
+    try:
+        assert buffer.try_record(_observation("first")) is True
+        assert buffer.try_record(_observation("second")) is True
+        await asyncio.wait_for(store.next_batch.get(), timeout=1)
+        clock[0] = 0.1
+        assert buffer.try_record(_observation("queued")) is True
+        clock[0] = 3.1
+        store.release.set()
+        batch = await asyncio.wait_for(store.next_batch.get(), timeout=0.05)
+        assert tuple(item.observation_id for item in batch) == ("queued",)
+    finally:
+        store.release.set()
+        await buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_flush_wakes_prefix_queued_behind_inflight_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_metrics, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(runtime_metrics, "_FLUSH_INTERVAL_SECONDS", 60.0)
+    store = _RecordingStore()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="inflight-flush")  # type: ignore[arg-type]
+    )
+    try:
+        assert buffer.try_record(_observation("first")) is True
+        assert buffer.try_record(_observation("second")) is True
+        await asyncio.wait_for(store.next_batch.get(), timeout=1)
+        assert buffer.try_record(_observation("queued")) is True
+        flushing = asyncio.create_task(buffer.flush(timeout_seconds=0.05))
+        await asyncio.sleep(0)
+        store.release.set()
+        assert (await flushing).completed is True
+        assert buffer.status().persisted == 3
+        assert len(store.batches) == 2
+    finally:
+        store.release.set()
+        await buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_timer_writes_without_another_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_metrics, "_FLUSH_INTERVAL_SECONDS", 0.01)
+    store = _RecordingStore()
+    store.release.set()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="idle-window")  # type: ignore[arg-type]
+    )
+    try:
+        assert buffer.try_record(_observation("alone")) is True
+        batch = await asyncio.wait_for(store.next_batch.get(), timeout=1)
+        assert tuple(item.observation_id for item in batch) == ("alone",)
+    finally:
+        await buffer.close()
+    assert buffer.status().persisted == 1
+
+
+@pytest.mark.asyncio
+async def test_metric_buffer_completed_flush_does_not_bypass_later_batch_window() -> None:
+    store = _RecordingStore()
+    store.release.set()
+    buffer = runtime_metrics._MetricBuffer(
+        Metrics.from_store(store, namespace="flush-prefix")  # type: ignore[arg-type]
+    )
+    try:
+        assert buffer.try_record(_observation("prefix")) is True
+        assert (await buffer.flush(timeout_seconds=0.05)).completed is True
+        assert buffer.try_record(_observation("later")) is True
+        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        assert buffer.status().persisted == 1
+        assert buffer.status().pending == 1
+        assert len(store.batches) == 1
+    finally:
+        await buffer.close()
+    assert buffer.status().persisted == 2
