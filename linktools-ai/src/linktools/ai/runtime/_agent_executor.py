@@ -1154,7 +1154,7 @@ async def _materialize_agent(
     agent = PydanticAgent(
         model,
         name=compiled_agent.spec.id,
-        system_prompt=compiled_agent.spec.system_prompt,
+        system_prompt=compiled_agent.spec.system_prompt if compiled_agent.spec.system_prompt != "" else (),
         instructions=runtime_instructions,
         output_type=output_type,
         deps_type=AgentContext,
