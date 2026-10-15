@@ -2143,6 +2143,35 @@ class DefaultExecutionService:
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 budget_scope_id=budget_scope_id,
             )
+            if existing.status is IdempotencyStatus.STARTED and started.status in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }:
+                # Terminal commit updates both records atomically, but these two
+                # reads can straddle that commit. Refresh only this mixed view.
+                refreshed = await self._state.idempotency.get(
+                    scope, idempotency_key_digest, tenant_id=request.principal.tenant_id,
+                )
+                if (
+                    refreshed is None
+                    or refreshed.scope != existing.scope
+                    or refreshed.idempotency_key_digest != existing.idempotency_key_digest
+                    or refreshed.request_digest != existing.request_digest
+                    or refreshed.resource_kind is not existing.resource_kind
+                    or refreshed.resource_id != existing.resource_id
+                    or not _terminal_idempotency_matches(refreshed, started)
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                existing = refreshed
+                if existing.status in {IdempotencyStatus.FAILED, IdempotencyStatus.CANCELLED}:
+                    if scope == "session.resume" and started.started_at is not None:
+                        await self._acquire_start_dependency_hold(started, dependency_hold_id)
+                        return ExecutionHandle(existing.resource_id)
+                    fallback = (
+                        ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+                        if existing.status is IdempotencyStatus.FAILED
+                        else ErrorCode.EXECUTION_CANCELLED
+                    )
+                    raise _stable_idempotency_error(existing.error_code, fallback)
             if existing.status is IdempotencyStatus.COMPLETED:
                 if not _terminal_idempotency_matches(existing, started):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

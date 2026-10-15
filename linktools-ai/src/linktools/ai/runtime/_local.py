@@ -1679,6 +1679,11 @@ class LocalExecutionBackend:
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
+    def bind_recovery_relaunch_guard(
+        self, guard: Callable[[ExecutionRecord], Awaitable[bool]],
+    ) -> None:
+        self._recovery_coordinator.bind_relaunch_guard(guard)
+
     async def reconcile(self, *, allow_active_recovery: bool = True) -> None:
         await self._recovery_coordinator.reconcile(
             allow_active_recovery=allow_active_recovery,

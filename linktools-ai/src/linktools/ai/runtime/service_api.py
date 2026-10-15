@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from ..agent import AgentBindingContract
 from ..asset import AssetVersionRef
@@ -47,6 +47,10 @@ from .recovery import (
     ResolveToolEffectRequest,
     ToolEffectResolutionResult,
 )
+
+
+if TYPE_CHECKING:
+    from .state._contracts import ResultRecord
 
 
 class _ExecutionStreamFailure(Exception):
@@ -189,10 +193,18 @@ class _ExecutionViewSource(Protocol):
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
     event_seq: int
+    started_at: datetime | None
+    result: "ResultRecord | None"
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
+    """Execution state, with the original start and recorded result timestamps.
+
+    ``terminal_at`` is the durable result's creation time, not the wall-clock
+    instant when its terminal storage transaction became visible.
+    """
+
     execution_id: str
     agent_id: str | None
     status: ExecutionStatus
@@ -207,6 +219,8 @@ class ExecutionView:
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
     event_seq: int = 0
+    started_at: datetime | None = None
+    terminal_at: datetime | None = None
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -227,6 +241,8 @@ def project_execution_view(source: object) -> ExecutionView:
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,
         event_seq=value.event_seq,
+        started_at=value.started_at,
+        terminal_at=None if value.result is None else value.result.created_at,
     )
 
 

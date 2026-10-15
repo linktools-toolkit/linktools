@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution metadata queries must not re-read decoded candidates."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,8 @@ class _Candidates:
             task_deadline_at=None,
             task_next_attempt_at=None,
             event_seq=1,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            result=SimpleNamespace(created_at=datetime(2026, 1, 2, tzinfo=timezone.utc)),
         )
         return ExecutionCandidatePage(
             (ExecutionCandidate(record, "cursor-1"),),  # type: ignore[arg-type]
@@ -76,3 +79,6 @@ async def test_execution_list_authorizes_decoded_candidate_without_header_reread
 
     assert repository.list_calls == 1
     assert [item.execution_id for item in page.items] == ["exec-1"]
+
+    assert page.items[0].started_at == datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert page.items[0].terminal_at == datetime(2026, 1, 2, tzinfo=timezone.utc)

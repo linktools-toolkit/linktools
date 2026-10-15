@@ -307,6 +307,21 @@ class RuntimeInputCaptures:
                  "dependency_states": encode_domain({name: invocation.dependency_states[name] for name in node.dependencies})}
         await self._put(self._key(invocation.principal.tenant_id, "invocation", execution_id), value)
 
+    async def read_invocation_node(
+        self, execution_id: str, *, principal: Principal,
+    ) -> tuple[str, TaskNode] | None:
+        """Read the retained graph/node binding for execution recovery."""
+        header = await self._storage.execution.executions.get_header(execution_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
+        value = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
+        if value is None:
+            return None
+        if not isinstance(value, Mapping) or not isinstance(value.get("graph_id"), str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value["graph_id"], decode_domain(value.get("node"), TaskNode)
+
     async def record_graph(self, graph: TaskGraph, admission: TaskGraphAdmission) -> None:
         await self._put(self._key(admission.principal.tenant_id, "declaration", graph.graph_id),
                         encode_domain(TaskGraphTemplate(graph.nodes, admission.limits)))
