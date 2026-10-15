@@ -21,9 +21,6 @@ class ModelBinding(Protocol):
     def model_identity(self) -> str: ...
 
     @property
-    def vision(self) -> bool: ...
-
-    @property
     def contract(self) -> Mapping[str, JsonValue]: ...
 
     def materialize(self) -> Model:

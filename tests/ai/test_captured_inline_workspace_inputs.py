@@ -69,7 +69,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         expected = [b"DIRECT", b"INLINE ORIGINAL", b"INLINE ORIGINAL"]
         if files:
-            expected.append(b"SUFFIX ORIGINAL")
+            expected.insert(0, b"SUFFIX ORIGINAL")
         assert models.attachments == expected
         assert len(models.prompts) == 1
         case_ref = CaseRef(f"data-{capture_kind}", "case", 1)

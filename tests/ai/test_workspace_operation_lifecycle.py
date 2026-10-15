@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import BinaryIO, TextIO
 
 import pytest
 
@@ -32,26 +33,28 @@ async def test_close_does_not_wait_for_caller_after_read_finishes(
     read_finished = asyncio.Event()
     caller_release = asyncio.Event()
     close_waiting = asyncio.Event()
-    read_bytes = Path.read_bytes
+    open_file = Path.open
     session = await LocalSandbox().open(root=tmp_path)
     wait_operations = session._wait_operations
 
-    def delayed_read(path: Path) -> bytes:
-        if path == target:
+    def delayed_open(
+        path: Path, mode: str = "r", *args: object, **kwargs: object,
+    ) -> BinaryIO | TextIO:
+        if path == target and mode == "rb":
             entered.set()
             assert release.wait(5)
-        return read_bytes(path)
+        return open_file(path, mode, *args, **kwargs)
 
     async def wait_for_operations() -> None:
         close_waiting.set()
         await wait_operations()
 
     async def caller() -> None:
-        assert await session.read_bytes("value") == b"content"
+        assert await session.read_bytes("value", max_bytes=7) == b"content"
         read_finished.set()
         await caller_release.wait()
 
-    monkeypatch.setattr(Path, "read_bytes", delayed_read)
+    monkeypatch.setattr(Path, "open", delayed_open)
     monkeypatch.setattr(session, "_wait_operations", wait_for_operations)
     reading = asyncio.create_task(caller())
     closing: asyncio.Task[None] | None = None
@@ -59,6 +62,8 @@ async def test_close_does_not_wait_for_caller_after_read_finishes(
         assert await asyncio.to_thread(entered.wait, 5)
         closing = asyncio.create_task(session.close())
         await asyncio.wait_for(close_waiting.wait(), 5)
+        assert not closing.done()
+        assert not read_finished.is_set()
         release.set()
         await asyncio.wait_for(read_finished.wait(), 5)
         done, _ = await asyncio.wait((closing,), timeout=2)

@@ -126,15 +126,15 @@ class ModelUsage:
 @dataclass(frozen=True, slots=True)
 class EvidenceAttachmentRef:
     attachment_id: str
-    media_type: str
+    mime_type: str
     object_ref: ObjectRef
 
     def __post_init__(self) -> None:
-        if not all(isinstance(value, str) and value.strip() for value in (self.attachment_id, self.media_type)):
+        if not all(isinstance(value, str) and value.strip() for value in (self.attachment_id, self.mime_type)):
             raise ValueError("evidence attachment requires an identity and media type")
 
     def to_mapping(self) -> dict[str, JsonValue]:
-        return {"kind": "runtime_content", "attachment_id": self.attachment_id, "media_type": self.media_type,
+        return {"kind": "runtime_content", "attachment_id": self.attachment_id, "mime_type": self.mime_type,
                 "digest": self.object_ref.digest, "size": self.object_ref.size}
 
 
@@ -175,7 +175,18 @@ class EvidenceBundle:
 
     @property
     def digest(self) -> str:
-        return canonical_sha256(self.content_mapping())
+        # Public projections use mime_type; existing evidence identity retains
+        # the original media_type wire key without rewriting stored bundles.
+        content = self.content_mapping()
+        content["attachments"] = [
+            {"kind": "runtime_content", "attachment_id": item.attachment_id,
+             "media_type": item.mime_type, "digest": item.object_ref.digest,
+             "size": item.object_ref.size}
+            if isinstance(item, EvidenceAttachmentRef)
+            else {"kind": "asset", "ref": item.to_payload()}
+            for item in self.attachments
+        ]
+        return canonical_sha256(content)
 
 
 class ScoreNotApplicable(BaseModel):

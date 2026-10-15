@@ -120,7 +120,7 @@ jobs:
           rm -- .github/.pip-install-scope
           python -m pip install --quiet -U -r requirements.txt
           read -r -a packages <<< "$INSTALL_PACKAGES"
-          python manage.py install "${packages[@]}" --editable --quiet
+          python manage.py install "${packages[@]}" --editable --quiet --check-setup
           python - <<'PYCOMPILE'
           from compileall import compile_dir
           from pathlib import Path

@@ -28,7 +28,7 @@ class WorkspaceFileInput:
     """Describe one workspace file to be frozen by the Runtime."""
 
     path: str
-    media_type: str | None = None
+    mime_type: str | None = None
     identifier: str | None = None
 
     def __post_init__(self) -> None:
@@ -36,8 +36,8 @@ class WorkspaceFileInput:
             raise ValueError("workspace file path is required")
         if "\x00" in self.path:
             raise ValueError("workspace file path is invalid")
-        if self.media_type is not None and (
-            not isinstance(self.media_type, str) or not self.media_type
+        if self.mime_type is not None and (
+            not isinstance(self.mime_type, str) or not self.mime_type
         ):
             raise ValueError("workspace file media type is invalid")
         if self.identifier is not None and (

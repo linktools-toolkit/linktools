@@ -96,7 +96,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..model import model_binding_error
+from ..model import model_binding_error, validate_model_inputs
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
@@ -574,6 +574,8 @@ class AgentExecutor:
         compiled_agent = binding.compiled_agent
         if await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        validate_model_inputs(compiled_agent.model, scope.user_prompt)
+        validate_model_inputs(compiled_agent.model, scope.history)
         model = compiled_agent.model.materialize()
         # Model cleanup must not replace cancellation or an established run failure.
         execution_error: BaseException | None = None
@@ -945,7 +947,7 @@ async def _materialize_agent(
             workspace_names,
             limits=scope.limits,
             session=scope.sandbox_session,
-            vision=compiled_agent.model.vision,
+            model_binding=compiled_agent.model,
         )
     )
     if workspace_capability_values:
@@ -1152,7 +1154,7 @@ async def _materialize_agent(
     agent = PydanticAgent(
         model,
         name=compiled_agent.spec.id,
-        system_prompt=compiled_agent.spec.system_prompt,
+        system_prompt=compiled_agent.spec.system_prompt if compiled_agent.spec.system_prompt != "" else (),
         instructions=runtime_instructions,
         output_type=output_type,
         deps_type=AgentContext,

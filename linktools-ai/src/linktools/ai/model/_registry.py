@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Thread-safe model registry and immutable resolver captures."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from threading import RLock
 from types import MappingProxyType
 
@@ -26,7 +26,7 @@ class ModelRegistry:
         cls,
         *,
         model: str,
-        vision: bool = False,
+        input_types: Sequence[str] = (),
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -35,11 +35,17 @@ class ModelRegistry:
         max_tokens: "int | None" = None,
         connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
     ) -> "ModelRegistry":
+        """Create the default Chat route.
+
+        input_types accepts image/audio/document/video SDK categories and
+        mime:<MIME type> patterns. Only their expanded MIME types are allowed;
+        provider encoding checks and resource budgets still apply.
+        """
         registry = cls()
         registry.register_openai(
             "default",
             model=model,
-            vision=vision,
+            input_types=input_types,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
@@ -62,7 +68,7 @@ class ModelRegistry:
         route_id: str,
         *,
         model: str,
-        vision: bool = False,
+        input_types: Sequence[str] = (),
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -77,7 +83,7 @@ class ModelRegistry:
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
-                vision=vision,
+                input_types=input_types,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
@@ -170,10 +176,6 @@ class _ModelAliasBinding:
     @property
     def model_identity(self) -> str:
         return self._target.model_identity
-
-    @property
-    def vision(self) -> bool:
-        return self._target.vision
 
     @property
     def contract(self) -> Mapping[str, JsonValue]:

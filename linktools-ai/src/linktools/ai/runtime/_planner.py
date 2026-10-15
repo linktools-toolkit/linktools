@@ -208,15 +208,15 @@ class _TaskArtifactPublisher:
         name: str,
         chunks: AsyncIterator[bytes],
         *,
-        media_type: str,
+        mime_type: str,
         expected_size: int,
         expected_digest: str,
     ) -> ArtifactRecord:
         if (
             not isinstance(name, str)
             or not name
-            or not isinstance(media_type, str)
-            or not media_type
+            or not isinstance(mime_type, str)
+            or not mime_type
             or isinstance(expected_size, bool)
             or not isinstance(expected_size, int)
             or expected_size < 0
@@ -235,8 +235,9 @@ class _TaskArtifactPublisher:
         if existing is not None:
             if (
                 existing.execution_id != self._execution_id
-                or existing.digest != expected_digest
-                or existing.media_type != media_type
+                or existing.object_ref.digest != expected_digest
+                or existing.object_ref.size != expected_size
+                or existing.mime_type != mime_type
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return existing
@@ -253,13 +254,12 @@ class _TaskArtifactPublisher:
         )
         object_ref = ObjectRef("runtime", object_key, stat.digest, stat.size)
         record = ArtifactRecord(
-            artifact_id,
-            self._execution_id,
-            self._principal.tenant_id,
-            f"task:{self._graph_id}:{self._node_id}",
-            media_type,
-            object_ref,
-            datetime.now(timezone.utc),
+            artifact_id=artifact_id,
+            execution_id=self._execution_id,
+            producer=f"task:{self._graph_id}:{self._node_id}",
+            mime_type=mime_type,
+            object_ref=object_ref,
+            created_at=datetime.now(timezone.utc),
         )
         return await self._state.records.put_metadata(record)
 

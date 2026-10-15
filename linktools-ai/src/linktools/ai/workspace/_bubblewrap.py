@@ -38,6 +38,7 @@ from ._sandbox import (
     normalize_workspace_input_path,
 )
 from ._root import Workspace, validate_workspace_path
+from ._file_io import _check_state, _state
 from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_VALUES,
@@ -60,6 +61,7 @@ _HANDSHAKE_TIMEOUT_SECONDS = 10.0
 # Allow the guardian's TERM and KILL windows plus namespace teardown/reporting.
 _CLOSE_TIMEOUT_SECONDS = 3 * GUARDIAN_CHILD_TIMEOUT_SECONDS
 _MAX_RESULT_CHARS = 50_000
+_MAX_STRUCTURED_RESULT_CHARS = 350_000
 _MOUNTPOINTS = (
     "workspace",
     "resources",
@@ -254,6 +256,7 @@ class _BubblewrapSandboxSession:
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._pending: dict[str, tuple[asyncio.Future[Any], bool]] = {}
+        self._structured_requests: set[str] = set()
         self._pending_lock = asyncio.Lock()
         self._lost_cleanup_task: asyncio.Task[None] | None = None
         self._lost_cleanup_error: Exception | None = None
@@ -300,6 +303,7 @@ class _BubblewrapSandboxSession:
         path: str,
         *,
         max_bytes: int | None = None,
+        expected_state: str | None = None,
     ) -> bytes:
         self._ensure_open_sync()
         if max_bytes is not None and (
@@ -307,6 +311,8 @@ class _BubblewrapSandboxSession:
             or isinstance(max_bytes, bool)
             or max_bytes < 0
         ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if expected_state is not None and not isinstance(expected_state, str):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         root = self._workspace_root
         if root is None:
@@ -320,6 +326,7 @@ class _BubblewrapSandboxSession:
                 read_policy=self._read_policy,
                 hidden_paths=self._hidden_paths,
                 max_bytes=max_bytes,
+                expected_state=expected_state,
             ),
             name="bubblewrap-sandbox-read-bytes",
         )
@@ -424,6 +431,42 @@ class _BubblewrapSandboxSession:
 
     def _stdio_execution_policy(self) -> Mapping[str, JsonValue]:
         return _stdio_execution_policy(self._read_policy, self._hidden_paths)
+
+    async def _file_result(
+        self, method: str, params: Mapping[str, JsonValue],
+    ) -> Mapping[str, JsonValue]:
+        raw = await self._call(method, params)
+        try:
+            result = json.loads(raw)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.SANDBOX_SESSION_LOST) from error
+        if not isinstance(result, dict):
+            raise AIError(ErrorCode.SANDBOX_SESSION_LOST)
+        return result
+
+    async def inspect_file(
+        self, path: str, *, max_bytes: int | None = None,
+    ) -> Mapping[str, JsonValue]:
+        return await self._file_result("inspect_file", {"path": path, "max_bytes": max_bytes})
+
+    async def read_text(
+        self, path: str, *, offset: int | None = None, limit: int | None = None,
+        cursor: str | None = None, full_metadata: bool = False,
+        max_bytes: int | None = None, max_read_bytes: int | None = None,
+    ) -> Mapping[str, JsonValue]:
+        return await self._file_result("read_text", {
+            "path": path, "offset": offset, "limit": limit, "cursor": cursor,
+            "full_metadata": full_metadata, "max_bytes": max_bytes,
+            "max_read_bytes": max_read_bytes,
+        })
+
+    async def list_files(self, path: str = ".", *, include_glob: str = "*") -> str:
+        return await self._call("list_files", {"path": path, "include_glob": include_glob})
+
+    async def search_text(
+        self, pattern: str, *, path: str = ".", include_glob: str | None = None,
+    ) -> str:
+        return await self._call("search_text", {"pattern": pattern, "path": path, "include_glob": include_glob})
 
     async def read_file(
         self,
@@ -602,6 +645,8 @@ class _BubblewrapSandboxSession:
                 if business and pending_business >= MAX_ACTIVE_REQUESTS:
                     raise AIError(ErrorCode.SANDBOX_BUSY)
                 self._pending[frame_id] = (future, business)
+                if method in {"read_text", "inspect_file"}:
+                    self._structured_requests.add(frame_id)
         sent = False
         try:
             async with self._write_lock:
@@ -676,11 +721,15 @@ class _BubblewrapSandboxSession:
         if has_result:
             if (
                 not isinstance(frame["result"], str)
-                or len(frame["result"]) > _MAX_RESULT_CHARS
+                or len(frame["result"]) > (
+                    _MAX_STRUCTURED_RESULT_CHARS
+                    if request_id in self._structured_requests else _MAX_RESULT_CHARS
+                )
             ):
                 raise SandboxProtocolError("response result is invalid")
             async with self._pending_lock:
                 self._pending.pop(request_id, None)
+                self._structured_requests.discard(request_id)
             if not future.done():
                 future.set_result(frame["result"])
             return
@@ -703,6 +752,7 @@ class _BubblewrapSandboxSession:
             raise SandboxProtocolError("response error code is invalid") from protocol_error
         async with self._pending_lock:
             self._pending.pop(request_id, None)
+            self._structured_requests.discard(request_id)
         exception: AIError
         if effect == ERROR_EFFECT_NOT_APPLIED:
             exception = SandboxOperationRejected(code, safe_details=dict(details))
@@ -721,6 +771,7 @@ class _BubblewrapSandboxSession:
     async def _drop_pending(self, request_id: str) -> None:
         async with self._pending_lock:
             self._pending.pop(request_id, None)
+            self._structured_requests.discard(request_id)
 
     async def _mark_lost(self) -> None:
         async with self._state_lock:
@@ -739,6 +790,7 @@ class _BubblewrapSandboxSession:
         async with self._pending_lock:
             pending = tuple(self._pending.values())
             self._pending.clear()
+            self._structured_requests.clear()
         for future, _ in pending:
             if not future.done():
                 future.set_exception(AIError(code))
@@ -1013,6 +1065,7 @@ def _read_workspace_bytes(
     read_policy: ReadOnlySandboxPolicy | None,
     hidden_paths: tuple[str, ...],
     max_bytes: int | None,
+    expected_state: str | None = None,
 ) -> bytes:
     if path == "." or _hidden_path_covers(hidden_paths, path):
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -1064,7 +1117,14 @@ def _read_workspace_bytes(
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
+            info = os.fstat(stream.fileno())
+            state = _state(path, info)
+            if expected_state is not None and expected_state != state:
+                raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "file_changed"})
+            if max_bytes is not None and info.st_size > max_bytes:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "file_byte_limit"})
             value = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+            _check_state(root.joinpath(*PurePosixPath(relative).parts), path, stream, state)
         if max_bytes is not None and len(value) > max_bytes:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return value

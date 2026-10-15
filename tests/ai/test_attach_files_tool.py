@@ -14,6 +14,7 @@ from linktools.ai.capability import (
     ToolCallRetry,
     workspace_capabilities,
 )
+from linktools.ai.model import ModelBinding, ModelRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -77,13 +78,13 @@ async def _boundary(
     session: _AttachmentSession,
     repository: _RepositoryBoundary | None = None,
     *,
-    vision: bool = True,
+    model_binding: ModelBinding | None = None,
 ) -> tuple[BoundaryToolset, object]:
     capability = workspace_capabilities(
         workspace,
         ("attach_files",),
         session=session,  # type: ignore[arg-type]
-        vision=vision,
+        model_binding=model_binding,
     )[0]
     boundary = BoundaryToolset(
         (capability.get_toolset(),),
@@ -136,7 +137,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     assert isinstance(result, ToolReturn)
     expected = {
         "path": "evidence.png",
-        "media_type": "image/png",
+        "mime_type": "image/png",
         "size": 3,
         "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
     }
@@ -144,6 +145,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     assert result.content is not None
     binary = [item for item in result.content if isinstance(item, BinaryContent)]
     assert len(binary) == 2
+    assert all(item.media_type == "image/png" for item in binary)
     assert binary[0].identifier != binary[1].identifier
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png", "evidence.png"]
@@ -169,7 +171,7 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
         "files": [
             {
                 "path": path,
-                "media_type": "image/png",
+                "mime_type": "image/png",
                 "size": 3,
                 "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
             }
@@ -216,16 +218,16 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
+async def test_attach_files_rejects_unknown_image_before_read(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
-    boundary, tool = await _boundary(workspace, session, vision=False)
+    boundary, tool = await _boundary(workspace, session, model_binding=ModelRegistry.openai(model="gpt-test").capture().resolve("default"))
 
     with pytest.raises(
         ToolCallRetry,
-        match="does not support image attachments",
+        match="model",
     ):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",

@@ -28,7 +28,9 @@ export function inputPresentation(value) {
   const parts=[], attachments=[];
   const attachment=item=>{
     const name=item.path || item.identifier || item.url || item.file_id || 'Attachment';
-    const description=[name,item.media_type,Number.isFinite(item.size)?`${item.size} bytes`:null].filter(Boolean).join(' · ');
+    // Version-1 persisted input descriptions retain the SDK media_type wire key.
+    const mimeType=item.mime_type ?? item.media_type;
+    const description=[name,mimeType,Number.isFinite(item.size)?`${item.size} bytes`:null].filter(Boolean).join(' · ');
     attachments.push(description);
   };
   const read=item=>{

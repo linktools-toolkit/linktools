@@ -1,0 +1,531 @@
+{
+  "attach_files": {
+    "description": "<summary>Attach Workspace files to the next model request.</summary>\n<returns>\n<description>Lightweight file metadata plus the file content for the next model request.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "paths"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "description": "File paths relative to the root directory.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "type": "object"
+    },
+    "return_schema": {},
+    "revision": 2,
+    "strict": null,
+    "version": 1
+  },
+  "check_command": {
+    "description": "<summary>Check the status and recent output of a background command.</summary>\n<returns>\n<description>Status and recent output of the background command.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "shell"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "description": "The ID returned by start_command.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "create_directory": {
+    "description": "<summary>Create a directory and any missing parents.</summary>\n<returns>\n<description>Confirmation message.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "non_replay_safe",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.tool_class": "filesystem.write"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Directory path relative to the root directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "edit_file": {
+    "description": "<summary>Edit a file by exact string replacement with conflict detection.\n\nThe old_text must appear exactly once in the file. Include surrounding\ncontext lines to ensure uniqueness.</summary>\n<returns>\n<description>Summary with new hash for subsequent operations.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "non_replay_safe",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.tool_class": "filesystem.write"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "If provided, rejects the edit when the file's\ncurrent hash doesn't match (optimistic concurrency)."
+        },
+        "new_text": {
+          "description": "The replacement text.",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "The exact text to find (must appear exactly once).",
+          "type": "string"
+        },
+        "path": {
+          "description": "File path relative to the root directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "file_info": {
+    "description": "<summary>Get metadata about a file or directory.</summary>\n<returns>\n<description>Formatted metadata including size, type, and permissions.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "File or directory path relative to the root directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "find_files": {
+    "description": "<summary>Find files by glob pattern (name matching, not content search).</summary>\n<returns>\n<description>Newline-separated list of matching file paths relative to root.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": ".",
+          "description": "Directory to search in, relative to the root directory.",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "Glob pattern to match, relative to `path` (e.g. '*.py',\n'**/*.json'). Absolute patterns are rejected.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "list_directory": {
+    "description": "<summary>List the contents of a directory.</summary>\n<returns>\n<description>A newline-separated listing with type indicators and sizes.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": ".",
+          "description": "Directory path relative to the root directory.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "list_files": {
+    "description": "List names and type hints; only ** globs recurse below path.",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "include_glob": {
+          "default": "*",
+          "type": "string"
+        },
+        "path": {
+          "default": ".",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "read_file": {
+    "description": "Read text or supported media; as_file sends whole files. Lists are atomic batches.\n\nRanges/metadata require one text preview: zero-based offset, default 200 lines.\ncursor excludes offset; full_metadata scans for SHA-256 and line count.",
+    "metadata": {
+      "linktools.ai.context_dedupe": "workspace_file_read_v2",
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "as_file": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "full_metadata": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "offset": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "return_schema": {},
+    "revision": 3,
+    "strict": null,
+    "version": 1
+  },
+  "run_command": {
+    "description": "<summary>Execute a shell command and return its output.</summary>\n<returns>\n<description>Labeled stdout/stderr output with exit code on non-zero exit.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "non_replay_safe",
+      "linktools.ai.tool_class": "shell"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "The shell command to run.",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum seconds to wait (default: 30)."
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "search_files": {
+    "description": "Search text recursively by regex, returning matching lines and coverage limits.\n\ninclude_glob is relative to path: * stays in one level; ** spans zero or more.",
+    "metadata": {
+      "linktools.ai.effect_policy": "none",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.plan_safe": true,
+      "linktools.ai.tool_class": "filesystem.read"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "include_glob": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "path": {
+          "default": ".",
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 2,
+    "strict": null,
+    "version": 1
+  },
+  "start_command": {
+    "description": "<summary>Start a long-running command in the background (e.g. a server or watcher).\n\nCallers MUST call `stop_command(command_id)` when done to terminate the\nprocess and clean up temporary output files.</summary>\n<returns>\n<description>A message containing the unique command ID for later check/stop calls.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "non_replay_safe",
+      "linktools.ai.tool_class": "shell"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "The shell command to run in the background.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "stop_command": {
+    "description": "<summary>Stop a background command and return its final output.</summary>\n<returns>\n<description>Final output and exit status of the stopped command.</description>\n</returns>",
+    "metadata": {
+      "linktools.ai.effect_policy": "non_replay_safe",
+      "linktools.ai.tool_class": "shell"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "description": "The ID returned by start_command.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 1,
+    "strict": null,
+    "version": 1
+  },
+  "write_file": {
+    "description": "Create/overwrite with content, or replace one unique nonempty old_text.\n\nEmpty content is valid. Optional expected_hash checks current raw-byte SHA-256.",
+    "metadata": {
+      "linktools.ai.effect_policy": "non_replay_safe",
+      "linktools.ai.path_fields": [
+        "path"
+      ],
+      "linktools.ai.tool_class": "filesystem.write"
+    },
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "old_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "return_schema": {
+      "type": "string"
+    },
+    "revision": 2,
+    "strict": null,
+    "version": 1
+  }
+}

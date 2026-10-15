@@ -334,7 +334,7 @@ def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
     assert dict(plain.contract) == {
         "provider": "openai",
         "model_identity": "openai:gpt-test",
-        "vision": False,
+        "input_mime_types": [],
         "settings": {},
     }
     assert dict(prefixed.contract) == dict(plain.contract)

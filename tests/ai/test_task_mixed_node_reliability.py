@@ -42,6 +42,7 @@ from linktools.ai.core import (
     idempotency_key_digest,
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
@@ -314,15 +315,14 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
 
 class _TaskTestModelBinding:
-    route_id = "default"
-    provider = "test"
-    model_identity = "test:task"
-    vision = False
+    _input_binding = ModelRegistry.openai(
+        model="gpt-task-test", input_types=("mime:text/plain",),
+    ).capture().resolve("default")
+    route_id = _input_binding.route_id
+    provider = _input_binding.provider
+    model_identity = _input_binding.model_identity
     model_digest = "a" * 64
-    contract: dict[str, JsonValue] = {
-        "provider": "test",
-        "model": "task",
-    }
+    contract: dict[str, JsonValue] = dict(_input_binding.contract)
 
     def materialize(self) -> TestModel:
         return TestModel()
@@ -5712,10 +5712,9 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from linktools.ai.runtime.state import _filesystem
     from linktools.ai.task import _local
 
-    monkeypatch.setattr(_local, "_LEASE_SECONDS", 1)
-    monkeypatch.setattr(_local, "_HEARTBEAT_SECONDS", 0.1)
     storage_root = tmp_path / "state"
     held_started = asyncio.Event()
     held_cancelled = asyncio.Event()
@@ -5802,7 +5801,16 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
         assert join_calls == 0
 
     assert held_cancelled.is_set()
-    await asyncio.sleep(1.1)
+    expired_at = datetime.now(timezone.utc) + timedelta(seconds=_local._LEASE_SECONDS + 1)
+
+    class AfterLeaseExpiry:
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            return expired_at.astimezone(tz)
+
+    # Expire the abandoned lease without shortening the live commit window.
+    monkeypatch.setattr(_local, "datetime", AfterLeaseExpiry)
+    monkeypatch.setattr(_filesystem, "datetime", AfterLeaseExpiry)
 
     async with Runtime.open(
         "any-succeeded-restart",

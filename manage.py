@@ -24,7 +24,7 @@ _VERSION_LINE_PATTERN = re.compile(r"(?m)^version:[^\r\n]*$")
 _INSTALL_MODULE_PATTERN = re.compile(
     r"^([A-Za-z0-9_-]+)(?:\[([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)\])?$"
 )
-_SUPPORTED_CHECKS = {"gate", "ruff", "pytest", "ci-pool"}
+_SUPPORTED_CHECKS = {"gate", "ruff", "pytest", "ci-pool", "setup"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
 _PYTEST_FIELDS = {"paths", "groups"}
@@ -214,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument("-e", "--editable", action="store_true", help="Install in editable mode")
     install_parser.add_argument("--no-isolation", action="store_true", help="Disable build isolation")
     install_parser.add_argument("--quiet", action="store_true", help="Suppress routine pip output")
+    install_parser.add_argument(
+        "--check-setup", action="store_true",
+        help="Run package-owned CI setup scripts after installation (may change system packages)",
+    )
     install_parser.set_defaults(func=handle_install)
 
     check_parser = subparsers.add_parser("check", help="Run source and test release gates")
@@ -372,6 +376,11 @@ def load_project_checks(project: str, project_path: str) -> "typing.Dict[str, ty
         raise SystemExit(1)
 
     result = {}
+    if "setup" in checks:
+        result["setup"] = _require_string_list(checks["setup"], "%s checks.setup" % project)
+        if any(not command.strip() for command in result["setup"]):
+            print("[-] %s checks.setup scripts must not be blank" % project, file=sys.stderr)
+            raise SystemExit(1)
     if "ci-pool" in checks:
         pool = checks["ci-pool"]
         if not isinstance(pool, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", pool):
@@ -682,7 +691,13 @@ def handle_init(args: argparse.Namespace) -> None:
 
 
 def handle_install(args: argparse.Namespace) -> None:
-    requirements = _install_requirements(args, get_modules())
+    modules = get_modules()
+    requirements = _install_requirements(args, modules)
+    setup = []
+    if getattr(args, "check_setup", False):
+        for name, _ in requirements:
+            checks = load_project_checks(name, modules[name]["path"])
+            setup.extend((name, command) for command in checks.get("setup", ()))
     pip_args = [sys.executable, "-m", "pip", "install"]
     if args.quiet:
         pip_args.append("--quiet")
@@ -694,6 +709,9 @@ def handle_install(args: argparse.Namespace) -> None:
         pip_args.append("--no-build-isolation")
     print("[+] Installing projects: %s" % ", ".join(name for name, _ in requirements))
     subprocess.check_call(pip_args)
+    for name, command in setup:
+        print("[+] %s: check setup" % name)
+        subprocess.check_call(["bash", "-euo", "pipefail", "-c", command], cwd=PROJECT_PATH)
 
 
 def handle_check(args: argparse.Namespace) -> None:

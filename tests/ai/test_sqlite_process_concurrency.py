@@ -95,7 +95,7 @@ def _artifact_write_worker(database: str, barrier) -> None:
                         artifact_id=f"artifact-{index}",
                         execution_id="execution",
                         producer="concurrency-test",
-                        media_type="application/octet-stream",
+                        mime_type="application/octet-stream",
                         object_ref=ObjectRef(
                             "runtime",
                             f"artifact/{index}",

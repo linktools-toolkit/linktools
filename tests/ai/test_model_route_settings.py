@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
+from linktools.ai.model import ModelBinding, ModelRegistry
 from linktools.ai.model._openai import _RetryingModel
 from pydantic_ai.messages import (
     BinaryContent,
@@ -71,24 +71,19 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
     assert dict(binding.contract) == {
         "provider": "openai",
         "model_identity": "openai:gpt-test",
-        "vision": False,
+        "input_mime_types": [],
         "settings": {},
     }
 
 
-def test_openai_vision_is_durable_model_contract() -> None:
-    without_vision = ModelRegistry.openai(
-        model="gpt-test",
-        vision=False,
-    ).capture().resolve("default")
-    with_vision = ModelRegistry.openai(
-        model="gpt-test",
-        vision=True,
+def _input_binding(*, allow_files: bool = False) -> ModelBinding:
+    return ModelRegistry.openai(
+        model="gpt-test", input_types=("mime:image/*", "mime:application/*", "mime:text/*") if allow_files else (),
     ).capture().resolve("default")
 
-    assert dict(without_vision.contract)["vision"] is False
-    assert dict(with_vision.contract)["vision"] is True
-    assert dict(without_vision.contract) != dict(with_vision.contract)
+
+def test_openai_input_policy_is_durable_model_contract() -> None:
+    assert _input_binding().contract != _input_binding(allow_files=True).contract
 
 
 @pytest.mark.asyncio
@@ -96,15 +91,15 @@ def test_openai_vision_is_durable_model_contract() -> None:
     "content",
     (
         BinaryContent(b"image", media_type="image/png"),
-        ImageUrl("https://example.com/image"),
+        ImageUrl("https://example.com/image.png"),
         UploadedFile("report.png", "openai"),
     ),
 )
-async def test_openai_without_vision_rejects_images_before_provider(
+async def test_openai_with_reject_policy_rejects_images_before_provider(
     content: Any,
 ) -> None:
     wrapped = _CountingModel()
-    model = _RetryingModel(wrapped, 2, 0, vision=False)
+    model = _RetryingModel(wrapped, 2, 0, input_binding=_input_binding())
 
     with pytest.raises(AIError) as raised:
         await model.request(
@@ -115,16 +110,14 @@ async def test_openai_without_vision_rejects_images_before_provider(
 
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert raised.value.retryable is False
-    assert raised.value.safe_details == {
-        "reason": "image_input_not_supported",
-    }
+    assert raised.value.safe_details["reason"] == "model_input_not_supported"
     assert wrapped.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_openai_without_vision_rejects_stream_images_before_provider() -> None:
+async def test_openai_with_reject_policy_rejects_stream_images_before_provider() -> None:
     wrapped = _CountingModel()
-    model = _RetryingModel(wrapped, 2, 0, vision=False)
+    model = _RetryingModel(wrapped, 2, 0, input_binding=_input_binding())
 
     with pytest.raises(AIError) as raised:
         async with model.request_stream(
@@ -140,7 +133,7 @@ async def test_openai_without_vision_rejects_stream_images_before_provider() -> 
             None,
             ModelRequestParameters(),
         ):
-            raise AssertionError("vision guard should reject before stream entry")
+            raise AssertionError("input policy should reject before stream entry")
 
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert raised.value.retryable is False
@@ -149,11 +142,11 @@ async def test_openai_without_vision_rejects_stream_images_before_provider() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("media_type", ("application/pdf", "text/plain"))
-async def test_openai_without_vision_allows_non_image_attachments(
+async def test_openai_allow_files_allows_non_image_attachments(
     media_type: str,
 ) -> None:
     wrapped = _CountingModel()
-    model = _RetryingModel(wrapped, 2, 0, vision=False)
+    model = _RetryingModel(wrapped, 2, 0, input_binding=_input_binding(allow_files=True))
 
     await model.request(
         [
@@ -173,11 +166,11 @@ async def test_openai_without_vision_allows_non_image_attachments(
 
 
 @pytest.mark.asyncio
-async def test_openai_vision_policy_is_independent_per_binding() -> None:
+async def test_openai_input_policy_is_independent_per_binding() -> None:
     parent_provider = _CountingModel()
     child_provider = _CountingModel()
-    parent_model = _RetryingModel(parent_provider, 2, 0, vision=False)
-    child_model = _RetryingModel(child_provider, 2, 0, vision=True)
+    parent_model = _RetryingModel(parent_provider, 2, 0, input_binding=_input_binding())
+    child_model = _RetryingModel(child_provider, 2, 0, input_binding=_input_binding(allow_files=True))
     messages = [
         ModelRequest(
             parts=[
@@ -197,9 +190,9 @@ async def test_openai_vision_policy_is_independent_per_binding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_without_vision_does_not_guess_opaque_uploaded_file_type() -> None:
+async def test_openai_allow_files_does_not_guess_opaque_uploaded_file_type() -> None:
     wrapped = _CountingModel()
-    model = _RetryingModel(wrapped, 2, 0, vision=False)
+    model = _RetryingModel(wrapped, 2, 0, input_binding=_input_binding(allow_files=True))
 
     uploaded = UploadedFile("file-image", "openai")
     assert uploaded.media_type == "application/octet-stream"

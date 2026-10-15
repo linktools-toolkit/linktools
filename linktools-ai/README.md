@@ -676,12 +676,63 @@ reservation when their durable contract requires it. Model transport retries
 use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
 to `tool_retries=10`, and output correction defaults to `output_retries=3`.
 
-OpenAI model declarations accept explicit `vision=True` or `vision=False`
-(`False` by default). The value is part of the model model digest. A
-model with `vision=False` rejects recognizable image content at the final
-request boundary before provider calls or transport retries; PDF, text, and
-other non-image attachments continue through the existing provider contract.
-LinkTools does not infer image support from model names, endpoints, or probes.
+Model attachments use one string list, `input_types`, which defaults to empty.
+Plain prompt text is unaffected; there is no `text` category. The built-in names
+`image`, `audio`, `document`, and `video` expand to their corresponding Pydantic AI
+MIME Literal values. Use a `mime:` prefix for an explicit MIME type or `type/*`
+family. Attachments that do not match the resulting MIME allowlist are rejected:
+
+```python
+from linktools.ai.model import ModelRegistry
+
+models = ModelRegistry.openai(
+    model="your-model",
+    input_types=["audio", "document", "mime:audio/*", "mime:application/pdf"],
+)
+```
+
+For `lt ai run`, `lt ai acp`, and `lt ai web`, the existing
+`.linktools/config.yaml` uses the same strings:
+
+```yaml
+model: your-model
+input_types:
+  - audio
+  - document
+  - mime:audio/*
+  - mime:application/pdf
+```
+
+The model package directly re-exports Pydantic AI's `AudioMediaType`,
+`ImageMediaType`, `DocumentMediaType`, and `VideoMediaType` Literal types with
+their SDK names and identity. Category expansion uses those SDK sets, rather
+than treating a category as a wildcard. For example, `audio` means the SDK's
+known audio MIME values; `mime:audio/*` permits the whole audio family.
+Custom values such as `mime:application/x-private` remain supported. Bare MIME
+strings, `mime:*/*`, and partial wildcards are not accepted; actual attachments
+still need concrete MIME types. Text files can be selected explicitly, for
+example with `mime:text/plain`, without changing ordinary prompt text handling.
+
+Capture expands categories, normalizes, deduplicates, and sorts the MIME values.
+The model contract stores only that resolved `input_mime_types` list, which
+contributes to its digest. Restore uses the stored list without expanding it
+again against a potentially different SDK. `input_mime_types` is the captured
+contract/display field, not the Python or YAML authoring argument. Web settings
+show the actual captured MIME values rather than the authoring category labels.
+
+The allowlist declares application permission, not guaranteed provider support.
+SDK encoding restrictions and existing resource limits still apply. Transport
+selection is internal; no extra status, transport, passthrough, or per-MIME
+byte-limit configuration is needed.
+
+The old `vision` API argument and `--vision` flag have been removed.
+Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and
+persisted configuration, and remove workspace `vision` settings; their presence
+is a migration error, even when false or empty. There is no implicit mapping to
+`input_types`. Recovering a historical execution requires an explicitly
+registered binding matching its persisted historical contract. Historical input
+semantics are retained only at that restore boundary; a new binding with omitted
+declarations cannot recover them or replace them with its empty allowlist contract.
 
 Execution file input uses the same durable boundary:
 
@@ -702,7 +753,7 @@ from linktools.ai.core import WorkspaceFileInput
 result = (await agent.run(
     ("Review this evidence:", WorkspaceFileInput(
         "evidence/report.txt",
-        media_type="text/plain",
+        mime_type="text/plain",
         identifier="report-1",
     )),
 )).result
@@ -710,7 +761,7 @@ result = (await agent.run(
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `runtime.tasks.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. Runtime materializes those inputs at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
+For new Agent configurations, select `read_file` to preview text or attach supported files (`read_file(path=[...])`; use `as_file=True` for whole-text input). See [file tools and model input](docs/file-tools.md) for format capabilities, bounded reads, exact edits, minimal toolsets and migration. The legacy `attach_files(paths=[...])` entry point remains a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `runtime.tasks.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. Runtime materializes those inputs at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
 
 Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 

@@ -29,6 +29,13 @@ MAX_ACTIVE_REQUESTS = 256
 MAX_SAFE_DETAILS_BYTES = 8 * 1024
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 _REQUEST_FIELDS = {
+    "inspect_file": (frozenset({"path"}), frozenset({"max_bytes"})),
+    "read_text": (
+        frozenset({"path"}),
+        frozenset({"offset", "limit", "cursor", "full_metadata", "max_bytes", "max_read_bytes"}),
+    ),
+    "list_files": (frozenset(), frozenset({"path", "include_glob"})),
+    "search_text": (frozenset({"pattern"}), frozenset({"path", "include_glob"})),
     "read_file": (
         frozenset({"path"}),
         frozenset({"offset", "limit"}),
@@ -68,7 +75,11 @@ _REQUEST_VALUE_TYPES = {
     "old_text": (str,),
     "new_text": (str,),
     "expected_hash": (str, type(None)),
-    "offset": (int,),
+    "offset": (int, type(None)),
+    "cursor": (str, type(None)),
+    "full_metadata": (bool,),
+    "max_bytes": (int, type(None)),
+    "max_read_bytes": (int, type(None)),
     "limit": (int, type(None)),
     "command": (str,),
     "command_id": (str,),
@@ -112,6 +123,8 @@ def validate_request_params(
     for field in fields:
         value = params[field]
         accepted_types = _REQUEST_VALUE_TYPES[field]
+        if method == "read_file" and field == "offset":
+            accepted_types = (int,)
         if isinstance(value, bool) and (int in accepted_types or float in accepted_types):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(value, accepted_types):

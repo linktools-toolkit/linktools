@@ -445,7 +445,7 @@ class AttachmentFact:
     attachment_id: str
     fact: str
     source: str
-    media_type: str | None
+    mime_type: str | None
     size: int | None
     digest: str | None
     position: int
@@ -464,8 +464,8 @@ class AttachmentFact:
             or self.fact not in {"accepted", "included_in_request"}
             or not isinstance(self.source, str)
             or not self.source
-            or self.media_type is not None
-            and (not isinstance(self.media_type, str) or not self.media_type)
+            or self.mime_type is not None
+            and (not isinstance(self.mime_type, str) or not self.mime_type)
             or self.size is not None
             and (
                 isinstance(self.size, bool)

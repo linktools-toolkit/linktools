@@ -164,7 +164,7 @@ class TaskArtifactPublisher(Protocol):
         name: str,
         chunks: AsyncIterator[bytes],
         *,
-        media_type: str,
+        mime_type: str,
         expected_size: int,
         expected_digest: str,
     ) -> object: ...

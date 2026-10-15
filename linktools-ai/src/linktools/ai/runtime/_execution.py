@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
+from ..model import validate_model_inputs
+
 from ..agent import (
     AgentBinding,
     AgentBindingContract,
@@ -520,10 +522,12 @@ class DefaultExecutionService:
     async def _freeze_input(
         self,
         context: _ExecutionStartContext,
+        binding: AgentBinding,
     ) -> _ExecutionStartContext:
         request = context.request
         if self._input_materializer is None:
             canonical = validate_user_input(request.user_prompt)
+            validate_model_inputs(binding.compiled_agent.model, canonical)
             if isinstance(canonical, str):
                 stored = StoredUserInput(
                     "text",
@@ -541,6 +545,7 @@ class DefaultExecutionService:
                 request.user_prompt,
                 context.canonical_files,
             )
+            validate_model_inputs(binding.compiled_agent.model, canonical)
             stored = await self._input_materializer.store(
                 canonical,
                 tenant_id=request.principal.tenant_id,
@@ -2203,7 +2208,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
         await self._validate_tool_response_input(request.tool_response_ref, session_id=session_id)
-        context = await self._freeze_input(context)
+        context = await self._freeze_input(context, binding)
         request = context.request
 
         input_context = None
