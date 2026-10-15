@@ -69,8 +69,8 @@ def test_config_values_construction_repr_and_bool_do_not_read() -> None:
     assert calls == []
 
 
-@pytest.mark.parametrize("key", [None, 0, ConfigField("VALUE")])
-def test_config_values_reference_rejects_non_string_keys(key: "Any") -> None:
+@pytest.mark.parametrize("key", [None, 0, object()])
+def test_config_values_reference_rejects_keys_other_than_string_or_field(key: "Any") -> None:
     with pytest.raises(TypeError, match="non-empty string"):
         ConfigRef(key)
 
@@ -127,6 +127,62 @@ def test_config_values_context_is_unbound_and_results_are_not_cached() -> None:
     assert calls == [first, second, first]
     assert first.schema.fields() == []
     assert second.schema.fields() == []
+
+
+def test_config_values_reference_accepts_inline_field_without_registering_it() -> None:
+    config = _config()
+    field = ConfigField("PORT", default="8080", cast=int)
+    reference = ConfigRef(field)
+    revision = config.revision
+    assert reference.key is field
+    assert config.schema.fields() == []
+    assert config.resolve(reference) == 8080
+    assert config.schema.fields() == []
+    assert config.revision == revision
+
+
+@pytest.mark.parametrize("name", [None, "", 0])
+def test_config_values_reference_requires_a_nonempty_field_name(name: "Any") -> None:
+    with pytest.raises(ValueError, match="field name must be a non-empty string"):
+        ConfigRef(ConfigField(name, default="8080"))
+
+
+def test_config_values_inline_field_remains_lazy_and_uses_each_consuming_config() -> None:
+    calls = []
+    field = ConfigField("PORT", cast=int, provider=LazyProvider(
+        lambda resolver: calls.append(resolver) or resolver.get("FALLBACK")))
+    reference = ConfigRef(field)
+    first = _config({"FALLBACK": "8080"})
+    second = _config({"PORT": "9090", "FALLBACK": "7070"})
+    value = ConfigLazy(lambda config: reference if config.get("ENABLED", default=False) else "")
+    assert calls == []
+    assert first.resolve(value) == ""
+    assert calls == []
+    assert first.resolve(reference) == 8080
+    assert second.resolve(reference) == 9090
+    assert len(calls) == 1
+    first.set("FALLBACK", "8081")
+    assert first.resolve(reference) == 8081
+    assert len(calls) == 2
+    assert first.schema.fields() == second.schema.fields() == []
+
+
+def test_config_values_inline_field_preserves_outer_cast_and_default_rules() -> None:
+    config = _config()
+    assert config.resolve(ConfigRef(ConfigField("VALUE", default="12", cast=int), type=str)) == "12"
+    assert config.resolve(ConfigRef(ConfigField("ABSENT"), default="fallback")) == "fallback"
+    assert config.resolve(ConfigRef(ConfigField("VALUE", default="invalid"), type=int, default=7)) == 7
+    with pytest.raises(ConfigCastError):
+        config.resolve(ConfigRef(ConfigField("VALUE", default="invalid", cast=int), default=7))
+
+
+def test_config_values_inline_secret_field_retains_error_redaction() -> None:
+    secret = "private-not-a-number"
+    config = _config()
+    with pytest.raises(ConfigCastError) as error:
+        config.resolve(ConfigRef(ConfigField("SECRET", default=secret, secret=True), type=int))
+    assert secret not in str(error.value)
+    assert "***" in str(error.value)
 
 
 def test_config_values_reference_preserves_get_missing_default_and_cast() -> None:

@@ -244,7 +244,8 @@ app = endpoint(
 )
 ```
 
-`ConfigRef(key, type=None, default=MISSING)` reads a nonempty string key;
+`ConfigRef(key, type=None, default=MISSING)` defers `Config.get` with a nonempty
+string key or a `ConfigField` with a nonempty string `name` supplied for that read;
 `ConfigFormat(format_string, *args, **kwargs)` resolves its explicit arguments
 and performs one ordinary `str.format`; `ConfigLazy(func)` calls `func(config)`
 for conditional or more complex read-only calculations. All implement the public
@@ -257,16 +258,24 @@ Constructing or scanning these declarations does not read configuration. Consume
 supply `producer.env_config`, so one expression can be reused with separate Config
 instances. The expressions do not cache results or register fields. Keep schema
 and provider declarations in `ConfigField`/`configs`. The URL factories retain
-their existing successful-result caching.
-`ConfigRef` does not accept a `ConfigField` in place of its string key.
+their existing successful-result caching. An inline field can supply its own
+provider, cast, validator and default without being registered in the schema.
+For example, `ConfigRef(ConfigField("APP_PORT", default="8080", cast=int))`
+resolves to an integer even when `APP_PORT` was not declared beforehand.
+Unnamed fields belong in `configs`, where the dictionary key supplies their name.
+Existing configured values still outrank the field's provider. With the standard
+`DefaultSource(schema)`, an existing same-name schema default remains ahead of
+the inline field's default. Explicit field reads do not share the name-keyed
+resolution memo; named schema lookups and persistent provider caching are unchanged.
 
 `BaseContainer.get_config_later` is removed without an alias. Replace deferred
 field reads with `ConfigRef("KEY", type=..., default=...)`; use `ConfigFormat`
 or `ConfigLazy` for computed values. Built-in consumers resolve these declarations
 with the producer's Config; custom consumers call `config.resolve(value)`.
-For an ad-hoc `ConfigField`, declare it in `configs` or call `config.define(field)`
-before referencing `field.name`. Immediate `container.get_config(ConfigField(...))`
-remains supported.
+For an ad-hoc `ConfigField`, pass the field directly to `ConfigRef(field)` to
+resolve it without registration. Declare it in `configs` or call `config.define(field)`
+when subsequent name-based reads should use that schema. Immediate
+`container.get_config(ConfigField(...))` retains its explicit registration behavior.
 
 Nginx resolves only the currently needed field. An absent nginx consumer or empty
 server name skips unrelated fields; explicit `auth=False` and `waf=False` skip

@@ -175,11 +175,12 @@ environ.config.update(
 `ConfigRef`、`ConfigFormat` 和 `ConfigLazy` 用于声明调用方需要的值，在实际消费时统一传给 `config.resolve(value)`：
 
 ```python
-from linktools.core import ConfigRef, ConfigFormat, ConfigLazy
+from linktools.core import ConfigField, ConfigRef, ConfigFormat, ConfigLazy
 
 domain = ConfigRef("DOMAIN", default="localhost")
+port = ConfigRef(ConfigField("HTTPS_PORT", default="443", cast=int))
 address = ConfigFormat("https://{domain}:{port}",
-                       domain=domain, port=ConfigRef("HTTPS_PORT", type=int))
+                       domain=domain, port=port)
 optional_address = ConfigLazy(
     lambda config: address if config.get("HTTPS_ENABLED", type=bool) else ""
 )
@@ -187,12 +188,14 @@ optional_address = ConfigLazy(
 result = config.resolve({"address": optional_address, "domain": domain})
 ```
 
-- `ConfigRef(key, type=None, default=MISSING)` 只读取非空字符串 key，沿用 `Config.get` 的转换和回退规则，不注册配置项
+- `ConfigRef(key, type=None, default=MISSING)` 接受非空字符串 key 或具有非空字符串 `name` 的 `ConfigField`，沿用 `Config.get` 的转换和回退规则，不注册配置项；传入字段可在未预先声明配置时提供 provider、类型转换、校验和默认值。未命名字段仍可放在 `configs` 字典中，由字典 key 补名
 - `ConfigFormat(format_string, *args, **kwargs)` 先解析所有显式参数，再执行一次标准 `str.format`，支持位置参数、命名参数、转换和格式说明；未引用的显式参数也会解析，替换值中的花括号不会二次解释
 - `ConfigLazy(func)` 调用 `func(config)` 并继续解析返回结果，适合需要条件分支的只读计算；回调是可信 Python 代码，不是沙箱，不应生成或持久化随机密钥
 - 自定义声明继承 `ConfigValue` 并实现 `resolve(config)`；外部调用仍使用 `config.resolve(value)`
 
-声明构造和 `repr` 不读取配置，不绑定某个 Config，也不缓存结果。同一声明可以在不同仓库的 Config 中分别解析。相同回调出现在两个参数位置会执行两次，而 `ConfigFormat("{x}{x}", x=callback)` 只解析一次 `x`。`Config.get`、provider 以及调用方已有的缓存行为保持不变。
+声明构造和 `repr` 不读取配置，不绑定某个 Config，也不缓存结果。同一声明可以在不同仓库的 Config 中分别解析。相同回调出现在两个参数位置会执行两次，而 `ConfigFormat("{x}{x}", x=callback)` 只解析一次 `x`。显式传入的 `ConfigField` 不参与按名称查找的结果缓存，避免同名字段的规则互相污染；字符串读取的缓存、provider 持久缓存和消费方缓存保持原有行为。
+
+字段引用使用本次调用方 Config 的来源优先级，不隐式注册或覆盖 schema。已有配置值优先于传入字段的 provider；标准 `DefaultSource(schema)` 中的同名默认值仍先于传入字段的 default。`field.cast` / validator 属于字段解析，`ConfigRef.type` 是之后的额外转换；外层 default 不吞掉字段转换或校验错误。
 
 只递归普通 `dict` 的值、`list` 和 `tuple`，返回新容器，不修改输入或解析字典 key。容器子类、Mapping、普通 callable、自定义对象及旧 Proxy 保持原样；普通字符串不隐式引用配置。格式化阶段仍可按 Python 语义触发参数的 `__format__` / `__str__`。循环容器、自返回声明及重入解析循环抛出 `ConfigCycleError`，格式化或回调失败使用不包含参数值的错误信息。
 

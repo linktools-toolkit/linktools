@@ -71,14 +71,19 @@ class ConfigValue(abc.ABC):
 
 
 class ConfigRef(ConfigValue):
-    """Read one existing key, preserving ``Config.get`` cast/default semantics."""
+    """Defer ``Config.get`` for a key or named inline field without registration."""
 
-    def __init__(self, key: str, type: "ConfigType" = None,
+    def __init__(self, key: "str | ConfigField", type: "ConfigType" = None,
                  default: "Any" = MISSING) -> None:
-        if not issubclass(builtins.type(key), str):
-            raise TypeError("ConfigRef key must be a non-empty string")
-        if str.__len__(key) == 0:
-            raise ValueError("ConfigRef key must be a non-empty string")
+        if issubclass(builtins.type(key), str):
+            if str.__len__(key) == 0:
+                raise ValueError("ConfigRef key must be a non-empty string")
+        elif not issubclass(builtins.type(key), ConfigField):
+            raise TypeError("ConfigRef key must be a non-empty string or ConfigField")
+        else:
+            name = key.name
+            if not issubclass(builtins.type(name), str) or str.__len__(name) == 0:
+                raise ValueError("ConfigRef field name must be a non-empty string")
         self.key = key
         self.type = type
         self.default = default
@@ -945,7 +950,10 @@ class ConfigResolver:
 
     def resolve(self, key: str, _stack: "list[str] | None" = None,
                 field: "ConfigField | None" = None) -> "ResolvedConfig":
-        if _stack is None and not self.is_read_only_resolution():
+        # Inline fields can share a name while defining different rules.
+        # Only schema-based lookups can reuse the name-keyed memo.
+        use_memo = field is None and _stack is None and not self.is_read_only_resolution()
+        if use_memo:
             cached = self._memo.get(key)
             if cached is not None:
                 cached_token, cached_result = cached
@@ -959,7 +967,7 @@ class ConfigResolver:
 
         result = self._resolve_inner(key, _stack, field=field)
 
-        if _stack is None and not self.is_read_only_resolution():
+        if use_memo:
             # Recompute the token AFTER resolving, not before: a cached=True
             # provider can write PersistentSource as a side effect of this
             # very call, which would otherwise be memoized under a

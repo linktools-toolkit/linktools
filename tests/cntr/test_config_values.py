@@ -160,6 +160,23 @@ def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_mana
     assert rendered == "{{not_jinja}} {not_format}|{{not_jinja}} {not_format}|True|True"
 
 
+def test_config_values_compose_template_consumes_inline_field_without_registration(
+        fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
+    container = fresh_manager.containers["portainer"]
+    config = container.env_config
+    field = ConfigField("INLINE_PORT", default="8080", cast=int)
+    reference = ConfigRef(field)
+    revision = config.revision
+    source = tmp_path / "inline.j2"
+    source.write_text("{{ port + 1 }}|{{ port }}", encoding="utf-8")
+    assert container.render_template(source, port=reference) == "8081|8080"
+    assert config.schema.get("INLINE_PORT") is None
+    assert config.revision == revision
+    assert config.get("INLINE_PORT", default="absent") == "absent"
+    field.default = "9090"
+    assert container.render_template(source, port=reference) == "9091|9090"
+
+
 @pytest.mark.parametrize("variable,key", [("TEMPLATE_VALUE", "TEMPLATE_VALUE"), ("docker_user", "DOCKER_USER")])
 def test_config_values_compose_template_context_reads_lazily_once_per_render(
         fresh_manager: "ContainerManager", tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch",
