@@ -34,7 +34,7 @@ ObjectStore 和 ContentCache 不能为了词形一致合并。get 返回可缺�
 
 | 当前 | 推荐 | 原因 |
 |---|---|---|
-| StorageOverlay.cache | content_cache | 与 RuntimeStorage 同一注入概念 |
+| StorageOverlay.content_cache（已落实） | content_cache | 与 RuntimeStorage 同一注入概念 |
 | InMemoryContentCache.max_size | max_entries | 单位是条目数，区别 max_bytes |
 | preload_concurrency | origin_read_concurrency | 普通读取 cache miss 同样使用 |
 | cache_concurrency | cache_read_concurrency | 实际限制 cache probe |
@@ -74,13 +74,13 @@ StoredRecord.storage_version 是存储 CAS token，guard/lease 操作也会递�
 
 ## 5. 最小接入方式
 
-已有：ContentCache、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.content_cache及内部读取路由。本稿拟调整：第3节命名和批读合同；写缓冲公开形状在第8节。
+已有：ContentCache、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.content_cache及内部读取路由。StorageOverlay.content_cache 已同步构造参数、属性与调用。本稿其余拟调整：第3节其他命名和批读合同；写缓冲公开形状在第8节。
 
 已有 ContentCache 继续仅含 get/put/delete/contains_many；TieredContentCache 可以嵌套复用，不引入层配置 DSL。
 
 ### 5.1 资产读写：拟调整接口的完整示例
 
-下面代码使用第3节拟实施的 BackendRevisionSource、content_cache、max_entries 和 digest 名称；这些名称及其导出同步落地后可直接运行。示例仅创建进程内资产，不读取、覆盖或删除实际环境数据。
+下面代码的 content_cache 已落实；BackendRevisionSource、max_entries 和 digest 仍为第3节拟实施名称，其相应导出与实现同步落地后示例可直接运行。示例仅创建进程内资产，不读取、覆盖或删除实际环境数据。
 
     import asyncio
     import hashlib

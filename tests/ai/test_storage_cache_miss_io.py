@@ -61,7 +61,7 @@ class _Validator:
 async def _fixture():
     backend = _PausedBackend()
     cache = InMemoryContentCache(max_bytes=1024 * 1024)
-    overlay = _ObservedOverlay(backend, writer=backend, cache=cache,
+    overlay = _ObservedOverlay(backend, writer=backend, content_cache=cache,
                                cache_adapter=AssetCacheAdapter(), validator=_Validator())
     store = AssetStore(overlay)
     await store.initialize()
@@ -91,7 +91,7 @@ async def test_overlapping_batches_share_each_immutable_origin_and_keep_bulk() -
         assert Counter(key for batch in backend.loads for key in batch) == Counter((a, b, c))
         assert any(len(batch) > 1 for batch in backend.loads)
         assert await store.get_many((a, b, c)) == (b"a", b"b", b"c")
-        await overlay.cache.delete(overlay.cache_adapter.cache_key(b, await backend.stat(b)))
+        await overlay.content_cache.delete(overlay.cache_adapter.cache_key(b, await backend.stat(b)))
         backend.loads.clear()
         assert await asyncio.gather(store.get_many((a, b)), store.get(b)) == [(b"a", b"b"), b"b"]
         assert Counter(key for batch in backend.loads for key in batch) == Counter((b,))
@@ -110,7 +110,7 @@ async def test_preload_rechecks_eviction_without_reading_warm_content(tmp_path: 
     backend = _PausedBackend()
     backend.release.set()
     cache = ObservedCache(max_bytes=len(AssetCacheAdapter().to_cache(b"a")), **({"root": tmp_path} if filesystem else {}))
-    overlay = StorageOverlay(backend, writer=backend, cache=cache, cache_adapter=AssetCacheAdapter())
+    overlay = StorageOverlay(backend, writer=backend, content_cache=cache, cache_adapter=AssetCacheAdapter())
     await overlay.initialize()
     a, b, absent = (AssetKey("test", name) for name in ("a", "b", "absent"))
     await overlay.put(a, b"a")
@@ -177,7 +177,7 @@ async def test_preload_reports_uncached_values_as_failed(failure: str) -> None:
     backend = MissingBackend() if failure == "missing" else _PausedBackend()
     backend.release.set()
     cache = None if failure == "no-cache" else InMemoryContentCache(max_bytes=0 if failure == "capacity" else 1024)
-    overlay = StorageOverlay(backend, writer=backend, cache=cache,
+    overlay = StorageOverlay(backend, writer=backend, content_cache=cache,
                              cache_adapter=AssetCacheAdapter() if cache is not None else None)
     await overlay.initialize()
     key = AssetKey("test", "uncached")
@@ -193,7 +193,7 @@ async def test_preload_reports_uncached_values_as_failed(failure: str) -> None:
 async def test_preload_retains_bounded_bulk_loading() -> None:
     backend = _PausedBackend()
     backend.release.set()
-    overlay = StorageOverlay(backend, writer=backend, cache=InMemoryContentCache(max_bytes=4096),
+    overlay = StorageOverlay(backend, writer=backend, content_cache=InMemoryContentCache(max_bytes=4096),
                              cache_adapter=AssetCacheAdapter(), preload_batch_size=2)
     await overlay.initialize()
     keys = tuple(AssetKey("test", str(index)) for index in range(5))
@@ -270,7 +270,7 @@ async def test_sql_cold_evicted_and_warm_reads_have_bounded_origin_io(tmp_path: 
     await provision_asset_database(engine)
     backend = SqlAssetBackend(engine, namespace="cache-miss")
     cache, adapter = InMemoryContentCache(max_bytes=1024 * 1024), AssetCacheAdapter()
-    store = AssetStore(StorageOverlay(backend, writer=backend, cache=cache, cache_adapter=adapter))
+    store = AssetStore(StorageOverlay(backend, writer=backend, content_cache=cache, cache_adapter=adapter))
     await store.initialize()
     key, content = AssetKey("test", "payload"), b"x" * 16384
     info = await store.put(key, content)
@@ -332,7 +332,7 @@ async def test_shared_origin_does_not_share_mutable_decoded_values() -> None:
     backend = MutableBackend()
     key = AssetKey("test", "mutable")
     await backend.put(key, b"ab")
-    overlay = _ObservedOverlay(backend, cache=InMemoryContentCache(max_bytes=1024),
+    overlay = _ObservedOverlay(backend, content_cache=InMemoryContentCache(max_bytes=1024),
                                cache_adapter=MutableAdapter())
     first = asyncio.create_task(overlay.get(key))
     await backend.started.get()
@@ -396,7 +396,7 @@ async def test_layer_origin_failure_does_not_poison_or_abandon_other_layer() -> 
     failure = AIError(ErrorCode.STORAGE_UNAVAILABLE)
     bad.failure = failure
     overlay = _ObservedOverlay(bad, layers=(StorageLayer("good", good),),
-                               cache=InMemoryContentCache(max_bytes=1024), cache_adapter=AssetCacheAdapter())
+                               content_cache=InMemoryContentCache(max_bytes=1024), cache_adapter=AssetCacheAdapter())
     store = AssetStore(overlay)
     await store.initialize()
     batch = asyncio.create_task(store.get_many((a, b)))
@@ -430,7 +430,7 @@ async def test_completed_layer_read_is_not_held_by_unrelated_inflight_layer() ->
     await slow.put(a, b"slow")
     await fast.put(b, b"fast")
     overlay = _ObservedOverlay(slow, layers=(StorageLayer("fast", fast),),
-                               cache=InMemoryContentCache(max_bytes=1024), cache_adapter=AssetCacheAdapter())
+                               content_cache=InMemoryContentCache(max_bytes=1024), cache_adapter=AssetCacheAdapter())
     store = AssetStore(overlay)
     await store.initialize()
     batch = asyncio.create_task(store.get_many((a, b)))
@@ -453,7 +453,7 @@ async def test_completed_layer_read_is_not_held_by_unrelated_inflight_layer() ->
 async def test_warm_key_does_not_wait_for_same_layer_cold_origin() -> None:
     backend, overlay, store, (cold, warm, _) = await _fixture()
     info = await backend.stat(warm)
-    await overlay.cache.put(overlay.cache_adapter.cache_key(warm, info),
+    await overlay.content_cache.put(overlay.cache_adapter.cache_key(warm, info),
                             overlay.cache_adapter.to_cache(b"b"))
     batch = asyncio.create_task(store.get_many((cold, warm)))
     await backend.started.get()
@@ -484,7 +484,7 @@ async def test_nonbatch_origin_publishes_finished_key_before_slow_peer() -> None
                 entered.set()
                 await release.wait()
             return await backend.get(key)
-    overlay = _ObservedOverlay(SingleReader(), cache=InMemoryContentCache(max_bytes=1024),
+    overlay = _ObservedOverlay(SingleReader(), content_cache=InMemoryContentCache(max_bytes=1024),
                                cache_adapter=AssetCacheAdapter())
     batch = asyncio.create_task(overlay.get_many((slow, fast)))
     await entered.wait()

@@ -5,7 +5,7 @@ storage package separates content, revision discovery, and metadata projection.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `ContentCache` | Store discardable immutable byte content | Supply `StorageOverlay(cache=...)` or `RuntimeStorage(..., content_cache=...)` |
+| `ContentCache` | Store discardable immutable byte content | Supply `StorageOverlay(content_cache=...)` or `RuntimeStorage(..., content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
 
@@ -23,7 +23,7 @@ store = AssetStore(StorageOverlay(
     primary=backend,
     writer=backend,
     revision_source=revision_source,
-    cache=content_cache,
+    content_cache=content_cache,
     cache_adapter=AssetCacheAdapter(),
 ))
 await store.initialize()

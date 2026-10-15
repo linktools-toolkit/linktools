@@ -124,15 +124,15 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         layers: 'Sequence[StorageLayer[KeyT, ValueT, InfoT]]' = (),
         validator: 'StorageValueValidator[KeyT, ValueT, InfoT] | None' = None,
         revision_source: 'RevisionSource | None' = None,
-        cache: 'ContentCache | None' = None,
+        content_cache: 'ContentCache | None' = None,
         cache_adapter: 'CacheAdapter[KeyT, ValueT, InfoT] | None' = None,
         cache_concurrency: int = 16,
         preload_batch_size: int = 100,
         preload_concurrency: int = 8,
     ) -> None:
         layer_values = tuple(layers)
-        if cache is not None and cache_adapter is None:
-            raise ValueError("cache_adapter is required when cache is configured")
+        if content_cache is not None and cache_adapter is None:
+            raise ValueError("cache_adapter is required when content_cache is configured")
         if cache_concurrency < 1 or preload_batch_size < 1 or preload_concurrency < 1:
             raise ValueError("storage concurrency and batch settings must be positive")
         layer_ids = tuple(layer.id for layer in layer_values)
@@ -146,7 +146,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self.writer = writer
         self.layers = layer_values
         self.validator = validator
-        self.cache = cache
+        self.content_cache = content_cache
         self.cache_adapter = cache_adapter
         self.cache_concurrency = cache_concurrency
         self.preload_batch_size = preload_batch_size
@@ -423,7 +423,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if info is None or _is_deleted(info):
             return None
         layer_index = state.layer_indexes[key]
-        if self.cache is not None and self.cache_adapter is not None:
+        if self.content_cache is not None and self.cache_adapter is not None:
             value = (await self._read_cached_or_origins((key,), state))[key]
         else:
             value = await self._views[layer_index].backend.get(key)
@@ -490,7 +490,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         keys: 'Sequence[KeyT]',
         state: 'EffectiveMetadataState[KeyT, InfoT]',
     ) -> 'dict[KeyT, ValueT | None]':
-        if self.cache is None or self.cache_adapter is None:
+        if self.content_cache is None or self.cache_adapter is None:
             loaded, errors = await self._load_origins(keys, state)
             if errors:
                 raise next(iter(errors.values()))
@@ -569,7 +569,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     info = state.entries[key]
                     self._validate_value(key, value, info)
                     content = self.cache_adapter.to_cache(value)
-                    await write_cache(self.cache, self.cache_adapter.cache_key(key, info), content)
+                    await write_cache(self.content_cache, self.cache_adapter.cache_key(key, info), content)
                 pending[key].set_result((value, content))
             except (Exception, asyncio.CancelledError) as error:
                 pending[key].set_exception(error)
@@ -582,7 +582,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         info: InfoT,
         cache_key: str,
     ) -> 'tuple[ValueT | None, bytes | None]':
-        cached = await read_cache(self.cache, cache_key)
+        cached = await read_cache(self.content_cache, cache_key)
         if cached is None:
             return None, None
         try:
@@ -655,10 +655,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         return loaded, errors
 
     async def _delete_cache(self, cache_key: str) -> None:
-        if self.cache is None:
+        if self.content_cache is None:
             return
         try:
-            await self.cache.delete(cache_key)
+            await self.content_cache.delete(cache_key)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -711,14 +711,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
     async def preload(self, keys: 'Sequence[KeyT] | None' = None) -> PreloadResult:
         state = await self._state()
         selected = tuple(dict.fromkeys(keys)) if keys is not None else tuple(state.entries)
-        if self.cache is None or self.cache_adapter is None:
+        if self.content_cache is None or self.cache_adapter is None:
             return PreloadResult(state.revision, len(selected), 0, 0, len(selected))
         identities = {
             key: self.cache_adapter.cache_key(key, state.entries[key])
             for key in selected
             if key in state.entries and not _is_deleted(state.entries[key])
         }
-        present = await contains_many(self.cache, tuple(identities.values()))
+        present = await contains_many(self.content_cache, tuple(identities.values()))
         already_cached = sum(1 for identity in identities.values() if identity in present)
         missing = tuple(
             key
@@ -740,7 +740,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 loaded_keys.append(key)
             if loaded_keys:
                 present_after = await contains_many(
-                    self.cache,
+                    self.content_cache,
                     tuple(identities[key] for key in loaded_keys),
                 )
                 for key in loaded_keys:

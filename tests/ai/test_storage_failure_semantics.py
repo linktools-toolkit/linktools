@@ -130,7 +130,7 @@ async def test_corrupt_cache_falls_back_to_origin() -> None:
     adapter = _CorruptingCacheAdapter()
     cache = InMemoryContentCache(max_bytes=1024)
     await cache.put(adapter.cache_key(key, info), b"corrupt")
-    storage = StorageOverlay(backend, cache=cache, cache_adapter=adapter)
+    storage = StorageOverlay(backend, content_cache=cache, cache_adapter=adapter)
 
     assert await storage.get(key) == b"value"
 
@@ -148,7 +148,7 @@ async def test_invalid_cached_value_falls_back_to_valid_origin() -> None:
     await cache.put(adapter.cache_key(key, info), adapter.to_cache(b"value"))
     storage = StorageOverlay(
         backend,
-        cache=cache,
+        content_cache=cache,
         cache_adapter=adapter,
         validator=_Validator(fail_once=True),
     )
@@ -163,7 +163,7 @@ async def test_preload_propagates_origin_validation_failure() -> None:
     await backend.put(key, b"value")
     storage = StorageOverlay(
         backend,
-        cache=InMemoryContentCache(max_bytes=1024),
+        content_cache=InMemoryContentCache(max_bytes=1024),
         cache_adapter=AssetCacheAdapter(),
         validator=_Validator(),
     )

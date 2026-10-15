@@ -107,7 +107,7 @@ def test_asset_storage_uses_file_cache() -> None:
         storage = StorageOverlay(
             backend,
             writer=backend,
-            cache=cache,
+            content_cache=cache,
             cache_adapter=AssetCacheAdapter(),
         )
         store = AssetStore(storage)

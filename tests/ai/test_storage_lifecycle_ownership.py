@@ -373,7 +373,7 @@ async def test_asset_store_close_settles_detached_cache_singleflight() -> None:
     storage = StorageOverlay(
         backend,
         writer=backend,
-        cache=cache,
+        content_cache=cache,
         cache_adapter=AssetCacheAdapter(),
     )
     store = AssetStore(storage)
