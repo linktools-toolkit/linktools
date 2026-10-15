@@ -7,6 +7,7 @@ complete installed snapshot, even for partial operations. Unknown consumer names
 are errors; known optional consumers that are absent do not consume declarations.
 
 ```python
+from linktools.core import ConfigRef
 from linktools.cntr import Integrations
 from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
 from linktools.decorator import cached_property
@@ -16,7 +17,7 @@ from linktools.decorator import cached_property
 def integrations(self) -> "Integrations":
     return [
         Nginx.site(
-            self.get_config_later("APP_DOMAIN"),
+            ConfigRef("APP_DOMAIN"),
             proxy="http://app:8080",
             auth=None,
             auth_bypass=(r"^/public/",),
@@ -220,6 +221,75 @@ def proxy_url(self):
 
 Raw ext declarations can still be mixed with endpoint results and grouped links.
 
+## Config-dependent declaration values
+
+Use the core value declarations for fields that need the producer's configuration:
+
+```python
+from linktools.core import ConfigFormat, ConfigLazy, ConfigRef
+from linktools.cntr.ext import Authelia, Flare, endpoint
+
+app = endpoint(
+    self,
+    domain=ConfigRef("APP_DOMAIN"),
+    proxy=ConfigRef("APP_LOCAL_URL"),
+    auth=ConfigLazy(lambda config: not config.get("APP_PUBLIC", type=bool)),
+    template_vars={"client_max_body_size": ConfigRef("APP_BODY_LIMIT", default="1m")},
+    extensions=[
+        Flare.public(ConfigRef("APP_TITLE"), "apps", url=ConfigRef("APP_START_PATH", default="/")),
+        Authelia.access(policy=ConfigRef("APP_AUTH_POLICY", default="one_factor")),
+        Authelia.oidc((ConfigFormat("{base}/callback", base=ConfigRef("APP_EXTERNAL_URL")),)),
+    ],
+)
+```
+
+`ConfigRef(key, type=None, default=MISSING)` reads a nonempty string key;
+`ConfigFormat(format_string, *args, **kwargs)` resolves its explicit arguments
+and performs one ordinary `str.format`; `ConfigLazy(func)` calls `func(config)`
+for conditional or more complex read-only calculations. All implement the public
+`ConfigValue.resolve(config)` hook. The consumption entry point is
+`config.resolve(value)`, which also resolves values inside plain dictionaries,
+lists and tuples without mutating them. It leaves ordinary strings, callables,
+custom objects, dictionary keys and existing `Proxy` values alone.
+
+Constructing or scanning these declarations does not read configuration. Consumers
+supply `producer.env_config`, so one expression can be reused with separate Config
+instances. The expressions do not cache results or register fields. Keep schema
+and provider declarations in `ConfigField`/`configs`, and use the existing
+`get_config_later` or URL factories where their successful-result caching is wanted.
+`ConfigRef` does not accept a `ConfigField` in place of its string key.
+
+Nginx resolves only the currently needed field. An absent nginx consumer or empty
+server name skips unrelated fields; explicit `auth=False` and `waf=False` skip
+those capabilities' global settings and dependent values. Flare resolves the URL
+before display metadata and skips empty URLs. An endpoint's relative extension
+URL is joined to the original site's URL after its explicit value is resolved.
+Authelia resolves native fields and callback values before its normal validation;
+disabled sites and authentication skip access rules.
+
+Custom consumers can call the public, explicit-context operations:
+`Flare.resolve_url(config)`, `Flare.resolve_metadata(config, include_desc=True)`,
+`Authelia.resolve_rule(config)`, and `Authelia.resolve_redirect_uris(config)`.
+Read the URL before metadata; bookmark output can pass `include_desc=False`.
+The old direct declaration properties remain available for legacy values but do
+not transparently resolve new ConfigValue declarations.
+
+Keep `template_vars` itself a mapping. Its individual values and explicit top-level general
+template arguments may use ConfigValue; unused variables are not resolved.
+General template arguments retain their ordinary types when passed as plain
+values. To defer a structured argument, use ConfigLazy returning its dictionary,
+list or tuple. General template arguments use the existing lazy Proxy adapter,
+so identity tests such as `is none` are not transparent for deferred arguments;
+read `config.get(...)` directly when a template needs an exact native value.
+Native nginx templates remain single-pass Jinja, and strings inserted by a
+ConfigFormat are not formatted or rendered again. ConfigFormat resolves every
+explicit parameter, including unused format arguments, so use ConfigLazy when a
+branch must avoid a configuration read. Callbacks are trusted Python code for
+read-only computation, not secret-generation or persistence hooks.
+
+The nginx resolved-site view and generated output remain command-local snapshots.
+Changing a Config does not refresh an already cached site or rendered output.
+
 ## Authelia access rules
 
 `Authelia.access(policy="one_factor")` declares native ACL fields for the current
@@ -280,6 +350,10 @@ the port is valid. Original site/endpoint lookup waits until the proxy is read.
 Missing, foreign or ambiguous references fail; declared disabled sites or absent
 nginx resolve to an empty URL.
 Path joining, query encoding and literal template placeholders remain unchanged.
+The `queries` argument may contain ConfigValue declarations; they are resolved
+with the owning container's Config only after a nonempty URL or valid port is
+available. Query encoding still belongs to the URL utilities. The returned Proxy
+continues to cache its first successful result, including resolved query values.
 These factories never register hooks or write configuration.
 
 `BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
@@ -347,7 +421,8 @@ must not mutate or restore historical derived ACL/OIDC settings.
 
 ## Request body limits
 
-Template variables are passed through unchanged. The shared `nginx/params.conf` template uses an
+Template variable declarations are not mutated; ConfigValue values are resolved
+only when the template reads their key. The shared `nginx/params.conf` template uses an
 explicit `client_max_body_size` key when present, otherwise `1m`, matching
 nginx's native default. The common proxy snippet does not silently raise that
 limit. Configure an individual site's server policy using the existing endpoint
@@ -366,7 +441,11 @@ For example, an omitted limit and `10m` produce a shared `10m` server limit,
 regardless of declaration order. Values use ordinary equality, without unit or
 type normalization. Defaults remain in the template, with no injected values.
 Each business template still receives its own original variables, but same-name
-keys within a hostname must share the same meaning and value. Declarations are
+keys within a hostname must share the same meaning and value. Ordinary-value
+conflicts are rejected while merging. When a key contains a ConfigValue, its
+values are compared in their respective producer Configs when either a business
+or shared server template reads that key; entirely unused deferred keys stay
+unread. Each business template still sees only its own declared keys. Declarations are
 not mutated. A present key is passed through, so invalid values remain subject
 to native nginx validation. Native location directives still override it, including an
 explicit `0` (no nginx body-size limit). The former proxy-snippet default was

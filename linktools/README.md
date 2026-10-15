@@ -170,6 +170,34 @@ environ.config.update(
 
 `|` 运算符按顺序尝试每个后备值，直到某一个能成功解析为止。
 
+#### 消费时解析配置值
+
+`ConfigRef`、`ConfigFormat` 和 `ConfigLazy` 用于声明调用方需要的值，在实际消费时统一传给 `config.resolve(value)`：
+
+```python
+from linktools.core import ConfigRef, ConfigFormat, ConfigLazy
+
+domain = ConfigRef("DOMAIN", default="localhost")
+address = ConfigFormat("https://{domain}:{port}",
+                       domain=domain, port=ConfigRef("HTTPS_PORT", type=int))
+optional_address = ConfigLazy(
+    lambda config: address if config.get("HTTPS_ENABLED", type=bool) else ""
+)
+
+result = config.resolve({"address": optional_address, "domain": domain})
+```
+
+- `ConfigRef(key, type=None, default=MISSING)` 只读取非空字符串 key，沿用 `Config.get` 的转换和回退规则，不注册配置项
+- `ConfigFormat(format_string, *args, **kwargs)` 先解析所有显式参数，再执行一次标准 `str.format`，支持位置参数、命名参数、转换和格式说明；未引用的显式参数也会解析，替换值中的花括号不会二次解释
+- `ConfigLazy(func)` 调用 `func(config)` 并继续解析返回结果，适合需要条件分支的只读计算；回调是可信 Python 代码，不是沙箱，不应生成或持久化随机密钥
+- 自定义声明继承 `ConfigValue` 并实现 `resolve(config)`；外部调用仍使用 `config.resolve(value)`
+
+声明构造和 `repr` 不读取配置，不绑定某个 Config，也不缓存结果。同一声明可以在不同仓库的 Config 中分别解析。相同回调出现在两个参数位置会执行两次，而 `ConfigFormat("{x}{x}", x=callback)` 只解析一次 `x`。`Config.get`、provider 以及调用方已有的缓存行为保持不变。
+
+只递归普通 `dict` 的值、`list` 和 `tuple`，返回新容器，不修改输入或解析字典 key。容器子类、Mapping、普通 callable、自定义对象及旧 Proxy 保持原样；普通字符串不隐式引用配置。格式化阶段仍可按 Python 语义触发参数的 `__format__` / `__str__`。循环容器、自返回声明及重入解析循环抛出 `ConfigCycleError`，格式化或回调失败使用不包含参数值的错误信息。
+
+这些对象是消费声明，不用于替代 `ConfigField`、`configs` / `define` 或 `LazyProvider`，也不承诺把它们存入 schema、default、provider 或 source 后在 cast 前解析。需要分支短路时用 `ConfigLazy`，不要把不应读取的依赖放进格式参数。不要预先解析整套模板上下文或 integrations；在实际访问的字段处传入对应的 Config。
+
 ### tools — 工具管理
 
 声明式工具定义，自动处理下载、解压和执行：

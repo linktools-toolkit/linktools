@@ -8,6 +8,7 @@ import yaml
 
 from linktools.cntr import ContainerError, ContainerManager
 from linktools.cntr.ext import Flare
+from linktools.core import Config, ConfigSchema
 from _harness import builtin_container_type
 from _harness import builtin_module as builtin
 
@@ -20,6 +21,7 @@ FlareContainer = builtin_container_type("120-flare")
 
 def instance(module, **manager):
     container = object.__new__(module.Container)
+    manager.setdefault("env_config", Config(None, ConfigSchema(), []))
     container.manager = SimpleNamespace(**manager)
     return container
 
@@ -28,6 +30,7 @@ def flare_instance(module, entries):
     snapshot = {"flare": []}
     containers = {}
     for producer, key, link in entries:
+        producer.env_config = Config(None, ConfigSchema(), [])
         containers[producer.name] = producer
         snapshot.setdefault(producer.name, []).append(link)
     manager = object.__new__(ContainerManager)
@@ -81,7 +84,8 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
     from linktools.cntr.ext import Authelia
     declaration = Authelia.oidc(("https://app.test", "https://app.test"))
     container = instance(module, project_name="project")
-    container.manager.iter_integrations = lambda consumer: iter(((SimpleNamespace(name="app"), declaration),))
+    producer = SimpleNamespace(name="app", env_config=Config(None, ConfigSchema(), []))
+    container.manager.iter_integrations = lambda consumer: iter(((producer, declaration),))
     monkeypatch.setitem(container.__dict__, "public_url", "https://sso.test")
     monkeypatch.setattr(container, "get_config", lambda key: "saved-secret")
     client = container.oidc_client
@@ -100,7 +104,8 @@ def test_portainer_callback_declaration_is_lazy_and_auth_independent(monkeypatch
     module = builtin("110-portainer")
     container = instance(module)
     calls = []
-    values = {"PORTAINER_AUTH_ENABLE": portainer_auth, "NGINX_AUTH_ENABLE": global_auth,
+    values = {"PORTAINER_AUTH_ENABLE": portainer_auth, "PORTAINER_DOMAIN": "portainer.test",
+              "NGINX_AUTH_ENABLE": global_auth,
               "NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}
 
     def config(key, **kwargs):
@@ -108,16 +113,16 @@ def test_portainer_callback_declaration_is_lazy_and_auth_independent(monkeypatch
         return values[key]
 
     monkeypatch.setattr(container, "get_config", config)
-    monkeypatch.setattr(container, "get_config_later", lambda key: "portainer.test")
+    container.env_config.get = config
     declarations = container.integrations
     declaration = next(value for value in declarations if isinstance(value, Authelia))
-    assert calls == ["PORTAINER_AUTH_ENABLE"]
+    assert calls == []
     container.manager.integration_snapshot = {"nginx": ()}
     container.manager.containers = {"nginx": SimpleNamespace(sites={
         declarations[0]: ResolvedSite(container, declarations[0], 0),
     })}
     assert declaration.redirect_uris == ("https://portainer.test",)
-    assert calls == ["PORTAINER_AUTH_ENABLE", "NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
+    assert calls == ["PORTAINER_DOMAIN", "NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
 
 
 def test_flare_navigation_orders_producers_and_preserves_link_values():

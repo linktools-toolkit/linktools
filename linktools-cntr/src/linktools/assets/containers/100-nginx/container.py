@@ -7,6 +7,7 @@ import re
 import shlex
 import hashlib
 from pathlib import Path
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined, TemplateError
@@ -14,7 +15,7 @@ from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined,
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.container import ContainerTemplateError
-from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
+from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import choose
@@ -25,9 +26,53 @@ if TYPE_CHECKING:
     from types import SimpleNamespace
     from linktools.cntr.ext import ResolvedSite, Nginx
     from collections.abc import Iterable, Sequence
-    from typing import AbstractSet, Any, Mapping
+    from typing import AbstractSet, Any, Callable, Iterator
+    from linktools.core import Config
     from linktools.cntr import OperationContext
     from linktools.types import PathType
+
+
+class _TemplateVariables(Mapping):
+    """Resolve a site's variables only when its native template reads a key."""
+
+    def __init__(self, values: "Mapping[str, Sequence[tuple[Config, Any]]]",
+                 conflict: "Callable[[str], None] | None" = None,
+                 selections: "Mapping[str, int] | None" = None) -> None:
+        self._values = values
+        self._conflict = conflict
+        self._selections = {} if selections is None else selections
+
+    def __getitem__(self, key: str) -> "Any":
+        candidates = self._values[key]
+        results = [config.resolve(value) for config, value in candidates]
+        if any(results[0] != value for value in results[1:]):
+            self._conflict(key)
+        return results[self._selections.get(key, 0)]
+
+    def select(self, selections: "Mapping[str, int]") -> "_TemplateVariables":
+        return type(self)({key: self._values[key] for key in selections}, self._conflict, selections)
+
+    def __iter__(self) -> "Iterator[str]":
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def _has_config_value(value: "Any", seen: "set[int] | None" = None) -> bool:
+    if issubclass(type(value), ConfigValue):
+        return True
+    if type(value) not in (dict, list, tuple):
+        return False
+    seen = set() if seen is None else seen
+    if id(value) in seen:
+        return True
+    seen.add(id(value))
+    try:
+        values = value.values() if type(value) is dict else value
+        return any(_has_config_value(item, seen) for item in values)
+    finally:
+        seen.remove(id(value))
 
 
 class Container(BaseContainer):
@@ -336,6 +381,11 @@ class Container(BaseContainer):
             extra["sites"] = sites
         if route_auth:
             extra["route_auth"] = True
+        variables = site.template_vars if template_vars is None else template_vars
+        if not isinstance(variables, _TemplateVariables):
+            variables = _TemplateVariables({
+                key: ((container.env_config, value),) for key, value in variables.items()
+            })
         try:
             return environment.get_template(template_name).render(
                 site=site,
@@ -346,7 +396,7 @@ class Container(BaseContainer):
                     name: str(container.env_config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
                     for name, suffix in (("nginx", "253"), ("tengine", "254"))
                 }),
-                template_vars=site.template_vars if template_vars is None else template_vars,
+                template_vars=variables,
                 **extra,
             )
         except TemplateError as exc:
@@ -408,24 +458,38 @@ class Container(BaseContainer):
                     raise ContainerError(
                         "Incompatible nginx routing policies on {}:{} for {} and {}".format(
                             domain, port, leader.producer.name, site.producer.name))
-            template_vars, owners = {}, {}
+            template_vars, owners, deferred, selections = {}, {}, set(), []
             for site in sites:
+                selected = {}
+                selections.append(selected)
                 for key, value in site.template_vars.items():
-                    if key in template_vars and template_vars[key] != value:
+                    if _has_config_value(value):
+                        deferred.add(key)
+                    if key in template_vars and key not in deferred and template_vars[key][0][1] != value:
                         raise ContainerError(
                             "Conflicting nginx template variable {} on {}:{} for {} and {}".format(
-                                key, domain, port, owners[key], site.producer.name))
-                    template_vars[key] = value
-                    owners[key] = site.producer.name
+                                key, domain, port, owners[key][0], site.producer.name))
+                    candidates = template_vars.setdefault(key, [])
+                    selected[key] = len(candidates)
+                    candidates.append((site.producer.env_config, value))
+                    owners.setdefault(key, []).append(site.producer.name)
+
+            def conflict(key: str) -> None:
+                raise ContainerError(
+                    "Conflicting nginx template variable {} on {}:{} for {}".format(
+                        key, domain, port, " and ".join(owners[key])))
+
+            template_vars = _TemplateVariables(template_vars, conflict)
             route_auth = len(sites) > 1 and any(
                 (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
                 for member in sites[1:])
             leader = next((site for site in sites if site.default_server), leader)
             routes = []
-            for site in sites:
+            for site, selected in zip(sites, selections):
                 source = site.template or self.get_source_path("templates", "default.conf")
                 business = self._render_site_template(
-                    site.producer, source, site, route_auth=route_auth)
+                    site.producer, source, site, route_auth=route_auth,
+                    template_vars=template_vars.select(selected))
                 if len(sites) > 1:
                     business = "# site {}\n{}".format(site.producer.name, business)
                 routes.append(business)

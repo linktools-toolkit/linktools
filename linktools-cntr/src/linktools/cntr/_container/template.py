@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from jinja2 import Environment, FileSystemLoader, TemplateError
 
 from linktools import utils
+from linktools.core import ConfigValue
 from linktools.runtime import lazy_load
 from ...capabilities.cntr import __cap_cntr__
 
@@ -72,7 +73,11 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         chmod=chmod,
     )
 
-    context.update(kwargs)
+    context.update({
+        key: lazy_load(config.resolve, value)
+        if issubclass(type(value), ConfigValue) else value
+        for key, value in kwargs.items()
+    })
 
     # Local templates intentionally take precedence over shared snippets.
     environment = Environment(

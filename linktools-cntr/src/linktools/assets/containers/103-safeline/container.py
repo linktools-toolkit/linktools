@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from linktools.cli import subcommand
 from linktools.cntr import BaseContainer
 from linktools.cntr.ext import Flare, Nginx, endpoint, load_port_url
-from linktools.core import ConfigField
+from linktools.core import ConfigRef, ConfigLazy, ConfigField
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -40,12 +40,12 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return endpoint(
             self,
-            domain=self.get_config_later("SAFELINE_DOMAIN"),
+            domain=ConfigRef("SAFELINE_DOMAIN"),
             proxy="https://safeline-mgt:1443",
-            auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
+            auth=ConfigLazy(lambda config: None if config.get("SAFELINE_AUTH_ENABLE") else False),
             auth_bypass=(r"\.(css|js)$",),
             auth_headers={
-                "X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN"),
+                "X-SLCE-API-TOKEN": ConfigRef("SAFELINE_API_TOKEN"),
             },
             extensions=[
                 Flare.links(

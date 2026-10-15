@@ -8,6 +8,7 @@ from linktools import utils
 from linktools.runtime import lazy_load
 
 if TYPE_CHECKING:
+    from linktools.core import ConfigValue
     from linktools.runtime import Proxy
     from linktools.types import ConfigKeyType, QueryType
     from ..container import BaseContainer
@@ -16,18 +17,18 @@ if TYPE_CHECKING:
 
 
 def load_config_url(container: "BaseContainer", key: "ConfigKeyType",
-                    *path: str, queries: "QueryType | None" = None) -> "Proxy":
+                    *path: str, queries: "QueryType | ConfigValue | None" = None) -> "Proxy":
     def make_url() -> str:
         url = container.get_config(key, type=str, default=None)
         if url:
-            return utils.join_url(url, *path, queries=queries)
+            return utils.join_url(url, *path, queries=container.env_config.resolve(queries))
         return ""
 
     return lazy_load(make_url)
 
 
 def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
-                  *path: str, queries: "QueryType | None" = None,
+                  *path: str, queries: "QueryType | ConfigValue | None" = None,
                   https: bool = True) -> "Proxy":
     def make_url() -> str:
         port = container.get_config(key, type=int, default=0)
@@ -37,7 +38,7 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
                 container.host,
                 port,
                 *path,
-                queries=queries)
+                queries=container.env_config.resolve(queries))
         return ""
 
     return lazy_load(make_url)
@@ -45,13 +46,13 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
 
 def load_nginx_url(container: "BaseContainer",
                    reference: "Nginx | tuple[Integration, ...] | None" = None, *path: str,
-                   queries: "QueryType | None" = None) -> "Proxy":
+                   queries: "QueryType | ConfigValue | None" = None) -> "Proxy":
     from ._nginx_site import ResolvedSite
 
     def make_url() -> str:
         site = ResolvedSite.find(container, reference)
         url = site.get_url(default="")
-        return utils.join_url(url, *path, queries=queries) if url else ""
+        return utils.join_url(url, *path, queries=container.env_config.resolve(queries)) if url else ""
 
     return lazy_load(make_url)
 

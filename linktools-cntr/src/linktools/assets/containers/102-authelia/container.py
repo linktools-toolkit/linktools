@@ -14,7 +14,7 @@ from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_nginx_url
-from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
+from linktools.core import ConfigField, ConfigLazy, ConfigRef, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -63,11 +63,11 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return endpoint(
             self,
-            domain=self.get_config_later("AUTHELIA_DOMAIN"),
+            domain=ConfigRef("AUTHELIA_DOMAIN"),
             https=True,
             template=self.get_source_path("templates", "nginx.conf"),
             waf_bypass=(r"^/api/", r"^/\.well-known/", r"^/jwks\.json$"),
-            auth=(None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False),
+            auth=ConfigLazy(lambda config: None if config.get("AUTHELIA_ADMIN_AUTH_ENABLE") else False),
             auth_bypass=(r"\.(css|js)$",),
             extensions=[
                 Authelia.access(
@@ -136,7 +136,7 @@ class Container(BaseContainer):
             site = ResolvedSite.find(producer, declaration.site)
             if not site.enabled or not site.auth:
                 continue
-            rule = dict(declaration.rule)
+            rule = dict(declaration.resolve_rule(producer.env_config))
             if "domain" not in rule and "domain_regex" not in rule:
                 if site.literal_domain is None:
                     raise ContainerError("Authelia access for %s requires domain or domain_regex" % producer.name)
@@ -152,7 +152,7 @@ class Container(BaseContainer):
         for producer, declaration in self.manager.iter_integrations("authelia"):
             if not isinstance(declaration, Authelia):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)
-            for redirect in declaration.redirect_uris:
+            for redirect in declaration.resolve_redirect_uris(producer.env_config):
                 if redirect not in redirects:
                     redirects.append(redirect)
         return tuple(redirects)

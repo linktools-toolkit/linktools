@@ -149,13 +149,17 @@ def _site_navigation_manager(declarations, links=None, nginx=True):
     from types import SimpleNamespace
     from linktools.cntr import ContainerManager
     from linktools.cntr.ext import ResolvedSite
+    from linktools.core import Config, ConfigSchema
 
     reads = []
     def config(key, **kwargs):
         reads.append(key)
         return {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443}[key]
     manager = object.__new__(ContainerManager)
-    producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config)
+    manager.env_config = Config(None, ConfigSchema(), [])
+    manager.env_config.get = config
+    producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config,
+                               env_config=manager.env_config)
     manager.containers = {"app": producer, "nginx": SimpleNamespace(sites={}),
                           "flare": SimpleNamespace(name="flare", order=0)}
     producer.test_sites = declarations
@@ -283,7 +287,8 @@ def test_navigation_merge_preserves_producer_ties_and_key_collisions():
         "two": public("Two", "web", "", load_nginx_url(producer, producer.test_sites["two"])),
         "path": public("Path", "web", "", "https://one.test/path"),
     })
-    producer = SimpleNamespace(name="other", order=10, manager=manager)
+    producer = SimpleNamespace(name="other", order=10, manager=manager,
+                               env_config=manager.env_config)
     manager.containers["other"] = producer
     site = Nginx.site("other.test")
     manager.integration_snapshot["other"] = (

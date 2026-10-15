@@ -14,21 +14,22 @@ from ._urls import load_nginx_url
 
 if TYPE_CHECKING:
     from typing import Any, Mapping, Optional, Sequence, Tuple
+    from linktools.core import ConfigValue
     from linktools.types import PathType
     from ..container import BaseContainer
     from ._base import Integrations
 
 
 def endpoint(
-        producer: "BaseContainer", *, domain: str,
-        proxy: "Optional[str]" = None, template: "Optional[PathType]" = None,
-        https: "Optional[bool]" = None,
-        waf: "Optional[bool]" = None, waf_bypass: "Sequence[str]" = (),
-        auth: "Optional[bool]" = None, auth_bypass: "Sequence[str]" = (),
-        auth_headers: "Optional[Mapping[str, str]]" = None,
-        cert_domains: "Sequence[str]" = (),
+        producer: "BaseContainer", *, domain: "str | ConfigValue",
+        proxy: "str | ConfigValue | None" = None, template: "PathType | ConfigValue | None" = None,
+        https: "bool | ConfigValue | None" = None,
+        waf: "bool | ConfigValue | None" = None, waf_bypass: "Sequence[str | ConfigValue] | ConfigValue" = (),
+        auth: "bool | ConfigValue | None" = None, auth_bypass: "Sequence[str | ConfigValue] | ConfigValue" = (),
+        auth_headers: "Mapping[str, str | ConfigValue] | ConfigValue | None" = None,
+        cert_domains: "Sequence[str | ConfigValue] | ConfigValue" = (),
         template_vars: "Optional[Mapping[str, Any]]" = None,
-        default_server: bool = False,
+        default_server: "bool | ConfigValue" = False,
         extensions: "Integrations" = (),
 ) -> "Tuple[Integration, ...]":
     """Declare a site and explicitly associated extensions.

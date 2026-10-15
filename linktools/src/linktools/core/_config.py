@@ -7,6 +7,8 @@
 ``ProjectProfile``/loader live in ``_profile.py``.
 """
 
+import abc
+import builtins
 import json
 import os
 import threading
@@ -44,11 +46,89 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Config", "ConfigField", "ConfigSchema",
+    "ConfigValue", "ConfigRef", "ConfigFormat", "ConfigLazy",
     "ConfigResolver", "ConfigSource", "EnvironmentSource", "RuntimeOverrideSource",
     "PersistentSource", "FileSource", "DictSource", "DefaultSource", "AliasProvider",
     "ConfigProvider", "LazyProvider", "PromptProvider", "ConfirmProvider", "ErrorProvider",
     "ChainProvider", "ResolvedConfig",
 ]
+
+
+class ConfigValue(abc.ABC):
+    """An unbound config-dependent declaration, evaluated by ``Config.resolve``.
+
+    Implementations return a value that the entry point resolves recursively.
+    They do not register fields, bind a Config, or cache a result.
+    """
+
+    @abc.abstractmethod
+    def resolve(self, config: "Config") -> "Any":
+        """Compute this declaration in the supplied configuration context."""
+        raise NotImplementedError
+
+    def __repr__(self) -> str:
+        return "%s(...)" % type(self).__name__
+
+
+class ConfigRef(ConfigValue):
+    """Read one existing key, preserving ``Config.get`` cast/default semantics."""
+
+    def __init__(self, key: str, type: "ConfigType" = None,
+                 default: "Any" = MISSING) -> None:
+        if not issubclass(builtins.type(key), str):
+            raise TypeError("ConfigRef key must be a non-empty string")
+        if str.__len__(key) == 0:
+            raise ValueError("ConfigRef key must be a non-empty string")
+        self.key = key
+        self.type = type
+        self.default = default
+
+    def resolve(self, config: "Config") -> "Any":
+        return config.get(self.key, type=self.type, default=self.default)
+
+
+class ConfigFormat(ConfigValue):
+    """Resolve explicit arguments, then perform one standard ``str.format``."""
+
+    def __init__(self, format_string: str, *args: "Any", **kwargs: "Any") -> None:
+        if type(format_string) is not str:
+            raise TypeError("ConfigFormat format_string must be a plain string")
+        self.format_string = format_string
+        self.args = args
+        self.kwargs = kwargs
+
+    def resolve(self, config: "Config") -> str:
+        args = config.resolve(self.args)
+        kwargs = config.resolve(self.kwargs)
+        try:
+            return self.format_string.format(*args, **kwargs)
+        except ConfigCycleError:
+            raise ConfigCycleError("config value cycle detected") from None
+        except Exception:
+            # Format hooks and their exception text may contain secret values.
+            raise ConfigError("ConfigFormat formatting failed") from None
+
+
+class ConfigLazy(ConfigValue):
+    """A trusted, read-only computation receiving exactly one Config argument.
+
+    Unlike a cached provider or legacy proxy, this callback runs on every use.
+    It must not generate persistent secrets or rely on being called only once.
+    """
+
+    def __init__(self, func: "Callable[[Config], Any]") -> None:
+        if not callable(func):
+            raise TypeError("ConfigLazy func must be callable")
+        self.func = func
+
+    def resolve(self, config: "Config") -> "Any":
+        try:
+            return self.func(config)
+        except ConfigCycleError:
+            raise ConfigCycleError("config value cycle detected") from None
+        except Exception:
+            # Callbacks can include sensitive config data in any exception type.
+            raise ConfigError("ConfigLazy callback failed") from None
 
 
 def redact_config_value(field: "ConfigField | None", value: "Any") -> "Any":
@@ -1151,6 +1231,37 @@ class Config:
                 detail = exc.__class__.__name__ if (redact_field is not None and redact_field.secret) else str(exc)
                 raise ConfigCastError("cannot cast %r for %s: %s" % (shown, name, detail))
         return value
+
+    def resolve(self, value: "Any") -> "Any":
+        """Resolve declarations and plain dict/list/tuple values without mutation.
+
+        Other objects, including legacy proxies, remain opaque. Nested calls
+        share the thread's active chain; completed values are never memoized.
+        """
+        value_type = type(value)
+        is_declaration = issubclass(value_type, ConfigValue)
+        if not is_declaration and value_type not in (dict, list, tuple):
+            return value
+
+        active = getattr(_resolution_context, "values", None)
+        if active is None:
+            active = _resolution_context.values = set()
+        identity = (id(self), id(value))
+        if identity in active:
+            raise ConfigCycleError("config value cycle detected")
+        active.add(identity)
+        try:
+            if is_declaration:
+                return self.resolve(value.resolve(self))
+            if value_type is dict:
+                return {key: self.resolve(item) for key, item in value.items()}
+            if value_type is list:
+                return [self.resolve(item) for item in value]
+            return tuple(self.resolve(item) for item in value)
+        finally:
+            active.remove(identity)
+            if not active:
+                del _resolution_context.values
 
     def require(self, key: str, type: "type | None" = None) -> "Any":
         """Resolve a must-exist key; raise ConfigNotFoundError if it is missing."""

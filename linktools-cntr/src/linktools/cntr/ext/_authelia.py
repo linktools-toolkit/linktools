@@ -15,6 +15,7 @@ from ..errors import ContainerError
 
 if TYPE_CHECKING:
     from typing import Any, Sequence
+    from linktools.core import Config, ConfigValue
     from ._nginx import Nginx
 
 
@@ -28,7 +29,7 @@ class Authelia(Integration):
         self._base_url = MISSING
 
     @classmethod
-    def access(cls, rule: "Mapping[str, Any]" = MISSING, *,
+    def access(cls, rule: "Mapping[str, Any] | ConfigValue" = MISSING, *,
                site: "Nginx | tuple[Integration, ...] | None" = None, **fields: "Any") -> "Authelia":
         """Declare native access-control fields for a producer's site."""
         if rule is not MISSING and fields:
@@ -44,14 +45,21 @@ class Authelia(Integration):
             raise ContainerError("Authelia access rule must be a mapping")
         return MappingProxyType(dict(self._rule))
 
+    def resolve_rule(self, config: "Config") -> "Mapping[str, Any]":
+        """Resolve native rule fields in the producer's config without caching."""
+        rule = config.resolve(self._rule)
+        if not isinstance(rule, Mapping):
+            raise ContainerError("Authelia access rule must be a mapping")
+        return MappingProxyType(config.resolve(dict(rule)))
+
     @classmethod
-    def oidc(cls, redirect_uris: "Sequence[str]") -> "Authelia":
+    def oidc(cls, redirect_uris: "Sequence[str | ConfigValue] | ConfigValue") -> "Authelia":
         """Contribute exact callback URLs without creating clients or credentials."""
         self = cls()
         self._redirect_uris = tuple(redirect_uris) if type(redirect_uris) in (tuple, list) else redirect_uris
         return self
 
-    def with_base_url(self, base_url: str) -> "Authelia":
+    def with_base_url(self, base_url: "str | ConfigValue") -> "Authelia":
         """Bind explicitly declared callback references without changing their owner."""
         result = copy(self)
         result._base_url = base_url
@@ -60,18 +68,32 @@ class Authelia(Integration):
 
     @cached_property
     def redirect_uris(self) -> "tuple[str, ...]":
-        if isinstance(self._redirect_uris, (str, bytes)):
+        return self._resolve_redirect_uris()
+
+    def resolve_redirect_uris(self, config: "Config") -> "tuple[str, ...]":
+        """Resolve callbacks in the producer's config before URL validation."""
+        return self._resolve_redirect_uris(config)
+
+    def _resolve_redirect_uris(self, config: "Config | None" = None) -> "tuple[str, ...]":
+        values = self._redirect_uris if config is None else config.resolve(self._redirect_uris)
+        if isinstance(values, (str, bytes)):
             raise ContainerError("Authelia redirect_uris must be a sequence of URLs")
         result = []
-        for value in self._redirect_uris:
+        for value in values:
+            if config is not None:
+                value = config.resolve(value)
             if not isinstance(value, str):
                 raise ContainerError("Authelia redirect URI must be a string")
             value = str(value)
+            if not value:
+                continue
             if self._base_url is not MISSING:
                 reference = urlsplit(value)
                 if not reference.scheme and reference.netloc:
                     raise ContainerError("Authelia redirect URI must use an explicit scheme")
-                value = resolve_url_reference(value, self._base_url)
+                if not reference.scheme:
+                    base_url = self._base_url if config is None else config.resolve(self._base_url)
+                    value = resolve_url_reference(value, base_url)
             if not value:
                 continue
             parsed = urlsplit(value)

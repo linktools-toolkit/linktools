@@ -5,6 +5,10 @@ from ._cache import CacheStore, CacheNamespace, CacheCodec, JsonCodec, BytesCode
 from ._config_store import ConfigStore, ConfigNamespace
 from ._config import (
     Config,
+    ConfigValue,
+    ConfigRef,
+    ConfigFormat,
+    ConfigLazy,
     ConfigField,
     ConfigSchema,
     ConfigResolver,
@@ -55,6 +59,7 @@ __all__ = [
     "CacheStore", "CacheNamespace", "CacheCodec", "JsonCodec", "BytesCodec",
     # config
     "Config", "ConfigField", "ConfigSchema", "ConfigResolver", "ConfigSource",
+    "ConfigValue", "ConfigRef", "ConfigFormat", "ConfigLazy",
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource", "DictSource",
     "DefaultSource", "ConfigProvider", "AliasProvider", "LazyProvider", "PromptProvider",
     "ConfirmProvider", "ErrorProvider", "ChainProvider", "ResolvedConfig",
