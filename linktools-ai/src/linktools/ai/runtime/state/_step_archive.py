@@ -5,7 +5,7 @@
 import asyncio
 from abc import abstractmethod
 import hashlib
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
@@ -19,7 +19,7 @@ from pydantic_ai.messages import ModelMessage
 from ...core import ExecutionStatus, canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...model import ModelClientRequest
-from ...storage import ObjectStore, StoredPayload
+from ...storage import ObjectRef, ObjectStore, StoredPayload
 from .._message import decode_model_messages, encode_model_messages
 from .._transcript_staging import StagedTranscript
 from .._model_interaction import (
@@ -1008,6 +1008,7 @@ class StateStepArchive(AgentRunStore):
         context_sources: Mapping[RuntimeDomain, TranscriptRepository] | None = None,
         history_repository: "ConversationHistoryRepository | None" = None,
         execution_repository: "ExecutionRepository | None" = None,
+        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
     ) -> None:
         self._store = store
         self._namespace = namespace
@@ -1021,6 +1022,7 @@ class StateStepArchive(AgentRunStore):
             runtime_domain=runtime_domain,
             context_sources=context_sources,
             history_repository=history_repository,
+            object_reader=object_reader,
         )
         self._execution_repository = execution_repository
         self._context_baselines: dict[str, LoadedModelContext] = {}

@@ -3,7 +3,7 @@
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
@@ -197,9 +197,11 @@ class TranscriptRepository:
         runtime_domain: RuntimeDomain,
         context_sources: Mapping[RuntimeDomain, "TranscriptRepository"] | None = None,
         history_repository: "ConversationHistoryRepository | None" = None,
+        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
     ) -> None:
         self._store = store
         self._object_store = object_store
+        self._object_reader = object_reader
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._namespace_digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
@@ -1813,7 +1815,11 @@ class TranscriptRepository:
             if not isinstance(value, bytes):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return value
-        if payload.ref is None or self._object_store is None:
+        if payload.ref is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._object_reader is not None:
+            return await self._object_reader(self._runtime_domain, payload.ref)
+        if self._object_store is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await read_object(
             self._object_store,

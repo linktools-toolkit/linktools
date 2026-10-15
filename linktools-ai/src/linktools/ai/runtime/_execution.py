@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -42,6 +42,7 @@ from ..core import (
     OperationStatus,
     Page,
     Principal,
+    RUNTIME_OBJECT_STORE_ID,
     ResourceKind,
     ResourceRef,
     StopReason,
@@ -61,6 +62,7 @@ from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
+    ObjectRef,
     ObjectStore,
     PayloadPolicy,
     StoredPayload,
@@ -366,9 +368,11 @@ class DefaultExecutionService:
         session_execution_ready: bool = True,
         task_admissions: TaskAdmissionRepository | None = None,
         tool_responses: ToolResponseFixture | None = None,
+        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
     ) -> None:
         self._state = state
         self._object_store = object_store
+        self._object_reader = object_reader
         self._sessions = sessions
         self._task_admissions = task_admissions
         self._tool_responses = tool_responses
@@ -2820,7 +2824,12 @@ class DefaultExecutionService:
                 reference = result.output.ref
                 if reference is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                payload = await read_runtime_object(self._object_store, reference)
+                if self._object_reader is None:
+                    payload = await read_runtime_object(self._object_store, reference)
+                else:
+                    if reference.store_id != RUNTIME_OBJECT_STORE_ID:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    payload = await self._object_reader(RuntimeDomain.EXECUTION, reference)
                 if result.output.encoding == "utf-8":
                     output = payload.decode("utf-8")
                 else:

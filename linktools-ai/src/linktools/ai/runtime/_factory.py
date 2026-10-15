@@ -559,6 +559,7 @@ async def _build_local_components(
             input_materializer=input_materializer,
             session_execution_ready=session_execution_ready,
             tool_responses=tool_responses,
+            object_reader=storage.read_object,
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -863,6 +864,7 @@ def _borrowed_runtime_history(
         namespace=storage.namespace,
         execution_objects=storage.object_store(RuntimeDomain.EXECUTION),
         task_objects=storage.object_store(RuntimeDomain.TASK),
+        object_reader=storage.read_object,
         artifacts=artifact,
         cursor_signer=HmacCursorSigner(
             "runtime-history",

@@ -17,7 +17,7 @@ from ...core import (
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
-from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, read_object
+from ...storage import ContentCache, FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, read_object
 from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
 from ._input_capture import input_capture_expiry_key, input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
@@ -99,10 +99,12 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
+        content_cache: "ContentCache | None" = None,
     ) -> None:
         _validate_storage_configuration(plan, object_store)
         self._plan = plan
         self._external_object_store = object_store
+        self._content_cache = content_cache
         self._lifecycle = _RuntimeStorageLifecycle.NEW
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -124,8 +126,8 @@ class RuntimeStorage:
         self._read_only = False
 
     @classmethod
-    def in_memory(cls) -> "RuntimeStorage":
-        return cls(RuntimeStoragePlan())
+    def in_memory(cls, *, content_cache: "ContentCache | None" = None) -> "RuntimeStorage":
+        return cls(RuntimeStoragePlan(), content_cache=content_cache)
 
     @classmethod
     def filesystem(
@@ -133,6 +135,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
+        content_cache: "ContentCache | None" = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(path)
         return cls(
@@ -147,6 +150,7 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
+            content_cache=content_cache,
         )
 
     @classmethod
@@ -155,6 +159,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
+        content_cache: "ContentCache | None" = None,
     ) -> "RuntimeStorage":
         route = RuntimeStorageRoute.sqlite(path)
         return cls(
@@ -166,14 +171,18 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
+            content_cache=content_cache,
         )
 
     @classmethod
-    def from_root(cls, root: "str | Path") -> "RuntimeStorage":
+    def from_root(
+        cls, root: "str | Path", *, content_cache: "ContentCache | None" = None,
+    ) -> "RuntimeStorage":
         base = _normalize_path(root)
         return cls.sqlite(
             base / "runtime.db",
             object_store=FilesystemObjectStore(base / "objects"),
+            content_cache=content_cache,
         )
 
     @classmethod
@@ -182,6 +191,7 @@ class RuntimeStorage:
         engine: "AsyncEngine",
         *,
         object_store: "ObjectStore | None" = None,
+        content_cache: "ContentCache | None" = None,
     ) -> "RuntimeStorage":
         route = RuntimeStorageRoute.sql(engine)
         return cls(
@@ -193,6 +203,7 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
+            content_cache=content_cache,
         )
 
     @classmethod
@@ -201,8 +212,9 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
+        content_cache: "ContentCache | None" = None,
     ) -> "RuntimeStorage":
-        return cls(plan, object_store=object_store)
+        return cls(plan, object_store=object_store, content_cache=content_cache)
 
     @property
     def plan(self) -> RuntimeStoragePlan:
@@ -293,6 +305,7 @@ class RuntimeStorage:
                     namespace=namespace,
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
+                    content_cache=self._content_cache,
                     read_only=read_only,
                 )
                 self._assign_materialized(
@@ -403,6 +416,13 @@ class RuntimeStorage:
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
             )
         return self._objects.object_store(domain)
+
+    async def read_object(self, domain: RuntimeDomain, reference: ObjectRef) -> bytes:
+        """Read a referenced object through this storage's content cache."""
+        self._require_ready()
+        if self._objects is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._objects.read_object(domain, reference)
 
     def working_object_store(
         self,

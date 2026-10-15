@@ -5,7 +5,7 @@ storage package separates content, revision discovery, and metadata projection.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `ContentCache` | Store discardable immutable byte content | Supply a cache implementation through `StorageOverlay(cache=...)` |
+| `ContentCache` | Store discardable immutable byte content | Supply `StorageOverlay(cache=...)` or `RuntimeStorage(..., content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
 
@@ -72,3 +72,53 @@ producer fencing. Likewise, business TTL snapshots and explicit refresh
 semantics remain with their read owner unless an equivalent contract has been
 established. Existing Runtime history calls do not automatically acquire shared
 content caching from the asset-store configuration above.
+
+## Runtime content
+
+Runtime storage accepts a borrowed `content_cache` independently of asset
+storage. The ordinary history and session APIs continue to own authorization,
+retention and reference selection; their external object reads use the storage
+router. Inline payloads do not enter the object cache.
+
+```python
+from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.storage import InMemoryContentCache
+
+content_cache = InMemoryContentCache(max_bytes=16 * 1024 * 1024)
+storage = RuntimeStorage.from_root("./runtime", content_cache=content_cache)
+```
+
+The host can retain the cache across successive storage lifetimes. Different
+storage instances share cached bytes, not their in-flight loads. The owning
+storage settles its own reads on close without closing the borrowed cache or a
+host connection pool. Closing first completes pending archive projections,
+then drains accepted object reads before source storage is closed.
+
+Only durable routes use this cache. A cold read uses the source directly. A
+cache hit verifies the expected size and digest and checks the referenced
+object still exists in the current source. Deletion or a source error cannot
+be hidden by cached bytes. This saves body transfer and filesystem work; it
+does not eliminate authorization, state, reference or object-metadata queries.
+`RuntimeStorage.read_object(domain, reference)` is the storage-level read
+operation used by SDK composition; applications normally keep using their
+existing domain/history APIs.
+
+## Choosing layers
+
+Use `TieredContentCache(memory, filesystem)` for local reusable content, or
+`TieredContentCache(memory, host_cache)` when a host-provided shared backend is
+useful. Existing composition can be nested for a third layer. Each additional
+layer adds writes and promotion work; a filesystem cache in front of a local
+filesystem source can duplicate storage without providing a useful saving.
+
+A lower-tier hit is promoted to earlier tiers. TTL in a host backend does not
+expire an already promoted memory or filesystem entry. Deletion is best effort;
+source membership and domain retention remain the read authority. Host adapters
+must bound network operation time as well as capacity; a failed backend is a
+miss, but an unbounded network wait still delays the read.
+
+One active `FilesystemContentCache` instance must own a cache directory. Its
+index and capacity accounting are instance-local. Sharing that directory
+between independent instances or worker processes does not provide a shared
+LRU or a global capacity bound. Hosts can use separate stable worker directories
+and account for the sum of their budgets and abandoned-directory cleanup.

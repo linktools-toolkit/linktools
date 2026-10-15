@@ -47,6 +47,7 @@ def build_runtime_agent_run_store(
         archives[domain] = ModelInteractionStateStepArchive(
             stores[domain],
             object_store=objects.object_store(domain),
+            object_reader=objects.read_object,
             namespace=namespace,
             tenant_id=tenant_id,
             runtime_domain=domain,
