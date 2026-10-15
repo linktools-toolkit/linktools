@@ -125,14 +125,16 @@ class ExecutionPlanner:
             warnings.append("Native Compose selection could not be resolved; startup commands and hooks "
                             "are omitted until native Compose configuration is available.")
         if action in ("up", "restart"):
-            warnings.append("Only selected services, their requirements and running declared consumers are applied. "
+            warnings.append("Named operations apply only explicitly selected container services. Required external "
+                            "dependencies must already be ready; dependent services requiring a joint operation "
+                            "must be explicitly selected. Full-project operations include their requirements. "
                             "Prepared file content changes recreate affected consumers; ordinary configuration "
                             "updates do not invoke a container-specific reload lifecycle. Preparation, image "
                             "availability and native checks are resolved during execution, before restart stops.")
         if action == "restart":
             warnings.append("Restart prepares selected inputs and images, then checks "
-                            "them before stopping only the explicitly selected services. Runtime providers "
-                            "are included in startup hooks and application, not in the explicit stop set.")
+                            "them before stopping only the explicitly selected services. Unselected providers "
+                            "and integration consumers are never implicitly refreshed or applied.")
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)

@@ -201,7 +201,7 @@ def test_starting_callbacks_all_finish_before_start_registry_lookup(lifecycle_ca
     ]
 
 
-def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_case, monkeypatch) -> None:
+def test_partial_restart_leaves_runtime_provider_outside_all_lifecycle_phases(lifecycle_case, monkeypatch) -> None:
     manager, containers, _, events = lifecycle_case
     provider, target = containers
     target._dependencies = ()
@@ -218,7 +218,7 @@ def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_c
     assert events == []
     planned = [(hook.phase, hook.container, hook.name) for hook in plan.hooks]
     provider_phases = [phase for phase, name, _ in planned if name == provider.name]
-    assert provider_phases == ["before-start", "check", "after-start"]
+    assert provider_phases == []
     assert [(phase, name) for phase, name, _ in planned if phase.endswith("stop")] == [
         ("before-stop", target.name), ("after-stop", target.name),
     ]
@@ -238,6 +238,7 @@ def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_c
     assert [event for event in events if event[0] not in ("callback", "runtime")] == planned
     assert ("callback", provider.name, "stopping") not in events
     assert ("callback", provider.name, "stopped") not in events
+    assert not any(event[1] == provider.name for event in events)
     before_stop = next(index for index, event in enumerate(events) if event[0] == "before-stop")
     assert all(index < before_stop for index, event in enumerate(events)
                if event[0] in ("check", "before-start"))

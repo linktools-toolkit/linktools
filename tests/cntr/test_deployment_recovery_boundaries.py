@@ -18,6 +18,19 @@ from linktools.cntr.runtime.process import RuntimeProcessFactory
 from test_lifecycle_rebuild import setup_case
 
 
+def assert_no_runtime_changes(manager: SimpleNamespace) -> None:
+    assert not any(event[0] in ("images", "apply", "stop", "restore", "restart", "down")
+                   for event in manager.events)
+
+
+def profile_nonproviders(manager: SimpleNamespace, provider: str) -> None:
+    for service, specification in manager.model["services"].items():
+        if service != provider:
+            specification["profiles"] = ["optional"]
+    manager.compose_runner.final_model = lambda context, preserve_disabled=False, privilege=None: deepcopy(
+        manager.model if preserve_disabled else {"services": {provider: manager.model["services"][provider]}})
+
+
 @pytest.mark.parametrize("saved_snapshot", [False, True])
 def test_inspection_cannot_overwrite_migration_recovery_input(tmp_path, saved_snapshot):
     manager = setup_case(tmp_path, [
@@ -93,7 +106,8 @@ def test_running_orphan_does_not_abort_after_applying_current_services(tmp_path,
     {"volumes_from": ["db:ro"]},
     {"depends_on": {"db": {"restart": True}}},
 ])
-def test_recovery_rebinds_running_dependents_without_starting_stopped_siblings(tmp_path, binding):
+@pytest.mark.parametrize("scope", ["provider", "joint", "full"])
+def test_recovery_rebinds_running_dependents_without_starting_stopped_siblings(tmp_path, binding, scope):
     manager = setup_case(tmp_path, [
         ("db", {"db": {"image": "db:new"}}),
         ("net", {"net": dict(binding, image="net:new")}),
@@ -102,10 +116,17 @@ def test_recovery_rebinds_running_dependents_without_starting_stopped_siblings(t
         ("other", {"other": {"image": "other:new"}}),
     ], running=("db", "net", "child", "other"))
     manager.compose_runner.fail = "db"
+    if scope == "provider":
+        with pytest.raises(ContainerError, match="Running dependents require a joint operation.*net"):
+            manager.compose_operations.up(["db"])
+        assert_no_runtime_changes(manager)
+        return
+    if scope == "full":
+        profile_nonproviders(manager, "db")
     with pytest.raises(ContainerError, match="apply failed db"):
-        manager.compose_operations.up(["db"])
+        manager.compose_operations.up(None if scope == "full" else ["db", "net", "child"])
     restored = [event[1] for event in manager.events if event[0] == "restore"]
-    if "depends_on" in binding:
+    if scope == "full" and "depends_on" in binding:
         assert restored == [("db",)]
         assert ("restart", "net") in manager.events
     else:
@@ -195,18 +216,21 @@ def test_known_running_orphan_respects_removal_and_saved_model(tmp_path, full, f
         return restart(context, service)
 
     manager.compose_runner.restart_service = restart_saved
+    manager.compose_runner.fail = "db" if failure else None
+    if not full:
+        with pytest.raises(ContainerError, match="Running dependents require a joint operation.*net"):
+            manager.compose_operations.up(["db"])
+        assert_no_runtime_changes(manager)
+        return
     if failure:
-        manager.compose_runner.fail = "db"
         with pytest.raises(ContainerError, match="apply failed db"):
-            manager.compose_operations.up(None if full else ["db"])
+            manager.compose_operations.up()
     else:
-        manager.compose_operations.up(None if full else ["db"])
+        manager.compose_operations.up()
     restored = [event[1] for event in manager.events if event[0] == "restore"]
     expected = [("db",)] if failure else []
-    if not full and "network_mode" in binding:
-        expected.append(("net",))
     assert restored == expected
-    assert (("restart", "net") in manager.events) == (not full and "depends_on" in binding)
+    assert ("restart", "net") not in manager.events
 
 
 def test_cleanup_stops_new_namespace_dependents_of_discarded_provider(tmp_path):
@@ -252,6 +276,12 @@ def test_legacy_untouched_service_uses_captured_old_binding(tmp_path, old_bindin
 
     native._resolved_model = resolve
     manager.compose_runner.saved_service_models = native.saved_service_models
+    manager.compose_runner.fail = "db" if failure else None
+    if old_binding:
+        with pytest.raises(ContainerError, match="Running dependents require a joint operation.*web"):
+            manager.compose_operations.up(["db"])
+        assert_no_runtime_changes(manager)
+        return
     if failure:
         manager.compose_runner.fail = "db"
         with pytest.raises(ContainerError, match="apply failed db"):
@@ -259,7 +289,7 @@ def test_legacy_untouched_service_uses_captured_old_binding(tmp_path, old_bindin
     else:
         manager.compose_operations.up(["db"])
     restored = [event[1] for event in manager.events if event[0] == "restore"]
-    assert restored == ([("db",)] if failure else []) + ([("web",)] if old_binding else [])
+    assert restored == ([("db",)] if failure else [])
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["db"]
 
 
@@ -373,34 +403,38 @@ def stopped_provider_case(tmp_path, binding):
     return manager
 
 
-@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("scope", ["provider", "joint", "full"])
 @pytest.mark.parametrize("binding", [
     {"network_mode": "service:db"}, {"ipc": "service:db"},
     {"pid": "service:db"}, {"volumes_from": ["db:ro"]},
 ])
-def test_stopped_provider_replacement_rebinds_live_namespace_consumers(tmp_path, full, binding):
+def test_stopped_provider_replacement_rebinds_live_namespace_consumers(tmp_path, scope, binding):
     manager = stopped_provider_case(tmp_path, binding)
-    manager.compose_operations.up(None if full else ["db"])
-    if full:
-        assert ("apply", "net", True) in manager.events
-        assert ("apply", "child", True) in manager.events
-    else:
-        assert [event[1] for event in manager.events if event[0] == "restore"] == [("net",), ("child",)]
+    if scope == "provider":
+        with pytest.raises(ContainerError, match="Running dependents require a joint operation.*net"):
+            manager.compose_operations.up(["db"])
+        assert_no_runtime_changes(manager)
+        return
+    manager.compose_operations.up(None if scope == "full" else ["db", "net", "child"])
+    assert ("apply", "net", True) in manager.events
+    assert ("apply", "child", True) in manager.events
+    if scope == "joint":
         assert not any(event[0] == "apply" and event[1] == "stopped" for event in manager.events)
 
 
 @pytest.mark.parametrize("provider_running", [False, True])
 @pytest.mark.parametrize("failed_running", [False, True])
-def test_later_failure_rebinds_dependents_of_retained_successful_provider(tmp_path, provider_running, failed_running):
+@pytest.mark.parametrize("full", [False, True])
+def test_later_failure_rebinds_dependents_of_retained_successful_provider(tmp_path, provider_running, failed_running, full):
     manager = setup_case(tmp_path, [
         ("db", {"db": {"image": "db:new"}}),
+        ("fail", {"fail": {"image": "fail:new"}}),
         ("net", {"net": {"image": "net:new", "network_mode": "service:db"}}),
         ("child", {"child": {"image": "child:new", "network_mode": "service:net"}}),
-        ("fail", {"fail": {"image": "fail:new"}}),
     ], running=("net", "child") + (("db",) if provider_running else ()) + (("fail",) if failed_running else ()))
     manager.compose_runner.fail = "fail"
     with pytest.raises(ContainerError, match="apply failed fail"):
-        manager.compose_operations.up(["db", "fail"])
+        manager.compose_operations.up(None if full else ["db", "net", "child", "fail"])
     restored = [event[1] for event in manager.events if event[0] == "restore"]
     assert ("net",) in restored and ("child",) in restored
     assert ("db",) not in restored
@@ -443,7 +477,7 @@ def test_failed_stopped_provider_restores_live_bindings_then_stops_old_provider(
     manager.compose_runner.apply_saved_services = restore_with_dependencies
     manager.compose_runner.stop = stop_after_rebinding
     with pytest.raises(ContainerError, match="apply failed db"):
-        manager.compose_operations.up(["db"])
+        manager.compose_operations.up(["db", "net", "child"])
     assert [event[1] for event in manager.events if event[0] == "restore"] == [("db",), ("net",), ("child",)]
     assert active == {"net", "child"}
     assert manager.running_state.get_persisted() == ["child", "net"]
@@ -459,7 +493,7 @@ def test_stopped_namespace_provider_requires_recovery_input_before_mutation(tmp_
         snapshots = AppliedServiceModels(manager, manager.model)
         Path(snapshots._path("db")).unlink()
     with pytest.raises(ContainerError, match="original image ID|Missing restore input"):
-        manager.compose_operations.up(["db"])
+        manager.compose_operations.up(["db", "net", "child"])
     assert not any(event[0] in ("apply", "stop", "restore") for event in manager.events)
 
 
@@ -475,7 +509,7 @@ def test_failed_temporary_provider_recovery_stops_it_again(tmp_path):
 
     manager.compose_runner.apply_saved_services = fail_dependent_restore
     with pytest.raises(ContainerError, match="recovery failed: dependent restore failed"):
-        manager.compose_operations.up(["db"])
+        manager.compose_operations.up(["db", "net", "child"])
     assert ("stop", ("db",)) in manager.events
     assert manager.running_state.get_persisted() == ["child", "net"]
 
@@ -493,7 +527,8 @@ def test_explicit_recovery_image_ids_do_not_change_initial_running_images(tmp_pa
                                             runtime=SimpleNamespace(create_docker_process=process)))
     runner._resolved_model = lambda process: {"services": {"db": {"image": "sha256:old-stopped"}}}
     runner.wait_service_dependencies = lambda *args, **kwargs: None
-    context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (), "docker"), project_containers=())
+    context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (), "docker"), project_containers=(),
+                              is_full_project=False, target_services=("db",))
     runner.apply_saved_services(context, ("db",), {"old.yml": "services: {db: {image: mutable:tag}}"},
                                 image_ids={"db": "sha256:old-stopped"})
     assert yaml.safe_load(files[-1][-1]) == {"services": {"db": {"image": "sha256:old-stopped"}}}
@@ -516,6 +551,7 @@ def test_recovery_configuration_explicitly_selects_profiled_service(tmp_path, le
     context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (
         SimpleNamespace(service="optional", state="running", image_id="sha256:original", labels={}),), "docker"), project_containers=(),
                               service_models=SimpleNamespace(previous={}),
+                              is_full_project=False, target_services=("optional",),
                               previous_compose_contents={"old.yml": yaml.safe_dump(model)})
     if legacy:
         assert "optional" in runner.saved_service_models(context, ("optional",))
@@ -599,12 +635,18 @@ def legacy_labeled_case(tmp_path, binding, label, child_restart=False):
 
 
 @pytest.mark.parametrize("label", ["db", "db:service_started", "db:service_started:true", "db:service_started:false"])
-def test_native_labels_capture_interpolated_namespace_and_then_its_child(tmp_path, label):
+@pytest.mark.parametrize("joint", [False, True])
+def test_native_labels_capture_interpolated_namespace_and_then_its_child(tmp_path, label, joint):
     manager = legacy_labeled_case(tmp_path, {"network_mode": "${REVIEW_NETWORK_MODE}"}, label)
-    manager.compose_operations.up(["db"])
+    manager.compose_runner.fail = "db"
+    with pytest.raises(ContainerError, match="apply failed db" if joint else "Running dependents require a joint operation"):
+        manager.compose_operations.up(["db", "worker", "child"] if joint else ["db"])
     captures = [event[1] for event in manager.events if event[0] == "capture-restore"]
     assert {"worker", "child"}.issubset(set().union(*captures))
-    assert [event[1] for event in manager.events if event[0] == "restore"] == [("worker",), ("child",)]
+    if joint:
+        assert [event[1] for event in manager.events if event[0] == "restore"] == [("db",), ("worker",), ("child",)]
+    else:
+        assert_no_runtime_changes(manager)
 
 
 @pytest.mark.parametrize("label", ["db:service_started:false", ""])
@@ -616,12 +658,25 @@ def test_native_false_or_empty_dependency_label_does_not_capture_unrelated_legac
     assert all(event[1] == ("db",) for event in manager.events if event[0] == "capture-restore")
 
 
-def test_native_implicit_restart_edge_restarts_child_without_recreating_namespace(tmp_path):
+@pytest.mark.parametrize("scope", ["provider", "joint", "full"])
+def test_native_implicit_restart_edge_respects_operation_scope(tmp_path, scope):
     manager = legacy_labeled_case(tmp_path, {"depends_on": {"db": {"restart": True}}},
                                  "db:service_started:true", child_restart=True)
-    manager.compose_operations.up(["db"])
-    assert [event[1] for event in manager.events if event[0] == "restart"] == ["worker", "child"]
-    assert not any(event[0] == "restore" for event in manager.events)
+    if scope == "full":
+        profile_nonproviders(manager, "db")
+        manager.compose_operations.up()
+        assert [event[1] for event in manager.events if event[0] == "restart"] == ["worker", "child"]
+        assert not any(event[0] == "restore" for event in manager.events)
+    elif scope == "joint":
+        manager.compose_runner.fail = "db"
+        with pytest.raises(ContainerError, match="apply failed db"):
+            manager.compose_operations.up(["db", "worker", "child"])
+        assert [event[1] for event in manager.events if event[0] == "restore"] == [("db",), ("worker",), ("child",)]
+        assert not any(event[0] == "restart" for event in manager.events)
+    else:
+        with pytest.raises(ContainerError, match="Running dependents require a joint operation"):
+            manager.compose_operations.up(["db"])
+        assert_no_runtime_changes(manager)
 
 
 def test_nonshared_runtime_namespace_and_false_restart_do_not_capture_dynamic_legacy_consumer(tmp_path):
@@ -685,7 +740,7 @@ def test_second_interrupt_does_not_force_temporary_provider_cleanup(tmp_path):
 
     manager.compose_runner.apply_saved_services = interrupted_restore
     with pytest.raises(KeyboardInterrupt) as caught:
-        manager.compose_operations.up(["db"])
+        manager.compose_operations.up(["db", "net", "child"])
     assert caught.value is interrupt
     assert ("restore", ("db",)) in manager.events
     assert not any(event[0] == "stop" for event in manager.events)
@@ -708,7 +763,7 @@ def test_temporary_provider_cleanup_failure_preserves_both_recovery_errors(tmp_p
     manager.compose_runner.apply_saved_services = failed_restore
     manager.compose_runner.stop = failed_stop
     with pytest.raises(ContainerError, match="consumer restore failed; stopping temporary providers failed: provider stop failed"):
-        manager.compose_operations.up(["db"])
+        manager.compose_operations.up(["db", "net", "child"])
     assert manager.running_state.get_persisted() == ["child", "db", "net"]
 
 
@@ -725,7 +780,8 @@ def test_stopped_unrelated_service_does_not_add_a_recovery_requirement(tmp_path)
     assert ("apply", "db", True) in manager.events
 
 
-def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_path):
+@pytest.mark.parametrize("scope", ["provider", "joint", "full"])
+def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_path, scope):
     manager = setup_case(tmp_path, [
         ("vpn", {"vpn": {"image": "vpn:new"}}),
         ("db", {"db": {"image": "db:new", "network_mode": "service:vpn"}}),
@@ -739,6 +795,7 @@ def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_pa
     captured = []
 
     def saved_models(context, services):
+        manager.events.append(("capture-legacy", tuple(services)))
         captured.extend(services)
         known = tuple(service for service in services if service in context.service_models.previous)
         results = original(context, known)
@@ -748,10 +805,17 @@ def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_pa
         return results
 
     manager.compose_runner.saved_service_models = saved_models
-    manager.compose_operations.up(["db"])
+    if scope == "provider":
+        with pytest.raises(ContainerError, match="Required dependencies are not ready: vpn"):
+            manager.compose_operations.up(["db"])
+        assert_no_runtime_changes(manager)
+        assert not captured
+        return
+    manager.compose_operations.up(None if scope == "full" else ["db", "net", "vpn"])
     first_apply = next(index for index, event in enumerate(manager.events) if event[0] == "apply")
-    assert "db" in captured and "vpn" in captured
-    assert ("capture-restore", ("net",)) in manager.events[first_apply:]
+    preflight = {service for event in manager.events[:first_apply] if event[0] == "capture-legacy"
+                 for service in event[1]}
+    assert {"db", "vpn"} <= preflight
 
 
 def test_recovery_metadata_failure_keeps_observed_restoration_state(tmp_path, monkeypatch):

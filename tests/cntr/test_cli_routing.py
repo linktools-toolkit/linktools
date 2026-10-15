@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CLI up/restart/down routing through image preparation and ComposeRunner."""
+import pytest
+
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
+from linktools.cntr.artifacts import AppliedServiceModels
+from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 
 
+def _ready_dependencies(manager, monkeypatch) -> None:
+    services = {name for container in manager.containers.values() if container.name != "portainer"
+                for name in container.services}
+    model = {"services": {name: {"image": name + ":current"}
+                          for container in manager.containers.values() for name in container.services}}
+    actual = ProjectRuntimeState(manager.project_name, tuple(
+        SimpleNamespace(service=name, state="running", health="healthy", exit_code=None, labels={},
+                        image_id="sha256:local-" + name + ":current") for name in sorted(services)), "docker")
+    monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers, **kwargs: actual)
+    AppliedServiceModels(manager, model).record(services)
+
+
 def _record(manager, monkeypatch):
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
+    _ready_dependencies(manager, monkeypatch)
     recorded = []
 
     def fake(*args, privilege=None, **kwargs):
@@ -27,7 +45,7 @@ def _record(manager, monkeypatch):
 
         return _Proc()
 
-    def fake_plan(model, services=(), force_pull=False, refresh_services=()):
+    def fake_plan(model, services=(), force_pull=False, refresh_services=(), include_dependencies=True):
         targets = tuple(services)
         images = {spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
                   for spec in model["services"].values()}
@@ -52,8 +70,8 @@ def test_cli_up_partial_records_exact_args(monkeypatch, fresh_manager):
 
     cntr_main.command.on_command_up(names=["portainer"], pull=False)
 
-    assert any(cmd[0] == "build" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
-    assert {"portainer", "nginx"} <= {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
+    assert any(cmd[0] == "build" and "portainer" in cmd and "nginx" not in cmd for cmd in recorded)
+    assert {"portainer"} == {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
 
 
 def test_cli_restart_partial_records_stop_build_and_up(monkeypatch, fresh_manager):
@@ -66,20 +84,19 @@ def test_cli_restart_partial_records_stop_build_and_up(monkeypatch, fresh_manage
 
     assert any(cmd[0] == "build" and "portainer" in cmd for cmd in recorded)
     assert ("stop", "portainer") in recorded
-    assert {"portainer", "nginx"} <= {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
+    assert {"portainer"} == {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
     assert next(i for i, cmd in enumerate(recorded) if cmd[0] == "build") < recorded.index(("stop", "portainer"))
 
 
-def test_restart_config_only_target_keeps_shared_services_running(monkeypatch, fresh_manager):
+def test_restart_config_only_target_requires_explicit_consumer(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
     recorded = _record(fresh_manager, monkeypatch)
 
-    cntr_main.command.on_command_restart(names=["portainer"])
+    with pytest.raises(ContainerError, match="[Nn]o runnable service"):
+        cntr_main.command.on_command_restart(names=["portainer"])
 
-    assert not any(args[0] == "stop" for args in recorded)
-    assert any(args[0] == "up" and "nginx" in args for args in recorded)
-    assert not any(args[0] == "up" and "portainer" in args for args in recorded)
+    assert recorded == []
 
 
 def test_restart_mixed_config_and_service_targets_stops_only_real_service(monkeypatch, fresh_manager):
@@ -112,7 +129,7 @@ def test_cli_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_ma
 
     assert any(cmd[:2] == ("pull", "--ignore-buildable") and "portainer" in cmd for cmd in recorded)
     assert not any(cmd[0] == "build" for cmd in recorded)
-    assert {"portainer", "nginx"} <= {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
+    assert {"portainer"} == {service for cmd in recorded if cmd[0] == "up" for service in cmd[cmd.index("--no-deps") + 1:]}
 
 
 def test_only_one_manager_singleton_backs_the_cli():

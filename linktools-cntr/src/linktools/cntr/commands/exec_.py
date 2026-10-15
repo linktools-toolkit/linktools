@@ -57,5 +57,6 @@ class ExecCommand(BaseCommand):
         subcommand = self.parse_subcommand(args)
         if not subcommand or isinstance(subcommand, SubCommandGroup):
             return self.print_subcommands(args, root=subcommand, max_level=2)
-        _shared.manager.prepare_installed_containers()
+        if subcommand.name not in ("up", "restart"):
+            _shared.manager.prepare_installed_containers()
         return subcommand.run(args)

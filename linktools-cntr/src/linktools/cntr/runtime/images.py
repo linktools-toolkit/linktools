@@ -57,7 +57,7 @@ def _dependencies(services, targets):
 
 
 class ImagePreparer:
-    """Classifies, checks, and prepares exactly the service dependency closure."""
+    """Classifies, checks, and prepares selected services and their dependencies."""
 
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
@@ -242,9 +242,19 @@ class ImagePreparer:
                 raise ImagePreparationError("Built image revision mismatch for " + name)
 
     def plan(self, model: "dict[str, Any]", services: "Sequence[str]" = (),
-             force_pull: bool = False, refresh_services: "Sequence[str] | None" = None) -> ImagePlan:
+             force_pull: bool = False, refresh_services: "Sequence[str] | None" = None,
+             include_dependencies: bool = True) -> ImagePlan:
+        """Plan selected images, including dependencies unless explicitly excluded."""
         all_services = model["services"]
-        targets = list(all_services) if not services else _dependencies(all_services, services)
+        if not services:
+            targets = list(all_services)
+        elif include_dependencies:
+            targets = _dependencies(all_services, services)
+        else:
+            targets = list(dict.fromkeys(services))
+            for name in targets:
+                if name not in all_services:
+                    raise ImagePreparationError("Unknown Compose service dependency: " + name)
         refreshing = set(targets if refresh_services is None and force_pull else (refresh_services or ()))
         if not force_pull:
             refreshing.clear()

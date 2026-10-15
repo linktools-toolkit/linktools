@@ -45,20 +45,34 @@ inputs because those relationships require different restore actions.
 
 ## Ordering and responsibilities
 
-An `up` operation resolves the selected groups, required providers and declared
-running consumers, including attached navigation links. The existing artifact
-index retains the source-container names of generated inputs so removing a
-producer's final declaration can still update its previously running consumer.
-Container requirements select what participates; only Compose
-service dependency edges determine startup order. A real Compose dependency cycle
-is an error. There is no implicit bootstrap configuration.
+A named `up` or `restart` operation applies only the services belonging to the
+explicitly named containers. This boundary also controls preparation, image
+inspection, pull, build, callbacks, snapshots and recovery. Dependencies and
+integration consumers are not implicitly added. Required external services must
+already satisfy their runtime conditions; otherwise the operation explains which
+containers to include explicitly before refreshing images or stopping services.
+Successful one-shot dependencies satisfy `service_completed_successfully` without
+remaining running. Unselected services' pending configuration is not applied or
+recursively interpreted as a new prerequisite.
 
-When multiple containers contribute to the same service, native Compose resolves
-their merged dependencies. Each contributing container receives that service's
-lifecycle callbacks; unrelated sibling services remain outside a partial operation.
-Managed build revisions follow the contributing build owner, rather than whichever
-container appeared last. Conflicting managed owners that cannot be identified from
-the resolved build inputs fail before service application.
+An operation without names still resolves the full project, its required
+providers and running declared consumers. Full-project generated-input metadata
+retains producer names so removed declarations can update previous consumers.
+Only real Compose service edges determine startup order; dependency cycles are
+errors. The full Compose model and its dependency declarations remain intact in
+both modes, and execution uses `--no-deps` with the resolved service list.
+
+A named operation on a shared Compose service requires all contributing
+containers to be named, so no unprepared contributor is silently applied. Native
+Compose resolves their merged definitions. Managed build revisions follow the
+contributing build owner; ambiguous build ownership fails before application.
+
+Running outside consumers with `restart: true` edges or namespace bindings can
+need joint application or recovery when a selected provider changes. Named
+operations diagnose these relationships before image work and ask for the
+consumer containers to be included explicitly. Even recovery cannot implicitly
+start, stop or recreate an unselected service. Required providers in selected
+services' previous models are checked as rollback prerequisites as well.
 
 Compose resolves profiles before startup hooks. Full-project operations apply only
 active services; explicit service selection enables its profiles through native
@@ -84,18 +98,19 @@ The operation then runs:
 were not explicitly selected are not included in the stop set. `down` uses the stop callbacks after loading preparation and performs no
 start preparation, build or native check.
 Status reads metadata and actual state without invoking preparation callbacks.
-Partial `up` warns before changing a service outside the explicitly requested
-containers, identifying the action and dependency/configuration reason. Unchanged
-services produce no such warning; recovery reports additional actions when needed.
+Named operations diagnose required outside actions before image refresh or service
+mutation. Explicit joint selection is required even when rollback could need to
+rebind a running dependent. Inspection and readiness checks do not imply that an
+existing service is restarted or recreated.
 
-`on_prepare()` runs for all installed containers after config registration and
-before execution selects services or expands their runtime requirements. Static
-installation dependencies have already been resolved during metadata loading. It is available
-to `up`, `restart`, `down`, `compose`, and container `exec` commands. Exceptions
-propagate before the requested operation starts. Each preparation entry calls it
-once; an `exec` subcommand that invokes another operation enters preparation
-again, so custom callbacks must support repeated calls. Generated integration files still
-belong in `on_starting(context)`, which runs later for selected targets.
+`on_prepare()` runs after config registration. Named `up` and `restart` prepare
+only explicitly named owners before reading their service declarations. Full
+starts, `down`, and `compose` retain project-wide preparation. The standard
+`exec <name> up/restart` entry delegates preparation to the same named operation;
+other exec commands retain their existing preparation entry. Exceptions propagate
+before the requested runtime operation starts. Custom callbacks must tolerate
+repeated calls. Generated integration files belong in `on_starting(context)`,
+which runs later for the selected targets.
 
 Metadata-only planning, status, doctor and config commands do not call
 `on_prepare()`. A hook that changes declarations can therefore change the actual
@@ -169,7 +184,7 @@ input. Newly started related consumers without a prior instance are stopped.
 Independent successful siblings are retained. Initial migration may read old saved Compose files, but
 new operations do not write a second container-level applied snapshot.
 Live namespace consumers are rebound after a retained provider changes, even if
-an independent service later fails. Restoring a live consumer may temporarily
+an independent service later fails. During full-project recovery, restoring a live consumer may temporarily
 start its previously stopped namespace provider with the old model and image;
 the provider is stopped again after recovery. Interrupting deployment runs
 recovery before propagating the interrupt; interrupting recovery itself stops
