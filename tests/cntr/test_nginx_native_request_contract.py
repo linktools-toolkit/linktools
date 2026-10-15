@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from linktools.core import Config, ConfigSchema, DictSource
+
 
 def _native_site(port):
     return SimpleNamespace(server_name="app.test", file_id="native", var_name="native",
@@ -112,7 +114,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         config = {"NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
                   "NGINX_WAF_PORT": origin_port, "NGINX_ROOT_DOMAIN": "test",
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
-        producer = SimpleNamespace(name="native-fixture", env_config=config)
+        producer = SimpleNamespace(name="native-fixture", env_config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app_port)
 
         def render(name, selected=site):
@@ -393,11 +395,11 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
 
 def test_native_fixture_template_contract_without_native_processes(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    producer = SimpleNamespace(name="native-fixture", env_config={
+    producer = SimpleNamespace(name="native-fixture", env_config=Config(None, ConfigSchema(), [DictSource({
         "NGINX_HTTP_PORT": 8080, "NGINX_HTTPS_PORT": 8443,
         "NGINX_WAF_PORT": 8081, "NGINX_ROOT_DOMAIN": "test",
         "SAFELINE_SUBNET_PREFIX": "127.0.0",
-    })
+    })]))
     site = _native_site(8082)
     business = nginx._render_site_template(producer, nginx.get_source_path("templates", "default.conf"), site)
     server = nginx._render_site_template(
@@ -459,7 +461,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
             "NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
             "NGINX_ROOT_DOMAIN": "test",
         }
-        producer = SimpleNamespace(name="shared-native", env_config=config)
+        producer = SimpleNamespace(name="shared-native", env_config=Config(None, ConfigSchema(), [DictSource(config)]))
 
         def site(name, auth_enabled):
             return SimpleNamespace(
@@ -598,7 +600,7 @@ def test_native_body_limits_with_fixed_length_and_chunked_requests(fresh_manager
         public_port, origin_port = _port(), _port()
         config = {"NGINX_HTTP_PORT": public_port, "NGINX_WAF_PORT": origin_port,
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
-        producer = SimpleNamespace(name="body-fixture", env_config=config)
+        producer = SimpleNamespace(name="body-fixture", env_config=Config(None, ConfigSchema(), [DictSource(config)]))
         site = _native_site(app.server_port)
         site.https, site.waf, site.auth = False, waf, False
         site.waf_bypass = (r"^/bypass",)
