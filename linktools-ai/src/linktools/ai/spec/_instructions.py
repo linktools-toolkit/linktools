@@ -335,7 +335,15 @@ def _normalize_rule_target(value: str | Path) -> str:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if not isinstance(raw, str) or not raw or "\x00" in raw:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    return _validate_scope(raw)
+    # Targets are paths, not rendered instruction metadata. Legal filenames may
+    # contain characters such as brackets that source/scope headers cannot use.
+    if raw == ".":
+        return raw
+    if "\\" in raw or raw.startswith("/") or any(
+        part in {"", ".", ".."} for part in raw.split("/")
+    ):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return raw
 
 
 __all__ = [
