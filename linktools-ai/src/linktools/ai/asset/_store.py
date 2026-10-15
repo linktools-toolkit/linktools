@@ -6,7 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -54,10 +54,10 @@ class AssetStoreReader(Protocol):
 
     async def get(self, key: AssetKey) -> "bytes | None": ...
 
-    async def get_many(
+    def get_many(
         self,
         keys: Sequence[AssetKey],
-    ) -> "tuple[bytes | None, ...]": ...
+    ) -> "AsyncIterator[bytes | None]": ...
 
     async def local_paths(
         self,
@@ -89,7 +89,7 @@ class AssetCacheAdapter:
                 key.kind,
                 key.id,
                 str(info.revision.value),
-                info.etag,
+                info.digest,
             )
         )
 
@@ -171,10 +171,10 @@ class AssetStore:
         self._ensure_ready()
         return await self._storage.get(key)
 
-    async def get_many(self, keys: "Sequence[AssetKey]") -> "tuple[bytes | None, ...]":
-        """Return current file bytes in the same order as the requested keys."""
+    def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
+        """Yield ordered file bytes; close an unfinished stream when stopping early."""
         self._ensure_ready()
-        return await self._storage.get_many(keys)
+        return self._storage.get_many(keys)
 
     async def local_paths(
         self,
@@ -371,7 +371,7 @@ class AssetStore:
                     key,
                     location.layer,
                     info.revision,
-                    info.etag,
+                    info.digest,
                     info.size,
                 )
             )
@@ -405,7 +405,7 @@ class AssetStore:
             if value is None:
                 raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
             data = bytes(value)
-            if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.etag:
+            if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.append(data)
         return tuple(values)
@@ -475,7 +475,7 @@ class AssetStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value = values[0]
             info = infos[key]
-            content_key = f"v{_SNAPSHOT_VERSION}/asset-content/{info.etag}"
+            content_key = f"v{_SNAPSHOT_VERSION}/asset-content/{info.digest}"
             await _put_snapshot_object(object_store, content_key, value)
             entries.append(_snapshot_entry(info, content_key))
         if await self.current_revision() != captured_revision:
@@ -571,7 +571,7 @@ def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
         "key": {"kind": info.key.kind, "id": info.key.id},
         "entry_revision": info.revision.value,
         "store_revision": info.store_revision.value,
-        "etag": info.etag,
+        "digest": info.digest,
         "size": info.size,
         "status": info.status.value,
         "modified_at": info.modified_at.isoformat(),
@@ -579,7 +579,7 @@ def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
         "content": {
             "store_id": "snapshot",
             "key": content_key,
-            "digest": info.etag,
+            "digest": info.digest,
             "size": info.size,
         },
     }
@@ -639,7 +639,7 @@ class _SnapshotAssetStore(AssetStore):
             await read_object(
                 self._object_store,
                 content_key,
-                expected_digest=info.etag,
+                expected_digest=info.digest,
                 expected_size=info.size,
             )
             entries[info.key] = info
@@ -675,12 +675,24 @@ class _SnapshotAssetStore(AssetStore):
         return await read_object(
             self._object_store,
             content_key,
-            expected_digest=info.etag,
+            expected_digest=info.digest,
             expected_size=info.size,
         )
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> tuple[bytes | None, ...]:
-        return tuple([value async for value in _snapshot_values(self, keys)])
+    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
+        requested = tuple(keys)
+        remaining = dict.fromkeys(requested, 0)
+        for key in requested:
+            remaining[key] += 1
+        values: dict[AssetKey, bytes | None] = {}
+        for key in requested:
+            if key not in values:
+                values[key] = await self.get(key)
+            value = values[key]
+            remaining[key] -= 1
+            if remaining[key] == 0:
+                del values[key]
+            yield value
 
     async def list_info(
         self,
@@ -751,7 +763,7 @@ class _SnapshotAssetStore(AssetStore):
                     key,
                     "snapshot",
                     info.revision,
-                    info.etag,
+                    info.digest,
                     info.size,
                 )
             )
@@ -890,14 +902,6 @@ def _snapshot_cursor_start(
     return start
 
 
-async def _snapshot_values(
-    store: _SnapshotAssetStore,
-    keys: Sequence[AssetKey],
-):
-    for key in keys:
-        yield await store.get(key)
-
-
 def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
     if not isinstance(raw, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -910,13 +914,13 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
         ):
             raise ValueError
         key = AssetKey(str(key_payload["kind"]), str(key_payload["id"]))
-        etag = str(raw["etag"])
+        digest = str(raw["digest"])
         size = int(raw["size"])
         info = AssetInfo(
             key=key,
             revision=StorageEntryRevision(int(raw["entry_revision"])),
             store_revision=StorageRevision(str(raw["store_revision"])),
-            etag=etag,
+            digest=digest,
             size=size,
             status=StorageEntryStatus(str(raw["status"])),
             modified_at=datetime.fromisoformat(str(raw["modified_at"])),
@@ -924,7 +928,7 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
         )
         if (
             content.get("store_id") != "snapshot"
-            or content.get("digest") != info.etag
+            or content.get("digest") != info.digest
             or content.get("size") != info.size
         ):
             raise ValueError

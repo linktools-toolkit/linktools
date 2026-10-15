@@ -113,7 +113,7 @@ async def test_fixture_reads_saved_version_with_borrowed_reader_after_default_ch
             fixture.ref = original.ref
         assert await store.get(original.ref.key) == canonical_json_bytes(updated)
         with pytest.raises(AIError):
-            await fixture.load(replace(original.ref, etag="0" * 64))
+            await fixture.load(replace(original.ref, digest="0" * 64))
     finally:
         await store.close()
 

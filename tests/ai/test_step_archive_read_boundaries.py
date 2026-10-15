@@ -143,8 +143,8 @@ async def test_observation_commit_keeps_validation_and_fencing(
                 payload["fields"] = fields
                 envelope["payload"] = payload
                 assert await transaction.replace_record(
-                    replace(record, data=encode_envelope(envelope), storage_version=record.storage_version + 1),
-                    expected_storage_version=record.storage_version,
+                    replace(record, data=encode_envelope(envelope), storage_revision=record.storage_revision + 1),
+                    expected_storage_revision=record.storage_revision,
                 )
 
             await archive.state_store.mutate(corrupt)

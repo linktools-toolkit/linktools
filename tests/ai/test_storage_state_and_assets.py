@@ -18,6 +18,9 @@ from linktools.ai.runtime.state._store import StoredRecord
 from linktools.ai.storage import StorageEntryRevision
 
 
+from tests.ai._storage_stream_helpers import collect_values
+
+
 def _record(value: str) -> StoredRecord:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
     return StoredRecord(
@@ -85,9 +88,7 @@ async def test_directory_assets_are_limited_to_registered_kinds(tmp_path: Path) 
     assert tuple(change.key for change in loaded.changes) == (
         AssetKey("agent", "default.json"),
     )
-    assert await backend.get_many((AssetKey("agent", "default.json"),)) == {
-        AssetKey("agent", "default.json"): b"agent"
-    }
+    assert await collect_values(backend.get_many((AssetKey("agent", "default.json"),))) == (b"agent",)
     assert await backend.get_at_revision(AssetKey("agent", "default.json"), StorageEntryRevision(99)) == b"agent"
     with pytest.raises(AIError):
         await backend.get(AssetKey("runtime", "state.json"))

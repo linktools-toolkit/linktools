@@ -91,7 +91,7 @@ class PreparedTranscriptObservation:
     base_message_count: int
     target_message_count: int
     chunks: tuple[TranscriptChunk, ...]
-    base_storage_version: int
+    base_storage_revision: int
     pending: RuntimePayloadRef | None
     pending_parts: tuple[_PendingPart, ...]
     new_pending_parts: tuple[StoredFact, ...]
@@ -100,7 +100,7 @@ class PreparedTranscriptObservation:
 @dataclass(frozen=True, slots=True)
 class _PendingCache:
     message_index: int
-    storage_version: int
+    storage_revision: int
     pending: RuntimePayloadRef | None
     parts: tuple[_PendingPart, ...]
 
@@ -434,11 +434,11 @@ class TranscriptRepository:
         async def capture(transaction: StateTransaction):
             entry = await self.get_head_in_transaction(transaction, owner_id)
             head = self.empty_head(owner_id) if entry is None else entry[0]
-            version = -1 if entry is None else entry[1].storage_version
+            version = -1 if entry is None else entry[1].storage_revision
             cache = self._pending_cache.get(owner_id)
             previous = ()
             if (cache is not None and cache.message_index == head.message_count
-                    and cache.storage_version <= version and cache.pending == head.pending
+                    and cache.storage_revision <= version and cache.pending == head.pending
                     and len(cache.parts) <= head.pending_part_count):
                 previous = cache.parts
             chunks, keys = await self._capture_pending_suffix(
@@ -539,7 +539,7 @@ class TranscriptRepository:
     ) -> None:
         entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
         if entry is None:
-            if prepared.base_storage_version != -1:
+            if prepared.base_storage_revision != -1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self.create_head_in_transaction(transaction, prepared.owner_id)
             entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
@@ -547,7 +547,7 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head, record = entry
         if (
-            record.storage_version != max(0, prepared.base_storage_version)
+            record.storage_revision != max(0, prepared.base_storage_revision)
             or head.message_count != prepared.base_message_count
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -557,7 +557,7 @@ class TranscriptRepository:
             and head.pending_part_count == len(prepared.pending_parts)
         ):
             guarded = await transaction.guard_record(
-                record.key_digest, expected_storage_version=record.storage_version,
+                record.key_digest, expected_storage_revision=record.storage_revision,
             )
             if guarded is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -571,9 +571,9 @@ class TranscriptRepository:
         upgraded = replace(
             record,
             data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
-            storage_version=record.storage_version + 1,
+            storage_revision=record.storage_revision + 1,
         )
-        if not await transaction.replace_record(upgraded, expected_storage_version=record.storage_version):
+        if not await transaction.replace_record(upgraded, expected_storage_revision=record.storage_revision):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if prepared.new_pending_parts:
             await transaction.insert_facts(prepared.new_pending_parts)
@@ -750,11 +750,11 @@ class TranscriptRepository:
             data=encode_envelope(
                 {"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}
             ),
-            storage_version=head_record.storage_version + 1,
+            storage_revision=head_record.storage_revision + 1,
         )
         if not await transaction.replace_record(
             upgraded,
-            expected_storage_version=head_record.storage_version,
+            expected_storage_revision=head_record.storage_revision,
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         final = await transaction.reserve_sequence(
@@ -1098,7 +1098,7 @@ class TranscriptRepository:
         current = await self._store.read(
             lambda transaction: transaction.get_record(record.key_digest)
         )
-        if current is None or current.storage_version != record.storage_version:
+        if current is None or current.storage_revision != record.storage_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def history_message_count(self, history_id: str, *, tenant_id: str) -> int:
@@ -1295,9 +1295,9 @@ class TranscriptRepository:
                 value,
                 scope_digest=current.scope_digest,
                 parent_digest=current.parent_digest,
-                storage_version=current.storage_version + 1,
+                storage_revision=current.storage_revision + 1,
             ),
-            expected_storage_version=current.storage_version,
+            expected_storage_revision=current.storage_revision,
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 

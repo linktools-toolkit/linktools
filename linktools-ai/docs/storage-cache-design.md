@@ -49,13 +49,13 @@ ObjectStore 和 ContentCache 不能为了词形一致合并。get 返回可缺�
 
 ### 批量读取统一
 
-Storage 批读统一 get_many(keys) -> tuple[value | None, ...]，保持输入顺序、重复 key 和缺失位置。四个内置 Asset backend 内部仍可去重和批量查询，最后按输入组装 tuple；Overlay 内部用 zip 恢复所需映射。普通 facade 原有合同不变。新增成本仅 O(n) 对象引用，不复制 bytes、不增加 SQL。不添加 get_many_map 这套第二名称。
+Storage 与 Asset 批读统一 get_many(keys) -> AsyncIterator[value | None]，直接 async for 消费，保持输入顺序、重复 key 和缺失位置。四个内置 Asset backend 保留 metadata 批量查询，正文可按需读取；不能流式的数据先完成必要批量捕获再逐项返回。允许前缀已交付后出现后项错误，不能用 None 隐藏异常；Overlay 刷新只重读未交付后缀。无缓存路径提前关闭会收口源 stream；缓存路径允许逐 key 提前交付，但已接纳的共享 loader 继续完成，单读者取消不取消其他读者共享工作，不承诺全路径背压。提前结束内置流使用 aclosing。独立 ExecutionRepository 的领域 Mapping 合同不变；不保留 tuple 兼容壳，也不添加 get_many_map。
 
 ### 持久字段与当前代码一致性
 
-AssetInfo/AssetVersionRef.etag 实为 SHA-256，推荐 digest；涉及 SQL JSON payload、文件历史/receipt、快照及 Runtime 内嵌引用，不涉及名为 etag 的 SQL 列。
+AssetInfo、AssetVersionRef 和 CapabilityLoadEntry 的 digest 字段表示内容字节的 SHA-256，采用 64 位小写十六进制。当前 SQL JSON payload、文件 metadata/history、batch receipt、快照及 Runtime 内嵌引用统一使用 digest；HTTP ETag 保持独立的传输语义。
 
-StoredRecord.storage_version 是存储 CAS token，guard/lease 操作也会递增，不能改为会与业务 revision 混淆的 record_revision。依包级 AGENTS 将 version 保留给 wire/schema 的规则，推荐 cas_revision/expected_cas_revision，明确区别业务 revision；同步当前 ai_state_records 列、SQL/文件后端、CAS条件与codec，不增加旧数据迁移。Asset digest 改名仍须同步当前 writers/readers/快照引用及摘要生成，不能用旧 ObjectRef 指向改过的字节。旧持久数据兼容不在范围，但不得自动清库。
+StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token；RecordReplacement 和 StateTransaction 使用 expected_storage_revision 作为比较条件。guard/lease 操作也会递增 storage_revision，但不改变领域数据及其 revision。业务 revision/expected_revision 保留各自语义，version 仍用于 wire/schema 格式。当前 ai_state_records 列和文件 record codec 均使用 storage_revision，不保留旧字段别名或旧数据读取、迁移路径。Asset digest 改名仍须同步当前 writers/readers/快照引用及摘要生成，不能用旧 ObjectRef 指向改过的字节。旧持久数据兼容不在范围，但不得自动清库。
 
 ## 4. 场景矩阵
 
@@ -74,13 +74,13 @@ StoredRecord.storage_version 是存储 CAS token，guard/lease 操作也会递�
 
 ## 5. 最小接入方式
 
-已有：ContentCache、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.content_cache及内部读取路由。StorageOverlay.content_cache 已同步构造参数、属性与调用。本稿其余拟调整：第3节其他命名和批读合同；写缓冲公开形状在第8节。
+已有：ContentCache、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.content_cache及内部读取路由。Storage 与 Asset get_many 已统一为 AsyncIterator；第3节其余命名仍拟调整，写缓冲公开形状在第8节。
 
 已有 ContentCache 继续仅含 get/put/delete/contains_many；TieredContentCache 可以嵌套复用，不引入层配置 DSL。
 
 ### 5.1 资产读写：拟调整接口的完整示例
 
-下面代码的 content_cache 已落实；BackendRevisionSource、max_entries 和 digest 仍为第3节拟实施名称，其相应导出与实现同步落地后示例可直接运行。示例仅创建进程内资产，不读取、覆盖或删除实际环境数据。
+下面代码的 content_cache 和 digest 已落实；BackendRevisionSource、max_entries 仍为第3节拟实施名称，其相应导出与实现同步落地后示例可直接运行。示例仅创建进程内资产，不读取、覆盖或删除实际环境数据。
 
     import asyncio
     import hashlib
@@ -111,7 +111,7 @@ StoredRecord.storage_version 是存储 CAS token，guard/lease 操作也会递�
             content = b"hello"
             info = await store.put(key, content)
             assert info.digest == hashlib.sha256(content).hexdigest()
-            assert await store.get_many((key, missing, key)) == (
+            assert tuple([value async for value in store.get_many((key, missing, key))]) == (
                 content, None, content,
             )
             assert await store.get(key) == content

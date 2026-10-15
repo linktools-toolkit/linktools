@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Shared Asset capture and loader context for capability groups."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -49,11 +49,21 @@ class _CapabilityAssetReader:
     async def get_many(
         self,
         keys: Sequence[AssetKey],
-    ) -> "tuple[bytes | None, ...]":
-        refs = tuple(self._versions.get(key) for key in keys)
-        selected = tuple(ref for ref in refs if ref is not None)
-        values = iter(await self._store.read_versions(selected))
-        return tuple(next(values) if ref is not None else None for ref in refs)
+    ) -> "AsyncIterator[bytes | None]":
+        requested = tuple(keys)
+        remaining = dict.fromkeys(requested, 0)
+        for key in requested:
+            remaining[key] += 1
+        values: dict[AssetKey, bytes | None] = {}
+        for key in requested:
+            if key not in values:
+                ref = self._versions.get(key)
+                values[key] = None if ref is None else (await self._store.read_versions((ref,)))[0]
+            value = values[key]
+            remaining[key] -= 1
+            if remaining[key] == 0:
+                del values[key]
+            yield value
 
     async def local_paths(
         self,
@@ -112,16 +122,16 @@ class CapabilityLoadEntry:
     """Asset metadata captured at the start of one group capture."""
 
     key: AssetKey
-    etag: str
+    digest: str
     size: int
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.key, AssetKey)
-            or not isinstance(self.etag, str)
-            or len(self.etag) != 64
-            or any(character not in "0123456789abcdef" for character in self.etag)
+            or not isinstance(self.digest, str)
+            or len(self.digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.digest)
             or isinstance(self.size, bool)
             or not isinstance(self.size, int)
             or self.size < 0
@@ -161,7 +171,7 @@ class CapabilityLoadContext:
             or set(self._by_key) != set(self._versions)
             or any(
                 self._versions[entry.key].key != entry.key
-                or self._versions[entry.key].etag != entry.etag
+                or self._versions[entry.key].digest != entry.digest
                 or self._versions[entry.key].size != entry.size
                 for entry in self._entries
             )
@@ -197,7 +207,7 @@ class CapabilityLoadContext:
         entries = tuple(
             CapabilityLoadEntry(
                 info.key,
-                info.etag,
+                info.digest,
                 info.size,
                 info.metadata,
             )

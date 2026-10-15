@@ -55,7 +55,7 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
-# Six CASE assignments plus key/version predicates stay below 999 SQLite binds.
+# Six CASE assignments plus key/CAS predicates stay below 999 SQLite binds.
 _RECORD_REPLACE_BATCH_SIZE = 64
 
 
@@ -668,18 +668,18 @@ class _SqlTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
     ) -> StoredRecord | None:
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
-            raise ValueError("expected_storage_version must be a non-negative integer")
+            raise ValueError("expected_storage_revision must be a non-negative integer")
         if key in self._guarded_record_keys:
             return await self.get_record(key)
         current = await self.get_record(key)
-        if current is None or current.storage_version != expected_storage_version:
+        if current is None or current.storage_revision != expected_storage_revision:
             return None
         from sqlalchemy import update
 
@@ -689,23 +689,23 @@ class _SqlTransaction:
             .where(
                 table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
-                table.c.storage_version == expected_storage_version,
+                table.c.storage_revision == expected_storage_revision,
             )
-            .values(storage_version=expected_storage_version + 1)
+            .values(storage_revision=expected_storage_revision + 1)
         )
         if result.rowcount != 1:
             return None
-        guarded = replace(current, storage_version=expected_storage_version + 1)
+        guarded = replace(current, storage_revision=expected_storage_revision + 1)
         self._guarded_record_keys.add(key)
         self._record_cache[key] = guarded
         return guarded
 
     async def replace_record(
-        self, record: StoredRecord, *, expected_storage_version: int
+        self, record: StoredRecord, *, expected_storage_revision: int
     ) -> bool:
         try:
             await self.replace_records(
-                (RecordReplacement(record, expected_storage_version),)
+                (RecordReplacement(record, expected_storage_revision),)
             )
         except AIError as error:
             if error.code is ErrorCode.STORAGE_CONFLICT:
@@ -726,23 +726,23 @@ class _SqlTransaction:
             existing = current.get(replacement.record.key_digest)
             if (
                 existing is None
-                or existing.storage_version != replacement.expected_storage_version
+                or existing.storage_revision != replacement.expected_storage_revision
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             validate_record_identity(replacement.record)
             validate_record_replacement(existing, replacement.record)
             if (
-                replacement.record.storage_version
-                != replacement.expected_storage_version + 1
+                replacement.record.storage_revision
+                != replacement.expected_storage_revision + 1
             ):
                 raise ValueError(
-                    "replacement must increment storage_version exactly once"
+                    "replacement must increment storage_revision exactly once"
                 )
         from sqlalchemy import bindparam, case, func, literal, tuple_, update
 
         table = self._table("ai_state_records")
         prepared = tuple(_record_values(value.record) for value in ordered)
-        columns = ("state", "storage_version", "lease_owner", "lease_fence",
+        columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
@@ -754,18 +754,18 @@ class _SqlTransaction:
                 statement = update(table).where(
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest == bindparam("_replacement_key"),
-                    table.c.storage_version == bindparam("_replacement_expected_version"),
+                    table.c.storage_revision == bindparam("_replacement_expected_storage_revision"),
                 ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
                          updated_at=func.current_timestamp())
                 parameters = [
                     {"_replacement_key": row["key_digest"],
-                     "_replacement_expected_version": value.expected_storage_version,
+                     "_replacement_expected_storage_revision": value.expected_storage_revision,
                      **{f"_replacement_{column}": row[column] for column in columns}}
                     for row, value in zip(rows, batch)
                 ]
             else:
-                versions = [(row["key_digest"], value.expected_storage_version)
-                            for row, value in zip(rows, batch)]
+                cas_conditions = [(row["key_digest"], value.expected_storage_revision)
+                                  for row, value in zip(rows, batch)]
                 updates = {
                     column: rows[0][column] if len(rows) == 1 else case(
                         {row["key_digest"]: literal(row[column], type_=table.c[column].type)
@@ -778,7 +778,7 @@ class _SqlTransaction:
                 statement = update(table).where(
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest.in_([row["key_digest"] for row in rows]),
-                    tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                    tuple_(table.c.key_digest, table.c.storage_revision).in_(cas_conditions),
                 ).values(**updates, updated_at=func.current_timestamp())
             try:
                 result = await self._execute(statement, parameters)
@@ -801,7 +801,7 @@ class _SqlTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
         lease_owner: str | None,
         lease_fence: int,
         lease_expires_at: datetime | None,
@@ -809,9 +809,9 @@ class _SqlTransaction:
         from sqlalchemy import func, update
 
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
             or isinstance(lease_fence, bool)
             or not isinstance(lease_fence, int)
             or lease_fence < 0
@@ -825,13 +825,13 @@ class _SqlTransaction:
             .where(
                 table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
-                table.c.storage_version == expected_storage_version,
+                table.c.storage_revision == expected_storage_revision,
             )
             .values(
                 lease_owner=lease_owner,
                 lease_fence=lease_fence,
                 lease_expires_at=lease_expires_at,
-                storage_version=expected_storage_version + 1,
+                storage_revision=expected_storage_revision + 1,
                 updated_at=func.current_timestamp(),
             )
         )
@@ -844,7 +844,7 @@ class _SqlTransaction:
                     lease_owner=lease_owner,
                     lease_fence=lease_fence,
                     lease_expires_at=lease_expires_at,
-                    storage_version=expected_storage_version + 1,
+                    storage_revision=expected_storage_revision + 1,
                 )
         return result.rowcount == 1
 
@@ -867,17 +867,17 @@ class _SqlTransaction:
                 )
                 if not current:
                     continue
-                versions = tuple(
-                    (_hex(key), record.storage_version)
+                cas_conditions = tuple(
+                    (_hex(key), record.storage_revision)
                     for key, record in sorted(current.items())
                 )
-                key_hexes = tuple(key for key, _version in versions)
-                # Deleting the version-matched owners fences concurrent alias/fact writers.
+                key_hexes = tuple(key for key, _revision in cas_conditions)
+                # Deleting the CAS-matched owners fences concurrent alias/fact writers.
                 result = await self._execute(
                     delete(table).where(
                         table.c.store_digest == self._store_hex,
                         table.c.key_digest.in_(key_hexes),
-                        tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                        tuple_(table.c.key_digest, table.c.storage_revision).in_(cas_conditions),
                     )
                 )
                 if result.rowcount != len(current):
@@ -909,15 +909,15 @@ class _SqlTransaction:
         self._log_batch("delete_records", len(deleted_keys), statement_count)
 
     async def delete_record(
-        self, key: bytes, *, expected_storage_version: int | None = None
+        self, key: bytes, *, expected_storage_revision: int | None = None
     ) -> bool:
-        if expected_storage_version is not None and (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+        if expected_storage_revision is not None and (
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
             raise ValueError(
-                "expected_storage_version must be a non-negative integer or None"
+                "expected_storage_revision must be a non-negative integer or None"
             )
         from sqlalchemy import delete
 
@@ -925,18 +925,18 @@ class _SqlTransaction:
         if current is None:
             return False
         expected = (
-            current.storage_version
-            if expected_storage_version is None
-            else expected_storage_version
+            current.storage_revision
+            if expected_storage_revision is None
+            else expected_storage_revision
         )
-        guarded = await self.guard_record(key, expected_storage_version=expected)
+        guarded = await self.guard_record(key, expected_storage_revision=expected)
         if guarded is None:
             return False
         table = self._table("ai_state_records")
         statement = delete(table).where(
             table.c.store_digest == self._store_hex,
             table.c.key_digest == _hex(key),
-            table.c.storage_version == guarded.storage_version,
+            table.c.storage_revision == guarded.storage_revision,
         )
         children_changed = False
         try:
@@ -1627,7 +1627,7 @@ def _record_values(
         "kind": record.kind,
         "sort_key": record.sort_key,
         "state": record.state,
-        "storage_version": record.storage_version,
+        "storage_revision": record.storage_revision,
         "lease_owner": record.lease_owner,
         "lease_fence": record.lease_fence,
         "lease_expires_at": record.lease_expires_at,
@@ -1649,7 +1649,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _row_string(row["kind"]),
             _row_string(row["sort_key"]),
             _row_optional_string(row["state"]),
-            _row_nonnegative_int(row["storage_version"]),
+            _row_nonnegative_int(row["storage_revision"]),
             _row_optional_string(row["lease_owner"]),
             _row_nonnegative_int(row["lease_fence"]),
             _datetime_or_none(row["lease_expires_at"]),

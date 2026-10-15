@@ -3,16 +3,71 @@
 """Batch preconditions fail without staging a partial record mutation."""
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state._store import RecordReplacement
+from linktools.ai.runtime.state._store import RecordReplacement, StateTransaction
 from tests.ai.test_state_batch_delete_backends import _open_store, _record
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+async def test_record_storage_revision_is_independent_of_domain_revision(
+    backend: str, tmp_path: Path,
+) -> None:
+    record = replace(_record(1), data={"revision": 7})
+    expires_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    async with _open_store(backend, tmp_path / backend) as store:
+        await store.mutate(lambda tx: tx.insert_record(record))
+
+        guarded = await store.mutate(lambda tx: tx.guard_record(
+            record.key_digest, expected_storage_revision=0,
+        ))
+        assert guarded == replace(record, storage_revision=1)
+        assert await store.mutate(lambda tx: tx.update_record_lease(
+            record.key_digest, expected_storage_revision=1,
+            lease_owner="worker", lease_fence=1, lease_expires_at=expires_at,
+        ))
+        leased = replace(
+            record, storage_revision=2, lease_owner="worker", lease_fence=1,
+            lease_expires_at=expires_at,
+        )
+        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == leased
+
+        async def stale_mutations(transaction: StateTransaction) -> None:
+            assert await transaction.guard_record(
+                record.key_digest, expected_storage_revision=1,
+            ) is None
+            assert not await transaction.update_record_lease(
+                record.key_digest, expected_storage_revision=1,
+                lease_owner="stale", lease_fence=2, lease_expires_at=expires_at,
+            )
+            assert not await transaction.replace_record(
+                replace(leased, data={"revision": 8}), expected_storage_revision=1,
+            )
+            assert not await transaction.delete_record(
+                record.key_digest, expected_storage_revision=1,
+            )
+
+        await store.mutate(stale_mutations)
+        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == leased
+        updated = replace(leased, storage_revision=3, data={"revision": 8})
+        assert await store.mutate(lambda tx: tx.replace_record(
+            updated, expected_storage_revision=2,
+        ))
+        assert await store.read(lambda tx: tx.get_record(record.key_digest)) == updated
+        assert not await store.mutate(lambda tx: tx.delete_record(
+            record.key_digest, expected_storage_revision=2,
+        ))
+        assert await store.mutate(lambda tx: tx.delete_record(
+            record.key_digest, expected_storage_revision=3,
+        ))
+        assert await store.read(lambda tx: tx.get_record(record.key_digest)) is None
 
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
@@ -47,12 +102,12 @@ async def test_caught_replace_precondition_allows_unrelated_write(
         async def callback(transaction):
             with pytest.raises(AIError) as raised:
                 await transaction.replace_records(tuple(
-                    RecordReplacement(replace(record, storage_version=index + 1), index)
+                    RecordReplacement(replace(record, storage_revision=index + 1), index)
                     for index, record in enumerate(records)
                 ))
             assert raised.value.code is ErrorCode.STORAGE_CONFLICT
             assert not await transaction.replace_record(
-                replace(records[-1], storage_version=2), expected_storage_version=1,
+                replace(records[-1], storage_revision=2), expected_storage_revision=1,
             )
             await transaction.insert_record(other)
 

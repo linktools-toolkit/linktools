@@ -138,7 +138,7 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
         created_record = await store._record("memory/notes.md")
         assert created_record is not None
         assert created_record.revision == 1
-        assert "storage_version" not in created_record.metadata
+        assert "storage_revision" not in created_record.metadata
         current = await store.read("memory/notes.md", max_chars=100)
         assert current is not None
         assert current.version == created.version
@@ -153,7 +153,7 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
         updated_record = await store._record("memory/notes.md")
         assert updated_record is not None
         assert updated_record.revision == 2
-        assert "storage_version" not in updated_record.metadata
+        assert "storage_revision" not in updated_record.metadata
         deleted = await store.delete(
             "memory/notes.md",
             expected_version=updated.version,

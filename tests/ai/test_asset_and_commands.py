@@ -3,7 +3,7 @@
 """Raw AssetStore file checks."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -33,6 +33,9 @@ from linktools.ai.storage import (
 )
 
 
+from tests.ai._storage_stream_helpers import collect_values
+
+
 class CountingAssetBackend(InMemoryAssetBackend):
     def __init__(self, root: AssetRoot) -> None:
         super().__init__(root)
@@ -42,9 +45,9 @@ class CountingAssetBackend(InMemoryAssetBackend):
         self.reads += 1
         return await super().get(key)
 
-    async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
+    def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
         self.reads += 1
-        return await super().get_many(keys)
+        return super().get_many(keys)
 
 
 def make_store(
@@ -71,7 +74,7 @@ def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
         tombstone = await store.stat(key)
         assert tombstone is not None and tombstone.status is StorageEntryStatus.DELETED
         assert await store.get(key) is None
-        assert await store.get_many((key,)) == (None,)
+        assert await collect_values(store.get_many((key,))) == (None,)
         assert (await store.list_info()).items == ()
 
     asyncio.run(run())
@@ -86,7 +89,7 @@ def test_asset_get_many_and_cursor_preserve_order() -> None:
         two = AssetKey("sample", "two")
         await store.put(one, b"one")
         await store.put(two, b"two")
-        assert await store.get_many((two, AssetKey("sample", "missing"), one)) == (b"two", None, b"one")
+        assert await collect_values(store.get_many((two, AssetKey("sample", "missing"), one))) == (b"two", None, b"one")
         first_page = await store.list_info(limit=1)
         assert len(first_page.items) == 1
         assert first_page.next_cursor is not None

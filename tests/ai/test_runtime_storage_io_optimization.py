@@ -147,7 +147,7 @@ async def test_filesystem_fact_batch_limits_stream_and_subject_staging(
 
             assert await transaction.guard_record(
                 owner,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             ) is not None
             monkeypatch.setattr(transaction, "_write", write)
             monkeypatch.setattr(transaction._cache, "load_fact_subjects", load_subjects)
@@ -226,7 +226,7 @@ async def test_filesystem_fact_batch_stages_each_stream_once(
         async def append(transaction: _FilesystemTransaction) -> None:
             assert await transaction.guard_record(
                 owner,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             ) is not None
             original_write = transaction._write
 

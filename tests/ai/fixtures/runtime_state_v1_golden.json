@@ -227,7 +227,7 @@
       "kind": "golden",
       "sort": "golden",
       "state": null,
-      "storage_version": 0,
+      "storage_revision": 0,
       "lease": {
         "owner": null,
         "fence": 0,

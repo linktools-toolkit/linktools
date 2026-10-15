@@ -6,7 +6,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -74,7 +74,7 @@ class InMemoryAssetBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for info, value in history:
                     if info.status is StorageEntryStatus.NORMAL and (
-                        info.etag != _etag(value) or info.size != len(value)
+                        info.digest != _digest(value) or info.size != len(value)
                     ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -101,13 +101,11 @@ class InMemoryAssetBackend:
             current = self._entries.get(key)
             return None if current is None or current[0].status is not StorageEntryStatus.NORMAL else current[1]
 
-    async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
+    async def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
         async with self._lock:
-            return {
-                key: current[1]
-                for key in keys
-                if (current := self._entries.get(key)) is not None and current[0].status is StorageEntryStatus.NORMAL
-            }
+            entries = tuple(self._entries.get(key) for key in keys)
+        for current in entries:
+            yield None if current is None or current[0].status is not StorageEntryStatus.NORMAL else current[1]
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         async with self._lock:
@@ -129,7 +127,7 @@ class InMemoryAssetBackend:
             if (
                 previous is not None
                 and previous[0].status is StorageEntryStatus.NORMAL
-                and previous[0].etag == _etag(value)
+                and previous[0].digest == _digest(value)
             ):
                 return StoragePutResult(previous[0], previous[0].revision, self._store_revision(), False)
             self._revision += 1
@@ -290,7 +288,7 @@ class InMemoryAssetBackend:
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
         async with self._lock:
             return tuple(
-                VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status, info.metadata)
+                VersionSummary(info.revision, info.digest, info.size, info.modified_at, info.status, info.metadata)
                 for info, _ in self._versions.get(key, ())
             )
 
@@ -358,7 +356,7 @@ class InMemoryAssetBackend:
             key,
             entry_revision,
             self._store_revision(),
-            _etag(value),
+            _digest(value),
             len(value),
             status,
             datetime.now(timezone.utc),
@@ -394,7 +392,7 @@ def _change_mutates(
     if change.operation is StorageOperation.RESET:
         return previous is not None and previous[0].status is not StorageEntryStatus.RESET
     value = bytes(change.value or b"")
-    return previous is None or previous[0].status is not StorageEntryStatus.NORMAL or previous[0].etag != _etag(value)
+    return previous is None or previous[0].status is not StorageEntryStatus.NORMAL or previous[0].digest != _digest(value)
 
 
 def _encode_entry(info: AssetInfo, value: bytes) -> "dict[str, object]":
@@ -403,7 +401,7 @@ def _encode_entry(info: AssetInfo, value: bytes) -> "dict[str, object]":
         "id": info.key.id,
         "revision": info.revision.value,
         "store_revision": info.store_revision.value,
-        "etag": info.etag,
+        "digest": info.digest,
         "size": info.size,
         "status": info.status.value,
         "modified_at": info.modified_at.isoformat(),
@@ -421,7 +419,7 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
             AssetKey(str(raw["kind"]), str(raw["id"])),
             StorageEntryRevision(int(raw["revision"])),
             StorageRevision(str(raw["store_revision"])),
-            str(raw["etag"]),
+            str(raw["digest"]),
             int(raw["size"]),
             StorageEntryStatus(str(raw["status"])),
             datetime.fromisoformat(str(raw["modified_at"])),
@@ -429,12 +427,12 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
         )
     except (KeyError, TypeError, ValueError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if len(value) != info.size or _etag(value) != info.etag:
+    if len(value) != info.size or _digest(value) != info.digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return info, value
 
 
-def _etag(value: bytes) -> str:
+def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 

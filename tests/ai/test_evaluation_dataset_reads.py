@@ -66,9 +66,9 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
             row = records[-1]
             case = EvaluationCaseRecord(cases[-1], "owner", NOW, None)
             changed = replace(repository._stored("evaluation_case", [cases[-1].ref.dataset_id,
-                              cases[-1].ref.case_id, cases[-1].ref.revision], case), storage_version=1)
+                              cases[-1].ref.case_id, cases[-1].ref.revision], case), storage_revision=1)
             assert await repository.state_store.mutate(lambda tx: tx.replace_record(
-                changed, expected_storage_version=row.storage_version))
+                changed, expected_storage_revision=row.storage_revision))
             assert await repository.dataset_expiry(dataset.ref) == dataset_record.content_expires_at
     finally:
         await storage.close()

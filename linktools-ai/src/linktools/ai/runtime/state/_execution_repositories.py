@@ -126,7 +126,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, current_record, next_record),
-                current_record.storage_version,
+                current_record.storage_revision,
             )
             return next_record
 
@@ -567,14 +567,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         execution_replacement = RecordReplacement(
             _projected_record(self, execution_record, next_execution),
-            execution_record.storage_version,
+            execution_record.storage_revision,
         )
         if idempotency_created:
             await transaction.insert_records((idempotency_record,))
             await _replace_checked(
                 transaction,
                 execution_replacement.record,
-                execution_replacement.expected_storage_version,
+                execution_replacement.expected_storage_revision,
             )
         else:
             replacements = [execution_replacement]
@@ -590,7 +590,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                         idempotency_record,
                         next_idempotency,
                     ),
-                    idempotency_record.storage_version,
+                    idempotency_record.storage_revision,
                 )
             )
             await transaction.replace_records(tuple(replacements))
@@ -670,7 +670,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         await _replace_checked(
             transaction,
             _projected_record(self, record, next_value),
-            record.storage_version,
+            record.storage_revision,
         )
         return next_value
 
@@ -761,7 +761,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         await _replace_checked(
             transaction,
             _projected_record(self, record, next_value),
-            record.storage_version,
+            record.storage_revision,
         )
         return next_value
 
@@ -881,7 +881,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, next_value),
-                record.storage_version,
+                record.storage_revision,
             )
             return next_value
 
@@ -958,7 +958,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 **task_updates,
             )
             candidate = _projected_record(self, stored, next_value)
-            await _replace_checked(transaction, candidate, stored.storage_version)
+            await _replace_checked(transaction, candidate, stored.storage_revision)
             first_sequence = stored_value.event_seq + 1
             facts = [
                 StoredFact(
@@ -1119,7 +1119,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             replacements = [
                 RecordReplacement(
                     _projected_record(self, stored, next_execution),
-                    stored.storage_version,
+                    stored.storage_revision,
                 )
             ]
             if commit.idempotency is not None:
@@ -1141,7 +1141,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                             id_record,
                             next_id,
                         ),
-                        id_record.storage_version,
+                        id_record.storage_revision,
                     )
                 )
             first_sequence = stored_value.event_seq + 1
@@ -1256,7 +1256,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, stored, next_value),
-                stored.storage_version,
+                stored.storage_revision,
             )
             return True
 
@@ -1294,7 +1294,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, stored, next_value),
-                stored.storage_version,
+                stored.storage_revision,
             )
             return next_value
 
@@ -1333,7 +1333,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, stored, next_value),
-                stored.storage_version,
+                stored.storage_revision,
             )
             return True
 
@@ -1487,12 +1487,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if await transaction.guard_record(
                 execution_key,
-                expected_storage_version=execution_record.storage_version,
+                expected_storage_revision=execution_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         guarded = await transaction.guard_record(
             key,
-            expected_storage_version=record.storage_version,
+            expected_storage_revision=record.storage_revision,
         )
         if guarded is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1514,11 +1514,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 next_head,
                 state=next_head.state.value,
             ),
-            storage_version=current_record.storage_version + 1,
+            storage_revision=current_record.storage_revision + 1,
         )
         if not await transaction.replace_record(
             upgraded,
-            expected_storage_version=current_record.storage_version,
+            expected_storage_revision=current_record.storage_revision,
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return next_head
@@ -1653,7 +1653,7 @@ class EventRepositoryImpl(_RepositoryBase):
         await _replace_checked(
             transaction,
             _projected_record(self, current, next_execution),
-            current.storage_version,
+            current.storage_revision,
         )
         facts = tuple(
             StoredFact(

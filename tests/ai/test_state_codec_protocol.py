@@ -92,6 +92,8 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     primitives = fixture["stored_primitives"]
     record = decode_record(primitives["record"])
     assert record.kind == "golden"
+    assert record.storage_revision == primitives["record"]["storage_revision"]
+    assert encode_record(record) == primitives["record"]
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
@@ -258,6 +260,23 @@ def test_record_reader_ignores_additive_fields() -> None:
     assert decode_record(value) == decode_record(
         _fixture()["stored_primitives"]["record"]
     )
+
+
+@pytest.mark.parametrize("value", (None, True, -1, "1"))
+def test_record_reader_rejects_invalid_storage_revision(value: object) -> None:
+    payload = dict(_fixture()["stored_primitives"]["record"])
+    payload["storage_revision"] = value
+    with pytest.raises(AIError) as raised:
+        decode_record(payload)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_record_reader_requires_storage_revision() -> None:
+    payload = dict(_fixture()["stored_primitives"]["record"])
+    payload.pop("storage_revision")
+    with pytest.raises(AIError) as raised:
+        decode_record(payload)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> None:

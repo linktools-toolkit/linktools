@@ -33,7 +33,7 @@ ValueT = TypeVar("ValueT")
 
 def _read_header(record: StoredRecord) -> tuple[object, ...]:
     return (record.key_digest, record.scope_digest, record.parent_digest,
-            record.kind, record.sort_key, record.state, record.storage_version,
+            record.kind, record.sort_key, record.state, record.storage_revision,
             record.lease_owner, record.lease_fence, record.lease_expires_at)
 
 
@@ -328,7 +328,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
             changed = replace(changed, revision=value.revision + 1,
                               updated_at=datetime.now(timezone.utc))
             await replace_checked(transaction, projected_record(self, current, changed),
-                                  current.storage_version)
+                                  current.storage_revision)
             return changed
         async def readback() -> EvaluationRecord | None:
             current = await self.get(experiment_id, tenant_id=self.tenant_id)
@@ -493,7 +493,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
                     ref = value.contract.ref
                     identity = ([ref.id, ref.revision] if isinstance(ref, DatasetRef)
                                 else [ref.dataset_id, ref.case_id, ref.revision])
-                    await transaction.delete_record(row.key_digest, expected_storage_version=row.storage_version)
+                    await transaction.delete_record(row.key_digest, expected_storage_revision=row.storage_revision)
                     await self._put(transaction, "evaluation_content_tombstone", [kind, identity],
                         EvaluationContentTombstone(kind, identity, owner_principal_id, value.contract.digest, now))
                     count += 1
@@ -536,11 +536,11 @@ class EvaluationRepositoryImpl(RepositoryBase):
                     identity = value.ref.evidence_id if isinstance(value, EvidenceBundle) else value.report_id
                     digest = value.ref.digest if isinstance(value, EvidenceBundle) else record.manifest_digest
                     objects.update(iter_runtime_object_refs(encode_domain(value), default_domain=RuntimeDomain.EVALUATION))
-                    await transaction.delete_record(row.key_digest, expected_storage_version=row.storage_version)
+                    await transaction.delete_record(row.key_digest, expected_storage_revision=row.storage_revision)
                     await self._put(transaction, "evaluation_content_tombstone", [kind, identity],
                                     EvaluationContentTombstone(kind, identity, owner, digest, now))
             if metadata_due:
-                await transaction.delete_record(stored.key_digest, expected_storage_version=stored.storage_version)
+                await transaction.delete_record(stored.key_digest, expected_storage_revision=stored.storage_revision)
                 await self._put(transaction, "evaluation_tombstone", experiment_id,
                     EvaluationTombstone(experiment_id, owner, record.request_digest,
                                         record.idempotency_key_digest, record.manifest_digest, now))
@@ -565,13 +565,13 @@ class EvaluationRepositoryImpl(RepositoryBase):
                                   owned_input_captures=(), intents=(), evidence=(), scores=scores, human_decisions=decisions,
                                   dispositions=dispositions, content_deleted_at=now,
                                   revision=record.revision + 1, updated_at=now)
-                await replace_checked(transaction, projected_record(self, stored, changed), stored.storage_version)
+                await replace_checked(transaction, projected_record(self, stored, changed), stored.storage_revision)
             candidates = tuple(sorted(objects, key=lambda item: (item[0].value, item[1].key, item[1].digest)))
             updated = EvaluationCleanupRecord(experiment_id, owner, candidates, now if cleanup is None else cleanup.created_at)
             if cleanup_stored is None:
                 await self._put(transaction, "evaluation_cleanup", experiment_id, updated)
             else:
-                await replace_checked(transaction, projected_record(self, cleanup_stored, updated), cleanup_stored.storage_version)
+                await replace_checked(transaction, projected_record(self, cleanup_stored, updated), cleanup_stored.storage_revision)
             return candidates
         try:
             return await self._store.mutate(write)
@@ -604,9 +604,9 @@ class EvaluationRepositoryImpl(RepositoryBase):
             value = await self._decode(row, EvaluationCleanupRecord)
             updated = replace(value, objects=tuple(item for item in value.objects if item not in objects))
             if not updated.objects:
-                await transaction.delete_record(row.key_digest, expected_storage_version=row.storage_version)
+                await transaction.delete_record(row.key_digest, expected_storage_revision=row.storage_revision)
             elif updated != value:
-                await replace_checked(transaction, projected_record(self, row, updated), row.storage_version)
+                await replace_checked(transaction, projected_record(self, row, updated), row.storage_revision)
         await self._store.mutate(write)
 
     async def get_report_at(self, cutoff: EvaluationReadCutoff) -> EvaluationReport | None:

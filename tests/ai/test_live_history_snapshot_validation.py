@@ -188,7 +188,7 @@ async def test_snapshot_fact_backed_model_interactions_validate_identity_and_seq
             namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
             kind="model_interaction", identity=["run", second.model_request_seq], value=second,
             parent=archive._agent_run_key("run"), state=second.status,
-            sort_key=f"m:{second.model_request_seq:020d}", storage_version=1,
+            sort_key=f"m:{second.model_request_seq:020d}", storage_revision=1,
         )
         records = (*records, record)
 

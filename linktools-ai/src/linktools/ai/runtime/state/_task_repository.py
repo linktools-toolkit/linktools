@@ -608,12 +608,12 @@ class TaskRepositoryImpl(RepositoryBase):
             if (
                 await transaction.guard_record(
                     graph_key,
-                    expected_storage_version=graph_record.storage_version,
+                    expected_storage_revision=graph_record.storage_revision,
                 )
                 is None
                 or await transaction.guard_record(
                     node_key,
-                    expected_storage_version=state_record.storage_version,
+                    expected_storage_revision=state_record.storage_revision,
                 )
                 is None
             ):
@@ -689,7 +689,7 @@ class TaskRepositoryImpl(RepositoryBase):
             expires = now + timedelta(seconds=lease_seconds)
             if not await transaction.update_record_lease(
                 node_record.key_digest,
-                expected_storage_version=node_record.storage_version,
+                expected_storage_revision=node_record.storage_revision,
                 lease_owner=node.owner,
                 lease_fence=node.fence,
                 lease_expires_at=expires,
@@ -784,7 +784,7 @@ class TaskRepositoryImpl(RepositoryBase):
         if stored_node != current:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         node_candidate = projected_record(self, node_record, value)
-        await replace_checked(transaction, node_candidate, node_record.storage_version)
+        await replace_checked(transaction, node_candidate, node_record.storage_revision)
 
     async def _mutate_with_event_retry(
         self,
@@ -902,7 +902,7 @@ class TaskRepositoryImpl(RepositoryBase):
             parent=self._state_parent(value.graph_id),
             state=value.status.value,
         )
-        return replace(candidate, storage_version=current.storage_version + 1)
+        return replace(candidate, storage_revision=current.storage_revision + 1)
 
     async def _apply_graph_transition(
         self,
@@ -966,7 +966,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 replacements.append(
                     RecordReplacement(
                         self._task_node_record(node_record, value),
-                        node_record.storage_version,
+                        node_record.storage_revision,
                     )
                 )
         if graph_changed:
@@ -977,7 +977,7 @@ class TaskRepositoryImpl(RepositoryBase):
                         graph_record,
                         replace(before.graph, status=next_status),
                     ),
-                    graph_record.storage_version,
+                    graph_record.storage_revision,
                 )
             )
         if replacements:
@@ -1298,7 +1298,7 @@ class TaskRepositoryImpl(RepositoryBase):
             value = replace(node, execution_id=execution_id)
             guarded_graph_record = await transaction.guard_record(
                 graph_key,
-                expected_storage_version=graph_record.storage_version,
+                expected_storage_revision=graph_record.storage_revision,
             )
             if guarded_graph_record is None:
                 raise _TaskEventAppendConflict()
@@ -1381,7 +1381,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             guarded_graph_record = await transaction.guard_record(
                 graph_key,
-                expected_storage_version=graph_record.storage_version,
+                expected_storage_revision=graph_record.storage_revision,
             )
             if guarded_graph_record is None:
                 raise _TaskEventAppendConflict()
@@ -2504,7 +2504,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             guarded_graph_record = await transaction.guard_record(
                 graph_key,
-                expected_storage_version=graph_record.storage_version,
+                expected_storage_revision=graph_record.storage_revision,
             )
             if guarded_graph_record is None:
                 raise _TaskEventAppendConflict()
@@ -2590,7 +2590,7 @@ class TaskRepositoryImpl(RepositoryBase):
             if (
                 await transaction.guard_record(
                     graph_key,
-                    expected_storage_version=graph_record.storage_version,
+                    expected_storage_revision=graph_record.storage_revision,
                 )
                 is None
             ):
@@ -2843,7 +2843,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             guarded_graph_record = await transaction.guard_record(
                 graph_key,
-                expected_storage_version=graph_record.storage_version,
+                expected_storage_revision=graph_record.storage_revision,
             )
             if guarded_graph_record is None:
                 raise _TaskEventAppendConflict()
@@ -2859,7 +2859,7 @@ class TaskRepositoryImpl(RepositoryBase):
                             guarded_graph_record,
                             replace(before.graph, status=after_status),
                         ),
-                        guarded_graph_record.storage_version,
+                        guarded_graph_record.storage_revision,
                     )
                 )
             if current_result is not None:
@@ -3129,7 +3129,7 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             guarded_graph_record = await transaction.guard_record(
                 graph_key,
-                expected_storage_version=graph_record.storage_version,
+                expected_storage_revision=graph_record.storage_revision,
             )
             if guarded_graph_record is None:
                 raise _TaskEventAppendConflict()
@@ -3153,7 +3153,7 @@ class TaskRepositoryImpl(RepositoryBase):
                         guarded_graph_record,
                         replace(before.graph, status=after_status),
                     ),
-                    guarded_graph_record.storage_version,
+                    guarded_graph_record.storage_revision,
                 )
             await self._update_node_in_transaction(
                 transaction, node, value, node_record

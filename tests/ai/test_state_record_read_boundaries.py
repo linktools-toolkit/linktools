@@ -34,7 +34,7 @@ def test_record_identity_reuses_canonical_immutable_data(
     data = {"value": [{"nested": [1, True, None, "text"]}]}
     record = _record(data)
     if source == "replacement":
-        record = replace(record, storage_version=1)
+        record = replace(record, storage_revision=1)
     elif source == "filesystem":
         record = decode_record(encode_record(record))
     elif source == "sql":

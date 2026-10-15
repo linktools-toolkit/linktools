@@ -1074,11 +1074,11 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
         )
         candidate = replace(
             candidate,
-            storage_version=record.storage_version + 1,
+            storage_revision=record.storage_revision + 1,
         )
         assert await transaction.replace_record(
             candidate,
-            expected_storage_version=record.storage_version,
+            expected_storage_revision=record.storage_revision,
         )
 
     await repository.state_store.mutate(corrupt)
@@ -1127,11 +1127,11 @@ async def test_task_admission_readback_rejects_corrupt_graph_identity() -> None:
         candidate = replace(
             record,
             data=encoded.data,
-            storage_version=record.storage_version + 1,
+            storage_revision=record.storage_revision + 1,
         )
         assert await transaction.replace_record(
             candidate,
-            expected_storage_version=record.storage_version,
+            expected_storage_revision=record.storage_revision,
         )
 
     await repository.state_store.mutate(corrupt)

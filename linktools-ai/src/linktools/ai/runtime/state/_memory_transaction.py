@@ -129,20 +129,20 @@ class _MemoryTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
     ) -> StoredRecord | None:
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
-            raise ValueError("expected_storage_version must be a non-negative integer")
+            raise ValueError("expected_storage_revision must be a non-negative integer")
         current = self.records.get(key)
-        if current is None or current.storage_version != expected_storage_version:
+        if current is None or current.storage_revision != expected_storage_revision:
             if key in self.guarded_record_keys and current is not None:
                 return current
             return None
-        current = replace(current, storage_version=expected_storage_version + 1)
+        current = replace(current, storage_revision=expected_storage_revision + 1)
         self.records[key] = current
         self.guarded_record_keys.add(key)
         return current
@@ -151,10 +151,10 @@ class _MemoryTransaction:
         self,
         record: StoredRecord,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
     ) -> bool:
         try:
-            await self.replace_records((RecordReplacement(record, expected_storage_version),))
+            await self.replace_records((RecordReplacement(record, expected_storage_revision),))
         except AIError as error:
             if error.code is ErrorCode.STORAGE_CONFLICT:
                 return False
@@ -169,12 +169,12 @@ class _MemoryTransaction:
         candidates: list[StoredRecord] = []
         for replacement in sorted(values, key=lambda value: value.record.key_digest):
             current = self.records.get(replacement.record.key_digest)
-            if current is None or current.storage_version != replacement.expected_storage_version:
+            if current is None or current.storage_revision != replacement.expected_storage_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             validate_record_replacement(current, replacement.record)
             validate_record_identity(replacement.record)
-            if replacement.record.storage_version != replacement.expected_storage_version + 1:
-                raise ValueError("replacement must increment storage_version exactly once")
+            if replacement.record.storage_revision != replacement.expected_storage_revision + 1:
+                raise ValueError("replacement must increment storage_revision exactly once")
             candidates.append(replacement.record)
         for record in candidates:
             self.records[record.key_digest] = record
@@ -184,28 +184,28 @@ class _MemoryTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
         lease_owner: str | None,
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
             or isinstance(lease_fence, bool)
             or not isinstance(lease_fence, int)
             or lease_fence < 0
         ):
             raise ValueError("record lease integer fields are invalid")
         current = self.records.get(key)
-        if current is None or current.storage_version != expected_storage_version:
+        if current is None or current.storage_revision != expected_storage_revision:
             return False
         if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
         self.records[key] = replace(
             current,
-            storage_version=expected_storage_version + 1,
+            storage_revision=expected_storage_revision + 1,
             lease_owner=lease_owner,
             lease_fence=lease_fence,
             lease_expires_at=lease_expires_at,
@@ -217,23 +217,23 @@ class _MemoryTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int | None = None,
+        expected_storage_revision: int | None = None,
     ) -> bool:
-        if expected_storage_version is not None and (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+        if expected_storage_revision is not None and (
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
-            raise ValueError("expected_storage_version must be a non-negative integer or None")
+            raise ValueError("expected_storage_revision must be a non-negative integer or None")
         current = self.records.get(key)
         if current is None:
             return False
         expected = (
-            current.storage_version
-            if expected_storage_version is None
-            else expected_storage_version
+            current.storage_revision
+            if expected_storage_revision is None
+            else expected_storage_revision
         )
-        guarded = await self.guard_record(key, expected_storage_version=expected)
+        guarded = await self.guard_record(key, expected_storage_revision=expected)
         if guarded is None:
             return False
         self._delete_record_owners(frozenset((key,)))
@@ -242,7 +242,7 @@ class _MemoryTransaction:
     async def delete_records(self, keys: Sequence[bytes]) -> None:
         records = await self.get_records(tuple(dict.fromkeys(keys)))
         for key, record in records.items():
-            if await self.guard_record(key, expected_storage_version=record.storage_version) is None:
+            if await self.guard_record(key, expected_storage_revision=record.storage_revision) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._delete_record_owners(frozenset(records))
 

@@ -40,6 +40,19 @@ miss; it consumes at least one byte of the built-in capacity budget. These
 capacity limits do not define domain retention or promise TTL expiration; the
 owning domain remains responsible for its retention rules.
 
+## Asset content digests
+
+`AssetInfo.digest`, `AssetVersionRef.digest`, and `CapabilityLoadEntry.digest`
+are the SHA-256 of the asset bytes, encoded as 64 lowercase hexadecimal
+characters. Asset version payloads, SQL JSON payloads, filesystem metadata and
+history, batch receipts, and snapshot manifests use the same `digest` field.
+Runtime bindings preserve it through the Asset version codec. Empty assets and
+non-normal entries use the SHA-256 of empty bytes.
+
+Snapshot content keys bind to the asset digest; each manifest has its own
+digest and object reference computed from the complete manifest bytes. HTTP
+ETag validators are a separate transport concept.
+
 ## Freshness and cancellation
 
 A content key must identify the exact content version. Reading a revision and
@@ -138,3 +151,33 @@ the lock. This disposable cache does not promise persistence through machine
 power loss, and its payload budget is not a limit on physical disk allocation or
 temporary-file peaks. All writers sharing a root must use this coordination
 protocol; old implementations or external edits cannot participate safely.
+
+
+## Ordered batch streams
+
+Storage and Asset `get_many(keys)` return an `AsyncIterator`; consume them with
+`async for`, without `await` on the call. Every requested position yields one
+value, including repeated keys and `None` for an absent value. An error may occur
+after earlier values have already been consumed; missing data is not a substitute
+for a failed read. A metadata refresh only retries the unconsumed suffix.
+
+Use `contextlib.aclosing` when stopping a built-in stream before exhaustion:
+
+```python
+from contextlib import aclosing
+
+async with aclosing(store.get_many(keys)) as values:
+    async for value in values:
+        consume(value)
+        if enough():
+            break
+```
+
+Backends capture metadata/references in batches where supported, then read bodies
+as needed. SQL metadata sessions close before values are yielded. A non-cached
+Overlay stream closes its opened origin streams when the consumer closes it.
+Caching readers can consume each finished key without waiting for the whole
+batch, but an already admitted shared loader continues for its other readers;
+closing one reader does not cancel that shared work. Overlay shutdown settles
+those loaders before closing its backends. This is not full cache-path backpressure
+or a guarantee of one transaction covering the entire batch.

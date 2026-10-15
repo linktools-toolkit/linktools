@@ -16,6 +16,9 @@ from linktools.ai.storage import InMemoryContentCache, StorageOverlay
 from linktools.ai.workspace._root import load_config
 
 
+from tests.ai._storage_stream_helpers import collect_values
+
+
 class _ValidatorFailure(RuntimeError):
     pass
 
@@ -97,7 +100,7 @@ async def test_batch_origin_validator_failure_propagates() -> None:
     storage = StorageOverlay(backend, validator=_Validator())
 
     with pytest.raises(_ValidatorFailure):
-        await storage.get_many((key,))
+        await collect_values(storage.get_many((key,)))
 
 
 @pytest.mark.asyncio

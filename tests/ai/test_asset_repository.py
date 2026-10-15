@@ -30,6 +30,9 @@ from linktools.ai.storage import (
 )
 
 
+from tests.ai._storage_stream_helpers import collect_values
+
+
 async def _store() -> AssetStore:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
@@ -439,7 +442,7 @@ async def test_asset_snapshot_reads_captured_versions_for_all_kinds() -> None:
         restored = AssetStore.from_snapshot(reference, object_store=objects)
         await restored.initialize()
         try:
-            assert await restored.get_many((agent, rule)) == (b"agent", b"rule")
+            assert await collect_values(restored.get_many((agent, rule))) == (b"agent", b"rule")
         finally:
             await restored.close()
     finally:

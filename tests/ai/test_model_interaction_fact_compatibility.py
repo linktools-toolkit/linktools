@@ -38,7 +38,7 @@ async def test_mixed_interaction_facts_and_records_preserve_paging_and_count(
         async def seed(transaction):
             owner = await transaction.get_record(fact.owner_key_digest)
             assert owner is not None
-            await transaction.guard_record(owner.key_digest, expected_storage_version=owner.storage_version)
+            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
             await transaction.insert_fact(fact)
             await transaction.reserve_sequence(archive._sequence(run.agent_run_id, "interaction"), 1)
 

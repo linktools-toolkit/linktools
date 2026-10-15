@@ -471,9 +471,9 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                             previous,
                             state=value.status,
                             data=_encode_step(value),
-                            storage_version=previous.storage_version + 1,
+                            storage_revision=previous.storage_revision + 1,
                         ),
-                        previous.storage_version,
+                        previous.storage_revision,
                     )
                 )
         fresh_sequences = tuple(
@@ -490,7 +490,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             owner_record = await transaction.get_record(self._agent_run_key(run.agent_run_id))
             if owner_record is None or await transaction.guard_record(
                 owner_record.key_digest,
-                expected_storage_version=owner_record.storage_version,
+                expected_storage_revision=owner_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         if fresh:

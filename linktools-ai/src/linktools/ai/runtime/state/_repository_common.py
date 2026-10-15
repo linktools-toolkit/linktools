@@ -323,7 +323,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, current, next_record),
-                current.storage_version,
+                current.storage_revision,
             )
             return next_record
 
@@ -613,7 +613,7 @@ def project_record(
     parent: bytes | None = None,
     state: str | None = None,
     sort_key: str | None = None,
-    storage_version: int = 0,
+    storage_revision: int = 0,
 ) -> StoredRecord:
     """Project one logical value into its canonical physical Runtime record."""
     if scope is None:
@@ -640,7 +640,7 @@ def project_record(
         kind,
         sortable_identity(identity) if sort_key is None else sort_key,
         state,
-        storage_version,
+        storage_revision,
         lease_owner,
         lease_fence,
         lease_expires_at,
@@ -890,7 +890,7 @@ async def _replace_checked(
     transaction: StateTransaction, candidate: StoredRecord, expected: int
 ) -> None:
     if not await transaction.replace_record(
-        candidate, expected_storage_version=expected
+        candidate, expected_storage_revision=expected
     ):
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -910,7 +910,7 @@ def _projected_record(
     projected = repository._stored(
         current.kind, identity, value, state=_record_state(value)
     )
-    return replace(projected, storage_version=current.storage_version + 1)
+    return replace(projected, storage_revision=current.storage_revision + 1)
 
 
 def _require_session_identity(

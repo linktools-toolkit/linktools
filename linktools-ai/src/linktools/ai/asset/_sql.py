@@ -3,6 +3,7 @@
 """Three-table SQL Asset backend with optimistic global revision CAS."""
 
 import hashlib
+from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -61,7 +62,7 @@ _RETRY_LIMIT = 8
 _ASSET_INFO_VERSION = 1
 _ASSET_INFO_FIELDS = frozenset(
     {
-        "kind", "id", "revision", "store_revision", "etag", "size", "status",
+        "kind", "id", "revision", "store_revision", "digest", "size", "status",
         "modified_at", "metadata", "content",
     }
 )
@@ -313,19 +314,32 @@ class SqlAssetBackend:
             return None
         return await _read_asset_object(self._object_store, self._namespace_digest, key, info)
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> dict[AssetKey, bytes]:
-        current = await self._load_current(tuple(dict.fromkeys(keys)))
-        result: dict[AssetKey, bytes] = {}
-        for key in dict.fromkeys(keys):
-            info = current[key]
-            if info is not None and info.status is StorageEntryStatus.NORMAL:
-                result[key] = await _read_asset_object(
-                    self._object_store,
-                    self._namespace_digest,
-                    key,
-                    info,
+    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
+        self._ensure_ready()
+        keys = tuple(keys)
+        remaining = Counter(keys)
+        current = await self._load_current(tuple(remaining))
+        values: dict[AssetKey, bytes | None] = {}
+        for key in keys:
+            if key in values:
+                value = values[key]
+            else:
+                info = current[key]
+                value = (
+                    None if info is None or info.status is not StorageEntryStatus.NORMAL
+                    else await _read_asset_object(
+                        self._object_store,
+                        self._namespace_digest,
+                        key,
+                        info,
+                    )
                 )
-        return result
+            remaining[key] -= 1
+            if remaining[key]:
+                values[key] = value
+            else:
+                values.pop(key, None)
+            yield value
 
     async def stat(self, key: AssetKey) -> AssetInfo | None:
         self._ensure_ready()
@@ -510,7 +524,7 @@ class SqlAssetBackend:
                     if payload_fits_inline(inline, self._payload_policy):
                         info = replace(info, content=inline)
                     else:
-                        object_key = _asset_object_key(self._namespace_digest, info.etag)
+                        object_key = _asset_object_key(self._namespace_digest, info.digest)
                         await _put_asset_object(self._object_store, object_key, content)
                         info = replace(
                             info,
@@ -518,7 +532,7 @@ class SqlAssetBackend:
                                 ObjectRef(
                                     self._object_store.store_id,
                                     object_key,
-                                    info.etag,
+                                    info.digest,
                                     info.size,
                                 )
                             ),
@@ -751,14 +765,14 @@ class SqlAssetBackend:
         parsed_history = [(row, self._audit_info(row, head_revision)) for row in history_rows]
         checked_objects: set[str] = set()
         for _, info in (*parsed_entries, *parsed_history):
-            object_key = _asset_object_key(self._namespace_digest, info.etag)
+            object_key = _asset_object_key(self._namespace_digest, info.digest)
             if info.status is not StorageEntryStatus.NORMAL or object_key in checked_objects:
                 continue
             checked_objects.add(object_key)
             if info.content is not None and info.content.kind == "inline":
                 continue
             stat = await self._object_store.stat(object_key)
-            if stat is None or stat.digest != info.etag or stat.size != info.size:
+            if stat is None or stat.digest != info.digest or stat.size != info.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         grouped: dict[str, list[tuple[Mapping[str, object], AssetInfo]]] = {}
         for row, info in parsed_history:
@@ -820,7 +834,7 @@ def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
             "id": info.key.id,
             "revision": info.revision.value,
             "store_revision": info.store_revision.value,
-            "etag": info.etag,
+            "digest": info.digest,
             "size": info.size,
             "status": info.status.value,
             "modified_at": info.modified_at.isoformat(),
@@ -880,7 +894,7 @@ def _info_from_data(data: Mapping[str, object]) -> AssetInfo:
             AssetKey(_asset_text(value["kind"]), _asset_text(value["id"])),
             StorageEntryRevision(_asset_int(value["revision"], minimum=1)),
             StorageRevision(_asset_text(value["store_revision"])),
-            _asset_text(value["etag"]),
+            _asset_text(value["digest"]),
             _asset_int(value["size"], minimum=0),
             StorageEntryStatus(_asset_text(value["status"])),
             _asset_datetime(value["modified_at"]),
@@ -923,7 +937,7 @@ def _next_info(
 
 
 def _summary(info: AssetInfo) -> VersionSummary:
-    return VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status, info.metadata)
+    return VersionSummary(info.revision, info.digest, info.size, info.modified_at, info.status, info.metadata)
 
 
 def _result(change: StorageChange[AssetKey, bytes], info: AssetInfo, store_revision: int) -> object:
@@ -948,7 +962,7 @@ def _mutates(change: StorageChange[AssetKey, bytes], previous: AssetInfo | None)
     if change.operation is StorageOperation.PUT:
         return (
             previous.status is not StorageEntryStatus.NORMAL
-            or previous.etag != hashlib.sha256(bytes(change.value or b"")).hexdigest()
+            or previous.digest != hashlib.sha256(bytes(change.value or b"")).hexdigest()
         )
     target = {
         StorageOperation.DELETE: StorageEntryStatus.DELETED,
@@ -977,11 +991,11 @@ async def _read_asset_object(store: ObjectStore, namespace_digest: bytes, key: A
         return await _read_object_bytes(
             store,
             info.content.ref.key,
-            info.etag,
+            info.digest,
             info.size,
         )
     return await _read_object_bytes(
-        store, _asset_object_key(namespace_digest, info.etag), info.etag, info.size
+        store, _asset_object_key(namespace_digest, info.digest), info.digest, info.size
     )
 
 

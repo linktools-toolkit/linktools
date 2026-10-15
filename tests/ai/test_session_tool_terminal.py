@@ -1004,7 +1004,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 ) -> None:
                     guarded = await transaction.guard_record(
                         candidate.key_digest,
-                        expected_storage_version=expected_version,
+                        expected_storage_revision=expected_version,
                     )
                     if guarded is None:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)

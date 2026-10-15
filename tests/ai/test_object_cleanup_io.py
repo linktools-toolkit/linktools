@@ -214,10 +214,10 @@ async def test_cleanup_reuses_capture_metadata_only_within_exclusive_operation(
         assert (await storage.purge_unreferenced_objects(candidate, exclusive=Offline())).retained == candidate
         assert reads[input_capture_expiry_key(capture.key)] <= 1
         assert reads[capture.key] <= 1
-        changed = replace(_record(1), storage_version=1, data={"captures": [encode_domain(ref)] * 15
+        changed = replace(_record(1), storage_revision=1, data={"captures": [encode_domain(ref)] * 15
                           + [encode_domain(replace(ref, digest="0" * 64))]})
         assert await storage.artifact.records.state_store.mutate(lambda tx: tx.replace_record(
-            changed, expected_storage_version=0))
+            changed, expected_storage_revision=0))
         with pytest.raises(AIError) as mismatch:
             await storage.purge_unreferenced_objects(candidate, exclusive=Offline())
         assert mismatch.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

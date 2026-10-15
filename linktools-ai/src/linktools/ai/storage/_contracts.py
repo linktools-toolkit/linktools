@@ -3,7 +3,7 @@
 """Domain-independent storage DTOs and protocols."""
 
 import math
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import AsyncIterator, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -208,7 +208,9 @@ class StorageReader(Protocol[KeyT, ValueT]):
 
 @runtime_checkable
 class BatchStorageReader(Protocol[KeyT, ValueT]):
-    async def get_many(self, keys: 'Sequence[KeyT]') -> 'Mapping[KeyT, ValueT]': ...
+    def get_many(self, keys: 'Sequence[KeyT]') -> 'AsyncIterator[ValueT | None]':
+        """Yield one value per input position; later failures may follow a prefix."""
+        ...
 
 
 @runtime_checkable

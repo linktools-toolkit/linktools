@@ -495,9 +495,9 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
             value = EvaluationCaseRecord(case, PRINCIPAL.principal_id,
                 content_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
             expired = replace(repository._stored("evaluation_case", identity, value),
-                              storage_version=row.storage_version + 1)
+                              storage_revision=row.storage_revision + 1)
             assert await repository.state_store.mutate(lambda tx: tx.replace_record(
-                expired, expected_storage_version=row.storage_version))
+                expired, expected_storage_revision=row.storage_revision))
         with _sql_writes(storage) as writes:
             with pytest.raises(AIError) as caught:
                 await runtime.evaluations.get_case(ref, principal=principal)

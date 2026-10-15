@@ -368,9 +368,9 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                             child_history_id,
                             child,
                         ),
-                        storage_version=current.storage_version + 1,
+                        storage_revision=current.storage_revision + 1,
                     ),
-                    current.storage_version,
+                    current.storage_revision,
                 )
                 await ensure_projection()
                 return child
@@ -663,7 +663,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if (
                 await transaction.guard_record(
                     self._key("session", source_session_id),
-                    expected_storage_version=source_stored.storage_version,
+                    expected_storage_revision=source_stored.storage_revision,
                 )
                 is None
             ):
@@ -1150,7 +1150,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if replayed:
                 return value, True
             candidate = _projected_record(self, current, proposed)
-            await _replace_checked(transaction, candidate, current.storage_version)
+            await _replace_checked(transaction, candidate, current.storage_revision)
             await self._bump_list_generation(transaction, value.owner_principal_id)
             return proposed, False
 
@@ -1185,7 +1185,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, proposed),
-                record.storage_version,
+                record.storage_revision,
             )
             await self._bump_list_generation(transaction, current.owner_principal_id)
             return proposed
@@ -1292,7 +1292,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     raise AIError(ErrorCode.SESSION_BUSY)
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
-            await _replace_checked(transaction, candidate, current.storage_version)
+            await _replace_checked(transaction, candidate, current.storage_revision)
             if not release:
                 sequence = await transaction.next_sequence(
                     self._timeline_sequence_key(session_id)
@@ -1357,7 +1357,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, next_value),
-                record.storage_version,
+                record.storage_revision,
             )
             await self._bump_list_generation(transaction, current.owner_principal_id)
             return next_value
@@ -1454,7 +1454,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         await _replace_checked(
             transaction,
             _projected_record(self, record, next_value),
-            record.storage_version,
+            record.storage_revision,
         )
         await self._bump_list_generation(transaction, current.owner_principal_id)
         return next_value

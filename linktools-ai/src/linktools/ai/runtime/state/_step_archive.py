@@ -2038,7 +2038,7 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _head, record = guard
         if await transaction.guard_record(
-            record.key_digest, expected_storage_version=record.storage_version,
+            record.key_digest, expected_storage_revision=record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -2258,7 +2258,7 @@ class StateStepArchive(AgentRunStore):
             )
         if await transaction.guard_record(
             owner,
-            expected_storage_version=owner_record.storage_version,
+            expected_storage_revision=owner_record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         await _insert_facts(transaction, tuple(stored_facts))
@@ -2345,7 +2345,7 @@ class StateStepArchive(AgentRunStore):
         owner = self._agent_run_key(run.agent_run_id)
         if await transaction.guard_record(
             owner,
-            expected_storage_version=owner_record.storage_version,
+            expected_storage_revision=owner_record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         sequence = (await _reserve_sequences(
@@ -2852,7 +2852,7 @@ class StateStepArchive(AgentRunStore):
                     return
             if await transaction.guard_record(
                 owner,
-                expected_storage_version=owner_record.storage_version,
+                expected_storage_revision=owner_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             sequence = await transaction.next_sequence(self._sequence(agent_run_id, family))
@@ -2971,9 +2971,9 @@ class StateStepArchive(AgentRunStore):
                     "coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
                 ))
             elif not await transaction.replace_record(
-                replace(coverage_record, storage_version=coverage_record.storage_version + 1,
+                replace(coverage_record, storage_revision=coverage_record.storage_revision + 1,
                         data={"sequence": sequences[-1]}),
-                expected_storage_version=coverage_record.storage_version,
+                expected_storage_revision=coverage_record.storage_revision,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         if inserts:

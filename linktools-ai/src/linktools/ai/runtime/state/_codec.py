@@ -1243,7 +1243,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
         "kind": record.kind,
         "sort": record.sort_key,
         "state": record.state,
-        "storage_version": record.storage_version,
+        "storage_revision": record.storage_revision,
         "lease": {
             "owner": record.lease_owner,
             "fence": record.lease_fence,
@@ -1266,7 +1266,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             "kind",
             "sort",
             "state",
-            "storage_version",
+            "storage_revision",
             "lease",
             "data",
         }
@@ -1287,7 +1287,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             _string(value, "kind"),
             _string(value, "sort"),
             _optional_string(value["state"]),
-            _integer(value, "storage_version"),
+            _integer(value, "storage_revision"),
             _optional_string(lease["owner"]),
             _integer(lease, "fence"),
             _optional_datetime(lease["expires_at"]),

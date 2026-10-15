@@ -182,7 +182,7 @@ async def test_invalid_version_references_leave_no_projection(
     try:
         ref = await _file(store)
         if invalid == "integrity":
-            ref = replace(ref, etag="0" * 64)
+            ref = replace(ref, digest="0" * 64)
             expected = ErrorCode.STORAGE_INTEGRITY_ERROR
         elif invalid == "missing":
             ref = replace(ref, revision=StorageEntryRevision(999))

@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -163,15 +164,29 @@ class FilesystemAssetBackend:
             return None
         return await self._read_info(info)
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> dict[AssetKey, bytes]:
+    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
+        keys = tuple(keys)
+        remaining = Counter(keys)
         await self._ensure_ready()
-        await self._reload()
-        result: dict[AssetKey, bytes] = {}
+        async with self._process_lock:
+            await self._reload()
+            current = {key: self._entries.get(key) for key in remaining}
+        values: dict[AssetKey, bytes | None] = {}
         for key in keys:
-            info = self._entries.get(key)
-            if info is not None and info.status is StorageEntryStatus.NORMAL:
-                result[key] = await self._read_info(info)
-        return result
+            if key in values:
+                value = values[key]
+            else:
+                info = current[key]
+                value = (
+                    None if info is None or info.status is not StorageEntryStatus.NORMAL
+                    else await self._read_info(info)
+                )
+            remaining[key] -= 1
+            if remaining[key]:
+                values[key] = value
+            else:
+                values.pop(key, None)
+            yield value
 
     async def stat(self, key: AssetKey) -> AssetInfo | None:
         await self._ensure_ready()
@@ -413,7 +428,7 @@ class FilesystemAssetBackend:
         await self._ensure_ready()
         await self._reload()
         return tuple(
-            VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status, info.metadata)
+            VersionSummary(info.revision, info.digest, info.size, info.modified_at, info.status, info.metadata)
             for info in self._versions.get(key, ())
         )
 
@@ -487,14 +502,14 @@ class FilesystemAssetBackend:
                 return _result(operation, key, info, StorageRevision(str(self._revision)), changed=True)
 
     async def _put_content(self, value: bytes) -> None:
-        digest = _etag(value)
+        digest = _digest(value)
         await self._object_store.put(
             self._object_keys.key(digest), _one(value), expected_size=len(value), expected_digest=digest
         )
 
     async def _read_info(self, info: AssetInfo) -> bytes:
-        object_key = self._object_keys.key(info.etag)
-        return await read_object(self._object_store, object_key, expected_digest=info.etag, expected_size=info.size)
+        object_key = self._object_keys.key(info.digest)
+        return await read_object(self._object_store, object_key, expected_digest=info.digest, expected_size=info.size)
 
     async def _reload(self) -> None:
         if not self._directory.exists() or not any(self._directory.iterdir()):
@@ -628,12 +643,12 @@ class FilesystemAssetBackend:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         checked: set[str] = set()
         for info in (*loaded_entries.values(), *(item for history in loaded_versions.values() for item in history)):
-            object_key = self._object_keys.key(info.etag)
+            object_key = self._object_keys.key(info.digest)
             if info.status is not StorageEntryStatus.NORMAL or object_key in checked:
                 continue
             checked.add(object_key)
             stat = await self._object_store.stat(object_key)
-            if stat is None or stat.digest != info.etag or stat.size != info.size:
+            if stat is None or stat.digest != info.digest or stat.size != info.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _write_state(self) -> None:
@@ -662,12 +677,12 @@ class FilesystemAssetBackend:
             "id": info.key.id,
             "revision": info.revision.value,
             "store_revision": info.store_revision.value,
-            "etag": info.etag,
+            "digest": info.digest,
             "size": info.size,
             "status": info.status.value,
             "modified_at": info.modified_at.astimezone(timezone.utc).isoformat(),
             "object_store_id": self._object_store.store_id if normal else None,
-            "object_key": self._object_keys.key(info.etag) if normal else None,
+            "object_key": self._object_keys.key(info.digest) if normal else None,
             "metadata": dict(info.metadata),
         }
 
@@ -900,7 +915,7 @@ def _mutates(operation: StorageOperation, current: AssetInfo | None, value: byte
         return current is not None and current.status is not StorageEntryStatus.DELETED
     if operation is StorageOperation.RESET:
         return current is not None and current.status is not StorageEntryStatus.RESET
-    return current is None or current.status is not StorageEntryStatus.NORMAL or current.etag != _etag(value)
+    return current is None or current.status is not StorageEntryStatus.NORMAL or current.digest != _digest(value)
 
 
 def _next_info(
@@ -925,7 +940,7 @@ def _next_info(
         key,
         StorageEntryRevision(entry_revision),
         StorageRevision(str(store_revision)),
-        _etag(content),
+        _digest(content),
         len(content),
         status,
         datetime.now(timezone.utc),
@@ -951,7 +966,7 @@ def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
         "id",
         "revision",
         "store_revision",
-        "etag",
+        "digest",
         "size",
         "status",
         "modified_at",
@@ -976,8 +991,8 @@ def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
         elif persisted_store_id is not None or persisted_object_key is not None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         key = AssetKey(_fs_text(raw["kind"]), _fs_text(raw["id"]))
-        etag = _fs_text(raw["etag"])
-        if normal and persisted_object_key != AssetObjectKeyFactory(root.locator).key(etag):
+        digest = _fs_text(raw["digest"])
+        if normal and persisted_object_key != AssetObjectKeyFactory(root.locator).key(digest):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         metadata = raw["metadata"]
         if not isinstance(metadata, Mapping):
@@ -986,7 +1001,7 @@ def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
             key,
             StorageEntryRevision(_fs_int(raw["revision"], minimum=1)),
             StorageRevision(_fs_text(raw["store_revision"])),
-            etag,
+            digest,
             _fs_int(raw["size"], minimum=0),
             status,
             _fs_datetime(raw["modified_at"]),
@@ -1023,7 +1038,7 @@ def _fs_datetime(value: object) -> datetime:
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
     return parsed.astimezone(timezone.utc)
 
-def _etag(value: bytes) -> str:
+def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 

@@ -93,6 +93,23 @@ async def test_state_group_read_scope_reuses_enlisted_readonly_transactions(
                 with pytest.raises(StateTransactionNestingError):
                     await transaction.insert_record(_record(1))
                 with pytest.raises(StateTransactionNestingError):
+                    await transaction.guard_record(
+                        _digest("record"), expected_storage_revision=0,
+                    )
+                with pytest.raises(StateTransactionNestingError):
+                    await transaction.replace_record(
+                        _record(2), expected_storage_revision=0,
+                    )
+                with pytest.raises(StateTransactionNestingError):
+                    await transaction.update_record_lease(
+                        _digest("record"), expected_storage_revision=0,
+                        lease_owner=None, lease_fence=0, lease_expires_at=None,
+                    )
+                with pytest.raises(StateTransactionNestingError):
+                    await transaction.delete_record(
+                        _digest("record"), expected_storage_revision=0,
+                    )
+                with pytest.raises(StateTransactionNestingError):
                     await store.mutate(lambda tx: tx.insert_record(_record(1)))
                 with pytest.raises(StateTransactionNestingError):
                     await group.mutate((store,), lambda tx: tx.transaction(store).insert_record(_record(1)))
@@ -176,7 +193,7 @@ async def test_state_group_read_scope_holds_one_snapshot(
 
             async def change(scope: StateGroupTransaction) -> None:
                 for store in (first, second):
-                    assert await scope.transaction(store).replace_record(_record(2), expected_storage_version=0)
+                    assert await scope.transaction(store).replace_record(_record(2), expected_storage_revision=0)
 
             await group.mutate((first, second), change)
 
@@ -285,7 +302,7 @@ async def test_state_group_read_scope_filesystem_live_reader_holds_all_publicati
 
             async def change(scope: StateGroupTransaction) -> None:
                 for store in writers[:2]:
-                    assert await scope.transaction(store).replace_record(_record(2), expected_storage_version=0)
+                    assert await scope.transaction(store).replace_record(_record(2), expected_storage_revision=0)
 
             await writers[0].storage_group.mutate(writers[:2], change)
 

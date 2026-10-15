@@ -497,7 +497,7 @@ async def test_read_only_state_callback_rejects_record_guard() -> None:
         async def callback(transaction: object) -> None:
             await transaction.guard_record(
                 b"x" * 32,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             )
 
         with pytest.raises(StateTransactionNestingError):

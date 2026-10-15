@@ -267,7 +267,7 @@ def _require_data_mapping(value: object, name: str) -> Mapping[str, JsonValue]:
 
 @dataclass(frozen=True, slots=True)
 class StoredRecord:
-    """Current mutable state of one logical resource."""
+    """Current state with a physical CAS revision independent of domain data."""
 
     key_digest: bytes
     scope_digest: bytes | None
@@ -275,7 +275,7 @@ class StoredRecord:
     kind: str
     sort_key: str
     state: str | None
-    storage_version: int
+    storage_revision: int
     lease_owner: str | None
     lease_fence: int
     lease_expires_at: datetime | None
@@ -298,7 +298,7 @@ class StoredRecord:
         ):
             raise ValueError("record sort_key must contain non-empty ASCII characters")
         _require_state(self.state, "record state", optional=True)
-        _require_nonnegative_int(self.storage_version, "storage_version")
+        _require_nonnegative_int(self.storage_revision, "storage_revision")
         _require_optional_string(self.lease_owner, "lease_owner")
         _require_nonnegative_int(self.lease_fence, "lease_fence")
         _require_optional_aware_datetime(self.lease_expires_at, "lease_expires_at")
@@ -399,19 +399,19 @@ class Observed(Generic[ValueT]):
     """A value paired with its physical CAS token."""
 
     value: ValueT
-    storage_version: int
+    storage_revision: int
 
     def __post_init__(self) -> None:
-        _require_nonnegative_int(self.storage_version, "storage_version")
+        _require_nonnegative_int(self.storage_revision, "storage_revision")
 
 
 @dataclass(frozen=True, slots=True)
 class RecordReplacement:
     record: StoredRecord
-    expected_storage_version: int
+    expected_storage_revision: int
 
     def __post_init__(self) -> None:
-        _require_nonnegative_int(self.expected_storage_version, "expected_storage_version")
+        _require_nonnegative_int(self.expected_storage_revision, "expected_storage_revision")
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,20 +512,20 @@ class StateTransaction(Protocol):
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
     ) -> StoredRecord | None: ...
-    async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool: ...
+    async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool: ...
     async def replace_records(self, replacements: Sequence["RecordReplacement"]) -> None: ...
     async def update_record_lease(
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
         lease_owner: str | None,
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool: ...
-    async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool: ...
+    async def delete_record(self, key: bytes, *, expected_storage_revision: int | None = None) -> bool: ...
     async def delete_records(self, keys: Sequence[bytes]) -> None: ...
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]: ...
     async def scan_records(self) -> tuple[StoredRecord, ...]: ...
@@ -603,9 +603,9 @@ class _ReadOnlyStateTransaction(StateTransaction):
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
     ) -> StoredRecord | None:
-        del key, expected_storage_version
+        del key, expected_storage_revision
         self._reject("guard_record")
         return None
 
@@ -704,8 +704,8 @@ class _ReadOnlyStateTransaction(StateTransaction):
         del records
         self._reject("insert_records")
 
-    async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
-        del record, expected_storage_version
+    async def replace_record(self, record: StoredRecord, *, expected_storage_revision: int) -> bool:
+        del record, expected_storage_revision
         self._reject("replace_record")
         return False
 
@@ -717,17 +717,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
         lease_owner: str | None,
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
-        del key, expected_storage_version, lease_owner, lease_fence, lease_expires_at
+        del key, expected_storage_revision, lease_owner, lease_fence, lease_expires_at
         self._reject("update_record_lease")
         return False
 
-    async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
-        del key, expected_storage_version
+    async def delete_record(self, key: bytes, *, expected_storage_revision: int | None = None) -> bool:
+        del key, expected_storage_revision
         self._reject("delete_record")
         return False
 
