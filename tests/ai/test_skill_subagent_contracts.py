@@ -107,9 +107,9 @@ def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> N
         "revision": 1,
     }
     assert restored.binding_contract.to_payload() == payload
-    decisions = validate_model_inputs(restored.compiled_agent.model,
-                                     BinaryContent(b"document", media_type="text/plain"))
-    assert decisions[0].allowed and not decisions[0].verified
+    assert validate_model_inputs(
+        restored.compiled_agent.model, BinaryContent(b"document", media_type="text/plain"),
+    ) is None
     with pytest.raises(AIError):
         validate_model_inputs(restored.compiled_agent.model,
                               BinaryContent(b"image", media_type="image/png"))
