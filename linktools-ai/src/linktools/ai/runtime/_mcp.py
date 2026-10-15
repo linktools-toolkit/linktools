@@ -13,6 +13,11 @@ import anyio
 import httpx
 from fastmcp.client.transports import ClientTransport
 from fastmcp.exceptions import McpError
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+from jsonschema.validators import validator_for
+from referencing import Registry
+from referencing.exceptions import InvalidAnchor, NoSuchAnchor, PointerToNowhere, Unresolvable
 
 from httpx2 import HTTPError as HTTPErrorV2, HTTPStatusError as HTTPStatusErrorV2
 from linktools.core import environ
@@ -25,10 +30,12 @@ from pydantic_ai.toolsets import (
     WrapperToolset,
 )
 from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.tools import ToolDefinition
 from mcp.types import Tool as MCPTool
 
 from ..capability import (
     AgentContext,
+    ToolCallRetry,
     tool_metadata,
     validate_resource_path,
     validate_resource_tree,
@@ -185,6 +192,45 @@ class _MCPDiscoveryToolset(MCPToolset[object]):
         self._server_id = server.id
         self._transport_kind = server.transport
         self._cleanup_error: BaseException | None = None
+
+    def tool_for_tool_def(
+        self,
+        tool_def: ToolDefinition,
+        *,
+        ctx: PydanticRunContext[object],
+    ) -> ToolsetTool[object]:
+        tool = super().tool_for_tool_def(tool_def, ctx=ctx)
+        schema = tool_def.parameters_json_schema
+        validator_type = validator_for(
+            schema, default=None if "$schema" in schema else Draft202012Validator,
+        )
+        if validator_type is None:
+            # The server remains authoritative for a dialect this client cannot evaluate.
+            return tool
+        validator_type.check_schema(schema)
+        validator = validator_type(schema, registry=Registry())
+
+        def validate_arguments(context: PydanticRunContext[object], /, **arguments: Any) -> None:
+            del context
+            try:
+                validator.validate(arguments)
+            except Unresolvable as error:
+                if isinstance(error.__cause__ or error, (InvalidAnchor, NoSuchAnchor, PointerToNowhere)):
+                    raise
+                # The registry never fetches external documents. Their semantics
+                # remain with the server, unlike broken references within this schema.
+                return
+            except JsonSchemaValidationError as error:
+                schema_path = tuple(error.absolute_schema_path)
+                field = next((schema_path[index + 1] for index, item in enumerate(schema_path[:-1])
+                              if item == "properties"), None)
+                location = f" field {json.dumps(str(field)[:80])}" if field is not None else ""
+                raise ToolCallRetry(
+                    f"MCP tool arguments{location} violate the {error.validator} schema constraint. "
+                    "Check the tool schema, correct the argument fields and types, and retry."
+                ) from None
+
+        return replace(tool, args_validator_func=validate_arguments)
 
     def _details(self, phase: str) -> dict[str, JsonValue]:
         return {
