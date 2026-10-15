@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from jinja2 import Environment, FileSystemLoader, TemplateError
 
 from linktools import utils
-from linktools.core import ConfigValue
+from linktools.core import ConfigRef, ConfigValue
 from linktools.runtime import lazy_load
 from ...capabilities.cntr import __cap_cntr__
 
@@ -48,7 +48,7 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         return path
 
     context = {
-        key: container.get_config_later(key)
+        key: ConfigRef(key)
         for key in config.keys()
     }
 
@@ -64,7 +64,7 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         containers=container.containers,
         config=config,
         user=container.user,
-        docker_user=container.get_config_later("DOCKER_USER"),
+        docker_user=ConfigRef("DOCKER_USER"),
 
         utils=utils,
         urls=ext,
@@ -73,11 +73,12 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         chmod=chmod,
     )
 
-    context.update({
+    context.update(kwargs)
+    context = {
         key: lazy_load(config.resolve, value)
         if issubclass(type(value), ConfigValue) else value
-        for key, value in kwargs.items()
-    })
+        for key, value in context.items()
+    }
 
     # Local templates intentionally take precedence over shared snippets.
     environment = Environment(

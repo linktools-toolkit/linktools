@@ -256,9 +256,17 @@ custom objects, dictionary keys and existing `Proxy` values alone.
 Constructing or scanning these declarations does not read configuration. Consumers
 supply `producer.env_config`, so one expression can be reused with separate Config
 instances. The expressions do not cache results or register fields. Keep schema
-and provider declarations in `ConfigField`/`configs`, and use the existing
-`get_config_later` or URL factories where their successful-result caching is wanted.
+and provider declarations in `ConfigField`/`configs`. The URL factories retain
+their existing successful-result caching.
 `ConfigRef` does not accept a `ConfigField` in place of its string key.
+
+`BaseContainer.get_config_later` is removed without an alias. Replace deferred
+field reads with `ConfigRef("KEY", type=..., default=...)`; use `ConfigFormat`
+or `ConfigLazy` for computed values. Built-in consumers resolve these declarations
+with the producer's Config; custom consumers call `config.resolve(value)`.
+For an ad-hoc `ConfigField`, declare it in `configs` or call `config.define(field)`
+before referencing `field.name`. Immediate `container.get_config(ConfigField(...))`
+remains supported.
 
 Nginx resolves only the currently needed field. An absent nginx consumer or empty
 server name skips unrelated fields; explicit `auth=False` and `waf=False` skip
@@ -279,7 +287,8 @@ Keep `template_vars` itself a mapping. Its individual values and explicit top-le
 template arguments may use ConfigValue; unused variables are not resolved.
 General template arguments retain their ordinary types when passed as plain
 values. To defer a structured argument, use ConfigLazy returning its dictionary,
-list or tuple. General template arguments use the existing lazy Proxy adapter,
+list or tuple. Configuration variables, `docker_user`, and explicit ConfigValue
+arguments use a lazy Proxy adapter that caches each successful value for one render,
 so identity tests such as `is none` are not transparent for deferred arguments;
 read `config.get(...)` directly when a template needs an exact native value.
 Native nginx templates remain single-pass Jinja, and strings inserted by a

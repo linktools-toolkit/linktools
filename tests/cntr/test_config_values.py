@@ -9,8 +9,9 @@ import pytest
 
 from linktools.cntr import ContainerError
 from linktools.cntr.ext import Nginx, ResolvedSite, endpoint, load_config_url, load_nginx_url, load_port_url
-from linktools.core import Config, ConfigFormat, ConfigLazy, ConfigRef, ConfigSchema, RuntimeOverrideSource
+from linktools.core import Config, ConfigField, ConfigFormat, ConfigLazy, ConfigRef, ConfigSchema, RuntimeOverrideSource
 from linktools.runtime import Proxy, lazy_load
+from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -157,6 +158,50 @@ def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_mana
         source, title=ConfigRef("TITLE"), data=ConfigLazy(lambda config: {"items": [ConfigRef("TITLE")]}),
         unused=ConfigLazy(fail), flag=False, empty=None)
     assert rendered == "{{not_jinja}} {not_format}|{{not_jinja}} {not_format}|True|True"
+
+
+@pytest.mark.parametrize("variable,key", [("TEMPLATE_VALUE", "TEMPLATE_VALUE"), ("docker_user", "DOCKER_USER")])
+def test_config_values_compose_template_context_reads_lazily_once_per_render(
+        fresh_manager: "ContainerManager", tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch",
+        variable: str, key: str) -> None:
+    container = fresh_manager.containers["portainer"]
+    config = make_config(**{key: "first", "UNUSED": ConfigLazy(fail)})
+    config.define(ConfigField(key))
+    config.define(ConfigField("UNUSED"))
+    monkeypatch.setattr(fresh_manager, "env_config", config)
+    reads = []
+    get = config.get
+
+    def read(name: str, type: "Any" = None, default: "Any" = MISSING) -> "Any":
+        reads.append(name)
+        return get(name, type=type, default=default)
+
+    monkeypatch.setattr(config, "get", read)
+    source = tmp_path / "context.j2"
+    source.write_text("{{ " + variable + " }}|{{ " + variable + " }}"
+                      "{% if false %}{{ UNUSED }}{% endif %}", encoding="utf-8")
+    assert container.render_template(source) == "first|first"
+    assert reads == ["DEBUG", key]
+    config.set(key, "updated")
+    assert container.render_template(source) == "updated|updated"
+    assert reads == ["DEBUG", key, "DEBUG", key]
+    other = make_config(**{key: "other"})
+    other.define(ConfigField(key))
+    monkeypatch.setattr(fresh_manager, "env_config", other)
+    assert container.render_template(source) == "other|other"
+    assert reads == ["DEBUG", key, "DEBUG", key]
+
+
+def test_config_values_compose_template_kwargs_override_deferred_context_without_reading_it(
+        fresh_manager: "ContainerManager", tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch") -> None:
+    container = fresh_manager.containers["portainer"]
+    config = make_config(OVERRIDDEN=ConfigLazy(fail), DOCKER_USER=ConfigLazy(fail))
+    config.define(ConfigField("OVERRIDDEN"))
+    config.define(ConfigField("DOCKER_USER"))
+    monkeypatch.setattr(fresh_manager, "env_config", config)
+    source = tmp_path / "override.j2"
+    source.write_text("{{ OVERRIDDEN is none }}|{{ docker_user is false }}", encoding="utf-8")
+    assert container.render_template(source, OVERRIDDEN=None, docker_user=False) == "True|True"
 
 
 def test_config_values_native_template_reads_each_variable_in_its_producer_context(

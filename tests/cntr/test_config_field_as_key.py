@@ -1,16 +1,22 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""get_config/get_config_later accept a ConfigField directly, not just a str.
+"""get_config accepts a ConfigField directly, not just a str.
 
 Lets a container reference a one-off field (e.g. a nginx domain with its own
 fallback) directly at the call site instead of also declaring a separate
 `configs` property purely to give the field a home.
 """
 import os
+from typing import TYPE_CHECKING
 
 import pytest
 
 import _harness
-from linktools.core import ConfigField, LazyProvider
+from linktools.cntr import BaseContainer
+from linktools.core import ConfigField, ConfigRef, LazyProvider
+
+if TYPE_CHECKING:
+    from linktools.cntr import ContainerManager
 
 
 @pytest.fixture
@@ -29,8 +35,8 @@ def field_key_repo(tmp_path):
         "    def resolved_twice(self):\n"
         "        field = ConfigField(name='SHARED', default='shared-default')\n"
         "        first = self.get_config(field)\n"
-        "        second = self.get_config_later(field)\n"
-        "        return first, str(second)\n"
+        "        second = self.get_config(field)\n"
+        "        return first, second\n"
     )
     return repo
 
@@ -89,6 +95,24 @@ def test_configfield_without_name_raises(fresh_manager):
 
 def test_get_config_still_accepts_plain_string_key(fresh_manager):
     assert fresh_manager.env_config.get("DOCKER_HOST") == fresh_manager.containers["portainer"].get_config("DOCKER_HOST")
+
+
+def test_deferred_config_ref_reads_an_explicitly_defined_field(fresh_manager: "ContainerManager") -> None:
+    container = fresh_manager.containers["portainer"]
+    calls = []
+    field = ConfigField(name="DEFERRED_FIELD", provider=LazyProvider(lambda config: calls.append(config) or "42"))
+    container.env_config.define(field)
+    reference = ConfigRef(field.name, type=int)
+    assert calls == []
+    assert container.env_config.resolve(reference) == 42
+    assert len(calls) == 1
+    container.env_config.set(field.name, "43")
+    assert container.env_config.resolve(reference) == 43
+    assert len(calls) == 1
+
+
+def test_container_has_no_get_config_later_alias() -> None:
+    assert not hasattr(BaseContainer, "get_config_later")
 
 
 def test_nginx_domain_provider_via_configfield_key(fresh_manager):
