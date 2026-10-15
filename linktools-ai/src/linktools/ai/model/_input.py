@@ -35,6 +35,8 @@ class ModelInputCapability:
 
     An explicit transport distinguishes known support for an alternate encoding,
     such as uploaded text files. Unsupported MIME declarations deny every encoding.
+    A type/* family requires an explicit transport unless unsupported. Exact
+    declarations take precedence over family rules for the selected encoding.
     """
 
     media_type: str
@@ -43,7 +45,7 @@ class ModelInputCapability:
     transport: ModelInputTransport | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "media_type", _media_type(self.media_type))
+        object.__setattr__(self, "media_type", _media_type(self.media_type, allow_family=True))
         if (self.transport is not None and self.transport not in _TRANSPORTS) or self.status not in _STATUSES:
             raise ValueError("model input transport or status is invalid")
         if self.max_bytes is not None and (type(self.max_bytes) is not int or self.max_bytes <= 0):
@@ -106,7 +108,7 @@ def normalize_input_capabilities(
             resolved.append(replace(item, transport=None))
             continue
         transport = item.transport
-        if transport is None and resolve_transport is not None:
+        if transport is None and resolve_transport is not None and not item.media_type.endswith("/*"):
             transport = resolve_transport(item.media_type)
         if transport is None:
             raise ValueError("MIME has no default input transport; an explicit transport is required")
@@ -159,10 +161,15 @@ def decide_model_input(
         transport = openai_input_transport(media_type, input_kind, model)
         if transport is None:
             return ModelInputDecision(media_type, input_kind, None, "unsupported", False, True, "input_encoding_not_supported")
-    rule = next((item for item in rules if item.media_type == media_type and item.status == "unsupported"), None)
-    if rule is not None:
+    rule = None
+    for pattern in (media_type, media_type.split("/", 1)[0] + "/*"):
+        rule = next((item for item in rules if item.media_type == pattern and item.status == "unsupported"), None)
+        if rule is None:
+            rule = next((item for item in rules if item.media_type == pattern and item.transport == transport), None)
+        if rule is not None:
+            break
+    if rule is not None and rule.status == "unsupported":
         return ModelInputDecision(media_type, input_kind, transport, "unsupported", False, True, "model_input_not_supported")
-    rule = next((item for item in rules if item.media_type == media_type and item.transport == transport), None)
     status = rule.status if rule is not None else "unknown"
     if rule is not None and rule.max_bytes is not None:
         if size is None or size > rule.max_bytes:
@@ -248,12 +255,15 @@ def _file_inputs(value: object) -> Iterator[BinaryContent | ImageUrl | AudioUrl 
             yield from _file_inputs(item)
 
 
-def _media_type(value: str) -> str:
+def _media_type(value: str, *, allow_family: bool = False) -> str:
     if not isinstance(value, str):
         raise ValueError("model input media_type must be a MIME type")
     value = value.strip().lower()
-    if value.count("/") != 1 or any(not part for part in value.split("/")) or "*" in value or any(c.isspace() for c in value) or ";" in value:
-        raise ValueError("model input media_type must be an exact MIME type")
+    parts = value.split("/")
+    if len(parts) != 2 or any(not part for part in parts) or any(c.isspace() for c in value) or ";" in value:
+        raise ValueError("model input media_type must be a MIME type")
+    if "*" in value and not (allow_family and parts[1] == "*" and "*" not in parts[0]):
+        raise ValueError("model input media_type must be an exact MIME type or a type/* declaration")
     return value
 
 

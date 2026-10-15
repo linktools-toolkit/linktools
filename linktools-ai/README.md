@@ -688,10 +688,8 @@ from linktools.ai.model import ModelInputCapability, ModelRegistry
 models = ModelRegistry.openai(
     model="your-model",
     input_capabilities=(
-        ModelInputCapability("image/png", status="supported", max_bytes=5_000_000),
-        ModelInputCapability("application/pdf", status="unknown"),
+        ModelInputCapability("image/*", transport="image", max_bytes=5_000_000),
     ),
-    unknown_inputs="passthrough",
 )
 ```
 
@@ -701,12 +699,10 @@ For `lt ai run`, `lt ai acp`, and `lt ai web`, use the existing
 ```yaml
 model: your-model
 input_capabilities:
-  - media_type: image/png
+  - media_type: image/*
     status: supported
+    transport: image
     max_bytes: 5000000
-  - media_type: application/pdf
-    status: unknown
-unknown_inputs: passthrough
 ```
 
 `status` is `supported`, `unsupported`, or `unknown`. An explicit `transport`
@@ -717,6 +713,32 @@ transport, and these inputs remain unverified; it does not bypass transport or
 resource limits. LinkTools does not infer or probe real provider support from
 model names or endpoints. The Web settings show the full captured `inputs`
 contract, including unknown policy, status, transport, and byte limits.
+
+Declarations may use an exact MIME type or a `type/*` family, such as
+`image/*`. A family with `supported` or `unknown` status requires an explicit
+transport; wildcard MIME types are not used to infer SDK encoding. `*/*` and
+partial wildcards are not accepted. Actual inputs still need concrete MIME
+types. The examples above configure an image-only allowlist with the default
+unknown-input rejection policy.
+
+`supported` is the host's explicit support/allowance declaration. A decision
+marked `verified` means that it matched such a declaration, not that LinkTools
+has tested every subtype against the live model. The adapter still rejects
+unsupported encodings, including uploaded image handles.
+
+The default unknown policy rejects PDF, audio and other undeclared attachments;
+plain prompt text is unaffected. Matching considers exact MIME rules before
+family rules for the actual SDK transport. An exact rule for another transport
+does not hide an applicable family rule. At each level, an `unsupported` rule
+denies every encoding, as before; otherwise the transport-specific rule applies.
+The selected rule supplies its status and byte limit. For example, an exact
+`image/png` rule can override an `image/*` rule for image encoding. A declaration
+does not bypass the adapter's actual SDK encoding limits. Explicit
+`unknown_inputs="passthrough"` remains available for undeclared inputs. As an
+advanced opt-in, callers can add `ModelInputCapability("application/pdf",
+status="unknown")` and explicitly select passthrough when unverified PDF inputs
+are intended; passthrough also permits other unknown inputs that the adapter can
+encode, rather than limiting the exception to PDF.
 
 The old `vision` API argument and `--vision` flag have been removed.
 Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and

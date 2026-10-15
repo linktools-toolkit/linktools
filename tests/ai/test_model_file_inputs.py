@@ -429,3 +429,117 @@ def test_file_policy_requires_explicit_current_or_historical_semantics(contract:
         validate_model_inputs(binding, BinaryContent(b"document", media_type="application/x-custom"))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details["reason"] == "model_input_contract_invalid"
+
+
+@pytest.mark.parametrize("pattern", ("image/*", "text/*", "application/*", "custom-family/*"))
+@pytest.mark.parametrize("status", ("supported", "unknown"))
+def test_family_capabilities_require_explicit_transport(pattern: str, status: str) -> None:
+    with pytest.raises(ValueError, match="explicit transport"):
+        _binding(ModelInputCapability(pattern, status))
+    binding = _binding(ModelInputCapability(pattern, status, transport="file-block"))
+    assert binding.contract["inputs"]["capabilities"][0]["media_type"] == pattern
+
+
+@pytest.mark.parametrize("pattern", ("*/*", "*/json", "image/p*", "image/**", "im*ge/*", "*/*/*"))
+def test_global_and_partial_mime_wildcards_are_invalid(pattern: str) -> None:
+    with pytest.raises(ValueError):
+        ModelInputCapability(pattern, "unsupported")
+
+
+def test_actual_input_mime_cannot_be_a_family() -> None:
+    with pytest.raises(ValueError):
+        decide_model_input(_binding(unknown_inputs="passthrough"), "image/*")
+
+
+def test_image_family_allowlist_accepts_images_and_rejects_other_attachments() -> None:
+    binding = _binding(ModelInputCapability("image/*", transport="image"))
+    assert validate_model_inputs(binding, "ordinary prompt") == ()
+    for mime in ("image/png", "image/jpeg", "image/x-custom"):
+        decision = validate_model_input(binding, mime, size=2)
+        assert decision.allowed and decision.verified and decision.transport == "image"
+    for mime in ("text/plain", "application/pdf", "audio/wav"):
+        assert not decide_model_input(binding, mime, size=2).allowed
+    with pytest.raises(AIError):
+        validate_model_inputs(binding, ImageUrl("https://file.invalid/image", media_type="text/plain"))
+    with pytest.raises(AIError) as raised:
+        validate_model_inputs(binding, UploadedFile("file-image", "openai", media_type="image/png"))
+    assert raised.value.safe_details["reason"] == "input_encoding_not_supported"
+
+
+def test_exact_rules_override_family_only_for_their_declared_transport() -> None:
+    binding = _binding(
+        ModelInputCapability("text/*", "unsupported"),
+        ModelInputCapability("text/plain", transport="file-block", max_bytes=3),
+        unknown_inputs="passthrough",
+    )
+    assert not decide_model_input(binding, "text/plain", size=2).allowed
+    assert decide_model_input(binding, "text/plain", input_kind="uploaded", size=2).allowed
+    assert decide_model_input(binding, "text/plain", input_kind="uploaded", size=4).reason == "model_input_size_exceeded"
+    assert decide_model_input(binding, "text/plain", input_kind="uploaded").reason == "model_input_size_unknown"
+    assert not decide_model_input(binding, "text/csv", input_kind="uploaded", size=2).allowed
+
+
+@pytest.mark.parametrize("unknown,allowed", (("reject", False), ("passthrough", True)))
+def test_selected_family_rule_owns_status_transport_and_byte_limit(unknown: str, allowed: bool) -> None:
+    binding = _binding(
+        ModelInputCapability("text/*", "unknown", max_bytes=3, transport="text-inline"),
+        ModelInputCapability("text/plain", max_bytes=5),
+        unknown_inputs=unknown,
+    )
+    selected = decide_model_input(binding, "text/csv", size=3)
+    assert selected.allowed is allowed
+    assert selected.status == "unknown" and not selected.verified
+    assert selected.transport == "text-inline"
+    assert decide_model_input(binding, "text/csv", size=4).reason == "model_input_size_exceeded"
+    assert decide_model_input(binding, "text/csv").reason == "model_input_size_unknown"
+    assert decide_model_input(binding, "text/plain", size=5).verified
+    assert decide_model_input(binding, "text/csv", input_kind="uploaded", size=4).allowed is allowed
+
+
+def test_same_pattern_unsupported_keeps_all_encodings_denied() -> None:
+    binding = _binding(
+        ModelInputCapability("text/*", "unsupported", transport="file-block"),
+        ModelInputCapability("text/*", transport="text-inline"),
+        unknown_inputs="passthrough",
+    )
+    assert not decide_model_input(binding, "text/plain", size=2).allowed
+    assert not decide_model_input(binding, "text/plain", input_kind="uploaded", size=2).allowed
+    assert binding.contract["inputs"]["capabilities"][0] == {"media_type": "text/*", "status": "unsupported"}
+
+
+def test_family_contract_round_trips_and_drift_stays_strict() -> None:
+    registry = ModelRegistry.openai(model="gpt-file-test", input_capabilities=(
+        ModelInputCapability("image/*", transport="image", max_bytes=8),
+    ))
+    resolver = registry.capture()
+    original = resolver.resolve("default")
+    stored = json.loads(json.dumps(original.contract))
+    restored = resolver.restore(stored, route_id="default")
+    assert restored.contract == stored
+    assert decide_model_input(restored, "image/png", size=8).verified
+    stored["inputs"]["capabilities"][0]["max_bytes"] = 9
+    with pytest.raises(AIError) as raised:
+        resolver.restore(stored, route_id="default")
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+
+
+def test_family_support_does_not_bypass_sdk_encoding_limits() -> None:
+    binding = _binding(ModelInputCapability("audio/*", transport="audio"))
+    assert not decide_model_input(binding, "audio/ogg").allowed
+    text = _binding(ModelInputCapability("text/*", transport="text-inline"))
+    with pytest.raises(AIError):
+        validate_model_inputs(text, BinaryContent(b"\xff", media_type="text/plain"))
+
+
+def test_existing_explicit_unsupported_payload_still_denies_all_encodings() -> None:
+    class Binding:
+        provider = "openai"
+        model_identity = "openai:gpt-file-test"
+        contract = {"inputs": {
+            "endpoint": "openai-chat", "unknown": "passthrough", "capabilities": [
+                {"media_type": "text/plain", "status": "unsupported", "transport": "file-block"},
+            ],
+        }}
+
+    assert not decide_model_input(Binding(), "text/plain").allowed
+    assert not decide_model_input(Binding(), "text/plain", input_kind="uploaded").allowed
