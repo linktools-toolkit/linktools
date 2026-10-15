@@ -8,6 +8,7 @@ import yaml
 
 from linktools.cntr import ContainerError, ContainerManager, Integration
 from linktools.cntr.ext import Authelia, Nginx, endpoint
+from linktools.core import Config, ConfigSchema
 from linktools.runtime import lazy_load
 
 
@@ -29,7 +30,10 @@ def _consumer(declarations: dict, *, nginx: bool = True, **overrides: object) ->
         return value() if callable(value) else value
 
     manager = object.__new__(ContainerManager)
-    containers = {name: SimpleNamespace(name=name, integrations=entries, manager=manager, get_config=config)
+    manager.env_config = Config(None, ConfigSchema(), [])
+    manager.env_config.get = config
+    containers = {name: SimpleNamespace(name=name, integrations=entries, manager=manager, get_config=config,
+                                        env_config=manager.env_config)
                   for name, entries in declarations.items()}
     for name, builtin in (("nginx", "100-nginx"), ("authelia", "102-authelia")):
         container = object.__new__(builtin_container_type(builtin))

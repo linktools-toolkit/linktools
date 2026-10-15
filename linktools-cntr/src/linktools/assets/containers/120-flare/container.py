@@ -11,7 +11,7 @@ import yaml
 
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.ext import endpoint, Authelia, Flare, Nginx, load_port_url
-from linktools.core import ConfigField, LazyProvider
+from linktools.core import ConfigField, ConfigLazy, ConfigRef, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
@@ -64,9 +64,9 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return endpoint(
             self,
-            domain=self.get_config_later("FLARE_DOMAIN"),
+            domain=ConfigRef("FLARE_DOMAIN"),
             proxy="http://flare:5005",
-            auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
+            auth=ConfigLazy(lambda config: None if config.get("FLARE_AUTH_ENABLE") else False),
             auth_bypass=(r"\.(css|js)$",),
             extensions=[
                 Flare.container(
@@ -80,13 +80,13 @@ class Container(BaseContainer):
             ],
         )
 
-    def _iter_links(self) -> "Iterator[Flare]":
+    def _iter_links(self) -> "Iterator[tuple[BaseContainer, Flare]]":
         declarations = sorted(
             self.manager.iter_integrations("flare"),
             key=lambda entry: entry[0].order,
         )
         for producer, declaration in declarations:
-            yield declaration
+            yield producer, declaration
 
 
     def on_starting(self, context: "OperationContext") -> None:
@@ -127,10 +127,10 @@ class Container(BaseContainer):
         categories = OrderedDict()
         apps = {"links": []}
 
-        for link in self._iter_links():
+        for producer, link in self._iter_links():
             if not isinstance(link, Flare):
                 continue
-            url = link.url
+            url = link.resolve_url(producer.env_config)
             if not url:
                 continue
             category = link.display_category
@@ -143,9 +143,10 @@ class Container(BaseContainer):
                     if getattr(existing[0], field) != getattr(category, field):
                         raise ContainerError(
                             f"Conflicting {label} for Flare category {category.name!r}")
-            value = deepcopy({"name": link.name, "icon": link.icon, "link": url})
+            value = deepcopy(link.resolve_metadata(producer.env_config, include_desc=category.apps))
+            value["link"] = url
             if category.apps:
-                apps["links"].append(dict(value, desc=deepcopy(link.desc)))
+                apps["links"].append(value)
             else:
                 existing[1].append(dict(value, category=category.name))
 

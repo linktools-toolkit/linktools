@@ -8,6 +8,7 @@ import pytest
 from linktools.cntr import ContainerError, ContainerManager, Integration
 from linktools.cntr.ext import Authelia, Flare, Nginx, load_nginx_url
 from linktools.cntr.ext import ResolvedSite, endpoint
+from linktools.core import Config, ConfigSchema
 from linktools.runtime import lazy_load
 
 
@@ -17,6 +18,8 @@ class Producer:
         self.config = dict(NGINX_HTTPS_ENABLE=True, NGINX_AUTH_ENABLE=True,
                            NGINX_WAF_ENABLE=True, NGINX_HTTP_PORT=80, NGINX_HTTPS_PORT=443)
         self.config.update(config)
+        self.env_config = Config(None, ConfigSchema(), [])
+        self.env_config.get = self.get_config
         self.manager = SimpleNamespace(
             integration_snapshot={name: () for name in installed},
             containers={"nginx": SimpleNamespace(sites={})},

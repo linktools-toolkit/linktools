@@ -9,6 +9,7 @@ import pytest
 from linktools.cntr import ContainerError
 from linktools.cntr.ext import Authelia, Flare, Integration, Nginx, ResolvedSite, endpoint
 from linktools.cntr.ext import load_nginx_url, load_port_url
+from linktools.core import Config, ConfigSchema
 from linktools.runtime import Proxy, lazy_load
 from linktools.types import MISSING
 
@@ -99,6 +100,8 @@ def test_endpoint_resolves_public_direct_and_oidc_paths_independently() -> None:
         return values[key]
 
     producer = SimpleNamespace(name="app", get_config=config, host="host.test")
+    producer.env_config = Config(None, ConfigSchema(), [])
+    producer.env_config.get = producer.get_config
     declarations = endpoint(producer, domain="app.test", proxy="http://app:8080", extensions=[
         Flare.public("App", "web", "Application", load_nginx_url(producer, None, "ui")),
         Flare.container("App", "web", load_port_url(producer, "APP_PORT", "ui", https=False)),
@@ -191,6 +194,8 @@ def test_endpoint_extensions_use_the_common_declaration_shape_validation(extensi
 
 def test_endpoint_inherits_only_omitted_application_urls_and_preserves_site_fields() -> None:
     producer = SimpleNamespace(name="app", get_config=lambda key, **kwargs: 8080)
+    producer.env_config = Config(None, ConfigSchema(), [])
+    producer.env_config.get = producer.get_config
     dashboard = Flare.category("dashboard", apps=True)
     explicit = lazy_load(fail)
     originals = [Flare.public("App", "web"), dashboard("Dashboard", "web"),
@@ -223,6 +228,8 @@ def test_endpoint_preserves_explicit_access_references_without_mutating_them() -
 def test_endpoint_binds_reused_access_and_public_links_to_each_actual_site() -> None:
     values = {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}
     producer = SimpleNamespace(name="app", get_config=lambda key, **kwargs: values[key])
+    producer.env_config = Config(None, ConfigSchema(), [])
+    producer.env_config.get = producer.get_config
     access = Authelia.access(policy="one_factor")
     link = Flare.public("App", "web")
     first = endpoint(producer, domain="one.test", extensions=[access, link])
@@ -274,6 +281,8 @@ def test_endpoint_rejects_extension_factories_but_accepts_callable_declaration()
 ])
 def test_endpoint_resolves_only_declared_url_fields(reference, expected):
     producer = SimpleNamespace(name="app", get_config=lambda key, **kw: True if key.endswith("ENABLE") else 443)
+    producer.env_config = Config(None, ConfigSchema(), [])
+    producer.env_config.get = producer.get_config
     original = Flare.public("literal {url}", "web", "{{metadata}}", reference)
     declarations = endpoint(producer, domain="app.test", extensions=[original])
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
@@ -291,6 +300,8 @@ def test_declarative_urls_are_lazy_and_oidc_does_not_follow_auth(active, auth):
     from urllib.parse import urlsplit
     reads = []
     producer = SimpleNamespace(name="app", get_config=lambda key, **kw: True if key.endswith("ENABLE") else 443)
+    producer.env_config = Config(None, ConfigSchema(), [])
+    producer.env_config.get = producer.get_config
     relative = lazy_load(utils.join_url, "/ui/metacubexd/#/setup", queries={
         "secret": lazy_load(lambda: reads.append("query") or "public-fixture-value"),
     })

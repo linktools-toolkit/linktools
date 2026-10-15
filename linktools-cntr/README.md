@@ -280,10 +280,11 @@ return [
 
 ```python
 from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
+from linktools.core import ConfigRef
 
 return endpoint(
     self,
-    domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
+    domain=ConfigRef("APP_DOMAIN"), proxy="http://app:8080",
     extensions=[
         Flare.links(
             Flare.public(),
