@@ -346,10 +346,10 @@ async def test_session_model_context_reuses_observed_projection(
     expected = LoadedModelContext(())
     projection_reads = 0
 
-    async def load_projection(_owner_id: str) -> ContextProjection:
+    async def load_metadata(_owner_id: str) -> tuple[ContextProjection, None]:
         nonlocal projection_reads
         projection_reads += 1
-        return projection
+        return projection, None
 
     async def load_projected(
         owner_id: str,
@@ -359,7 +359,7 @@ async def test_session_model_context_reuses_observed_projection(
         assert observed is projection
         return expected
 
-    monkeypatch.setattr(repository, "load_projection", load_projection)
+    monkeypatch.setattr(repository, "_load_context_metadata", load_metadata)
     monkeypatch.setattr(
         repository,
         "_load_model_context_from_projection",

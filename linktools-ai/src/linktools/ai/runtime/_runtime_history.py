@@ -47,7 +47,7 @@ from ._event import project_event_payload
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
-from ._history_service import DefaultExecutionHistoryService
+from ._history_service import DefaultExecutionHistoryService, _read_model_interaction_updates
 from ._runtime_identity import token_seed
 from ._transient_history import TransientExecutionHistoryStore
 from ._session_timeline import (
@@ -937,6 +937,22 @@ class RuntimeHistory:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+        )
+
+    async def read_model_interaction_updates(
+        self, execution_id: str, *, principal: Principal,
+        after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        """Read a fresh boundary and a bounded suffix without changing older service contracts."""
+        if type(self) is not RuntimeHistory:
+            return await _read_model_interaction_updates(
+                self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
+            )
+        read = getattr(self._service, "read_model_interaction_updates", None)
+        if callable(read):
+            return await read(execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit)
+        return await _read_model_interaction_updates(
+            self._service, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
         )
 
     async def capture_model_interaction_cutoffs(

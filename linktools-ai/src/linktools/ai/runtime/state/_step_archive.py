@@ -1428,6 +1428,23 @@ class StateStepArchive(AgentRunStore):
         key = self._sequence(agent_run_id, "checkpoint")
         return (await self._store.read(lambda transaction: transaction.get_sequences((key,)))).get(key, 0)
 
+    async def capture_checkpoint_progress(
+        self, *, agent_run_id: str, checkpoint: PreparedAgentRunCheckpoint,
+    ) -> tuple[int, int]:
+        """Capture the checkpoint's durable position and model interaction high water."""
+        require_no_run_history_lock("StateStepArchive.capture_checkpoint_progress")
+        async def read(_transaction: StateTransaction) -> tuple[int, int]:
+            sequence = await self.checkpoint_count(agent_run_id=agent_run_id)
+            if not sequence or not await self.verify_checkpoint_range(
+                agent_run_id=agent_run_id, after_sequence=sequence - 1,
+                checkpoints=(checkpoint,),
+            ):
+                sequence += 1
+            high_water = await self.model_interaction_count(agent_run_id=agent_run_id)
+            return sequence, high_water
+
+        return await self._store.read(read)
+
     async def verify_checkpoint_range(
         self, *, agent_run_id: str, after_sequence: int,
         checkpoints: Sequence[PreparedAgentRunCheckpoint],
@@ -1534,15 +1551,24 @@ class StateStepArchive(AgentRunStore):
         )
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        async def capture_metadata(_transaction: StateTransaction) -> int:
-            existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
+        async def capture_metadata(
+            transaction: StateTransaction,
+        ) -> tuple[int, TranscriptHeadRecord | None]:
+            run_key = self._agent_run_key(run.agent_run_id)
+            head_key = self._history.head_key(run.agent_run_id)
+            records = await transaction.get_records((run_key, head_key))
+            existing_run = records.get(run_key)
             if existing_run is None:
-                return 0
-            if existing_run != run:
+                return 0, None
+            if _decode_step(existing_run.data) != run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await self.transcript_message_count_for_run(run)
+            head_record = records.get(head_key)
+            if head_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            head = self._history.decode_head(head_record)
+            return head.message_count, head
 
-        before = await self._store.read(capture_metadata)
+        before, head = await self._store.read(capture_metadata)
         source_messages = tuple(checkpoint.messages)
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1551,6 +1577,7 @@ class StateStepArchive(AgentRunStore):
                 run.agent_run_id,
                 0,
                 before,
+                observed_head=head,
             )
             if tuple(
                 _exact_message_signature(message) for message in observed
@@ -1762,13 +1789,17 @@ class StateStepArchive(AgentRunStore):
             if self._runtime_domain is RuntimeDomain.CONVERSATION
             else run.agent_run_id
         )
-        async def capture_head(_transaction: StateTransaction) -> TranscriptHeadRecord:
-            head = await self._history.get_head(owner_id)
-            if head is None:
-                if await self.get_agent_run(agent_run_id=run.agent_run_id) is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                head = self._history.empty_head(owner_id)
-            return head
+        async def capture_head(transaction: StateTransaction) -> TranscriptHeadRecord:
+            head_key = self._history.head_key(owner_id)
+            run_key = self._agent_run_key(run.agent_run_id)
+            records = await transaction.get_records((head_key, run_key))
+            head_record = records.get(head_key)
+            if head_record is not None:
+                return self._history.decode_head(head_record)
+            run_record = records.get(run_key)
+            if run_record is not None and _decode_step(run_record.data) is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return self._history.empty_head(owner_id)
 
         head = await self._store.read(capture_head)
 
@@ -2152,7 +2183,8 @@ class StateStepArchive(AgentRunStore):
         producer_generation: int | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
-    ) -> None:
+    ) -> bool:
+        """Commit projection metadata and report whether its AgentRun was admitted."""
         self._ensure_open()
         if interactions:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -2177,6 +2209,7 @@ class StateStepArchive(AgentRunStore):
         owner_record, created = await self._ensure_run_with_head_in_transaction(
             transaction,
             run,
+            include_projection=bool(checkpoints),
         )
         if observation is not None:
             await self._history.commit_observation(transaction, observation)
@@ -2186,7 +2219,7 @@ class StateStepArchive(AgentRunStore):
                     transaction,
                     history_head_guard,
                 )
-            return
+            return created
         owner = self._agent_run_key(run.agent_run_id)
         grouped: dict[str, list[object]] = {
             "event": [],
@@ -2265,6 +2298,7 @@ class StateStepArchive(AgentRunStore):
                 transaction,
                 history_head_guard,
             )
+        return created
 
     async def materialize_checkpoint(
         self,
@@ -2317,7 +2351,9 @@ class StateStepArchive(AgentRunStore):
             history_head_guard,
         )
         # Pin ownership before the fact read so READ COMMITTED races fail the CAS.
-        owner_record = await self._ensure_run_in_transaction(transaction, run)
+        owner_record, _created = await self._ensure_run_with_head_in_transaction(
+            transaction, run, include_projection=True,
+        )
         stream = self._stream(run.agent_run_id, "checkpoint")
         subject = _step_subject(checkpoint.stored)
         data = _encode_step(checkpoint.stored)
@@ -2409,21 +2445,12 @@ class StateStepArchive(AgentRunStore):
             history_head_guard=history_head_guard,
         )
 
-    async def _ensure_run_in_transaction(
-        self,
-        transaction: StateTransaction,
-        run: AgentRunRecord,
-    ) -> StoredRecord:
-        owner_record, _created = await self._ensure_run_with_head_in_transaction(
-            transaction,
-            run,
-        )
-        return owner_record
-
     async def _ensure_run_with_head_in_transaction(
         self,
         transaction: StateTransaction,
         run: AgentRunRecord,
+        *,
+        include_projection: bool = False,
     ) -> tuple[StoredRecord, bool]:
         owner = self._agent_run_key(run.agent_run_id)
         history_owner = (
@@ -2432,7 +2459,10 @@ class StateStepArchive(AgentRunStore):
             else run.agent_run_id
         )
         head_key = self._history.head_key(history_owner)
-        records = await transaction.get_records((owner, head_key))
+        keys = (owner, head_key)
+        if include_projection:
+            keys += (self._history.projection_key(history_owner),)
+        records = await transaction.get_records(keys)
         owner_record = records.get(owner)
         head_record = records.get(head_key)
         if owner_record is None:

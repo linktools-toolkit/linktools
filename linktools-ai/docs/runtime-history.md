@@ -387,6 +387,32 @@ to its later terminal state. Missing identities inside a declared range,
 inconsistent ownership, and conflicting terminal metadata raise integrity errors
 rather than fabricating coverage. An uncommitted start is not publicly visible.
 
+For bounded live refreshes, `runtime.history.read_model_interaction_updates()`
+returns `(boundary, items)`. Optional `after_cutoffs` contains per-run known
+prefixes as `UsageReadCutoff` values; omitted runs start at zero. The operation
+captures current admitted identities and reads at most `limit` metadata items
+across all runs (default 200). The budget is allocated to run suffixes in boundary
+order; returned ranges may be short, including omission of later runs. An
+unchanged suffix returns an empty tuple with its current boundary. To finish a larger captured range, use
+`read_model_interaction_metadata()` with the returned boundary's fixed ceilings;
+calling the update operation again captures a new boundary.
+
+The built-in update operation authorizes once before reading its fresh boundary
+and first metadata page in one short metadata-owner scope. Authorization runs
+outside that scope. Later pages authorize independently and may observe newer
+lifecycle states without expanding their captured identities. Custom services
+may optionally implement this public operation; otherwise `RuntimeHistory`
+composes their existing capture and metadata operations, preserving their
+authorization and overrides. Custom history readers and service subclasses keep
+that same existing-operation composition.
+
+Live graph and execution observers use the update operation for new suffixes
+and contiguous active tails. Sparse active ranges retain separate bounded reads.
+This changes the number of internal authorization callbacks for a live refresh,
+not the requirement to authorize each public query. Subscriptions still precede
+snapshots. Final compensation still fixes model cutoffs before tree replay and
+reads model states afterward; it does not reuse live prefetched rows.
+
 ## Execution ownership and recovery
 
 SQL and SQLite permit several Runtime instances to use one namespace. Opening

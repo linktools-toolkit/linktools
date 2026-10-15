@@ -22,10 +22,21 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("model", "tool", "unknown_tool", "subagent"))
-async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(phase: str) -> None:
+async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
+    phase: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     entered = asyncio.Event()
     cancelled = asyncio.Event()
     finished = asyncio.Event()
+    start_and_handoff = RuntimeAgentTaskRunner._start_and_handoff
+
+    async def start_work(self: RuntimeAgentTaskRunner, *args: object, **kwargs: object) -> tuple[object, str]:
+        execution = await start_and_handoff(self, *args, **kwargs)
+        # Select the active work being cancelled without resetting its original deadline.
+        await asyncio.wait_for(entered.wait(), 2)
+        return execution
+
+    monkeypatch.setattr(RuntimeAgentTaskRunner, "_start_and_handoff", start_work)
 
     async def work() -> str:
         entered.set()

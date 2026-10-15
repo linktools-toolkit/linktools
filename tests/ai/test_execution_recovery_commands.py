@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import pytest
 from linktools.ai.agent import AgentBindingContract
@@ -28,6 +29,9 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 from ._runtime_test_helpers import execution_owner_fields
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _binding() -> AgentBindingContract:
@@ -500,5 +504,108 @@ async def test_resume_recovers_its_own_lost_commit_acknowledgement(monkeypatch, 
         assert resumed.revision == execution.revision + 1 + int(unrelated_update)
         head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
         assert head.producer_generation == execution.revision + 1
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_producer_guard_batches_known_keys_and_reuses_transaction_records(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import event
+
+    state = RuntimeStorage.sqlite(tmp_path / "producer-guard.db")
+    await state.initialize(namespace="producer-guard", tenant_id="tenant")
+    try:
+        repository = state.execution.executions
+        await repository.create_with_history_head(_execution(datetime.now(timezone.utc)))
+        engine = repository.state_store.storage_group.context.engine.sync_engine
+        totals, writes = [], []
+        for split in (True, False):
+            statements = []
+            def capture(_connection, _cursor, statement, _parameters, _context, _many):
+                statements.append(statement.lstrip().upper())
+            async def guard(transaction):
+                async def separate(keys):
+                    values = {}
+                    for key in keys:
+                        record = await transaction.get_record(key)
+                        if record is not None:
+                            values[key] = record
+                    return values
+                with monkeypatch.context() as patch:
+                    if split:
+                        patch.setattr(transaction, "get_records", separate)
+                    result = await repository.require_open_history_head_in_transaction(
+                        transaction, "execution", expected_producer_generation=0,
+                    )
+                    # Subsequent owner reads must retain the guarded cached versions.
+                    execution = await transaction.get_record(repository._key("execution", "execution"))
+                    assert execution is not None
+                    assert await transaction.get_record(repository._key("execution_history_head", "execution")) == result[1]
+                    return result[0]
+            event.listen(engine, "before_cursor_execute", capture)
+            try:
+                head = await repository.state_store.mutate(guard)
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            assert head.producer_generation == 0
+            totals.append(sum(sql.startswith("SELECT") for sql in statements))
+            writes.append([sql.split()[0] for sql in statements if not sql.startswith("SELECT")])
+        assert writes[1] == writes[0]
+        assert totals[1] < totals[0]
+        print("producer guard SELECT separate, batched:", totals)
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("failure,expected", (
+    ("missing_head", ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ("missing_execution", ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ("stale_generation", ErrorCode.STORAGE_CONFLICT),
+    ("stale_generation_missing_execution", ErrorCode.STORAGE_CONFLICT),
+    ("stale_revision", ErrorCode.STORAGE_CONFLICT),
+    ("cancelled", ErrorCode.EXECUTION_CANCELLED),
+    ("terminal", ErrorCode.STORAGE_CONFLICT),
+    ("execution_guard", ErrorCode.STORAGE_CONFLICT),
+    ("head_guard", ErrorCode.STORAGE_CONFLICT),
+))
+async def test_producer_guard_batch_preserves_fail_closed_checks(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch, backend: str, failure: str, expected: ErrorCode,
+) -> None:
+    from .test_incremental_projection_boundaries import _storage
+
+    state = _storage(backend, tmp_path)
+    await state.initialize(namespace="producer-guard-failure", tenant_id="tenant")
+    try:
+        repository = state.execution.executions
+        execution = _execution(datetime.now(timezone.utc))
+        if failure in ("cancelled", "terminal"):
+            execution = replace(execution, status=ExecutionStatus.CANCELLING if failure == "cancelled" else ExecutionStatus.SUCCEEDED)
+        await repository.create_with_history_head(execution)
+        head_key = repository._key("execution_history_head", "execution")
+        execution_key = repository._key("execution", "execution")
+        if failure in ("missing_head", "missing_execution", "stale_generation_missing_execution"):
+            await repository.state_store.mutate(lambda transaction: transaction.delete_record(
+                head_key if failure == "missing_head" else execution_key,
+            ))
+        async def guard(transaction):
+            original = transaction.guard_record
+            async def reject(key, **kwargs):
+                if key == (execution_key if failure == "execution_guard" else head_key):
+                    return None
+                return await original(key, **kwargs)
+            with monkeypatch.context() as patch:
+                if failure in ("execution_guard", "head_guard"):
+                    patch.setattr(transaction, "guard_record", reject)
+                return await repository.require_open_history_head_in_transaction(
+                    transaction, "execution", expected_producer_generation=1 if failure.startswith("stale_generation") else 0,
+                    expected_revision=1 if failure == "stale_revision" else 0, allow_cancelling=False,
+                )
+        with pytest.raises(AIError) as raised:
+            await repository.state_store.mutate(guard)
+        assert raised.value.code is expected
     finally:
         await state.close()
