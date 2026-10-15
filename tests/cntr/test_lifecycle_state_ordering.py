@@ -14,6 +14,7 @@ def _neutralize_runtime(manager, monkeypatch):
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
     manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    monkeypatch.setattr(manager.compose_operations, "_check_external_requirements", lambda *args, **kwargs: None)
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
@@ -172,7 +173,7 @@ def test_exec_down_marks_stopped_before_on_stopped_hook_failure(fresh_manager, m
     assert "portainer" not in fresh_manager.running_state.get_persisted()
 
 
-def test_partial_up_reconciles_a_container_removed_from_installed_set(fresh_manager, monkeypatch):
+def test_partial_up_preserves_a_container_removed_from_installed_set(fresh_manager, monkeypatch):
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer", "safeline"})
     fresh_manager.installed_state.remove("safeline")
@@ -180,11 +181,11 @@ def test_partial_up_reconciles_a_container_removed_from_installed_set(fresh_mana
 
     fresh_manager.compose_operations.up(names=["portainer"])
 
-    assert "safeline" not in fresh_manager.running_state.get_persisted()
+    assert "safeline" in fresh_manager.running_state.get_persisted()
     assert "portainer" in fresh_manager.running_state.get_persisted()
 
 
-def test_on_removed_hook_fires_exactly_once_per_removed_container(fresh_manager, monkeypatch):
+def test_on_removed_hook_does_not_fire_for_named_operation(fresh_manager, monkeypatch):
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer", "safeline"})
     fresh_manager.installed_state.remove("safeline")
@@ -203,4 +204,4 @@ def test_on_removed_hook_fires_exactly_once_per_removed_container(fresh_manager,
 
     fresh_manager.compose_operations.up(names=["portainer"])
 
-    assert calls == [1]
+    assert calls == []

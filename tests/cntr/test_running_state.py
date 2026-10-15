@@ -16,6 +16,7 @@ from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
+from test_cli_routing import _ready_dependencies
 from linktools.cntr.state.running import RuntimeStateUnavailable
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -25,6 +26,7 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 def _record(manager, monkeypatch, fail=False):
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
+    _ready_dependencies(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
@@ -39,7 +41,7 @@ def _record(manager, monkeypatch, fail=False):
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
+        lambda model, services=(), force_pull=False, refresh_services=(), include_dependencies=True: ImagePlan(
             build=(), pull=(), targets=tuple(services),
             images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
                     for spec in model["services"].values()}),
@@ -143,14 +145,14 @@ def test_mark_stopped_full_clears(fresh_manager):
     assert fresh_manager.running_state.get_persisted() == []
 
 
-def test_cli_partial_up_includes_required_dependencies(monkeypatch, fresh_manager):
+def test_cli_partial_up_records_only_explicit_target(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_up(names=["portainer"], pull=False)
     running = set(fresh_manager.running_state.get_persisted())
-    assert {"portainer", "nginx"} <= running
+    assert running == {"portainer"}
 
 
 def test_cli_partial_down_marks_target_stopped(monkeypatch, fresh_manager):
@@ -220,7 +222,7 @@ def test_successful_start_records_config_only_target(monkeypatch, fresh_manager,
     monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
     _record(fresh_manager, monkeypatch)
 
-    getattr(cntr_main.command, "on_command_" + action)(names=["portainer"], pull=False)
+    getattr(cntr_main.command, "on_command_" + action)(names=["portainer", "nginx"], pull=False)
 
     assert {"portainer", "nginx"} <= set(fresh_manager.running_state.get_persisted())
 
@@ -237,12 +239,12 @@ def test_failed_start_preserves_config_only_state(monkeypatch, fresh_manager, pr
 
     monkeypatch.setattr("linktools.cntr.artifacts.publish_prepared_files", failed)
     with pytest.raises(ContainerError, match="publishing file references failed"):
-        cntr_main.command.on_command_up(names=["portainer"], pull=False)
+        cntr_main.command.on_command_up(names=["portainer", "nginx"], pull=False)
 
     assert ("portainer" in fresh_manager.running_state.get_persisted()) == previous
 
 
-def test_partial_start_records_config_dependency_but_not_unselected_config(monkeypatch, fresh_manager, tmp_path):
+def test_partial_start_records_explicit_config_dependency_but_not_unselected_config(monkeypatch, fresh_manager, tmp_path):
     from linktools.cntr.container import BaseContainer
     unused = BaseContainer(fresh_manager, tmp_path, name="unused")
     monkeypatch.setitem(fresh_manager.containers, "unused", unused)
@@ -252,7 +254,7 @@ def test_partial_start_records_config_dependency_but_not_unselected_config(monke
     monkeypatch.setattr(type(fresh_manager.containers["portainer"]), "dependencies", property(lambda self: ["flare"]))
     _record(fresh_manager, monkeypatch)
 
-    cntr_main.command.on_command_up(names=["portainer"], pull=False)
+    cntr_main.command.on_command_up(names=["portainer", "flare"], pull=False)
 
     running = fresh_manager.running_state.get_persisted()
     assert "flare" in running
@@ -269,7 +271,7 @@ def test_unrunnable_config_only_selection_stays_pending(monkeypatch, fresh_manag
         monkeypatch.setattr(container, "services", {})
     _record(fresh_manager, monkeypatch)
 
-    with pytest.raises(ContainerError, match="No runnable service"):
+    with pytest.raises(ContainerError, match="[Nn]o runnable service"):
         cntr_main.command.on_command_up(names=["portainer"], pull=False)
 
     assert "portainer" not in fresh_manager.running_state.get_persisted()
@@ -288,8 +290,9 @@ def test_failed_lifecycle_preserves_config_only_state(monkeypatch, fresh_manager
                 raise RuntimeError("after-start failed")
         monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", failed)
 
-    with pytest.raises(ContainerError):
-        cntr_main.command.on_command_up(names=["portainer"], pull=False)
+    expected = RuntimeError if failure == "compose" else ContainerError
+    with pytest.raises(expected, match="compose failed" if failure == "compose" else "after-start"):
+        cntr_main.command.on_command_up(names=["portainer", "nginx"], pull=False)
 
     assert ("portainer" in fresh_manager.running_state.get_persisted()) == previous
 

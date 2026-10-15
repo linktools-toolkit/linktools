@@ -33,9 +33,9 @@ def shared_case(tmp_path, running=(), dependency=False, sibling=False):
 
 
 @pytest.mark.parametrize("action", ["up", "restart"])
-def test_shared_service_runs_all_author_hooks_without_starting_siblings(tmp_path, action):
-    manager = shared_case(tmp_path, running=("app",), sibling=True)
-    getattr(manager.compose_operations, action)(["base"])
+def test_explicit_shared_service_runs_all_author_hooks(tmp_path, action):
+    manager = shared_case(tmp_path, running=("app",), sibling=False)
+    getattr(manager.compose_operations, action)(["base", "overlay"])
     assert [event[1] for event in manager.events if event[0] == "prepare"] == ["base", "overlay"]
     assert [event[1] for event in manager.events if event[0] == "check-callback"] == ["base", "overlay"]
     assert [event[1] for event in manager.events if event[0] == "after-callback"] == ["overlay", "base"]
@@ -48,7 +48,7 @@ def test_shared_service_runs_all_author_hooks_without_starting_siblings(tmp_path
 
 def test_earlier_fragment_dependency_is_resolved_from_native_model(tmp_path):
     manager = shared_case(tmp_path, dependency=True)
-    manager.compose_operations.up(["base"])
+    manager.compose_operations.up(["base", "overlay", "database"])
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["db", "app"]
     assert [event[1] for event in manager.events if event[0] == "prepare"] == ["database", "base", "overlay"]
 
@@ -79,14 +79,14 @@ def test_shared_profile_resolution_includes_runtime_providers_before_native_sele
                              if name == "app" or name in context.target_services}}
 
     manager.compose_runner.final_model = native
-    selection = manager.compose_operations.start_selection(
+    selection = manager.compose_operations.required_selection(
         manager.compose_operations.select(["base"], for_start=True), privilege=False)
     assert set(selection.services) == {"app", "provider"}
     assert {owner.name for owner in selection.target_containers} == {"base", "overlay", "provider"}
     assert observed == [(("app", "provider"), False)]
 
 
-def test_shared_contributor_dependencies_do_not_select_its_unrelated_siblings(tmp_path):
+def test_omitted_shared_contributor_is_diagnosed_before_side_effects(tmp_path):
     manager = shared_case(tmp_path, sibling=True)
     database = setup_case(tmp_path / "database", [("database", {"db": {"image": "db:new"}})]).containers["database"]
     database.manager = manager
@@ -94,9 +94,9 @@ def test_shared_contributor_dependencies_do_not_select_its_unrelated_siblings(tm
     manager.load_installed_config_metadata = lambda: list(manager.containers.values())
     manager.model["services"]["db"] = deepcopy(database.services["db"])
     manager.containers["overlay"].dependencies = ("database",)
-    manager.compose_operations.up(["base"])
-    assert {event[1] for event in manager.events if event[0] == "apply"} == {"app", "db"}
-    assert {event[1] for event in manager.events if event[0] == "prepare"} == {"base", "overlay", "database"}
+    with pytest.raises(Exception, match="contributors.*overlay"):
+        manager.compose_operations.up(["base"])
+    assert not any(event[0] in ("images", "apply", "prepare") for event in manager.events)
 
 
 @pytest.mark.parametrize("action", ["up", "restart", "down"])
@@ -113,14 +113,16 @@ def test_shared_plan_uses_canonical_dependencies_and_all_author_hooks(tmp_path, 
     manager.docker_inspector.preflight_candidates = lambda files: "passed"
     manager.runtime = SimpleNamespace(docker_args=lambda *args, **kwargs: CommandSpec(args, False),
                                       display_args=lambda spec: spec.args)
-    plan = ExecutionPlanner(manager).plan(action, names=["base"])
-    assert plan.targets == ("base",)
+    names = ["base"] if action == "down" else ["base", "overlay", "database"]
+    plan = ExecutionPlanner(manager).plan(action, names=names)
+    assert plan.targets == tuple(names)
     if action != "down":
         assert plan.commands[-1].args[-2:] == ("db", "app")
         assert {hook.container for hook in plan.hooks} == {"base", "overlay", "database"}
     if action != "up":
         assert plan.commands[0].args[-1] == "app"
-        assert {hook.container for hook in plan.hooks if hook.phase == "before-stop"} == {"base", "overlay"}
+        assert {hook.container for hook in plan.hooks if hook.phase == "before-stop"} == (
+            {"base", "overlay"} if action == "down" else {"base", "overlay", "database"})
 
 
 def test_unique_service_start_does_not_add_native_model_queries(tmp_path):
@@ -183,10 +185,10 @@ def test_mixed_managed_context_and_dockerfile_claims_are_not_guessed():
 
 
 @pytest.mark.parametrize("initial_app", [False, True])
-def test_shared_service_failure_restores_all_author_state_without_touching_sibling(tmp_path, initial_app):
+def test_omitted_shared_contributor_preserves_all_author_state_and_sibling(tmp_path, initial_app):
     manager = shared_case(tmp_path, running=("app", "other") if initial_app else ("other",), sibling=True)
     manager.compose_runner.fail = "app"
-    with pytest.raises(Exception, match="apply failed app"):
+    with pytest.raises(Exception, match="contributors.*overlay"):
         manager.compose_operations.up(["base"])
     assert manager.running_state.get_persisted() == (["base", "overlay"] if initial_app else ["overlay"])
     assert not any(event[0] == "apply" and event[1] == "other" for event in manager.events)

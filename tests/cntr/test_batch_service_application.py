@@ -35,7 +35,7 @@ def test_native_batch_keeps_selected_edges_without_python_service_loop():
         calls.append(args)
         return SimpleNamespace(check_call=lambda: 0)
     runner = ComposeRunner(SimpleNamespace(runtime=SimpleNamespace(create_docker_process=process)))
-    context = SimpleNamespace(is_full_project=False, compose_model={"services": {
+    context = SimpleNamespace(is_full_project=False, target_services=("db", "app"), compose_model={"services": {
         "db": {}, "app": {"depends_on": {"db": {"condition": "service_healthy"}}}}})
     runner._model_args = lambda ctx: nullcontext(["compose"])
     runner.apply_services(context, ("db", "app"))

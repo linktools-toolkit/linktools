@@ -8,18 +8,20 @@ from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from types import SimpleNamespace
 from linktools.cntr.runtime.images import ImagePlan
+from test_cli_routing import _ready_dependencies
 
 
 def _record(manager, monkeypatch, build=False):
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
+    _ready_dependencies(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
                 return 0
         return _Proc()
 
-    def fake_plan(model, services=(), force_pull=False, refresh_services=()):
+    def fake_plan(model, services=(), force_pull=False, refresh_services=(), include_dependencies=True):
         targets = tuple(services)
         return ImagePlan(build=targets if build else (), pull=(), targets=targets,
                          images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
@@ -135,6 +137,7 @@ def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, m
 def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
     from _harness import stub_generated_runtime
     stub_generated_runtime(fresh_manager, monkeypatch)
+    _ready_dependencies(fresh_manager, monkeypatch)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     monkeypatch.setenv("http_proxy", "http://user:super-secret@proxy:8080")
@@ -143,7 +146,7 @@ def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
     monkeypatch.setattr(
         fresh_manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
+        lambda model, services=(), force_pull=False, refresh_services=(), include_dependencies=True: ImagePlan(
             build=tuple(services), pull=(), targets=tuple(services),
             images={spec["image"]: SimpleNamespace(image_id="sha256:local-" + spec["image"])
                     for spec in model["services"].values()}),
@@ -192,4 +195,4 @@ def test_report_flag_does_not_change_running_state_writes(fresh_manager, monkeyp
     without_report = set(fresh_manager.running_state.get_persisted())
 
     assert with_report == without_report
-    assert {"portainer", "nginx", "lldap", "authelia", "safeline"} <= with_report
+    assert with_report == {"portainer"}

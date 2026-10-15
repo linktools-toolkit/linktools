@@ -568,13 +568,14 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head, record = entry
         next_head = replace(head, pending=prepared.pending, pending_part_count=len(prepared.pending_parts))
-        upgraded = replace(
-            record,
-            data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
-            storage_revision=record.storage_revision + 1,
-        )
-        if not await transaction.replace_record(upgraded, expected_storage_revision=record.storage_revision):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if not prepared.chunks or next_head != head:
+            upgraded = replace(
+                record,
+                data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
+                storage_revision=record.storage_revision + 1,
+            )
+            if not await transaction.replace_record(upgraded, expected_storage_revision=record.storage_revision):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         if prepared.new_pending_parts:
             await transaction.insert_facts(prepared.new_pending_parts)
 
@@ -1132,13 +1133,12 @@ class TranscriptRepository:
         tenant_id: str,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
-        projection = await self.load_projection(history_id)
+        projection, head = await self._load_context_metadata(history_id)
         if projection is not None:
             return await self._load_model_context_from_projection(
                 history_id,
                 projection,
             )
-        head = await self.get_head(history_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history = (
@@ -1437,15 +1437,28 @@ class TranscriptRepository:
         owner_id: str,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_model_context")
-        projection = await self.load_projection(owner_id)
+        projection, head = await self._load_context_metadata(owner_id)
         if projection is None:
-            head = await self.get_head(owner_id)
             if head is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
         return await self._load_model_context_from_projection(owner_id, projection)
+
+    async def _load_context_metadata(
+        self, owner_id: str,
+    ) -> tuple[ContextProjection | None, TranscriptHeadRecord | None]:
+        projection_key = self._projection_key(owner_id)
+        head_key = self._head_key(owner_id)
+        records = await self._store.read(
+            lambda transaction: transaction.get_records((projection_key, head_key))
+        )
+        projection = records.get(projection_key)
+        if projection is not None:
+            return _decode_enveloped_domain(projection.data, ContextProjection), None
+        head = records.get(head_key)
+        return None, None if head is None else self._decode_head(head)
 
     async def _load_model_context_from_projection(
         self,

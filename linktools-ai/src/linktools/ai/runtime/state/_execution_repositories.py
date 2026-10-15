@@ -1449,7 +1449,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]:
         """Read and guard the OPEN history head for one execution-domain mutation."""
         key = self._key("execution_history_head", execution_id)
-        record = await transaction.get_record(key)
+        execution_key = self._key("execution", execution_id)
+        if expected_producer_generation is None:
+            record = await transaction.get_record(key)
+        else:
+            records = await transaction.get_records((key, execution_key))
+            record = records.get(key)
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if record.kind != "execution_history_head":
@@ -1472,8 +1477,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if expected_producer_generation is not None:
-            execution_key = self._key("execution", execution_id)
-            execution_record = await transaction.get_record(execution_key)
+            execution_record = records.get(execution_key)
             if execution_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             execution = await self._decode(execution_record, ExecutionRecord)

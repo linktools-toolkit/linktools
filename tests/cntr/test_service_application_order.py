@@ -54,7 +54,7 @@ def test_implicit_service_preserves_compose_edges_without_owner_dependencies():
     selection = ComposeSelection(project, (target,), ("target",), False)
     # Selection through a Compose service edge does not promote its owner's
     # unrelated logical container dependencies.
-    result = ComposeOperations(SimpleNamespace()).start_selection(selection)
+    result = ComposeOperations(SimpleNamespace()).required_selection(selection)
     assert "database" in result.services and "redis" in result.services
     assert "nginx" not in result.services
     assert result.services.index("database") < result.services.index("redis")
@@ -83,7 +83,7 @@ def test_apply_service_always_waits_for_dependency_before_start(condition):
                               docker_inspector=SimpleNamespace(get_project_state=inspect))
     runner = ComposeRunner(manager)
     runner._model_args = lambda context: nullcontext(["compose"])
-    context = SimpleNamespace(project_containers=(), is_full_project=False, compose_model={"services": {
+    context = SimpleNamespace(project_containers=(), is_full_project=False, target_services=("app",), compose_model={"services": {
         "app": {"depends_on": {"provider": {"condition": condition}}}}})
     runner.apply_service(context, "app")
     assert calls == [("inspect", ("provider",)), "apply"]
@@ -115,7 +115,7 @@ def test_started_dependency_does_not_require_one_shot_service_to_keep_running():
     runner = ComposeRunner(SimpleNamespace(runtime=SimpleNamespace(
         create_docker_process=lambda *args, **kwargs: process)))
     runner._model_args = lambda context: nullcontext(["compose"])
-    context = SimpleNamespace(project_containers=(), is_full_project=False, compose_model={"services": {
+    context = SimpleNamespace(project_containers=(), is_full_project=False, target_services=("app",), compose_model={"services": {
         "app": {"depends_on": ["job"]}}})
     runner.apply_service(context, "app")
     assert calls == ["apply"]

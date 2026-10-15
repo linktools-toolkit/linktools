@@ -125,6 +125,7 @@ from .state._contracts import (
 )
 
 if TYPE_CHECKING:
+    from .state._store import StateTransaction
     from .recovery import (
         ExecutionRecoveryEffect,
         ResolveToolEffectRequest,
@@ -1877,6 +1878,31 @@ class DefaultExecutionService:
         self, execution_id: str, *, principal: Principal
     ) -> tuple[ExecutionView, ...]:
         async with self._execution_consumer(execution_id, principal.tenant_id):
+            repository = self._state.executions
+            if type(repository) is ExecutionRepositoryImpl:
+                header = await repository.get_header(
+                    execution_id, tenant_id=principal.tenant_id
+                )
+                if header is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                await self._authorization.authorize(
+                    principal, AuthorizationAction.EXECUTION_READ, header
+                )
+
+                async def read(_transaction: "StateTransaction") -> tuple[ExecutionView, ...]:
+                    current = await repository.get(
+                        execution_id, tenant_id=principal.tenant_id
+                    )
+                    if current is None:
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    children = await repository.list_children(
+                        execution_id, tenant_id=principal.tenant_id
+                    )
+                    return tuple(_execution_view(child) for child in children)
+
+                # Authorization may await arbitrary application work; only the
+                # known metadata owner shares the post-authorization snapshot.
+                return await repository.state_store.read(read)
             await self._load_authorized(
                 execution_id, principal, AuthorizationAction.EXECUTION_READ
             )

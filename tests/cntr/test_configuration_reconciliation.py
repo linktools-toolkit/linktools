@@ -35,7 +35,8 @@ def test_running_declared_consumer_does_not_activate_stopped_sibling(tmp_path):
     ], running=("running",))
     manager.integration_snapshot["app"] = (SimpleNamespace(consumer="consumer"),)
     manager.compose_operations.up(["app"])
-    assert _applied(manager) == ["app", "running"]
+    assert _applied(manager) == ["app"]
+    assert ("prepare", "consumer") not in manager.events
     assert not any("stopped" in entry[1] for entry in manager.events if entry[0] == "images")
 
 
@@ -64,7 +65,7 @@ def test_selected_service_starts_stopped_dependency_first(tmp_path):
         ("app", {"app": {"image": "app:new", "depends_on": ["db"]}}),
         ("db", {"db": {"image": "db:new"}}),
     ])
-    manager.compose_operations.up(["app"])
+    manager.compose_operations.up(["app", "db"])
     assert _applied(manager) == ["db", "app"]
 
 
@@ -73,7 +74,7 @@ def test_service_dag_interleaves_owners_by_compose_edges(tmp_path):
         ("one", {"a": {"image": "a:new"}, "c": {"image": "c:new", "depends_on": ["b"]}}),
         ("two", {"b": {"image": "b:new", "depends_on": ["a"]}}),
     ])
-    manager.compose_operations.up(["one"])
+    manager.compose_operations.up(["one", "two"])
     assert _applied(manager) == ["a", "b", "c"]
 
 
