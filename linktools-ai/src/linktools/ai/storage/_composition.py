@@ -988,12 +988,15 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 view.invalidate()
 
     async def _notify_revision(self, revision: StorageRevision) -> None:
-        source = self.primary_view.revision_source
+        if self._writer_index is None:
+            return
+        view = self._views[self._writer_index]
+        source = view.revision_source
         if source is not None:
             try:
                 await source.revision_bumped(revision)
             except Exception:
-                self.primary_view.invalidate()
+                view.invalidate()
                 _logger.warning(
                     "storage revision notification failed",
                     extra={"error_code": ErrorCode.STORAGE_REVISION_NOTIFY_FAILED.value},
