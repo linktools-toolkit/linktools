@@ -23,7 +23,11 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..workspace import normalize_workspace_input_path
-from ._attachment import input_attachment_views
+from ._attachment import (
+    binary_attachment_text,
+    input_attachment_views,
+    is_binary_attachment_text,
+)
 from .state._plan import RuntimeDomain
 from ._input_contract import (
     CanonicalUserInput,
@@ -274,7 +278,7 @@ class ExecutionInputMaterializer:
             values.append(
                 WorkspaceFileInput(
                     path,
-                    media_type=item.media_type,
+                    mime_type=item.mime_type,
                     identifier=item.identifier,
                 )
             )
@@ -315,10 +319,12 @@ class ExecutionInputMaterializer:
             > self._limits.max_binary_input_parts
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not files and not workspace_inputs:
+        if not files and not workspace_inputs and (
+            not direct_binary or isinstance(canonical, MaterializedUserContent)
+        ):
             return canonical
         access = self._access
-        if access is None:
+        if (files or workspace_inputs) and access is None:
             raise AIError(
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "files", "reason": "workspace_required"},
@@ -332,6 +338,15 @@ class ExecutionInputMaterializer:
         else:
             for item in canonical:
                 if not isinstance(item, WorkspaceFileInput):
+                    if (
+                        isinstance(item, BinaryContent)
+                        and not isinstance(canonical, MaterializedUserContent)
+                        and (
+                            not materialized_items
+                            or not is_binary_attachment_text(materialized_items[-1], item)
+                        )
+                    ):
+                        materialized_items.append(binary_attachment_text(item))
                     materialized_items.append(item)
                     continue
                 remaining = self._limits.max_binary_input_bytes - total_bytes
@@ -352,6 +367,8 @@ class ExecutionInputMaterializer:
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             try:
+                if access is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 body = await access.read_bytes(path, max_bytes=remaining)
             except AIError as error:
                 mapped = _file_request_error(error, request_invalid_reason="file_invalid")
@@ -369,18 +386,10 @@ class ExecutionInputMaterializer:
                     "digest": hashlib.sha256(body).hexdigest(),
                 }
             )
-            file_addition = (
-                (
-                    f"Workspace file path: {json.dumps(path)}",
-                    BinaryContent(
-                        data=body,
-                        media_type=media_type,
-                    ),
-                )
-            )
+            content = BinaryContent(data=body, media_type=media_type)
+            file_addition = (binary_attachment_text(content, path=path), content)
             additions.extend(file_addition)
-        materialized_items.extend(additions)
-        materialized: CanonicalUserInput = tuple(materialized_items)
+        materialized: CanonicalUserInput = (*additions, *materialized_items)
         validate_user_content(materialized)
         _logger.info(
             "execution input materialized: files=%s binary_bytes=%s",
@@ -404,7 +413,7 @@ class ExecutionInputMaterializer:
         access = self._access
         if access is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        media_type = item.media_type or self._media_type(
+        media_type = item.mime_type or self._media_type(
             item.path,
             field="user_prompt",
         )
@@ -431,17 +440,12 @@ class ExecutionInputMaterializer:
             "input_identifier": item.identifier,
             "_prompt_occurrence": True,
         }
-        return (
-            (
-                f"Workspace file path: {json.dumps(item.path)}",
-                BinaryContent(
-                    data=body,
-                    media_type=media_type,
-                    identifier=item.identifier,
-                ),
-            ),
-            view,
+        content = BinaryContent(
+            data=body,
+            media_type=media_type,
+            identifier=item.identifier,
         )
+        return (binary_attachment_text(content, path=item.path), content), view
 
     async def store(
         self,
@@ -586,7 +590,7 @@ def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
                 {
                     "kind": "workspace-file",
                     "path": item.path,
-                    "media_type": item.media_type,
+                    "media_type": item.mime_type,
                     "identifier": item.identifier,
                 }
             )
@@ -620,6 +624,11 @@ def _input_view(
     prompt = _draft_prompt(canonical)
     if not isinstance(canonical, str):
         prompt = {"kind": "items", "items": prompt}
+    attachments = list(input_attachment_views(canonical, files))
+    independent_files = sum(item.get("_prompt_occurrence") is not True for item in files)
+    if independent_files:
+        # Keep occurrence identities while exposing accepted model-input order.
+        attachments = [*attachments[-independent_files:], *attachments[:-independent_files]]
     try:
         normalized = normalize_json_value(
             {
@@ -633,7 +642,7 @@ def _input_view(
                     }
                     for item in files
                 ],
-                "attachments": list(input_attachment_views(canonical, files)),
+                "attachments": attachments,
             }
         )
     except (TypeError, ValueError) as error:
@@ -661,12 +670,26 @@ def captured_input_prompt(original: CanonicalUserInput, accepted: CanonicalUserI
     if not isinstance(items, list) or not isinstance(views, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     occurrences: dict[tuple[str, str | None, str | None], list[tuple[UserContent, ...]]] = {}
-    position = 0
+    independent_files = len(views) - sum(
+        isinstance(item, Mapping) and item.get("kind") == "workspace-file"
+        for item in items
+    )
+    if independent_files < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    file_parts = captured_input_files(accepted, independent_files) if independent_files else ()
+    position = len(file_parts) if _generated_file_pairs(file_parts) else 0
     file_index = 0
     for item in items:
         if not isinstance(item, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if item.get("kind") != "workspace-file":
+            if (
+                item.get("kind") == "binary"
+                and position + 1 < len(accepted)
+                and isinstance(accepted[position + 1], BinaryContent)
+                and is_binary_attachment_text(accepted[position], accepted[position + 1])
+            ):
+                position += 1
             position += 1
             continue
         if file_index >= len(views):
@@ -683,7 +706,7 @@ def captured_input_prompt(original: CanonicalUserInput, accepted: CanonicalUserI
     result: list[UserContent | WorkspaceFileInput] = []
     for item in original:
         if isinstance(item, WorkspaceFileInput):
-            key = (normalize_workspace_input_path(item.path), item.media_type, item.identifier)
+            key = (normalize_workspace_input_path(item.path), item.mime_type, item.identifier)
             matches = occurrences.get(key)
             if matches:
                 result.extend(matches.pop(0))
@@ -696,24 +719,52 @@ def _validate_captured_file(parts: tuple[UserContent, ...], view: JsonValue) -> 
     if not isinstance(view, Mapping) or len(parts) != 2:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     label, content = parts
+    path = view.get("path")
     if (not isinstance(content, BinaryContent)
-        or label != "Workspace file path: " + json.dumps(view.get("path"))
+        or not isinstance(path, str)
+        or not (
+            label == "Workspace file path: " + json.dumps(path)
+            or is_binary_attachment_text(label, content, path=path)
+        )
         or content.media_type != view.get("media_type") or len(content.data) != view.get("size")
         or hashlib.sha256(content.data).hexdigest() != view.get("digest")):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def captured_input_files(value: CanonicalUserInput, count: int) -> tuple[UserContent, ...]:
-    """Read the accepted file suffix produced by this input materializer."""
+    """Read accepted files, preserving current prefixes and durable legacy suffixes."""
     if not isinstance(value, MaterializedUserContent):
         raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "accepted_file_view_not_retained"})
     views = value.view.get("files")
     if not isinstance(views, list) or len(views) < count or len(value) < 2 * count:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    files = tuple(value[-2 * count:])
+    if count == 0:
+        return ()
+    files = tuple(value[:2 * count])
+    if not _generated_file_pairs(files):
+        files = tuple(value[-2 * count:])
+        if any(not isinstance(files[2 * index], str) for index in range(count)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for index, view in enumerate(views[-count:]):
         _validate_captured_file(files[2 * index:2 * index + 2], view)
     return files
+
+
+def merge_captured_input_files(
+    prompt: CanonicalUserInput,
+    files: Sequence[UserContent],
+) -> CanonicalUserInput:
+    """Replay captured file placement without changing legacy capture semantics."""
+    items = (prompt,) if isinstance(prompt, str) else prompt
+    return (*files, *items) if _generated_file_pairs(files) else (*items, *files)
+
+
+def _generated_file_pairs(parts: Sequence[UserContent]) -> bool:
+    return bool(parts) and len(parts) % 2 == 0 and all(
+        isinstance(parts[index + 1], BinaryContent)
+        and is_binary_attachment_text(parts[index], parts[index + 1])
+        for index in range(0, len(parts), 2)
+    )
 
 
 def stored_input_attachment_views(
@@ -782,7 +833,7 @@ def _encode_task_prompt_item(item: UserContent | WorkspaceFileInput) -> JsonValu
         return {
             "kind": "workspace-file",
             "path": item.path,
-            "media_type": item.media_type,
+            "media_type": item.mime_type,
             "identifier": item.identifier,
         }
     return {
@@ -821,6 +872,7 @@ __all__ = [
     "decode_user_content_payload",
     "stored_input_attachment_views",
     "input_intent",
+    "merge_captured_input_files",
     "stored_user_input_view",
     "task_prompt_draft",
     "validate_user_input",

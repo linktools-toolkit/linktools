@@ -45,7 +45,6 @@ class _TextModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:test"
-    vision = False
     contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:

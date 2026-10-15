@@ -21,6 +21,8 @@ class Element {
   connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
   append(...children){children.forEach(child=>{if(child.parentElement)child.parentElement.children=child.parentElement.children.filter(item=>item!==child);});this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
   replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
+  contains(node){return node===this || this.children.some(child=>child.contains?.(node));}
+  querySelectorAll(selector){const matches=[];for(const child of this.children){if(selector==='[data-request-focus]' && child.dataset?.requestFocus)matches.push(child);matches.push(...(child.querySelectorAll?.(selector)||[]));}return matches;}
   focus(){document.activeElement=this;}
   scrollIntoView(){}
   setAttribute(name,value){this.attributes ??= {};this.attributes[name]=String(value);}
@@ -132,70 +134,208 @@ async function until(description,ready){
     await new Promise(resolve=>setImmediate(resolve));
   }
 }
-const node=id=>nodes.get(id),tab=name=>({click(){if(node('inspector').hidden)node('inspector-toggle').click();return all.find(element=>element.dataset.tab===name).click();}}),view=name=>all.find(element=>element.dataset.view===name);
+const node=id=>nodes.get(id),tab=name=>({async click(){if(node('inspector').hidden){const opening=node('inspector-toggle').click();if(node('detail-view').value===name)return opening;}node('detail-view').value=name;return node('detail-view').onchange();}}),view=name=>all.find(element=>element.dataset.view===name);
+async function openOriginal(){
+  const draft=node('prompt').value;await node('native-mode').click();assert.equal(node('composer').hidden,true);assert.equal(node('cancel').parentElement,node('reader-actions'));assert.equal(node('prompt').value,draft);assert.equal(node('inspector').hidden,true);assert.equal(node('run-actions').open,false);assert.ok(node('native-mode').className.includes('active'));
+}
 async function refresh(){
   const previous=node('list').children;node('refresh').click();
   await until('refreshed list',()=>node('list').children!==previous);
 }
 async function detail(name,pattern){
-  tab(name).click();await until(`${name} detail`,()=>pattern.test(node('inspector-content').textContent));
+  await tab(name).click();
+  if(name==='trace' && pattern.test('Read SDK content')){const row=node('inspector-content').children.find(item=>item.className==='trace-item')?.children[0];if(row?.getAttribute('aria-expanded')!=='true')await row?.click();}
+  await until(`${name} detail`,()=>pattern.test(node('inspector-content').textContent));
 }
 await until('initial session list',()=>node('list').children.length===2);
 assert.equal(node('list').children.length,2);
 await select('#session=a');
 assert.equal(node('conversation-title').textContent,'Alpha');
-assert.match(node('conversation').textContent,/Original request timeline/);
-assert.doesNotMatch(node('conversation').textContent,/a answer/);
+assert.match(node('conversation').textContent,/a answer/);
+assert.doesNotMatch(node('conversation').textContent,/Original request timeline/);
+assert.equal(node('request-context')?.hidden ?? true,true);
+assert.equal(node('native-mode').className.includes('active'),false);
+if(process.argv[3]==='minimal') {
+  const descendants=node=>[node,...node.children.flatMap(descendants)];
+  assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && ['Details','Model requests'].includes(item.textContent)),'Default turns have no duplicate diagnostic navigation');
+  assert.equal(node('native-mode').className.includes('active'),false);assert.equal(node('composer-options').hidden,true);
+  const a=timeline('a').items[0],b={...a,execution_id:'a-two',created_at:'2026-01-02T00:00:00Z',user_input:'second'};
+  timelineOverrides.set('a',{items:[a,b],next_cursor:null});executions.set('a-two',info('a-two','a'));
+  await select('#session=a');await node('inspector-toggle').click();
+  assert.equal(node('detail-turn').value,'a-two');assert.deepEqual(node('detail-turn').children.map(item=>item.value),['a-run','a-two']);
+  node('detail-turn').value='a-run';await node('detail-turn').onchange();assert.match(node('execution-meta').textContent,/a-run/);
+  const records=[{execution_id:'a-run',step_event_seq:9,payload:{kind:'TOOL_CALL',tool_name:'search',agent_run_seq:3,step_index:2,call_id:'call-a',child_execution_id:'child-run',status:'SUCCEEDED',duration_ns:2000000}},{execution_id:'child-run',step_event_seq:1,payload:{kind:'MODEL_RESPONSE',agent_run_seq:1,model_request_seq:4,status:'SUCCEEDED'}}];
+  detailResponses.set('/api/executions/a-run/trace',url=>({items:url.searchParams.has('cursor')?[{execution_id:'a-run',step_event_seq:11,payload:{kind:'TOOL_RETURN',tool_name:'search'}}]:records,next_cursor:url.searchParams.has('cursor')?null:'trace-more'}));
+  await tab('trace').click();
+  const rows=()=>node('inspector-content').children.filter(item=>item.className==='trace-item');
+  assert.deepEqual(rows().map(item=>item.children[0].textContent.match(/^#\d+/)[0]),['#9','#1'],'API order is preserved across execution identities');
+  assert.ok(rows().every(item=>item.children.length===1),'Trace shows compact rows until an event is selected');
+  rows()[0].children[0].focus();await rows()[0].children[0].click();assert.equal(document.activeElement.dataset.requestFocus,'trace:a-run:9');
+  assert.match(rows()[0].textContent,/a-run.*run 3.*step 2/);assert.match(rows()[0].textContent,/Open subagent/);assert.match(rows()[0].textContent,/Original event record/);
+  const beforePaging=calls.length;await node('detail-more').click();assert.equal(calls[beforePaging].query.cursor,'trace-more');
+  assert.equal(rows()[0].children[0].getAttribute('aria-expanded'),'true');assert.equal(document.activeElement.dataset.requestFocus,'trace:a-run:9');assert.equal(rows().length,3);
+  rows()[1].children[0].focus();await rows()[1].children[0].click();assert.equal(rows()[0].children.length,1);assert.equal(rows()[1].children[0].getAttribute('aria-expanded'),'true');
+  await rows()[0].children[0].click();executions.set('child-run',{...info('child-run','a'),parent_execution_id:'a-run'});
+  const childRead=deferred('GET /api/executions/child-run'),openingChild=descendants(rows()[0]).find(item=>item.tagName==='BUTTON' && item.textContent==='Open subagent').click();await childRead.requested;
+  assert.equal(node('detail-turn').value,'child-run','Pending child read names its target immediately');
+  childRead.reject(new Error('Child unavailable'));await openingChild;assert.equal(node('detail-turn').value,'child-run');
+  node('detail-turn').value='a-run';await node('detail-turn').onchange();await rows()[0].children[0].click();
+  await descendants(rows()[0]).find(item=>item.tagName==='BUTTON' && item.textContent==='Open subagent').click();
+  assert.match(node('execution-meta').textContent,/child-run/);assert.equal(node('detail-turn').value,'child-run');assert.match(node('detail-turn').children.at(-1).textContent,/Execution child-run/);
+  await descendants(node('execution-meta')).find(item=>item.tagName==='BUTTON' && item.textContent==='↑ Parent execution').click();assert.equal(node('detail-turn').value,'a-run');
+  node('run-actions').open=true;await node('activity-mode').click();assert.equal(node('run-actions').open,false);assert.equal(node('conversation-column').hidden,true);assert.ok(node('inspector').className.includes('execution-page'));assert.equal(node('detail-view').value,'trace');assert.equal(rows().length,2);node('inspector-close').click();assert.equal(node('conversation-column').hidden,false);assert.equal(document.activeElement,node('activity-mode'));await openOriginal();assert.equal(node('request-turn').value,'a-run');assert.equal(document.activeElement,node('native-mode'));node('chat-mode').click();assert.equal(document.activeElement,node('prompt'));
+  console.log('Minimal navigation contracts passed: one entry, explicit turn identity, original Trace order, single selected event, paging/focus, real child/parent and full-width return');process.exit(0);
+}
+if(process.argv[3]==='details') {
+  executions.set('a-run',{...info('a-run'),usage:{logical_requests:2,input_tokens:20,output_tokens:5,cache_read_tokens:0,cache_write_tokens:0,unknown_usage_requests:1}});
+  await select('#session=a');node('inspector-toggle').click();await until('default original request details',()=>node('inspector-content').textContent.includes('No records'));
+  assert.equal(node('detail-view').value,'models');assert.match(node('execution-meta').textContent,/SUCCEEDED/);assert.match(node('execution-meta').textContent,/1.000 s/);assert.match(node('execution-meta').textContent,/2 requests.*20 in.*5 out.*1 usage unknown/);
+  assert.equal(node('session-details').hidden,true);assert.equal(node('recovery-controls').hidden,true);assert.equal(node('detail-attention').hidden,true);
+  assert.ok(!calls.some(call=>call.key.endsWith('/history') || call.key.endsWith('/recovery')),'Opening default Details does not fetch diagnostics or recovery');
+  node('run-actions').open=true;node('run-actions').onkeydown({key:'Escape'});assert.equal(node('run-actions').open,false);assert.equal(document.activeElement,node('run-actions-toggle'));
+  await detail('overview',/Execution metadata/);assert.equal(node('session-details').hidden,false);assert.equal(node('detail-view').value,'overview');
+  executions.set('orphan',{...info('orphan','a'),status:'RECOVERY_REQUIRED',terminal_at:null,error_code:'TOOL_EFFECT_OUTCOME_UNKNOWN'});sessions.get('a').active_execution_id='orphan';streamBlocks.set('orphan',{});
+  await select('#session=a&execution=orphan');assert.equal(node('detail-attention').hidden,false);assert.equal(node('detail-recovery').hidden,false);assert.match(node('detail-attention-text').textContent,/RECOVERY REQUIRED.*TOOL_EFFECT_OUTCOME_UNKNOWN/);assert.match(node('execution-meta').textContent,/Duration unavailable/);assert.doesNotMatch(node('execution-meta').textContent,/In progress/);
+  await node('detail-recovery').click();assert.equal(node('detail-view').value,'recovery');assert.equal(node('recovery-controls').hidden,false);assert.equal(node('resume-run').disabled,false);assert.equal(node('end-stopped').disabled,false);
+  const posts=calls.filter(call=>call.method==='POST').length;globalThis.confirm=()=>false;await node('resume-run').click();await node('end-stopped').click();assert.equal(calls.filter(call=>call.method==='POST').length,posts,'Dismissed Resume/End confirmations have no side effects');globalThis.confirm=()=>true;
+  executions.set('a-run',{...info('a-run'),status:'FAILED',error_code:'MODEL_ERROR'});await select('#session=a&execution=a-run');
+  assert.equal(node('inspector-active-stop').hidden,false);assert.equal(node('stop-run').hidden,true);assert.match(node('detail-attention-text').textContent,/Failed.*MODEL_ERROR/);assert.equal(node('detail-recovery').hidden,true);assert.equal(node('retry').disabled,false);
+  node('run-actions').open=true;await select('#session=b');assert.equal(node('run-actions').open,false,'Changing selected run closes its actions menu');assert.equal(node('detail-attention').hidden,true);
+  node('run-actions').open=true;await select('#session=a&execution=a-run');assert.equal(node('run-actions').open,false,'Explicit session/execution navigation closes the previous target actions menu');
+  node('run-actions').open=true;await select('#view=executions&execution=a-run');assert.equal(node('run-actions').open,false,'Same execution navigation into the independent browser closes the prior view action menu');await detail('overview',/Execution metadata/);assert.equal(node('session-details').hidden,true,'Standalone execution inspection cannot expose the previous conversation metadata');
+  await select('#session=b&execution=a-run');assert.equal(node('session-details').hidden,true,'Another execution session is not the surrounding conversation');
+  await select('#session=a&execution=orphan');await tab('recovery').click();
+  const recoveryReply=deferred('POST /api/executions/orphan/recover'),recovering=node('resume-run').click();await recoveryReply.requested;
+  node('inspector-close').click();assert.equal(node('inspector').hidden,true,'Close takes effect while Resume is pending');
+  executions.get('orphan').status='STARTED';recoveryReply({execution_id:'orphan'},202);await recovering;await hashChanged;
+  assert.equal(node('inspector').hidden,true,'Completing same-execution Resume must not reopen closed details');
+  streamBlocks.get('orphan').controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'orphan',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'resumed after close'}}}})+'\n\n'));
+  await until('resumed output with details closed',()=>node('live').textContent.includes('resumed after close'));assert.equal(node('cancel').hidden,false);
+  await tab('recovery').click();const lateRecovery=deferred('POST /api/executions/orphan/recover'),lateRecovering=node('resume-run').click();await lateRecovery.requested;
+  await select('#session=b');const beforeLate=calls.length;lateRecovery({execution_id:'orphan'},202);await lateRecovering;
+  assert.equal(node('conversation-title').textContent,'Beta');assert.ok(!calls.slice(beforeLate).some(call=>call.key.includes('/orphan')),'Late Resume does not refresh a newer conversation selection');
+  await select('#view=executions&execution=orphan');await tab('recovery').click();const standaloneHash=location.hash;
+  const standaloneReply=deferred('POST /api/executions/orphan/recover'),standaloneRecovering=node('resume-run').click();await standaloneReply.requested;standaloneReply({execution_id:'orphan'},202);await standaloneRecovering;await hashChanged;
+  assert.equal(location.hash,standaloneHash,'Same-execution Resume preserves standalone execution browsing');assert.equal(node('conversation-column').hidden,true);assert.equal(node('inspector').hidden,false);assert.match(node('execution-meta').textContent,/orphan/);
+  console.log('Details contracts passed: compact default source, summary, metadata, explicit recovery, confirmations, selected/active actions and menu focus');process.exit(0);
+}
+if(process.argv[3]==='guided') {
+  const descendants=node=>[node,...node.children.flatMap(descendants)];
+  assert.equal(node('conversation-heading').hidden,false);assert.equal(node('page-heading').hidden,true);
+  assert.equal(node('inspector').hidden,true);assert.ok(!calls.some(call=>call.key.endsWith('/history')),'SDK records stay opt-in');
+  assert.equal(calls.filter(call=>call.key.endsWith('/models')).length,0,'Default conversation does not fetch original or SDK request bodies');
+  const source='{ "messages": [{"role":"system","content":"actual system first"},{"role":"system","content":"actual instructions second"}],"untouched":9007199254740993 }';
+  const original={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},client_requests_included:true,client_requests:[{api:'openai.chat.completions',body:Buffer.from(source).toString('base64'),body_encoding:'base64',response:null}]};
+  detailResponses.set('/api/executions/a-run/history',{items:[
+    {execution_id:'a-run',message_seq:1,agent_run_seq:1,part_index:null,item_kind:'instructions',content:'SDK instructions field first in projection'},
+    {execution_id:'a-run',message_seq:1,agent_run_seq:1,part_index:0,item_kind:'system',content:'SDK system part follows field metadata'},
+  ],next_cursor:null});
+  detailResponses.set('/api/executions/a-run/models',{items:[original],next_cursor:null});
+  await detail('history',/SDK instructions field first in projection/);
+  assert.equal(node('detail-view').value,'history');
+  assert.match(node('inspector-content').textContent,/not outbound messages/);assert.match(node('inspector-content').textContent,/Display order is not client message order/);
+  assert.match(node('inspector-content').textContent,/SDK instructions field/);assert.match(node('inspector-content').textContent,/field metadata/);assert.match(node('inspector-content').textContent,/SDK system part/);
+  assert.doesNotMatch(node('inspector-content').textContent,/Message 1/);
+  for(const value of ['SDK instructions field first in projection','SDK system part follows field metadata'])assert.ok(descendants(node('inspector-content')).some(item=>item.tagName==='PRE' && item.textContent===value),'SDK field and part content remain unchanged');
+  await descendants(node('inspector-content')).find(item=>item.tagName==='BUTTON' && item.textContent==='View model messages').click();
+  assert.deepEqual(descendants(node('inspector-content')).filter(item=>item.className==='native-text').map(item=>item.textContent),['actual system first','actual instructions second'],'Readable rows follow captured array order, never SDK projection order');
+  await descendants(node('inspector-content')).find(item=>item.tagName==='BUTTON' && item.textContent==='View raw').click();
+  assert.ok(descendants(node('inspector-content')).some(item=>item.tagName==='PRE' && item.textContent===source),'Raw remains exact after readable projection');
+  assert.doesNotMatch(node('inspector-content').textContent,/SDK instructions field first in projection/);
+  node('inspector-close').click();await openOriginal();await until('independent model request mode',()=>node('conversation').textContent.includes('actual system first'));
+  assert.equal(node('request-context').hidden,false);assert.equal(node('request-turn').value,'a-run');
+  assert.doesNotMatch(node('conversation').textContent,/a question|a answer/,'Request mode does not interleave conversation turns with full outbound arrays');
+  const request=descendants(node('conversation')).find(item=>item.dataset.requestFocus==='reader:selection');request.focus();
+  await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Refresh requests').click();
+  assert.equal(descendants(node('conversation')).find(item=>item.dataset.requestFocus==='reader:selection').value,'a-run:1:1:0','Refreshing source preserves selected request');
+  assert.equal(document.activeElement?.dataset.requestFocus,'reader:selection','Source refresh preserves keyboard focus on the request selector');
+  await detail('models',/actual system first/);assert.equal(node('composer').hidden,false,'Opening diagnostics from reader restores coherent conversation layout');assert.equal(node('cancel').parentElement,node('composer-actions'));assert.equal(node('conversation-column').className.includes('reading'),false);await openOriginal();
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===source),'Changing the reading surface retains the same authoritative body and selection');
+  timelineOverrides.set('a',{items:[...timeline('a').items,{...timeline('a').items[0],execution_id:'a-two',user_input:'Second question'}],next_cursor:null});
+  await select('#session=a&execution=a-run');await openOriginal();
+  networkFailures.add('GET /api/executions/a-two');node('request-turn').value='a-two';await node('request-turn').onchange();
+  assert.equal(node('request-turn').value,'a-two');assert.match(node('conversation').textContent,/Runtime read unavailable/);
+  assert.doesNotMatch(node('conversation').textContent,/actual system first/,'Failed turn selection cannot retain another turn original bytes');
+  assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Download original bytes'));
+  networkFailures.clear();await select('#session=a&execution=a-run');
+  node('chat-mode').click();assert.equal(node('composer').hidden,false);assert.equal(node('cancel').parentElement,node('composer-actions'));assert.match(node('conversation').textContent,/a answer/);assert.equal(node('request-context')?.hidden ?? true,true);
+  await detail('transcript',/SDK text excerpts only/);assert.match(node('inspector-content').textContent,/System, instructions, tools/);
+  node('new-session').click();assert.equal(document.activeElement,node('new-agent'));assert.equal(node('new-options').open,false);
+  node('new-dialog').close();await openOriginal();node('new-session').click();node('new-title').value='Fresh chat';node('new-agent').value='default';
+  const creation=deferred('POST /api/sessions'),creating=node('new-form').requestSubmit();await creation.requested;
+  const createdId=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions').body.session_id;
+  sessions.set(createdId,{session_id:createdId,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:'Fresh chat'}});timelineOverrides.set(createdId,{items:[],next_cursor:null});
+  creation({session_id:createdId});await creating;await until('fresh conversation composer focus',()=>node('conversation-title').textContent==='Fresh chat' && document.activeElement===node('prompt'));
+  assert.equal(node('native-mode').className.includes('active'),false,'A new conversation always starts in chat, even after inspecting original requests');
+  node('menu').click();assert.equal(node('menu').getAttribute('aria-expanded'),'true');
+  node('sidebar-close').click();assert.equal(node('menu').getAttribute('aria-expanded'),'false');assert.equal(document.activeElement,node('menu'));
+  node('menu').click();view('metrics').click();await hashChanged;assert.equal(node('menu').getAttribute('aria-expanded'),'false');
+  node('menu').click();await Promise.all(handlers.get('keydown').map(handler=>handler({key:'Escape'})));assert.equal(node('menu').getAttribute('aria-expanded'),'false');assert.equal(document.activeElement,node('menu'));
+  console.log('Guided conversation contracts passed: default chat, independent original requests, unchanged bytes, SDK field/part provenance and discoverable controls');process.exit(0);
+}
 if(process.argv[3]==='native') {
+  node('conversation').scrollTop=700;await openOriginal();assert.equal(node('conversation').scrollTop,0,'Original inputs open at the first message instead of chat bottom');await until('original request reading mode',()=>node('conversation').textContent.includes('Refresh requests'));
   const descendants=node=>[node,...node.children.flatMap(descendants)];
   const clickText=label=>descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent===label).click();
   const bytes=value=>({body:Buffer.from(value).toString('base64'),body_encoding:'base64'});
-  const messages=[{role:'developer',content:'<script>native only</script>',unknown:{preserve:null}},{role:'assistant',content:'',tool_calls:[{id:'call',function:{name:'read',arguments:'{"x":1}'}}]},{role:'tool',tool_call_id:'call',content:[{type:'text',text:'result'}]}];
+  const messages=[{role:'developer',content:'<script>native only</script>',unknown:{preserve:null}},{role:'assistant',content:'',tool_calls:[{id:'call',function:{name:'read',arguments:'{"x":1}'}}]},{role:'tool',tool_call_id:'call',content:[{type:'text',text:'result'},{type:'image_url',image_url:{url:'https://invalid.example/pixel.png'}},{type:'unrecognized',value:17},{type:'text',text:'last block'}]},{role:'future-role',content:null,unknown_member:{keep:true}},{role:'user',content:[]},{role:'assistant'}];
   const source=JSON.stringify({messages,extra_body_field:{arbitrary:true}}).slice(0,-1)+',"large_integer":9007199254740993,"duplicate":1,"duplicate":2}';
   const responseText='data: {"choices":[{"delta":{"role":"assistant","content":"<img src=x onerror=alert(1)>"}}]}\n\n';
-  const item={execution_id:'a-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'CANCELLED',step_index:4,output_retry_index:2,started_at:'2026-01-01T00:00:00Z',finished_at:'2026-01-01T00:00:01Z',duration_ns:1000000000,model:{},content_included:false,request:{instructions:['DO NOT SYNTHESIZE SYSTEM']},client_requests_included:true,client_requests:[
+  const item={execution_id:'a-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'CANCELLED',step_index:4,output_retry_index:2,started_at:'2026-01-01T00:00:00Z',finished_at:'2026-01-01T00:00:01Z',duration_ns:1000000000,usage:{input_tokens:41,output_tokens:7,cache_read_tokens:3,cache_write_tokens:2},model:{},content_included:false,request:{instructions:['DO NOT SYNTHESIZE SYSTEM']},client_requests_included:true,client_requests:[
     {api:'openai.chat.completions',...bytes(source),response:{...bytes('{"error":"retry"}'),status_code:429,format:'json',content_encoding:null,complete:true}},
     {api:'openai.chat.completions',...bytes(source),response:{...bytes(responseText),status_code:200,format:'sse',content_encoding:null,complete:false}},
   ]};
   detailResponses.set('/api/executions/a-run/models',{items:[item],next_cursor:'raw-next'});
-  await clickText('Refresh original requests');
-  assert.match(node('conversation').textContent,/Original outbound request body/);
-  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===source),'Exact source retains large integers, duplicate keys, empty content, roles and all native fields');
-  assert.match(node('conversation').textContent,/"large_integer":9007199254740993,"duplicate":1,"duplicate":2/);
-  assert.match(node('conversation').textContent,/Logical request timing and identity/);
-  assert.match(node('conversation').textContent,/"step_index": 4/);
-  assert.match(node('conversation').textContent,/"output_retry_index": 2/);
-  assert.match(node('conversation').textContent,/"duration_ns": 1000000000/);
+  await clickText('Refresh requests');
+  assert.deepEqual(descendants(node('conversation')).filter(value=>value.className==='native-role').map(value=>value.textContent),['0developer','1assistant','2tool','3future-role','4user','5assistant']);assert.match(node('conversation').textContent,/content field absent/);assert.match(node('conversation').textContent,/content: empty array/);assert.match(node('conversation').textContent,/\"unknown_member\":\{\"keep\":true\}/);const blocks=descendants(node('conversation')).filter(value=>value.className==='native-block');assert.deepEqual(blocks.map(value=>value.children[0].textContent),['content[0] · text','content[1] · image_url','content[2] · unrecognized','content[3] · text']);assert.match(blocks[1].textContent,/https:\/\/invalid.example\/pixel.png/);assert.equal(descendants(node('conversation')).filter(value=>['IMG','IFRAME','VIDEO','AUDIO'].includes(value.tagName)).length,0,'Inspecting captured media never creates a remote loader');
+  assert.match(node('conversation').textContent,/content: empty string/);assert.ok(descendants(node('conversation')).some(value=>value.className==='native-tool-heading' && value.textContent.startsWith('readcall')));assert.match(node('conversation').textContent,/tool_calls\[0\]/);assert.ok(descendants(node('conversation')).some(value=>value.tagName==='PRE' && value.textContent==='\{\"x\":1\}'),'Tool arguments remain the exact captured string');
+  const messageFields=()=>descendants(node('conversation')).find(value=>value.children[0]?.dataset.requestFocus==='a-run:1:1:0:message:0:0');
+  assert.match(messageFields().textContent,/\"unknown\":\{\"preserve\":null\}/);messageFields().open=true;messageFields().ontoggle();messageFields().children[0].focus();await clickText('Refresh requests');assert.equal(messageFields().open,true);assert.equal(document.activeElement.dataset.requestFocus,'a-run:1:1:0:message:0:0','Field disclosure and focus survive an unrelated refresh');
+  await clickText('View raw');
+  assert.ok(descendants(node('conversation')).some(value=>value.tagName==='PRE' && value.textContent===source),'Exact source retains large integers, duplicate keys, empty content, roles and all native fields');
+  assert.match(node('conversation').textContent,/\"large_integer\":9007199254740993,\"duplicate\":1,\"duplicate\":2/);
+  assert.match(node('conversation').textContent,/Request details/);assert.match(node('conversation').textContent,/41 in.*7 out.*3 cache read.*2 cache write/);assert.match(node('conversation').textContent,/\"input_tokens\": 41/);
+  assert.match(node('conversation').textContent,/\"step_index\": 4/);assert.match(node('conversation').textContent,/\"output_retry_index\": 2/);assert.match(node('conversation').textContent,/\"duration_ns\": 1000000000/);
   assert.match(node('conversation').textContent,/HTTP 429 · complete/);
-  assert.match(node('conversation').textContent,/HTTP 200 · incomplete/);
-  assert.match(node('conversation').textContent,/<img src=x onerror=alert\(1\)>/);
+  const picker=()=>descendants(node('conversation')).find(value=>value.dataset.requestFocus==='reader:selection');
+  const pick=async key=>{const select=picker();select.focus();select.value=key;await select.onchange();};
+  assert.deepEqual(picker().children.map(value=>value.value),['a-run:1:1:0','a-run:1:1:1'],'Actual attempts retain original order in a flat selector');
+  assert.equal(node('request-turn').parentElement,picker().parentElement,'Turn and request use one toolbar');
+  assert.equal(node('request-turn').children[0].textContent,'Turn 1');assert.match(node('request-turn').children[0].getAttribute('aria-label'),/a-run/);assert.match(node('request-turn').title,/SUCCEEDED.*a-run/,'Compact turn labels retain the full identity and state in the control description');
+  const menu=()=>descendants(node('conversation')).find(value=>value.className==='native-tools');
+  menu().open=true;menu().ontoggle();menu().onkeydown({key:'Escape'});assert.equal(menu().open,false);assert.equal(document.activeElement.dataset.requestFocus,'reader:tools');
+  const infoPanel=()=>descendants(node('conversation')).find(value=>value.className==='native-envelope native-info');
+  assert.equal(infoPanel().hidden,true,'Technical identity starts out of the reading path');
+  await clickText('Inspect request');assert.equal(infoPanel().hidden,false);assert.equal(infoPanel().open,true);assert.match(infoPanel().textContent,/Provider-server receipt is not observable/);assert.match(infoPanel().textContent,/41 in.*7 out/);assert.equal(document.activeElement.dataset.requestFocus,'reader:tools');
+  infoPanel().children[0].focus();infoPanel().open=false;infoPanel().ontoggle();assert.equal(infoPanel().hidden,true);assert.equal(document.activeElement.dataset.requestFocus,'reader:tools','Closing Info returns focus to its visible trigger');await clickText('Refresh requests');assert.equal(document.activeElement.dataset.requestFocus,'reader:tools');
+  menu().open=true;menu().ontoggle();
+  await pick('a-run:1:1:1');assert.equal(menu().open,false,'Selecting another attempt closes request tools');assert.match(node('conversation').textContent,/HTTP 200 · incomplete/);assert.match(node('conversation').textContent,/<img src=x onerror=alert\(1\)>/);
   assert.doesNotMatch(node('conversation').textContent,/DO NOT SYNTHESIZE SYSTEM/);
-  const attempts=descendants(node('conversation')).filter(item=>item.dataset.clientAttempt);
-  assert.deepEqual(attempts.map(item=>item.dataset.clientAttempt),['a-run:1:1:0','a-run:1:1:1']);
-  assert.ok(descendants(node('conversation')).filter(item=>item.tagName==='PRE').every(item=>!item.innerHTML),'Original body uses text nodes, never HTML rendering');
-  let download;
-  URL.createObjectURL=blob=>{download=blob;return 'blob:test';};URL.revokeObjectURL=()=>{};
-  await clickText('Download original bytes');
-  assert.equal(await download.text(),source);
-  const beforeInspector=calls.filter(call=>call.key==='/api/executions/a-run/models').length;await detail('models',/Original outbound request body/);
-  assert.equal(calls.filter(call=>call.key==='/api/executions/a-run/models').length,beforeInspector,'Opening the original inspector reuses the visible timeline body page');tab('overview').click();node('inspector-close').click();
+  await clickText('Refresh requests');assert.equal(picker().value,'a-run:1:1:1');assert.equal(document.activeElement.dataset.requestFocus,'reader:selection');
+  const responsePanel=()=>descendants(node('conversation')).find(value=>value.className==='native-response');responsePanel().open=true;responsePanel().ontoggle();responsePanel().children[0].focus();await clickText('Refresh requests');assert.equal(responsePanel().open,true,'Refreshing capture retains the expanded response');assert.equal(document.activeElement.dataset.requestFocus,'a-run:1:1:1:response','Response summary focus survives capture refresh');const metadataPanel=()=>descendants(node('conversation')).find(value=>value.children[0]?.dataset.requestFocus==='a-run:1:1:metadata');metadataPanel().open=true;metadataPanel().ontoggle();await clickText('Read messages');assert.equal(metadataPanel().open,true,'Raw/readable switching retains request metadata disclosure');await clickText('View raw');
+  assert.ok(descendants(node('conversation')).filter(value=>value.tagName==='PRE').every(value=>!value.innerHTML),'Source and readable content use text nodes, never HTML rendering');
+  let download;URL.createObjectURL=blob=>{download=blob;return 'blob:test';};URL.revokeObjectURL=()=>{};
+  await clickText('Download bytes');assert.equal(await download.text(),source);
+  const beforeInspector=calls.filter(call=>call.key==='/api/executions/a-run/models').length;await detail('models',/Read messages/);
+  assert.equal(calls.filter(call=>call.key==='/api/executions/a-run/models').length,beforeInspector,'Opening the original inspector reuses the visible timeline body page');await tab('overview').click();assert.equal(node('inspector-content').className.includes('native-reader'),false,'Non-request details clear reader layout');await openOriginal();
   networkFailures.add('GET /api/executions/a-run/models');
-  await clickText('Load more model requests');
+  await clickText('Load more requests');
   assert.match(node('conversation').textContent,/Runtime read unavailable/);
   assert.ok(descendants(node('conversation')).some(item=>item.tagName==='PRE' && item.textContent===source),'Failed paging preserves loaded content');
-  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Load more model requests'),'Failed paging retains its retry cursor');
+  assert.ok(descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && item.textContent==='Load more requests'),'Failed paging retains its retry cursor');
   networkFailures.clear();
   const next=deferred('GET /api/executions/a-run/models'),before=calls.length;
-  const moreButton=descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Load more model requests');
+  const moreButton=descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Load more requests');
   const more=moreButton.click();moreButton.click();await next.requested;
   assert.equal(calls.slice(before).filter(call=>call.query.cursor==='raw-next').length,1);
   next({items:[{...item,model_request_seq:2,client_requests:null},{...item,model_request_seq:3,client_requests:[]}],next_cursor:null});
   await more;
-  assert.match(node('conversation').textContent,/were not recorded/);
-  assert.match(node('conversation').textContent,/No supported client dispatch/);
-  const stale=deferred('GET /api/executions/a-run/models'),staleRefresh=clickText('Refresh original requests');await stale.requested;
+  await pick('a-run:1:2:unavailable');assert.match(node('conversation').textContent,/were not recorded/);
+  await pick('a-run:1:3:unavailable');assert.match(node('conversation').textContent,/No supported client dispatch/);
+  await pick('a-run:1:2:unavailable');detailResponses.set('/api/executions/a-run/models',{items:[{...item,model_request_seq:2}],next_cursor:null});await clickText('Refresh requests');assert.equal(picker().value,'a-run:1:2:0','A selected unavailable request becomes its own captured attempt, never another request');
+  const stale=deferred('GET /api/executions/a-run/models'),staleRefresh=clickText('Refresh requests');await stale.requested;
   await select('#session=b');
-  stale({items:[item],next_cursor:null});await staleRefresh;
+  stale({items:[item],next_cursor:null});await staleRefresh;assert.equal(node('composer').hidden,true,'Switching conversations in reader mode keeps the composer hidden');assert.equal(node('cancel').parentElement,node('reader-actions'));
   assert.doesNotMatch(node('conversation').textContent,/native only/);
   assert.ok(calls.filter(call=>call.key.endsWith('/models')).every(call=>call.query.include_client_requests==='true' && !call.query.include_content));
   const id='native-live',path=`/api/executions/${id}/models`;
@@ -209,41 +349,41 @@ if(process.argv[3]==='native') {
   const bodyCalls=()=>calls.filter(call=>call.key===path),bodyReads=()=>bodyCalls().length;
   // Negative timer assertions must span the 60 ms original-body debounce.
   const waitNativeRefresh=()=>new Promise(resolve=>setTimeout(resolve,80));
-  emit(projection(20,'SUCCEEDED'));await until('completed original request 20',()=>node('conversation').textContent.includes('Request 20 · SUCCEEDED'));
-  const oldPage=deferred(`GET ${path}`),oldPaging=clickText('Load more model requests');await oldPage.requested;
+  emit(projection(20,'SUCCEEDED'));await until('completed original request 20',()=>node('conversation').textContent.includes('Request 20 · Attempt'));
+  const oldPage=deferred(`GET ${path}`),oldPaging=clickText('Load more requests');await oldPage.requested;
   oldPage({items:[...Array.from({length:9},(_,i)=>completed(i+11)),{...completed(20),status:'RUNNING',client_requests:null}],next_cursor:null});await oldPaging;
-  assert.deepEqual(descendants(node('conversation')).filter(value=>value.tagName==='H3' && value.textContent.startsWith('Request ')).map(value=>Number(value.textContent.split(' ')[1])),Array.from({length:20},(_,i)=>i+1),'Later paging retains logical request order after a newer point read');
-  assert.match(node('conversation').textContent,/Request 20 · SUCCEEDED/);assert.doesNotMatch(node('conversation').textContent,/Request 20 · RUNNING/);
+  assert.deepEqual([...new Set(picker().children.map(value=>Number(value.textContent.split(' ')[1])))],Array.from({length:20},(_,i)=>i+1),'Later paging retains logical request order after a newer point read');
+  assert.match(node('conversation').textContent,/Request 20 · Attempt/);await pick('native-live:1:20:0');assert.match(infoPanel().textContent,/\"status\": \"SUCCEEDED\"/);assert.doesNotMatch(infoPanel().textContent,/RUNNING/,'A stale running page cannot replace completed request metadata or its captured attempts');
   const beforeReplay=bodyReads();emit(projection(1,'SUCCEEDED'));await waitNativeRefresh();assert.equal(bodyReads(),beforeReplay,'Initial observation replay reuses already-loaded terminal originals');
   const beforeDeltas=bodyReads();emit(projection(21,'RUNNING'));
   for(let i=0;i<4;i++)emit({type:'event',item:{execution_id:id,depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:i?'!':'**live**'}}}});
   await until('live token batch',()=>node('live').textContent.includes('live!!!'));await waitNativeRefresh();assert.equal(bodyReads(),beforeDeltas,'Tokens and RUNNING metadata never read original bodies');
   assert.match(node('live').textContent,/LIVE RESPONSE · incomplete SDK display/);assert.match(node('live').textContent,/live!!!/);
   assert.ok(descendants(node('live')).some(value=>value.innerHTML.includes('<strong>live</strong>')),'Live Markdown remains visible in original mode');
-  emit(projection(21,'SUCCEEDED'));emit(projection(22,'SUCCEEDED'));emit(projection(21,'SUCCEEDED'));await until('completed original requests 21 and 22',()=>node('conversation').textContent.includes('Request 21 · SUCCEEDED') && node('conversation').textContent.includes('Request 22 · SUCCEEDED'));
+  emit(projection(21,'SUCCEEDED'));emit(projection(22,'SUCCEEDED'));emit(projection(21,'SUCCEEDED'));await until('completed original requests 21 and 22',()=>node('conversation').textContent.includes('Request 21 · Attempt') && node('conversation').textContent.includes('Request 22 · Attempt'));
   assert.equal(bodyReads(),beforeDeltas+2,'Distinct completions read exactly their own requests and coalesce replays');
   assert.ok(bodyCalls().slice(beforeDeltas).every(call=>call.query.agent_run_seq==='1' && ['21','22'].includes(call.query.model_request_seq)),'Completion never rereads previous history pages');
-  assert.match(node('conversation').textContent,/Request 19 · SUCCEEDED/);assert.match(node('conversation').textContent,/Request 22 · SUCCEEDED/);assert.match(node('conversation').textContent,/compaction/);assert.match(node('execution-meta').textContent,/STARTED/);
+  assert.match(node('conversation').textContent,/Request 19 · Attempt/);assert.match(node('conversation').textContent,/Request 22 · Attempt/);await pick('native-live:1:22:0');assert.match(node('conversation').textContent,/compaction/);assert.match(node('execution-meta').textContent,/STARTED/);
   emit(projection(21,'SUCCEEDED'));await waitNativeRefresh();assert.equal(bodyReads(),beforeDeltas+2,'Replayed completion does not reread bodies');
-  networkFailures.add(`GET ${path}`);await clickText('Refresh original requests');
-  assert.match(node('conversation').textContent,/Request 19 · SUCCEEDED/);assert.match(node('conversation').textContent,/Request 22 · SUCCEEDED/);assert.match(node('conversation').textContent,/Runtime read unavailable/);
+  networkFailures.add(`GET ${path}`);await clickText('Refresh requests');
+  assert.match(node('conversation').textContent,/Request 19 · Attempt/);assert.match(node('conversation').textContent,/Request 22 · Attempt/);assert.match(node('conversation').textContent,/Runtime read unavailable/);
   networkFailures.clear();
-  const loading=deferred(`GET ${path}`),loadingRefresh=clickText('Refresh original requests');await loading.requested;emit(projection(23,'SUCCEEDED'));await until('completion during a body read',()=>node('inspector-content').textContent.includes('Request 23 · SUCCEEDED'));
-  loading({items:Array.from({length:10},(_,i)=>completed(i+1)),next_cursor:'live-next'});await loadingRefresh;await until('original body for queued completion',()=>node('conversation').textContent.includes('Request 23 · SUCCEEDED'));
-  assert.match(node('conversation').textContent,/Request 19 · SUCCEEDED/);assert.match(node('conversation').textContent,/Request 23 · SUCCEEDED/);
+  const loading=deferred(`GET ${path}`),loadingRefresh=clickText('Refresh requests');await loading.requested;emit(projection(23,'SUCCEEDED'));await until('completion during a body read',()=>node('inspector-content').textContent.includes('Request 23 · SUCCEEDED'));
+  loading({items:Array.from({length:10},(_,i)=>completed(i+1)),next_cursor:'live-next'});await loadingRefresh;await until('original body for queued completion',()=>node('conversation').textContent.includes('Request 23 · Attempt'));
+  assert.match(node('conversation').textContent,/Request 19 · Attempt/);assert.match(node('conversation').textContent,/Request 23 · Attempt/);
   assert.equal(bodyCalls().filter(call=>call.query.model_request_seq==='23').length,1,'Completion during a body read refreshes its request once after paging finishes');
   const beforeHidden=bodyReads();emit(projection(24,'SUCCEEDED'));await until('completion queued before hiding original view',()=>node('inspector-content').textContent.includes('Request 24 · SUCCEEDED'));node('chat-mode').click();await waitNativeRefresh();
   assert.equal(bodyReads(),beforeHidden,'A queued refresh cannot read bodies after the original view is hidden');
-  node('native-mode').click();await until('original body after reopening original view',()=>node('conversation').textContent.includes('Request 24 · SUCCEEDED'));assert.equal(bodyReads(),beforeHidden+1);assert.match(node('conversation').textContent,/Request 24 · SUCCEEDED/);
+  openOriginal();await until('original body after reopening original view',()=>node('conversation').textContent.includes('Request 24 · Attempt'));assert.equal(bodyReads(),beforeHidden+1);assert.match(node('conversation').textContent,/Request 24 · Attempt/);
   networkFailures.add(`GET ${path}`);emit(projection(25,'SUCCEEDED'));await until('failed original point read',()=>node('conversation').textContent.includes('request 25: Runtime read unavailable'));
-  assert.match(node('conversation').textContent,/Request 24 · SUCCEEDED/);const failedReads=bodyReads();await waitNativeRefresh();assert.equal(bodyReads(),failedReads,'Failed point reads do not retry in a loop');
-  networkFailures.clear();await clickText('Refresh original requests');await until('retried original point read',()=>node('conversation').textContent.includes('Request 25 · SUCCEEDED'));assert.match(node('conversation').textContent,/Request 25 · SUCCEEDED/);
+  assert.match(node('conversation').textContent,/Request 24 · Attempt/);const failedReads=bodyReads();await waitNativeRefresh();assert.equal(bodyReads(),failedReads,'Failed point reads do not retry in a loop');
+  networkFailures.clear();await clickText('Refresh requests');await until('retried original point read',()=>node('conversation').textContent.includes('Request 25 · Attempt'));assert.match(node('conversation').textContent,/Request 25 · Attempt/);
   const child={...completed(1),execution_id:'native-child'};
   detailResponses.set('/api/executions/native-child/models',{items:[child],next_cursor:null});
-  emit({type:'model',item:{item:{...child,client_requests:null},visibility:'durable_history'}});await until('child original body',()=>descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-child:1:1:0'));
+  emit({type:'model',item:{item:{...child,client_requests:null},visibility:'durable_history'}});await until('child original body',()=>descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-child:1:1:0'));
   assert.ok(calls.some(call=>call.key==='/api/executions/native-child/models' && call.query.agent_run_seq==='1' && call.query.model_request_seq==='1'),'Child completion reads its actual execution identity');
-  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-live:1:1:0'));
-  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-child:1:1:0'));
+  assert.ok(descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-live:1:1:0'));
+  assert.ok(descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-child:1:1:0'));await pick('native-child:1:1:0');assert.ok(descendants(node('conversation')).some(value=>value.tagName==='BUTTON' && value.textContent==='Open subagent'),'Child navigation stays available on its selected request');
   const deniedChild={...completed(1),execution_id:'denied-child'},deniedPath='/api/executions/denied-child/models';
   detailResponses.set(deniedPath,()=>response({error_code:'AUTHORIZATION_DENIED'},403));
   const corruptChild={...completed(1),execution_id:'corrupt-child'},corruptPath='/api/executions/corrupt-child/models';
@@ -252,18 +392,18 @@ if(process.argv[3]==='native') {
   emit({type:'model',item:{item:{...deniedChild,client_requests:null},visibility:'durable_history'}});
   emit({type:'model',item:{item:{...corruptChild,client_requests:null},visibility:'durable_history'}});
   emit({type:'model',item:{item:{...readyChild,client_requests:null},visibility:'durable_history'}});
-  emit(projection(26,'SUCCEEDED'));await until('root completion after failed child reads',()=>node('conversation').textContent.includes('Request 26 · SUCCEEDED'));
-  assert.match(node('conversation').textContent,/Request 26 · SUCCEEDED/,'One failed child body read cannot block another completed root request');
+  emit(projection(26,'SUCCEEDED'));await until('root completion after failed child reads',()=>node('conversation').textContent.includes('Request 26 · Attempt'));
+  assert.match(node('conversation').textContent,/Request 26 · Attempt/,'One failed child body read cannot block another completed root request');
   assert.match(node('conversation').textContent,/denied-child · request 1: AUTHORIZATION_DENIED/);
   assert.match(node('conversation').textContent,/corrupt-child · request 1: STORAGE_INTEGRITY_ERROR/);
-  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='native-child:1:2:0'));
+  assert.ok(descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='native-child:1:2:0'));
   const deniedReads=()=>calls.filter(call=>call.key===deniedPath).length;
-  assert.equal(deniedReads(),1);emit(projection(27,'SUCCEEDED'));await until('next independent root completion',()=>node('conversation').textContent.includes('Request 27 · SUCCEEDED'));
-  assert.match(node('conversation').textContent,/Request 27 · SUCCEEDED/);assert.equal(deniedReads(),1,'Unrelated completions do not automatically retry a failed body read');
+  assert.equal(deniedReads(),1);emit(projection(27,'SUCCEEDED'));await until('next independent root completion',()=>node('conversation').textContent.includes('Request 27 · Attempt'));
+  assert.match(node('conversation').textContent,/Request 27 · Attempt/);assert.equal(deniedReads(),1,'Unrelated completions do not automatically retry a failed body read');
   assert.match(node('conversation').textContent,/denied-child · request 1: AUTHORIZATION_DENIED/);
   detailResponses.set(deniedPath,{items:[deniedChild],next_cursor:null});detailResponses.set(corruptPath,{items:[corruptChild],next_cursor:null});
-  await clickText('Refresh original requests');await until('retried child original bodies',()=>descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='denied-child:1:1:0'));assert.equal(deniedReads(),2,'Explicit refresh retries the failed identity');
-  assert.ok(descendants(node('conversation')).some(value=>value.dataset.clientAttempt==='denied-child:1:1:0'));
+  await clickText('Refresh requests');await until('retried child original bodies',()=>descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='denied-child:1:1:0'));assert.equal(deniedReads(),2,'Explicit refresh retries the failed identity');
+  assert.ok(descendants(node('conversation')).some(value=>value.tagName==='OPTION' && value.value==='denied-child:1:1:0'));
   assert.doesNotMatch(node('conversation').textContent,/AUTHORIZATION_DENIED|STORAGE_INTEGRITY_ERROR/);
   console.log('Original timeline contracts passed: native arrays, attempts, response provenance, safe text, byte download, paging and navigation');
   process.exit(0);
@@ -277,8 +417,10 @@ assert.equal(node('inspector-toggle').getAttribute('aria-expanded'),'false');
 const beforeDetails=calls.length;node('inspector-toggle').click();
 assert.equal(node('inspector').hidden,false);assert.equal(document.activeElement,node('inspector-close'));
 assert.equal(node('inspector-toggle').getAttribute('aria-expanded'),'true');
-node('inspector-close').click();assert.equal(document.activeElement,node('inspector-toggle'));
-assert.equal(node('inspector').hidden,true);assert.equal(calls.length,beforeDetails);
+assert.equal(node('detail-view').value,'models','Details opens directly to original model requests');
+assert.ok(calls.slice(beforeDetails).some(call=>call.key.endsWith('/models') && call.query.include_client_requests==='true'));
+const afterDetails=calls.length;node('inspector-close').click();assert.equal(document.activeElement,node('actions-toggle'));
+assert.equal(node('inspector').hidden,true);assert.equal(calls.length,afterDetails,'Closing Details does not fetch another view');
 node('action-menu').open=true;node('action-menu').onkeydown({key:'Escape'});
 assert.equal(node('action-menu').open,false);assert.equal(document.activeElement,node('actions-toggle'));
 node('options-toggle').click();assert.equal(node('composer-options').hidden,false);
@@ -286,7 +428,7 @@ assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('
 for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
 assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="close-session"[\s\S]*?<\/details>/);
 assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
-assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','sdkmodels','trace','recovery']);
+assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab).sort(),['overview','history','transcript','models','sdkmodels','trace','recovery'].sort(),'All inspection functions remain reachable through the single view picker');
 if(readOnly){
   for(const id of ['send','prompt','planning','thinking','memory','files','new-session','retry','fork-run','end-stopped','rename-session','fork-session','close-session'])assert.equal(node(id).disabled,true,id);
   assert.equal(node('connection').hidden,false);assert.equal(node('connection').textContent,'Read-only');
@@ -383,6 +525,12 @@ if(process.argv[3]==='navigation'){
     if(success)resolution({resolved:true});else resolution.reject(new Error('old resolution failed'));
     await resolving;assert.equal(node('notice').textContent,'');assert.equal(historyReads(),beforeResolution,'An old resolution cannot reload a newer panel');
   }
+  sessions.get('a').active_execution_id=null;await select('#session=a');
+  const recoverySelection=deferred('GET /api/executions/a-run'),openingRecovery=node('open-recovery').click();await recoverySelection.requested;
+  await select('#session=b');await detail('history',/History marker/);const beforeLateRecovery=calls.length;
+  recoverySelection(info('a-run'));await openingRecovery;
+  assert.ok(!calls.slice(beforeLateRecovery).some(call=>call.key==='/api/executions/b-run/history'),'A stale recovery selection cannot reload the new SDK drilldown');
+  assert.equal(node('detail-view').value,'history');
   console.log('Navigation contracts passed: stale responses, current owner during paging/reopen and independent repeated paging');process.exit(0);
 }
 if(process.argv[3]==='races'){
@@ -394,14 +542,29 @@ if(process.argv[3]==='races'){
   const activate=async id=>{
     sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
     await select('#session=a');
-    await node('conversation').children[0].children[0].children.find(item=>item.tagName==='BUTTON').click();
+    if(node('inspector').hidden)node('inspector-toggle').click();node('detail-turn').value='a-run';await node('detail-turn').onchange();
     return streamBlocks.get(id).controller;
   };
   const snapshot=(controller,id)=>{controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(executions.get(id))+'\n\n'));controller.close();};
   let controller=await activate('owner-one');
+  node('filter-form').requestSubmit();await until('running sidebar before terminal',()=>node('list').textContent.includes('Running'));
   const staleInfo={...executions.get('owner-one')},late=deferred('GET /api/executions/owner-one');
   node('refresh').click();await late.requested;delays.delete('GET /api/executions/owner-one');
+  const staleList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await staleList.requested;
+  const listReadsBefore=calls.filter(call=>call.key==='/api/sessions').length;
+  node('list').children.find(item=>item.textContent.includes('Beta')).focus();
   executions.get('owner-one').status='CANCELLED';sessions.get('a').active_execution_id=null;snapshot(controller,'owner-one');await until('released session after terminal snapshot',()=>node('current-status').textContent==='Session available');
+  assert.doesNotMatch(node('list').textContent,/Running/,'Canonical terminal release updates the sidebar without Refresh');
+  assert.match(document.activeElement?.textContent || '',/Beta/,'Background completion preserves the focused sidebar row');
+  assert.equal(calls.filter(call=>call.key==='/api/sessions').length,listReadsBefore,'Projecting accepted session metadata adds no list request');
+  const rowsBefore=node('list').children;node('prompt').focus();
+  staleList({items:[{...sessions.get('a'),active_execution_id:'owner-one'},sessions.get('b')],next_cursor:null});await until('stale list response rendered',()=>node('list').children!==rowsBefore);
+  assert.doesNotMatch(node('list').children.find(item=>item.className.includes('active')).textContent,/Running/,'A late older list read cannot overwrite accepted session release');
+  assert.equal(document.activeElement,node('prompt'),'Background list refresh does not steal composer focus');
+  const newOwnerList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await newOwnerList.requested;
+  newOwnerList({items:[{...sessions.get('a'),active_execution_id:'external-run'},sessions.get('b')],next_cursor:null});await until('newer same-revision list owner visible',()=>node('list').textContent.includes('Running'));
+  const renamedList=deferred('GET /api/sessions');node('filter-form').requestSubmit();await renamedList.requested;
+  renamedList({items:[{...sessions.get('a'),revision:1,metadata:{title:'Renamed elsewhere'},active_execution_id:'external-run'},sessions.get('b')],next_cursor:null});await until('newer revision list title visible',()=>node('list').textContent.includes('Renamed elsewhere'));
   late(staleInfo);await settle();assert.equal(node('cancel').hidden,true);assert.equal(node('end-active').hidden,true);assert.equal(node('current-status').textContent,'Session available');
 
   // Snapshot delivery and response EOF are distinct; an older Refresh cannot undo terminal truth.
@@ -489,7 +652,7 @@ if(process.argv[3]==='workspace'){
   timelineOverrides.set('a',{items:[old,{...old,execution_id:'a-live',status:'STARTED',conversation_committed:false,user_input:'Current question',items:[]}],next_cursor:null});
   streamBlocks.set('a-live',{});await select('#session=a');
   const observations=()=>calls.filter(item=>item.key==='/api/executions/a-live/events');
-  const oldTurn=node('conversation').children[0];await oldTurn.children[0].children.find(item=>item.tagName==='BUTTON').click();
+  if(node('inspector').hidden)node('inspector-toggle').click();node('detail-turn').value='a-run';await node('detail-turn').onchange();
   assert.match(node('execution-meta').textContent,/a-run/);assert.equal(node('cancel').hidden,false);assert.equal(node('end-active').hidden,false);
   let controller=streamBlocks.get('a-live').controller;
   const delta=(value,cursor='cursor-one')=>controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',cursor,item:{execution_id:'a-live',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:value}}}})+'\n\n'));
@@ -554,22 +717,22 @@ assert.doesNotMatch(node('inspector-content').textContent,/999/);
 
 // A child trace read cannot apply its selectors after the user changes selection.
 detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'trace-child',step_event_seq:1,payload:{agent_run_seq:7,model_request_seq:9}}],next_cursor:null});
-await detail('trace',/Read content/);
-const readChild=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read content');
+await detail('trace',/Read SDK content/);
+const readChild=node('inspector-content').children[0].children[1].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read SDK content');
 const releaseTraceChild=deferred('GET /api/executions/trace-child');
 const childRead=readChild.click();await releaseTraceChild.requested;await select('#session=a');await detail('models',/No records|No durable detail/);
 const afterTraceNavigation=calls.length;
 releaseTraceChild(info('trace-child','b'));await childRead;
 assert.equal(location.hash,'#session=a');
-assert.match(all.find(element=>element.dataset.tab==='models').className,/\bactive\b/);
+assert.equal(node('detail-view').value,'models');
 assert.ok(!calls.slice(afterTraceNavigation).some(call=>call.key==='/api/executions/a-run/history'));
 detailResponses.delete('/api/executions/b-run/trace');
 
 for(const destination of ['tab','execution','current']){
   await select('#session=b');
   detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'trace-child',step_event_seq:1,payload:{agent_run_seq:7,model_request_seq:9}}],next_cursor:null});
-  await detail('trace',/Read content/);
-  const read=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read content');
+  await detail('trace',/Read SDK content/);
+  const read=node('inspector-content').children[0].children[1].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read SDK content');
   const release=deferred('GET /api/executions/trace-child'),childRead=read.click();await release.requested;
   if(destination==='tab')await detail('models',/No records|No durable detail/);
   if(destination==='execution')await select('#session=b&execution=b-run');
@@ -580,7 +743,7 @@ for(const destination of ['tab','execution','current']){
     assert.equal(content[0].query.agent_run_seq,'7');assert.equal(content[0].query.model_request_seq,'9');
   }else{
     assert.equal(content.length,0,destination);
-    if(destination==='tab')assert.match(all.find(element=>element.dataset.tab==='models').className,/\bactive\b/);
+    if(destination==='tab')assert.equal(node('detail-view').value,'models');
     else assert.match(node('execution-meta').textContent,/b-run/);
   }
   detailResponses.delete('/api/executions/b-run/trace');
@@ -684,7 +847,7 @@ timelineOverrides.set('a',{items:[older,{...older,execution_id:'a-new',user_inpu
 await select('#session=a&execution=a-run');
 const releaseRefresh=deferred('GET /api/sessions/a');node('refresh').click();await releaseRefresh.requested;
 const newTurn=node('conversation').children.find(child=>child.textContent.includes('new question'));
-await newTurn.children[0].children.find(child=>child.tagName==='BUTTON').click();await until('live stream opened',()=>Boolean(streamBlocks.get('a-new').controller));
+if(node('inspector').hidden)node('inspector-toggle').click();node('detail-turn').value='a-new';await node('detail-turn').onchange();await until('live stream opened',()=>Boolean(streamBlocks.get('a-new').controller));
 const stream=streamBlocks.get('a-new');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'New execution text'}}},cursor:'resume-cursor'})+'\n\n'));
 await until('live assistant text',()=>node('live').textContent.includes('New execution text'));assert.match(node('live').textContent,/New execution text/);
@@ -980,7 +1143,7 @@ assert.match(node('inspector-content').textContent,/System Prompt1 part\(s\) · 
 assert.match(node('inspector-content').textContent,/Fixed Instructions \(F0\/F1\)/);
 assert.equal(calls.filter(call=>call.key.endsWith('/trace')).length,beforeTrace);
 detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'b-run',step_event_seq:1,payload:{kind:'MODEL_RESPONSE',status:'SUCCEEDED',scope:'root',agent_run_seq:1,step_index:0,model_request_seq:1,purpose:'agent',duration_ns:2000000,token_usage:{input_tokens:10,output_tokens:4}}}],next_cursor:null});
-await detail('trace',/Read content/);
+await detail('trace',/Read SDK content/);
 assert.match(node('inspector-content').textContent,/request #1/);
 assert.match(node('inspector-content').textContent,/agent · 2.000 ms · 10 in \/ 4 out/);
 

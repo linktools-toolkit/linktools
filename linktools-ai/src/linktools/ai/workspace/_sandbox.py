@@ -259,11 +259,29 @@ class SandboxSession(Protocol):
     async def canonicalize_path(self, path: str) -> str: ...
 
     async def read_bytes(
-        self,
-        path: str,
-        *,
-        max_bytes: "int | None" = None,
+        self, path: str, *, max_bytes: int | None = None,
+        expected_state: str | None = None,
     ) -> bytes: ...
+
+    async def inspect_file(
+        self, path: str, *, max_bytes: int | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """Return bounded file facts and an opaque mutable-file state token."""
+        ...
+
+    async def read_text(
+        self, path: str, *, offset: int | None = None, limit: int | None = None,
+        cursor: str | None = None, full_metadata: bool = False,
+        max_bytes: int | None = None, max_read_bytes: int | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """Return a bounded preview; full hash and total lines are explicit."""
+        ...
+
+    async def list_files(self, path: str = ".", *, include_glob: str = "*") -> str: ...
+
+    async def search_text(
+        self, pattern: str, *, path: str = ".", include_glob: str | None = None,
+    ) -> str: ...
 
     async def read_file(
         self,

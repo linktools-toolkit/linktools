@@ -1307,7 +1307,7 @@ class ArtifactRecord:
     artifact_id: str
     execution_id: str
     producer: str
-    media_type: str
+    mime_type: str
     object_ref: ObjectRef
     created_at: datetime
 

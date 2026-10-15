@@ -2347,7 +2347,7 @@ def _project_attachment_fact(
             attachment_id=cast(str, value.get("attachment_id")),
             fact=fact,
             source=cast(str, value.get("source")),
-            media_type=cast("str | None", value.get("media_type")),
+            mime_type=cast("str | None", value.get("media_type")),
             size=cast("int | None", value.get("size")),
             digest=cast("str | None", value.get("digest")),
             position=cast(int, value.get("position")),

@@ -10,12 +10,14 @@ class PromptLimits:
     max_preloaded_skill_bytes: int = 256 * 1024
     max_binary_input_parts: int = 32
     max_binary_input_bytes: int = 64 * 1024 * 1024
+    max_file_output_bytes: int = 256 * 1024
 
     def __post_init__(self) -> None:
         values = (
             self.max_preloaded_skill_bytes,
             self.max_binary_input_parts,
             self.max_binary_input_bytes,
+            self.max_file_output_bytes,
         )
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value < 1

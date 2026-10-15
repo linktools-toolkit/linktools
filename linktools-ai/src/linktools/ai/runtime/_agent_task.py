@@ -29,7 +29,7 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRef,
 )
-from ._input import decode_task_prompt_draft, task_prompt_draft
+from ._input import decode_task_prompt_draft, merge_captured_input_files, task_prompt_draft
 from .state._contracts import StoredUserInput, TaskPreparedInputRecord
 from ._agent_task_input import (
     AgentTaskInput,
@@ -613,7 +613,7 @@ def _append_captured_files(prompt: CanonicalUserInput, task_input: AgentTaskInpu
     files = decode_task_prompt_draft(payload)
     if isinstance(files, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return (*((prompt,) if isinstance(prompt, str) else prompt), *files)
+    return merge_captured_input_files(prompt, files)
 
 
 def _node_output_contract(invocation: TaskNodeInvocation) -> dict[str, JsonValue] | None:

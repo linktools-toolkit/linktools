@@ -2,6 +2,12 @@
 
 Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一的容器生命周期管理（命令前缀 `ct-cntr`）。
 
+### 指定容器的操作范围
+
+`ct-cntr up --pull safeline sublink omniroute` 只刷新、构建和启动这三个容器自身的服务，不自动拉取或构建 nginx、Authelia 等依赖。已有依赖只做就绪检查；缺少必要依赖时会在镜像操作和停止容器之前提示，把需要的容器显式加到命令中即可。`restart` 和 `exec <容器> up/restart` 遵循相同边界。
+
+未指定容器的 `ct-cntr up` 仍处理完整项目。依赖关系不会从 Compose 模型删除；若共享服务作者、运行中的重启依赖或 namespace 绑定必须联合操作，会明确要求共同选择，不能静默扩大范围。
+
 ## 开始使用
 
 以基于 Debian 的系统为例，先安装运行环境：
@@ -280,10 +286,11 @@ return [
 
 ```python
 from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
+from linktools.core import ConfigRef
 
 return endpoint(
     self,
-    domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
+    domain=ConfigRef("APP_DOMAIN"), proxy="http://app:8080",
     extensions=[
         Flare.links(
             Flare.public(),

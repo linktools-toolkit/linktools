@@ -32,7 +32,7 @@ def set_declarations(manager: SimpleNamespace, producer: str, declarations: obje
 
 @pytest.mark.parametrize("nested_navigation", [False, True])
 @pytest.mark.parametrize("nested_endpoint", [False, True])
-def test_independent_navigation_and_named_site_refresh_running_consumers(
+def test_independent_navigation_and_named_site_preserve_running_consumers(
         tmp_path: Path, nested_navigation: bool, nested_endpoint: bool) -> None:
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new"}}),
@@ -48,13 +48,13 @@ def test_independent_navigation_and_named_site_refresh_running_consumers(
     set_declarations(manager, "app", declarations)
     assert isinstance(manager.integration_snapshot["app"][0], Nginx)
     manager.compose_operations.up(["app"])
-    assert ("prepare", "nginx") in manager.events
-    assert ("prepare", "flare") in manager.events
+    assert ("prepare", "nginx") not in manager.events
+    assert ("prepare", "flare") not in manager.events
     assert ("prepare", "other") not in manager.events
-    assert {event[1] for event in manager.events if event[0] == "apply"} == {"app", "nginx", "flare"}
+    assert {event[1] for event in manager.events if event[0] == "apply"} == {"app"}
 
 
-def test_removing_producers_last_site_refreshes_previous_running_consumer(tmp_path: Path) -> None:
+def test_removing_producers_last_site_preserves_unselected_running_consumer(tmp_path: Path) -> None:
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new"}}),
         ("nginx", {"nginx": {"image": "nginx:new"}}),
@@ -69,4 +69,4 @@ def test_removing_producers_last_site_refreshes_previous_running_consumer(tmp_pa
     set_declarations(manager, "app", [])
     assert manager.integration_snapshot["app"] == ()
     manager.compose_operations.up(["app"])
-    assert ("prepare", "nginx") in manager.events
+    assert ("prepare", "nginx") not in manager.events

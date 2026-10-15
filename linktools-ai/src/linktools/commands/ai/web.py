@@ -14,7 +14,7 @@ from linktools.core import environ
 from linktools.ai.observe import Metrics
 from linktools.ai.workspace import Workspace
 from ._common import (
-    _add_local_runtime_arguments, _load_workspace, _local_metrics,
+    _add_local_runtime_arguments, _load_workspace, _local_input_config, _local_metrics,
     _local_runtime_assets, _local_runtime_models, _local_runtime_root,
     _local_runtime_storage, _run_async,
 )
@@ -51,6 +51,10 @@ class Command(BaseCommand):
         async def serve() -> int:
             from linktools.ai.runtime import RuntimeHistory
 
+            _local_input_config(workspace)
+            models = _local_runtime_models(workspace, args) if model else None
+            # Show resolved MIME permissions, not the authoring category labels.
+            input_mime_types = models.capture().resolve("default").contract.get("input_mime_types") if models is not None else None
             async with AsyncExitStack() as stack:
                 runtime = None
                 history = None
@@ -73,14 +77,14 @@ class Command(BaseCommand):
                     metrics = await _local_metrics(workspace)
                     runtime = await stack.enter_async_context(Runtime.open(
                         "default", storage=_local_runtime_storage(workspace), metrics=metrics,
-                        models=_local_runtime_models(workspace, args), capabilities=(capture,),
+                        models=models, capabilities=(capture,),
                     ))
                 status = {
                     "namespace": "default", "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),
                     "runtime_db": {"path": str(root / "runtime.db"), "exists": (root / "runtime.db").exists()},
                     "object_store": {"path": str(root / "objects"), "exists": (root / "objects").exists()},
                     "metrics_db": {"path": str(root / "metrics.db"), "exists": (root / "metrics.db").exists()},
-                    "model": model or None, "vision": args.vision,
+                    "model": model or None, "input_mime_types": input_mime_types,
                     "base_url_configured": bool(args.base_url or os.getenv("OPENAI_BASE_URL", "").strip()),
                     "api_key_configured": bool(args.api_key or os.getenv("OPENAI_API_KEY", "").strip()),
                 }

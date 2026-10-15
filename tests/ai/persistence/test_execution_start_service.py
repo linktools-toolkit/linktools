@@ -5,11 +5,9 @@
 
 import asyncio
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingContract
-from linktools.ai.agent._output import bind_output
+from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.core import (
     ExecutionStatus,
     Page,
@@ -18,6 +16,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
@@ -30,26 +29,21 @@ from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
-def _binding() -> AgentBindingContract:
-    output = bind_output()
-    return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
-        model_contract={"route_id": "model", "model_identity": "test:model"},
-        selected=(),
-        subagents=(),
-        output_mode=output.mode,
-        output_schema=output.schema_definition,
+def _binding() -> AgentBinding:
+    spec = AgentSpec("agent", model="model")
+    models = ModelRegistry()
+    models.register_openai("model", model="gpt-test")
+    compiler = AgentCompiler(
+        model_resolver=models.capture(), candidates=(), agents={spec.id: spec},
     )
+    return compiler.bind(compiler.compile(spec))
 
 
 class _BindingCatalog:
-    def binding(self, digest: str) -> object:
+    def binding(self, digest: str) -> AgentBinding:
         binding = _binding()
         assert digest == binding.binding_digest
-        return SimpleNamespace(
-            binding_digest=binding.binding_digest,
-            binding_contract=binding,
-        )
+        return binding
 
 
 class _History:

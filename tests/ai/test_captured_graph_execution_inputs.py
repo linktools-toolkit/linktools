@@ -378,5 +378,5 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate"), engine=engine)
         assert (await run.wait(timeout_seconds=20)).result.completion == "complete"
         assert (await run.create_report()).scores[0].valid == 1
-        assert models.attachments == [b"INLINE ORIGINAL", b"ORIGINAL"]
+        assert models.attachments == [b"ORIGINAL", b"INLINE ORIGINAL"]
         assert models.prompts[0].startswith("Question")

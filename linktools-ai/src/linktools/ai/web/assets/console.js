@@ -103,8 +103,10 @@ function instructionSummary(values) {
 }
 function collectAttachments(value, mediaTypes) {
   if (!value || typeof value!=='object') return;
-  if (!Array.isArray(value) && typeof value.media_type==='string' && value.media_type && Number.isInteger(value.size) && value.size>=0 && /^[a-f0-9]{64}$/.test(value.digest || '')) {
-    mediaTypes.set(value.media_type,(mediaTypes.get(value.media_type) || 0)+1);return;
+  // Request envelopes can contain original SDK media_type payloads.
+  const mimeType=value.mime_type ?? value.media_type;
+  if (!Array.isArray(value) && typeof mimeType==='string' && mimeType && Number.isInteger(value.size) && value.size>=0 && /^[a-f0-9]{64}$/.test(value.digest || '')) {
+    mediaTypes.set(mimeType,(mediaTypes.get(mimeType) || 0)+1);return;
   }
   Object.values(value).forEach(item=>collectAttachments(item,mediaTypes));
 }

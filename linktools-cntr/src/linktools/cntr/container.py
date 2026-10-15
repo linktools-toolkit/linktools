@@ -11,7 +11,6 @@ from linktools.cli.argparse import BooleanOptionalAction
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.rich import choose
-from linktools.runtime import lazy_load
 from linktools.types import MISSING
 from linktools.utils import get_md5
 from .errors import ContainerError, ContainerTemplateError, NoContainerInstalledError
@@ -350,9 +349,6 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
     def get_config(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
         return self.env_config.get(self._resolve_config_key(key), type=type, default=default)
-
-    def get_config_later(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
-        return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
 
     def make_exec_context(self, commands: "str | Iterable[str]") -> "OperationContext":
         from .context import OperationContext

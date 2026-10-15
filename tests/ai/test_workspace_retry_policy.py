@@ -44,7 +44,7 @@ _RETRY_MESSAGES = {
     ("name", "arguments", "rejected_codes", "effectful"),
     (
         ("attach_files", {"paths": ["note.txt"]}, _FILE_REJECTIONS, False),
-        ("read_file", {"path": "note.txt"}, _FILE_REJECTIONS, False),
+        ("read_file", {"path": "note.txt"}, _FILE_REJECTIONS | {ErrorCode.STORAGE_CONFLICT}, False),
         ("write_file", {"path": "note.txt", "content": "new"}, _FILE_REJECTIONS, True),
         (
             "edit_file",
@@ -79,7 +79,8 @@ async def test_workspace_retry_requires_supported_code_and_known_effect(
     async def reject(*args: object, **kwargs: object) -> str:
         raise error
 
-    method = "read_bytes" if name == "attach_files" else name
+    method = {"attach_files": "read_bytes", "read_file": "inspect_file",
+              "search_files": "search_text"}.get(name, name)
     session = SimpleNamespace(**{method: reject})
     capability = workspace_capabilities(
         Workspace.load(tmp_path),
@@ -122,7 +123,7 @@ async def test_workspace_conflict_retry_is_scoped_to_each_guarded_write(
     async def reject(*args: object, **kwargs: object) -> str:
         raise error
 
-    session = SimpleNamespace(**{name: reject, "read_file": reject})
+    session = SimpleNamespace(**{name: reject, "inspect_file": reject})
     capability = workspace_capabilities(
         Workspace.load(tmp_path),
         (name, "read_file"),
@@ -140,6 +141,6 @@ async def test_workspace_conflict_retry_is_scoped_to_each_guarded_write(
                 await tools[name].function(**arguments, expected_hash=expected_hash)
             assert failure.value is error
 
-    with pytest.raises(AIError) as unguarded_read:
+    with pytest.raises(ToolCallRetry) as changed_read:
         await tools["read_file"].function(path="note.txt")
-    assert unguarded_read.value is error
+    assert changed_read.value.__cause__ is error

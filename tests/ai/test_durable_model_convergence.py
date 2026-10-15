@@ -49,7 +49,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
         artifact_id="artifact",
         execution_id="execution",
         producer="tool",
-        media_type="text/plain",
+        mime_type="text/plain",
         object_ref=reference,
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )

@@ -7,7 +7,7 @@ from ._base import Integration
 
 if TYPE_CHECKING:
     from typing import Any, Mapping, Optional, Sequence
-    from linktools.core import ConfigResolver, LazyProvider
+    from linktools.core import ConfigResolver, ConfigValue, LazyProvider
     from linktools.types import PathType
     from ..container import BaseContainer
 
@@ -20,18 +20,18 @@ class Nginx(Integration):
     @classmethod
     def site(
             cls,
-            server_name: str,
-            proxy: "Optional[str]" = None,
-            template: "Optional[PathType]" = None,
-            https: "Optional[bool]" = None,
-            waf: "Optional[bool]" = None, waf_bypass: "Sequence[str]" = (),
-            auth: "Optional[bool]" = None, auth_bypass: "Sequence[str]" = (),
-            auth_headers: "Optional[Mapping[str, str]]" = None,
-            public_url: "Optional[str]" = None,
-            cert_domains: "Sequence[str]" = (),
+            server_name: "str | ConfigValue",
+            proxy: "str | ConfigValue | None" = None,
+            template: "PathType | ConfigValue | None" = None,
+            https: "bool | ConfigValue | None" = None,
+            waf: "bool | ConfigValue | None" = None, waf_bypass: "Sequence[str | ConfigValue] | ConfigValue" = (),
+            auth: "bool | ConfigValue | None" = None, auth_bypass: "Sequence[str | ConfigValue] | ConfigValue" = (),
+            auth_headers: "Mapping[str, str | ConfigValue] | ConfigValue | None" = None,
+            public_url: "str | ConfigValue | None" = None,
+            cert_domains: "Sequence[str | ConfigValue] | ConfigValue" = (),
             template_vars: "Optional[Mapping[str, Any]]" = None,
             *,
-            default_server: bool = False,
+            default_server: "bool | ConfigValue" = False,
     ) -> "Nginx":
         self = cls()
         self.server_name = server_name

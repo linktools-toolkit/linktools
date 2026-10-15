@@ -83,14 +83,8 @@ class _PartialDirectorySession:
 
 
 class _MissingReadSession:
-    async def read_file(
-        self,
-        path: str,
-        *,
-        offset: int = 0,
-        limit: int | None = None,
-    ) -> str:
-        del path, offset, limit
+    async def inspect_file(self, path: str, *, max_bytes=None) -> dict:
+        del path, max_bytes
         raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 
 

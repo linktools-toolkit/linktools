@@ -3,7 +3,7 @@
 """Portainer container definition."""
 from typing import TYPE_CHECKING
 
-from linktools.core import ConfigField
+from linktools.core import ConfigRef, ConfigLazy, ConfigField
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
 from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_port_url
@@ -28,9 +28,9 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return endpoint(
             self,
-            domain=self.get_config_later("PORTAINER_DOMAIN"),
+            domain=ConfigRef("PORTAINER_DOMAIN"),
             proxy="http://portainer:9000",
-            auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
+            auth=ConfigLazy(lambda config: None if config.get("PORTAINER_AUTH_ENABLE") else False),
             auth_bypass=(r"\.(css|js)$",),
             extensions=[
                 Flare.links(

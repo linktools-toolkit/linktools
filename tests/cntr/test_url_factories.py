@@ -7,6 +7,7 @@ import pytest
 
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.ext import Nginx, load_config_url, load_nginx_url, load_port_url
+from linktools.core import Config, ConfigSchema
 from linktools.runtime import Proxy
 
 
@@ -14,6 +15,8 @@ class Container:
     def __init__(self, value):
         self.value = value
         self.reads = []
+        self.env_config = Config(None, ConfigSchema(), [])
+        self.env_config.get = self.get_config
 
     def get_config(self, key, **kwargs):
         self.reads.append((key, kwargs))
@@ -78,7 +81,7 @@ def test_nginx_object_lookup_is_deferred_and_uses_producer_identity():
     reads = []
     declaration = Nginx.site("app.test")
     foreign = Nginx.site("other.test")
-    container = SimpleNamespace(name="app")
+    container = SimpleNamespace(name="app", env_config=Config(None, ConfigSchema(), []))
     other = SimpleNamespace(name="other")
 
     class Consumer:

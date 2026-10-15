@@ -95,7 +95,7 @@ def test_absent_flare_does_not_consume_navigation(fresh_manager, monkeypatch):
     assert list(fresh_manager.iter_integrations("flare")) == []
     assert any(value.consumer == "flare" for value in fresh_manager.integration_snapshot["portainer"])
     selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
-    assert "flare" not in [c.name for c in fresh_manager.compose_operations.start_selection(selection).target_containers]
+    assert "flare" not in [c.name for c in fresh_manager.compose_operations.required_selection(selection).target_containers]
 
 
 def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manager):
@@ -131,7 +131,7 @@ def test_container_authoring_has_one_integration_entry():
 def test_proxy_runtime_dependency_does_not_select_authelia_admin(fresh_manager):
     operations = fresh_manager.compose_operations
     explicit = operations.select(["portainer"], for_start=True)
-    selected = operations.start_selection(explicit)
+    selected = operations.required_selection(explicit)
     assert {"authelia", "authelia-redis", "lldap"} <= set(selected.services)
     assert "authelia-admin" not in selected.services
 
@@ -149,13 +149,17 @@ def _site_navigation_manager(declarations, links=None, nginx=True):
     from types import SimpleNamespace
     from linktools.cntr import ContainerManager
     from linktools.cntr.ext import ResolvedSite
+    from linktools.core import Config, ConfigSchema
 
     reads = []
     def config(key, **kwargs):
         reads.append(key)
         return {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443}[key]
     manager = object.__new__(ContainerManager)
-    producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config)
+    manager.env_config = Config(None, ConfigSchema(), [])
+    manager.env_config.get = config
+    producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config,
+                               env_config=manager.env_config)
     manager.containers = {"app": producer, "nginx": SimpleNamespace(sites={}),
                           "flare": SimpleNamespace(name="flare", order=0)}
     producer.test_sites = declarations
@@ -283,7 +287,8 @@ def test_navigation_merge_preserves_producer_ties_and_key_collisions():
         "two": public("Two", "web", "", load_nginx_url(producer, producer.test_sites["two"])),
         "path": public("Path", "web", "", "https://one.test/path"),
     })
-    producer = SimpleNamespace(name="other", order=10, manager=manager)
+    producer = SimpleNamespace(name="other", order=10, manager=manager,
+                               env_config=manager.env_config)
     manager.containers["other"] = producer
     site = Nginx.site("other.test")
     manager.integration_snapshot["other"] = (
@@ -609,7 +614,7 @@ def test_integration_containers_preserve_dependencies(fresh_manager):
     installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])
     assert {container.name for container in installed} == {"nginx", "lldap", "authelia"}
     selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
-    started = fresh_manager.compose_operations.start_selection(selection)
+    started = fresh_manager.compose_operations.required_selection(selection)
     assert "lldap" in started.services
 
 

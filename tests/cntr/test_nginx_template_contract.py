@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from linktools.cntr import ContainerError
 from linktools.cntr.ext import Nginx
+from linktools.core import Config, ConfigSchema
 from linktools.cntr.container import ContainerTemplateError
 
 
@@ -193,8 +194,10 @@ def generation_site(nginx: "BaseContainer", key: str = "web",
     def get_config(key: str, **options: "Any") -> "Any":
         return ports[key] if ports and key in ports else nginx.get_config(key, **options)
 
+    config = Config(None, ConfigSchema(), [])
+    config.get = get_config
     producer = SimpleNamespace(name=key, manager=nginx.manager,
-                               get_config=get_config, env_config=SimpleNamespace(get=get_config))
+                               get_config=get_config, env_config=config)
     values = dict(server_name="app.example.test", proxy="http://app:8080",
                   https=False, waf=False, auth=False)
     values.update(kwargs)

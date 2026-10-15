@@ -64,7 +64,6 @@ def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: 
             route_id = "default"
             provider = "test"
             model_identity = "test:without-mcp"
-            vision = False
             contract = {"provider": provider, "model_identity": model_identity}
 
             def materialize(self) -> TestModel:

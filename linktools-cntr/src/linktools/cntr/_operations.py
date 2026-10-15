@@ -34,15 +34,17 @@ class ComposeOperations:
         if not project:
             from .container import NoContainerInstalledError
             raise NoContainerInstalledError("No container installed")
-        if prepare:
-            self.manager.lifecycle.prepare(project)
         if not names:
+            if prepare:
+                self.manager.lifecycle.prepare(project)
             return ComposeSelection(project, project, (), True)
         installed = {container.name for container in project}
         unknown = [name for name in names if name not in installed]
         if unknown:
             raise ContainerError("Container(s) not installed: " + ", ".join(unknown))
         targets = tuple(container for container in project if container.name in names)
+        if prepare:
+            self.manager.lifecycle.prepare(project if with_dependencies or not for_start else targets)
         if with_dependencies:
             targets = tuple(self.manager.resolver.resolve_dependencies(targets))
         services = tuple(dict.fromkeys(service for container in targets for service in container.services))
@@ -62,7 +64,33 @@ class ComposeOperations:
     def start_selection(self, selection: ComposeSelection, model: "dict | None" = None,
                         running_services: "Iterable[str] | None" = None,
                         privilege: "bool | None" = None) -> ComposeSelection:
-        """Select container groups and providers, then order only real Compose edges."""
+        """Keep named operations within their explicit container service groups."""
+        if selection.full:
+            return self.required_selection(selection, model, running_services, privilege)
+        owners = service_owners(selection.project_containers)
+        selected_owners = set(selection.target_containers)
+        missing = {owner.name for service in selection.services for owner in owners[service]
+                   if owner not in selected_owners}
+        if missing:
+            raise ContainerError("Shared service contributors must be explicitly selected: " + ", ".join(sorted(missing)))
+        if model is None and (any(len(authors) > 1 for authors in owners.values()) or
+                              any(spec.get("profiles") for container in selection.project_containers
+                                  for spec in container.services.values())):
+            model = self.manager.compose_runner.final_model(self._make_context("up", selection), privilege=privilege)
+        definitions = model["services"] if model is not None else {
+            name: authors[-1].services[name] for name, authors in owners.items()}
+        specifications = {name: definitions[name] for name in selection.services if name in definitions}
+        ordered = order_service_subset(selection.project_containers, specifications)
+        if not ordered:
+            raise ContainerError("Selected containers have no runnable services; explicitly include the consuming container")
+        targets = tuple(dict.fromkeys(owner for service in ordered for owner in owners[service]))
+        targets += tuple(owner for owner in selection.target_containers if owner not in targets and not owner.services)
+        return ComposeSelection(selection.project_containers, targets, ordered, False)
+
+    def required_selection(self, selection: ComposeSelection, model: "dict | None" = None,
+                           running_services: "Iterable[str] | None" = None,
+                           privilege: "bool | None" = None) -> ComposeSelection:
+        """Resolve requirements for full application or read-only prerequisite checks."""
         installed = {container.name: container for container in selection.project_containers}
         owners = service_owners(selection.project_containers)
         shared = any(len(authors) > 1 for authors in owners.values())
@@ -72,7 +100,7 @@ class ComposeOperations:
             service: authors[-1].services[service] for service, authors in owners.items()}
         if model is None and selection.full and profiles:
             native_model = self.manager.compose_runner.final_model(self._make_context("up", selection), privilege=privilege)
-            return self.start_selection(selection, native_model, running_services, privilege)
+            return self.required_selection(selection, native_model, running_services, privilege)
         groups = {container for container in selection.target_containers
                   if not container.services or set(container.services).intersection(definitions)}
         providers = set(groups)
@@ -148,7 +176,7 @@ class ComposeOperations:
                                         tuple(container for container in selection.project_containers if container in targets),
                                         tuple(service for service in owners if service in services), selection.full)
             native_model = self.manager.compose_runner.final_model(self._make_context("up", expanded), privilege=privilege)
-            return self.start_selection(selection, native_model, running_services, privilege)
+            return self.required_selection(selection, native_model, running_services, privilege)
         ordered = order_services(selection.project_containers,
                                  tuple(service for service in owners if service in services), model)
         if not ordered:
@@ -229,7 +257,9 @@ class ComposeOperations:
                 raw_model = runner.final_model(context, preserve_disabled=True)
             else:
                 raw_model = runner.final_model(context)
-            ordered = order_services(selection.project_containers, selection.services, raw_model)
+            ordered = (order_services(selection.project_containers, selection.services, raw_model) if selection.full else
+                       order_service_subset(selection.project_containers, {
+                           name: raw_model["services"][name] for name in selection.services}))
             selection = ComposeSelection(selection.project_containers, selection.target_containers,
                                          ordered, selection.full)
             context.target_services = selection.services
@@ -247,9 +277,20 @@ class ComposeOperations:
             context.compose_model = manager.image_preparer.with_build_revisions(
                 model, selection.project_containers, selection.services)
             model_store.set_model(context.compose_model)
+            if not selection.full:
+                self._check_external_requirements(selection, actual, context.compose_model)
+                for service in selection.services:
+                    previous = model_store.previous_model(service)
+                    if previous is not None:
+                        prior = ComposeSelection(selection.project_containers, (), (service,), False)
+                        self._check_external_requirements(prior, actual, previous,
+                                                          selected_services=selection.services)
+                self._check_external_dependents(context, selection)
             image_plan = manager.image_preparer.plan(
                 context.compose_model, selection.services, force_pull=pull,
-                refresh_services=context.refresh_services)
+                refresh_services=context.refresh_services, include_dependencies=selection.full)
+            if not selection.full:
+                self._check_build_scope(context.compose_model, image_plan.build, selection)
             if image_plan.pull:
                 with record_phase(context, "pull", command=tuple(runner.pull_args(image_plan.pull)),
                                   logger=manager.logger):
@@ -529,13 +570,107 @@ class ComposeOperations:
         applied.is_full_project = False
         if applied.target_containers:
             manager.running_state.mark_started(applied)
-        manager.lifecycle.reconcile_removed(context)
+        if context.is_full_project:
+            manager.lifecycle.reconcile_removed(context)
         try:
             prune_prepared_files(context, model_store)
         except (OSError, ContainerError) as error:
             manager.logger.warning("Prepared file cleanup failed: %s", error)
         if report:
             render_report(manager.logger, get_records(context))
+
+    def _check_build_scope(self, model: dict, services: "Iterable[str]", selection: ComposeSelection) -> None:
+        pending, visited, outside = list(services), set(), set()
+        selected = set(selection.services)
+        while pending:
+            service = pending.pop()
+            if service in visited:
+                continue
+            visited.add(service)
+            build = model["services"][service].get("build") or {}
+            contexts = build.get("additional_contexts", {})
+            values = contexts.values() if isinstance(contexts, dict) else (
+                value.partition("=")[2] for value in contexts)
+            for value in values:
+                if isinstance(value, str) and value.startswith("service:"):
+                    dependency = value[len("service:"):]
+                    if dependency not in selected:
+                        outside.add(dependency)
+                    else:
+                        pending.append(dependency)
+        if outside:
+            self._scope_error("Build contexts require explicit service selection", outside, selection)
+
+    def _check_external_requirements(self, selection: ComposeSelection, actual,
+                                     model: "dict | None" = None,
+                                     selected_services: "Iterable[str] | None" = None) -> None:
+        installed = {container.name: container for container in selection.project_containers}
+        selected = set(selection.services if selected_services is None else selected_services)
+        required = {}
+        names = {container.name for container in selection.target_containers}
+        for container in selection.target_containers:
+            for name in container.dependencies:
+                if name not in installed:
+                    raise ContainerError("Required dependency {!r} is not installed".format(name))
+                for service in installed[name].services:
+                    required.setdefault(service, [])
+        for container in selection.project_containers:
+            for name, services in container.get_runtime_requirements(names).items():
+                if name not in installed:
+                    raise ContainerError("Required provider {!r} is not installed".format(name))
+                for service in services:
+                    required.setdefault(service, [])
+        owners = service_owners(selection.project_containers)
+        definitions = model["services"] if model is not None else {
+            name: authors[-1].services[name] for name, authors in owners.items()}
+        for service in selection.services:
+            for name, options in service_dependencies(definitions[service]).items():
+                if options.get("required", True):
+                    required.setdefault(name, []).append(options.get("condition", "service_started"))
+        unavailable = set()
+        for service in set(required) - selected:
+            instances = actual.service_instances(service)
+            conditions = required[service] or ["service_started"]
+            for condition in conditions:
+                if condition == "service_completed_successfully":
+                    ready = instances and all(item.state == "exited" and item.exit_code == 0 for item in instances)
+                elif condition == "service_healthy":
+                    ready = instances and all(item.state == "running" and item.health == "healthy" for item in instances)
+                elif condition == "service_started":
+                    ready = instances and all(item.state == "running" for item in instances)
+                else:
+                    raise ContainerError("Unsupported Compose dependency condition: " + str(condition))
+                if not ready:
+                    unavailable.add(service)
+        if unavailable:
+            self._scope_error("Required dependencies are not ready", unavailable, selection)
+
+    def _check_external_dependents(self, context, selection: ComposeSelection) -> None:
+        selected = set(selection.services)
+        collateral = set()
+        for service in context.initial_runtime_state.running_services - selected:
+            previous = context.service_models.previous_model(service)
+            if previous is not None and self._dependency_action(
+                    previous["services"][service], selected, selected) is not None:
+                collateral.add(service)
+            for item in context.initial_runtime_state.service_instances(service):
+                bindings = getattr(item, "namespace_bindings", None)
+                if bindings is not None and set(namespace_dependencies(bindings)) & selected:
+                    collateral.add(service)
+                declared = item.labels.get("com.docker.compose.depends_on", "")
+                for entry in filter(None, declared.split(",")):
+                    fields = entry.split(":")
+                    if fields[0] in selected and (len(fields) < 3 or fields[2].lower() in ("1", "t", "true")):
+                        collateral.add(service)
+        if collateral:
+            self._scope_error("Running dependents require a joint operation (including recovery)", collateral, selection)
+
+    def _scope_error(self, reason: str, services: "Iterable[str]", selection: ComposeSelection) -> None:
+        owners = service_owners(selection.project_containers)
+        names = sorted({owner.name for service in services for owner in owners.get(service, ())})
+        guidance = ("Explicitly include the corresponding containers: " + ", ".join(names)
+                    if names else "Restore these services' container declarations before a joint operation")
+        raise ContainerError("{}: {}. {}".format(reason, ", ".join(sorted(services)), guidance))
 
     def _dependent_actions(self, context, selected, running, updated, recreated,
                            applied=(), namespace_only=False):
@@ -545,6 +680,8 @@ class ComposeOperations:
         if context.is_full_project:
             known.intersection_update(context.compose_model["services"])
         running = set(running).intersection(known)
+        if not context.is_full_project:
+            running.intersection_update(context.target_services or ())
         definitions = {}
         for name in running:
             model = None if name in applied else context.service_models.previous_model(name)

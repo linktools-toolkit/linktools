@@ -198,7 +198,7 @@ def _user_content(part: UserPromptPart, payload: Mapping[str, JsonValue]) -> Jso
                     "kind": "uploaded-file",
                     "file_id": item.file_id,
                     "provider_name": item.provider_name,
-                    "media_type": item.media_type,
+                    "mime_type": item.media_type,
                     "vendor_metadata": normalize_json_value(
                         item.vendor_metadata or {}
                     ),
@@ -214,7 +214,7 @@ def _user_content(part: UserPromptPart, payload: Mapping[str, JsonValue]) -> Jso
 def _binary_content(item: BinaryContent) -> dict[str, JsonValue]:
     value: dict[str, JsonValue] = {
         "kind": "binary",
-        "media_type": item.media_type,
+        "mime_type": item.media_type,
         "size": len(item.data),
         "digest": hashlib.sha256(item.data).hexdigest(),
     }
@@ -230,8 +230,8 @@ def _url_content(item: object) -> dict[str, JsonValue]:
         "kind": str(getattr(item, "kind", "url")),
         "url": str(getattr(item, "url")),
     }
-    for name in ("media_type", "identifier"):
-        candidate = getattr(item, name, None)
+    for attribute, name in (("media_type", "mime_type"), ("identifier", "identifier")):
+        candidate = getattr(item, attribute, None)
         if candidate is not None:
             value[name] = str(candidate)
     metadata = getattr(item, "vendor_metadata", None)

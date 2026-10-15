@@ -78,6 +78,7 @@ assert.match(layers['Fixed Instructions (F0/F1)'],/sources: workspace/);
 assert.match(layers['Dynamic Instructions (O)'],/sources: repository/);
 assert.equal(layers['Conversation Context'],'1 message(s) · 1 part(s) · user-prompt=1');
 assert.equal(layers['Input Attachments'],'1 attachment · image/png');
+assert.equal(Object.fromEntries(promptLayers({messages:[{parts:[{part_kind:'user-prompt',content:[{mime_type:'application/pdf',size:12,digest:'b'.repeat(64)}]}]}]}))['Input Attachments'],'1 attachment · application/pdf');
 assert.equal(layers['Tool Contract'],'1 function · 0 native · 1 revealed · 0 deferred capabilities');
 assert.equal(layers['Model Output Contract'],'mode=text · text output=yes · image output=no');
 assert.doesNotMatch(JSON.stringify(layers),/duplicate instruction mirror|real system prompt|fixed workspace guidance|repository overlay/);
@@ -95,7 +96,7 @@ def test_web_dom_interactions_ignore_stale_work_and_preserve_mutation_identity()
     root = Path(__file__).parents[2]
     script = Path(__file__).with_name("web_console_dom.mjs")
     assets = root / "linktools-ai/src/linktools/ai/web/assets"
-    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native"):
+    for mode in ("writable", "readonly", "workspace", "races", "navigation", "native", "guided", "details", "minimal"):
         result = subprocess.run([node, str(script), str(assets), mode], capture_output=True, text=True, timeout=20, check=False)
         assert result.returncode == 0, result.stderr
 
@@ -108,3 +109,37 @@ def test_web_messages_render_safe_markdown_and_stored_input() -> None:
     script = Path(__file__).with_name("web_console_messages.mjs")
     result = subprocess.run([node, str(script), str(assets)], capture_output=True, text=True, timeout=20, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_web_settings_preserve_mime_allowlist_and_provider_uncertainty() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the optional Web client tests")
+    source = Path(__file__).parents[2] / "linktools-ai/src/linktools/ai/web/assets/app.js"
+    script = r'''
+import {readFileSync} from 'node:fs';
+import assert from 'node:assert/strict';
+const source=readFileSync(process.argv[1],'utf8');
+const settings=source.slice(source.indexOf('function showSettings()'),source.indexOf('async function bootstrap()'));
+const element=(tag,classes='',text='')=>({tag,text,children:[],append(...children){this.children.push(...children);}});
+const nodes={'settings-content':element('div'),'settings-dialog':{showModal(){this.open=true;}}};
+const $=id=>nodes[id],clear=id=>{nodes[id].children=[];};
+const properties=value=>({tag:'dl',value});
+const inputs=['image/*','application/x-private'];
+const state={config:{model:'opaque',input_mime_types:inputs,capabilities:[]}};
+const showSettings=new Function('state','$','clear','element','properties','json',settings+';return showSettings;')(state,$,clear,element,properties,JSON.stringify);
+showSettings();
+assert.equal(nodes['settings-dialog'].open,true);
+assert.equal('Vision' in nodes['settings-content'].children[0].value,false);
+const card=nodes['settings-content'].children[1];
+assert.deepEqual(JSON.parse(card.children.find(item=>item.tag==='pre').text),inputs);
+assert.equal(card.children.find(item=>item.tag==='h3').text,'Captured input MIME types');
+assert.match(card.children.find(item=>item.tag==='p').text,/expanded when the model is captured/);
+assert.match(card.children.find(item=>item.tag==='p').text,/provider support has not been verified/);
+state.config.input_mime_types=null;
+showSettings();
+assert.equal(nodes['settings-content'].children.length,3);
+assert.equal(nodes['settings-content'].children[1].children.find(item=>item.tag==='pre').text,'No model configured');
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", script, str(source)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

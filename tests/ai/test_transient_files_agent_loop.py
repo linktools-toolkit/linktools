@@ -27,17 +27,41 @@ class _Session:
         assert max_bytes is None or len(value) <= max_bytes
         return value
 
-    async def read_file(
+    async def inspect_file(
+        self, path: str, *, max_bytes: int | None = None,
+    ) -> dict[str, object]:
+        assert path == "note.txt"
+        assert max_bytes is None or max_bytes >= 4
+        return {
+            "path": path, "is_text": True, "mime_type": "text/plain",
+            "type_source": "content", "size": 4, "state": "note-v1", "bytes_read": 4,
+        }
+
+    async def read_text(
         self,
         path: str,
         *,
-        offset: int = 0,
+        offset: int | None = None,
         limit: int | None = None,
-    ) -> str:
+        cursor: str | None = None,
+        full_metadata: bool = False,
+        max_bytes: int | None = None,
+        max_read_bytes: int | None = None,
+    ) -> dict[str, object]:
         assert path == "note.txt"
-        assert offset == 0
+        assert offset is None
         assert limit is None
-        return "note"
+        assert cursor is None
+        assert not full_metadata
+        assert max_bytes is None or max_bytes >= 4
+        assert max_read_bytes is None or max_read_bytes >= 4
+        return {
+            "path": path, "content": "note", "state": "note-v1", "bytes_read": 4,
+            "size": 4, "offset": 0, "end_offset": 1,
+            "byte_offset": 0, "end_byte_offset": 4,
+            "line_offset": 0, "end_line_offset": 0,
+            "lossy": False, "truncated": False, "eof": True, "next_cursor": None,
+        }
 
     async def close(self) -> None:
         return None

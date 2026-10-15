@@ -69,7 +69,7 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
                 artifact_id="artifact",
                 execution_id="execution",
                 producer="tool",
-                media_type="text/plain",
+                mime_type="text/plain",
                 object_ref=ObjectRef("runtime", "artifact/key", "a" * 64, 7),
                 created_at=datetime.now(timezone.utc),
             )
@@ -115,7 +115,7 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
                 artifact_id="artifact",
                 execution_id="execution",
                 producer="tool",
-                media_type="text/plain",
+                mime_type="text/plain",
                 object_ref=reference,
                 created_at=datetime.now(timezone.utc),
             )

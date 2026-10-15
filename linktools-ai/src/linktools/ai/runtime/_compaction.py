@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
@@ -44,6 +45,9 @@ from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
+_TEXT_READ_POLICY = "workspace_file_read_v1"
+_UNIFIED_READ_POLICY = "workspace_file_read_v2"
+_SUPERSEDED_FILE_READ = "[superseded file read]"
 _logger = environ.get_logger("ai.runtime.compaction")
 
 
@@ -91,6 +95,38 @@ class _ContextProjectionSink(Protocol):
         source: Sequence[ModelMessage],
         projected: Sequence[ModelMessage] | None,
     ) -> None: ...
+
+
+class _WorkspaceFileReadDeduplication(DeduplicateFileReads[Any]):
+    """Preserve file-input metadata while compacting only proven text repeats."""
+
+    def __init__(self, policies: Callable[[], Mapping[str, str]]) -> None:
+        self._policies = policies
+        super().__init__(
+            file_key=lambda call: _context_dedupe_file_key(call, policies()),
+        )
+
+    async def compact(
+        self,
+        messages: list[ModelMessage],
+        ctx: PydanticRunContext[Any],
+    ) -> list[ModelMessage]:
+        string_returns = {
+            (part.tool_name, part.tool_call_id)
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and isinstance(part.content, str)
+        }
+        legacy = DeduplicateFileReads[Any](
+            file_key=lambda call: (
+                self.file_key(call)
+                if (call.tool_name, call.tool_call_id) in string_returns
+                else None
+            ),
+        )
+        compacted = await legacy.compact(messages, ctx)
+        return _deduplicate_text_entries(compacted, self._policies())
 
 
 class _ObservedCompactionModel(WrapperModel):
@@ -301,11 +337,8 @@ class CompactionCapability(AbstractCapability[None]):
         self._keep_result_tools: frozenset[str] = frozenset()
         self._context_dedupe_by_tool: dict[str, str] = {}
         self._refresh_policy()
-        self._deduplicate = DeduplicateFileReads(
-            file_key=lambda call: _context_dedupe_file_key(
-                call,
-                self._context_dedupe_by_tool,
-            )
+        self._deduplicate = _WorkspaceFileReadDeduplication(
+            lambda: self._context_dedupe_by_tool,
         )
 
     async def wrap_model_request(
@@ -354,7 +387,10 @@ class CompactionCapability(AbstractCapability[None]):
                     ClearToolResults(
                         max_tokens=1,
                         keep_pairs=_KEEP_COMPLETED_PAIRS,
-                        exclude_tools=self._keep_result_tools,
+                        exclude_tools=self._keep_result_tools | frozenset(
+                            name for name, policy in self._context_dedupe_by_tool.items()
+                            if policy == _UNIFIED_READ_POLICY
+                        ),
                     ),
                     SummarizingCompaction(
                         model=summary_model,
@@ -441,7 +477,7 @@ class CompactionCapability(AbstractCapability[None]):
         keep_result_tools = frozenset(self._policy.keep_result_tools)
         context_dedupe_by_tool = dict(self._policy.context_dedupe_by_tool)
         if any(
-            value != "workspace_file_read_v1"
+            value not in {_TEXT_READ_POLICY, _UNIFIED_READ_POLICY}
             for value in context_dedupe_by_tool.values()
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -464,20 +500,130 @@ def _validate_pending_binary_content(
     limits: PromptLimits,
 ) -> None:
     count, total_bytes = binary_content_usage(messages)
+    output_bytes = 0
+    # Only newly returned previews belong to the pending parallel batch. Older
+    # text remains ordinary context, governed by the existing compaction budget.
+    for message in reversed(messages):
+        if isinstance(message, ModelResponse) and message.state == "complete":
+            break
+        if not isinstance(message, ModelRequest):
+            continue
+        for part in message.parts:
+            if not isinstance(part, ToolReturnPart) or part.tool_name != "read_file":
+                continue
+            value = part.content
+            if not isinstance(value, Mapping) or not isinstance(value.get("texts"), list):
+                continue
+            output_bytes += len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+            for text in value["texts"]:
+                if isinstance(text, Mapping) and isinstance(text.get("content"), str):
+                    count += 1
+                    total_bytes += len(text["content"].encode("utf-8"))
     if (
         count > limits.max_binary_input_parts
         or total_bytes > limits.max_binary_input_bytes
+        or output_bytes > limits.max_file_output_bytes
     ):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
+                      safe_details={"reason": "file_request_budget_exceeded"})
 
 
 def _context_dedupe_file_key(
     call: ToolCallPart,
     policies: Mapping[str, str],
 ) -> str | None:
-    if policies.get(call.tool_name) != "workspace_file_read_v1":
+    if policies.get(call.tool_name) != _TEXT_READ_POLICY:
         return None
     return _workspace_file_key(call)
+
+
+def _deduplicate_text_entries(
+    messages: list[ModelMessage],
+    policies: Mapping[str, str],
+) -> list[ModelMessage]:
+    seen: set[str] = set()
+    projected: list[ModelMessage] = []
+    for message in reversed(messages):
+        if not isinstance(message, ModelRequest):
+            projected.append(message)
+            continue
+        parts = []
+        changed = False
+        for part in reversed(message.parts):
+            if (
+                not isinstance(part, ToolReturnPart)
+                or policies.get(part.tool_name) != _UNIFIED_READ_POLICY
+                or not isinstance(part.content, Mapping)
+                or not isinstance(part.content.get("texts"), list)
+            ):
+                parts.append(part)
+                continue
+            texts = []
+            keys: set[str] = set()
+            text_changed = False
+            for entry in part.content["texts"]:
+                key = _text_read_key(entry)
+                if key is not None:
+                    keys.add(key)
+                if key is not None and key in seen:
+                    texts.append({**entry, "content": _SUPERSEDED_FILE_READ})
+                    text_changed = True
+                else:
+                    texts.append(entry)
+            seen.update(keys)
+            if text_changed:
+                parts.append(replace(part, content={**part.content, "texts": texts}))
+                changed = True
+            else:
+                parts.append(part)
+        projected.append(
+            replace(message, parts=list(reversed(parts))) if changed else message
+        )
+    projected.reverse()
+    return projected
+
+
+def _text_read_key(value: object) -> str | None:
+    if not isinstance(value, Mapping) or not isinstance(value.get("content"), str):
+        return None
+    if value["content"] == _SUPERSEDED_FILE_READ:
+        return None
+    digest = value.get("hash")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        return None
+    path = value.get("path")
+    if not isinstance(path, str):
+        return None
+    try:
+        path = validate_workspace_path(path)
+    except (TypeError, ValueError, AIError):
+        return None
+    coverage = {}
+    for name in (
+        "offset", "end_offset", "byte_offset", "end_byte_offset",
+        "line_offset", "end_line_offset",
+    ):
+        position = value.get(name)
+        if isinstance(position, bool) or not isinstance(position, int) or position < 0:
+            return None
+        coverage[name] = position
+    if (
+        coverage["end_offset"] < coverage["offset"]
+        or coverage["end_byte_offset"] < coverage["byte_offset"]
+    ):
+        return None
+    lossy = value.get("lossy")
+    if not isinstance(lossy, bool):
+        return None
+    return json.dumps(
+        {"path": path, "hash": digest, "coverage": coverage, "lossy": lossy},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _workspace_file_key(call: ToolCallPart) -> str | None:

@@ -54,7 +54,6 @@ class _TextModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:test"
-    vision = False
     model_digest = "d" * 64
     contract: dict[str, JsonValue] = {
         "provider": "test",

@@ -153,7 +153,6 @@ class _InvalidOutputModels:
     route_id = "default"
     provider = "test"
     model_identity = "test:invalid-output"
-    vision = False
     contract: dict[str, JsonValue] = {"provider": "test", "model": "invalid-output"}
 
     def capture(self) -> "_InvalidOutputModels":
