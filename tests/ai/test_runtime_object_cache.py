@@ -97,7 +97,7 @@ def router(store: RecordingStore, cache: RecordingCache | None, **scope: str) ->
     return _RuntimeObjectRouter(
         {domain: store for domain in RuntimeDomain},
         close_guard_stores=(),
-        content_cache=cache,
+        cache_backend=cache,
         cache_domains=tuple(RuntimeDomain),
         namespace=scope.get("namespace", "namespace"),
         tenant_id=scope.get("tenant_id", "tenant"),
@@ -228,13 +228,13 @@ async def test_invalid_reference_metadata_still_fails_integrity(cache_enabled: b
 
 
 @pytest.mark.asyncio
-async def test_only_durable_routes_use_content_cache(tmp_path: Path) -> None:
+async def test_only_durable_routes_use_cache_backend(tmp_path: Path) -> None:
     store, cache = RecordingStore(), RecordingCache()
     plan = RuntimeStoragePlan(
         conversation=RuntimeStorageRoute.filesystem(tmp_path / "durable"),
         artifact=RuntimeStorageRoute.transient(),
     )
-    objects = build_runtime_object_router(plan, store, {}, {}, content_cache=cache)
+    objects = build_runtime_object_router(plan, store, {}, {}, cache_backend=cache)
     for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.ARTIFACT, RuntimeDomain.MEMORY):
         ref = await put(objects.object_store(domain))
         await objects.read_object(domain, ref)
@@ -343,7 +343,7 @@ async def test_uncached_transcript_cancellation_waits_for_owned_stream_close(
     cache = RecordingCache() if configured_cache else None
     objects = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: _Store(stream)},  # type: ignore[dict-item]
-        close_guard_stores=(), content_cache=cache, cache_domains=(),
+        close_guard_stores=(), cache_backend=cache, cache_domains=(),
     )
     ref = ObjectRef("runtime", "transcript", hashlib.sha256(b"abcd").hexdigest(), 4)
     reader = TranscriptRepository(

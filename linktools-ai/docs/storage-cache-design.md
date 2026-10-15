@@ -20,13 +20,14 @@ Redis 连接、配置及适配器归宿主。框架不依赖 Redis，不添加 R
 | 单一源 | 条目内容及 metadata/revision 的来源 | backend |
 | 组合视图 | 优先级层、有效条目与 metadata 派生视图 | StorageOverlay |
 | 字节对象 | 可引用的不可变字节成员及完整性 | ObjectStore/ObjectRef/ObjectStat |
-| 内容缓存 | 可丢弃的字节副本，无源存在性/授权权威 | ContentCache |
+| 字节缓存后端 | 可丢弃的字节副本，无源存在性/授权权威 | CacheBackend |
+| 领域内容缓存 | 持有借用的字节后端，定义领域 key 与编码/解码 | ContentCache；AssetContentCache |
 | 持久内容描述 | inline 内容或外部 ObjectRef | StoredPayload |
 | 事务状态 | record/alias/sequence/fact/operation 与 CAS | StateStore |
 | 修订提示 | 加速 metadata 新鲜度探测；不是提交凭据 | RevisionSource |
 | 写缓冲 | 被接纳但尚未获得 sink 确认的批写项 | 单独的条目有界缓冲职责，接口见第8节 |
 
-ObjectStore 和 ContentCache 不能为了词形一致合并。get 返回可缺失的完整值，stat 返回描述，open 返回字节流，read_object 完整物化并校验引用；这些不同名称有实际语义依据。
+ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺失的完整值，stat 返回描述，open 返回字节流，read_object 完整物化并校验引用；这些不同名称有实际语义依据。
 
 ## 3. 全局命名与合同收敛
 
@@ -34,8 +35,9 @@ ObjectStore 和 ContentCache 不能为了词形一致合并。get 返回可缺�
 
 | 当前 | 推荐 | 原因 |
 |---|---|---|
-| StorageOverlay.content_cache（已落实） | content_cache | 与 RuntimeStorage 同一注入概念 |
-| InMemoryContentCache.max_size | max_entries | 单位是条目数，区别 max_bytes |
+| StorageOverlay 缓存注入 | content_cache=AssetContentCache(cache_backend) | 单一领域对象包含字节后端与 key/codec |
+| RuntimeStorage 字节缓存注入 | cache_backend | Runtime 已有 ObjectRef/domain/tenant/source 规则 |
+| InMemoryCacheBackend.max_size | max_entries | 单位是条目数，区别 max_bytes |
 | preload_concurrency | origin_read_concurrency | 普通读取 cache miss 同样使用 |
 | cache_concurrency | cache_read_concurrency | 实际限制 cache probe |
 | StorageOverlay.refresh / invalidate | refresh_metadata / invalidate_metadata | 不清空内容副本，只操作 metadata |
@@ -43,13 +45,13 @@ ObjectStore 和 ContentCache 不能为了词形一致合并。get 返回可缺�
 | 具体类 StorageRevisionSource | BackendRevisionSource | 实际把 backend.head_revision 适配为 RevisionSource |
 | InitializableStorage | StorageLifecycle | 契约同时含 initialize 与 close |
 
-保留 CacheAdapter/AssetCacheAdapter/cache_adapter：当前没有另一适配器族与之混淆，相邻 content_cache 与类型已明确，无需加长。StorageId/StoragePath 推荐 PathSegment/RelativePath，准确表达文件路径约束；两者没有生产调用者，不添加 Storage 长前缀。不机械给所有 DTO 添加前缀，不增加总 manager/spec/registry。
+缓存接入使用两层职责：CacheBackend 仅保存字节，具体实现为 InMemoryCacheBackend、FilesystemCacheBackend、TieredCacheBackend；ContentCache 持有 backend 并定义 cache_key/to_cache/from_cache。AssetContentCache(backend) 直接实现该领域职责，StorageOverlay 只有 content_cache 一个缓存参数，不再另传适配器。RuntimeStorage 使用 cache_backend，沿用自身引用、租户与源存在性校验，不新增 Runtime 适配器或 options/binding 封装。两者借用后端而不关闭它；单飞保留 value 与 encoded bytes，每个 reader 独立解码可变值。StorageId/StoragePath 推荐 PathSegment/RelativePath，准确表达文件路径约束；两者没有生产调用者，不添加 Storage 长前缀。不机械给所有 DTO 添加前缀，不增加总 manager/spec/registry。
 
 修订作用域通过类型与所属对象明确：entry_revision 是单条目历史修订；backend.head_revision 是单源 head；Overlay.current_revision 是组合视图 head；写结果 store_revision 仍指实际 writer head。保留这些现有名称并补足合同，不为前缀整齐增加 effective_revision/backend_revision 两套平行术语。RESET 撤销写层覆盖、DELETE 产生删除状态，不能合并为同一动作。
 
-### 批量读取统一
+### 批量读取合同
 
-Storage 与 Asset 批读统一 get_many(keys) -> AsyncIterator[value | None]，直接 async for 消费，保持输入顺序、重复 key 和缺失位置。四个内置 Asset backend 保留 metadata 批量查询，正文可按需读取；不能流式的数据先完成必要批量捕获再逐项返回。允许前缀已交付后出现后项错误，不能用 None 隐藏异常；Overlay 刷新只重读未交付后缀。无缓存路径提前关闭会收口源 stream；缓存路径允许逐 key 提前交付，但已接纳的共享 loader 继续完成，单读者取消不取消其他读者共享工作，不承诺全路径背压。提前结束内置流使用 aclosing。独立 ExecutionRepository 的领域 Mapping 合同不变；不保留 tuple 兼容壳，也不添加 get_many_map。
+BatchStorageReader 与四个内置 Asset backend 的 get_many(keys) 返回 Mapping[key, value]，只包含存在且可见的条目；重复 key 合并，缺失 key 不进入结果。StorageOverlay、AssetStore、快照和能力捕获的 AssetStoreReader 返回 tuple[value | None, ...]，按输入顺序保留重复 key 与缺失位置。两层均通过 await 完成批读后返回，保留 backend 批量查询及 Overlay 的按 key 合并，不提供流式前缀或额外 iter_many 接口。ExecutionRepository 的领域 Mapping 合同保持独立。
 
 ### 持久字段与当前代码一致性
 
@@ -70,13 +72,13 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 | 可观测性指标/诊断 | 评估有界批写 | 先明确哪些允许延迟/丢失；记账和审计不能默认可丢 |
 | 快照/恢复/冻结资产 | 各自固定读取源 | 不以最新在线缓存替代冻结内容 |
 
-资产缓存允许同一摘要的字节跨来源复用；现有 AssetCacheAdapter 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识，命中仍验证当前实际源中的对象存在性。
+资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识，命中仍验证当前实际源中的对象存在性。
 
 ## 5. 最小接入方式
 
-已有：ContentCache、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.content_cache及内部读取路由。Storage 与 Asset get_many 已统一为 AsyncIterator；第3节其余命名仍拟调整，写缓冲公开形状在第8节。
+已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.cache_backend及内部读取路由。Storage 与 Asset 批读沿用第3节的分层合同；其余拟调整命名见第3节，写缓冲公开形状在第8节。
 
-已有 ContentCache 继续仅含 get/put/delete/contains_many；TieredContentCache 可以嵌套复用，不引入层配置 DSL。
+已有 CacheBackend 继续仅含 get/put/delete/contains_many；TieredCacheBackend 可以嵌套复用，不引入层配置 DSL。
 
 ### 5.1 资产读写：拟调整接口的完整示例
 
@@ -86,10 +88,10 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
     import hashlib
 
     from linktools.ai.asset import (
-        AssetCacheAdapter, AssetKey, AssetStore, InMemoryAssetBackend,
+        AssetContentCache, AssetKey, AssetStore, InMemoryAssetBackend,
     )
     from linktools.ai.storage import (
-        BackendRevisionSource, InMemoryContentCache, StorageOverlay,
+        BackendRevisionSource, InMemoryCacheBackend, StorageOverlay,
     )
 
     async def asset_example() -> None:
@@ -99,10 +101,9 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
             primary=backend,
             writer=backend,
             revision_source=revision_source,
-            content_cache=InMemoryContentCache(
+            content_cache=AssetContentCache(InMemoryCacheBackend(
                 max_entries=128, max_bytes=1024 * 1024,
-            ),
-            cache_adapter=AssetCacheAdapter(),
+            )),
         ))
         try:
             await store.initialize()
@@ -111,7 +112,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
             content = b"hello"
             info = await store.put(key, content)
             assert info.digest == hashlib.sha256(content).hexdigest()
-            assert tuple([value async for value in store.get_many((key, missing, key))]) == (
+            assert await store.get_many((key, missing, key)) == (
                 content, None, content,
             )
             assert await store.get(key) == content
@@ -132,8 +133,8 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
     from linktools.ai.core import AuthorizationPolicy, Principal
     from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
     from linktools.ai.storage import (
-        ContentCache, FilesystemContentCache,
-        InMemoryContentCache, TieredContentCache,
+        CacheBackend, FilesystemCacheBackend,
+        InMemoryCacheBackend, TieredCacheBackend,
     )
 
     async def read_existing_history(
@@ -145,19 +146,19 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
         session_id: str,
         execution_id: str,
         *,
-        shared_cache: ContentCache | None = None,
+        shared_cache: CacheBackend | None = None,
     ) -> None:
-        lower_cache: ContentCache = FilesystemContentCache(
+        lower_cache: CacheBackend = FilesystemCacheBackend(
             cache_root, max_bytes=64 * 1024 * 1024,
         )
         if shared_cache is not None:
-            lower_cache = TieredContentCache(lower_cache, shared_cache)
-        content_cache = TieredContentCache(
-            InMemoryContentCache(max_bytes=16 * 1024 * 1024),
+            lower_cache = TieredCacheBackend(lower_cache, shared_cache)
+        cache_backend = TieredCacheBackend(
+            InMemoryCacheBackend(max_bytes=16 * 1024 * 1024),
             lower_cache,
         )
         storage = RuntimeStorage.from_root(
-            runtime_root, content_cache=content_cache,
+            runtime_root, cache_backend=cache_backend,
         )
         async with RuntimeHistory.open(
             namespace,
@@ -180,20 +181,20 @@ RuntimeHistory.open 在进入时按 read_only=True 初始化所传 storage，在
 
 有 shared_cache 时依次检查内存、文件、宿主共享层，命中向前层提升；put 向配置的层写入。只需要内存或两层时直接删减组合，避免无收益副本与写放大。示例预算用于展示，不是固定最佳值；Runtime 和资产使用独立预算，避免大正文挤出资产缓存。
 
-宿主共享缓存适配器实现同一 ContentCache；连接配置与关闭仍由宿主资源所有者负责，RuntimeHistory 退出不关闭它。适配器须限制网络操作耗时；低层 TTL 不会自动使已提升到内存/文件层的副本过期，业务失效仍由拥有者合同决定。
+宿主共享缓存适配器实现同一 CacheBackend；连接配置与关闭仍由宿主资源所有者负责，RuntimeHistory 退出不关闭它。适配器须限制网络操作耗时；低层 TTL 不会自动使已提升到内存/文件层的副本过期，业务失效仍由拥有者合同决定。
 
 RuntimeStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；后到冷 miss 若加入已有 flight，须另查权威源，避免借用源已删除的旧读取；热 hit 校验缓存字节并检查权威对象存在性。查询数按这三类分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
 
 ## 6. 并发、一致性与生命周期
 
-- 同一 owning loader 内的冷 miss 共享已有 flight；共享 ContentCache 的不同 Runtime 实例不自动获得分布式 single-flight
+- 同一 owning loader 内的冷 miss 共享已有 flight；共享 CacheBackend 的不同 Runtime 实例不自动获得分布式 single-flight
 - completed flight 不作为新请求的缓存；权威 revision 仅允许源 I/O 开始前同批读共享，后到读必须新观察
 - 已知更新的 generation/修订不能被旧刷新覆盖；opaque SDK revision 不擅自排序，宿主可按自身版本合同处理
 - revision通知必须绑定实际writer的来源：现有Overlay允许非primary writer，而唯一revision_source在primary view。不能把其它层writer的head发布给primary提示源；实现按writer对应view选择source，无source则不误发，不禁止合法非primary writer，也不为此新增参数。该现存接线问题纳入实施必须修复项
 - 取消一个共享读等待者不取消 producer；禁用缓存的原请求取消语义保持
 - close 先封闭新工作，完成已接纳的必要工作，再按所有权关闭；外部 cache/连接不由 Runtime 接管
 - archive/projection preflight 可以合法读取对象，必须先完成，再封闭 object router 并 drain
-- ContentCache异常/损坏可回源；RevisionSource.head_revision异常按现有契约传播，适配器只有明确返回None时才进入源回退，不新增吞异常降级。refresh_metadata仍遵循来源策略，不是强制绕过提示的新接口；源失败、删除、授权失败不能伪装成缓存成功
+- 字节缓存异常/损坏可回源；RevisionSource.head_revision异常按现有契约传播，适配器只有明确返回None时才进入源回退，不新增吞异常降级。refresh_metadata仍遵循来源策略，不是强制绕过提示的新接口；源失败、删除、授权失败不能伪装成缓存成功
 - transient/volatile 不因文件或共享缓存延长生命周期；缓存逐出不是物理安全删除保证
 
 提交结果未知与提示通知不构成同一事务：请求取消可能发生在数据库已提交而提示尚未更新的窗口。本方案保持已有请求取消/提交结果未知合同，不把关闭修复变成无条件屏蔽取消；提示仅承诺其来源定义的最终刷新行为，不承诺固定提交后新鲜度上界。需要强一致的调用继续权威读取/readback。若未来要求提示与提交原子联动，应单独设计持久通知机制，而不在缓存层偷偷加入可靠队列。
@@ -350,13 +351,13 @@ close在第一次await前停止接纳，并创建/复用唯一owned cleanup task
 | 等待 flush 超时或等待者取消 | 只结束等待，不等于 sink 已结算，不撤销仍执行的暂存项 | 同样不决定持久结果；读端仍只看已提交事实 |
 | 进程崩溃 | 内存中的待写项可能丢失 | 同样可能丢失；只读已提交不等于待写可靠交付 |
 
-第二条路径不承诺“所有写入最终成功”，也不强制同步逐条写库。如果另有“接纳后即使崩溃也必须完成”的合同，必须沿用具有 durable pending/恢复所有权的领域机制；不能仅靠 ContentCache 或内存 WriteBuffer 宣称保证。这里不新增可靠队列或持久后台服务。
+第二条路径不承诺“所有写入最终成功”，也不强制同步逐条写库。如果另有“接纳后即使崩溃也必须完成”的合同，必须沿用具有 durable pending/恢复所有权的领域机制；不能仅靠 CacheBackend 或内存 WriteBuffer 宣称保证。这里不新增可靠队列或持久后台服务。
 
 “已提交可读”不等于“调用方已收到成功响应才可读”。数据库可能已经提交而响应丢失，写调用报告结果未知时，权威读取仍可能看到新值。不能把异常当成未提交，也不能假定所有 Store 都会自动读回确认；保留各 owner 的 receipt/readback 与错误传播合同。
 
 ### 数据和缓存的发布边界
 
-pending 与 committed 内容分别由暂存/队列和权威 reader/ContentCache 拥有。不能把未落库值写进普通已提交缓存的同一个 key，再指望读端根据一个标志猜它是否可靠。
+pending 与 committed 内容分别由暂存/队列和权威 reader/CacheBackend 拥有。不能把未落库值写进普通已提交缓存的同一个 key，再指望读端根据一个标志猜它是否可靠。
 
 - 接纳只改变 pending，不改变权威 revision、已提交 metadata 或内容缓存索引
 - sink 成功确认后，写入方才基于该批次主动发布已提交 revision/缓存，或使旧的可变索引失效；不可变正文仍按实际引用及摘要定位。其他权威 reader 若已读取并验证实际提交结果，即使原写调用结果未知，也可按原合同缓存该结果
@@ -379,7 +380,7 @@ WriteBuffer.confirmed 只表示回调成功返回。用于已提交读视图的 
 | 活跃执行 transcript / interaction / payload | StagingAgentRunStore / AgentRunStore 持有同 owner 未落库事实；projection 按捕获高水位交接 | 已有领域可读暂存路径；保持其更强的恢复/终态合同，不降级成失败可丢 |
 | 独立 DURABLE RuntimeHistory | archive / 权威对象 reader | 只读已提交；不保证看到另一实例尚未落库的 staging |
 | revision 提示与能力元数据 | 已提交 head、RevisionSource、Capability reader | 读缓存/失效问题，不是需要批量写库的 pending 事实；继续单飞与生命周期修复 |
-| 已提交正文 | ObjectStore + ContentCache | 可丢读副本，不能混入未确认正文来提高命中率 |
+| 已提交正文 | ObjectStore + CacheBackend | 可丢读副本，不能混入未确认正文来提高命中率 |
 | 显式允许失败的领域暂存读 | 需要由相应领域 reader 封装 pending 与 committed 的交接 | 尚需收敛通用接线；不能要求业务调用方自己拼接队列和数据库结果 |
 
 因此，“两条路径”不需要两个 WriteBuffer 或可靠/不可靠 mode，也不能以提供 pending_items 就声称通用可读路径已完成。框架必须封装使用方所需的读取语义；原有领域 staging 可以直接复用，不能为覆盖名义新增没有实际消费者的万能 KV 存储。
@@ -396,6 +397,6 @@ append/聚合查询则不能套按 key 覆盖：inflight 与持久结果可能�
 
 ### 当前公开接口结论与设计状态
 
-保留第8节单一 WriteBuffer 的接纳、批写、flush/status/close 合同。仅已提交读视图沿现有 reader 与已提交 ContentCache；可读暂存优先使用已有领域 owner 的读取接口。暂不新增 BufferedStorage 类、mode 参数或 pending_items 公共 API，也不将第8节纯写缓冲误称为已覆盖通用未落库读取。
+保留第8节单一 WriteBuffer 的接纳、批写、flush/status/close 合同。仅已提交读视图沿现有 reader 与已提交 CacheBackend；可读暂存优先使用已有领域 owner 的读取接口。暂不新增 BufferedStorage 类、mode 参数或 pending_items 公共 API，也不将第8节纯写缓冲误称为已覆盖通用未落库读取。
 
 本节已确认两种读取可见性及共同批写机制，修正了“第二条路径必须直接写库”的错误假定。通用可读接线还需以实际读取合同收敛并独立复审；本节不是新增 API 的实现承诺或全范围设计通过声明。实现验证须增加：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。

@@ -16,7 +16,7 @@ from linktools.core import environ
 from ...core import canonical_sha256
 from ...errors import AIError, ErrorCode
 from ...storage import (
-    ContentCache,
+    CacheBackend,
     FilesystemMutationLock,
     ObjectStore,
     SqlStorageContext,
@@ -92,7 +92,7 @@ async def materialize_runtime_storage(
     namespace: str,
     tenant_id: str,
     object_store: ObjectStore | None,
-    content_cache: ContentCache | None = None,
+    cache_backend: CacheBackend | None = None,
     read_only: bool = False,
 ) -> _MaterializedRuntimeStorage:
     stores: dict[RuntimeDomain, StateStore] = {}
@@ -315,7 +315,7 @@ async def materialize_runtime_storage(
         repositories = _repositories(bundles)
         objects = build_runtime_object_router(
             plan, object_store, stores, sql_contexts,
-            content_cache=content_cache, namespace=namespace, tenant_id=tenant_id,
+            cache_backend=cache_backend, namespace=namespace, tenant_id=tenant_id,
         )
         run_store = build_runtime_agent_run_store(
             plan,

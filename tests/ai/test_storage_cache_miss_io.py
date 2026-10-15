@@ -6,20 +6,17 @@ import asyncio
 import hashlib
 import gc
 from collections import Counter
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.asset import AssetCacheAdapter, AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend, SqlAssetBackend
+from linktools.ai.asset import AssetContentCache, AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend, SqlAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache, StorageOverlay
-
-
-from tests.ai._storage_stream_helpers import collect_values
+from linktools.ai.storage import FilesystemCacheBackend, InMemoryCacheBackend, StorageOverlay
 
 
 class _PausedBackend(InMemoryAssetBackend):
@@ -31,15 +28,14 @@ class _PausedBackend(InMemoryAssetBackend):
         self.failure: Exception | None = None
         self.closed = False
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
-        values = await collect_values(super().get_many(keys))
+    async def get_many(self, keys: Sequence[AssetKey]) -> dict[AssetKey, bytes]:
+        values = await super().get_many(keys)
         self.loads.append(tuple(keys))
         self.started.put_nowait(tuple(keys))
         await self.release.wait()
         if self.failure is not None:
             raise self.failure
-        for value in values:
-            yield value
+        return values
 
     async def close(self) -> None:
         self.closed = True
@@ -51,9 +47,9 @@ class _ObservedOverlay(StorageOverlay):
         super().__init__(backend, **kwargs)
         self.entered = asyncio.Queue()
 
-    async def _cache_reads(self, keys, state):
+    async def _read_cached_or_origins(self, keys, state):
         self.entered.put_nowait(None)
-        return await super()._cache_reads(keys, state)
+        return await super()._read_cached_or_origins(keys, state)
 
 
 class _Validator:
@@ -64,9 +60,11 @@ class _Validator:
 
 async def _fixture():
     backend = _PausedBackend()
-    cache = InMemoryContentCache(max_bytes=1024 * 1024)
-    overlay = _ObservedOverlay(backend, writer=backend, content_cache=cache,
-                               cache_adapter=AssetCacheAdapter(), validator=_Validator())
+    cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
+    overlay = _ObservedOverlay(
+        backend, writer=backend, content_cache=AssetContentCache(cache),
+        validator=_Validator(),
+    )
     store = AssetStore(overlay)
     await store.initialize()
     keys = tuple(AssetKey("test", name) for name in ("a", "b", "c"))
@@ -80,9 +78,9 @@ async def _fixture():
 @pytest.mark.asyncio
 async def test_overlapping_batches_share_each_immutable_origin_and_keep_bulk() -> None:
     backend, overlay, store, (a, b, c) = await _fixture()
-    first = asyncio.create_task(collect_values(store.get_many((a, b, a))))
+    first = asyncio.create_task(store.get_many((a, b, a)))
     await backend.started.get()
-    second = asyncio.create_task(collect_values(store.get_many((b, c))))
+    second = asyncio.create_task(store.get_many((b, c)))
     await backend.started.get()
     scalar = asyncio.create_task(store.get(b))
     for _ in range(3):
@@ -94,10 +92,10 @@ async def test_overlapping_batches_share_each_immutable_origin_and_keep_bulk() -
         assert await scalar == b"b"
         assert Counter(key for batch in backend.loads for key in batch) == Counter((a, b, c))
         assert any(len(batch) > 1 for batch in backend.loads)
-        assert await collect_values(store.get_many((a, b, c))) == (b"a", b"b", b"c")
-        await overlay.content_cache.delete(overlay.cache_adapter.cache_key(b, await backend.stat(b)))
+        assert await store.get_many((a, b, c)) == (b"a", b"b", b"c")
+        await overlay.content_cache.backend.delete(overlay.content_cache.cache_key(b, await backend.stat(b)))
         backend.loads.clear()
-        assert await asyncio.gather(collect_values(store.get_many((a, b))), store.get(b)) == [(b"a", b"b"), b"b"]
+        assert await asyncio.gather(store.get_many((a, b)), store.get(b)) == [(b"a", b"b"), b"b"]
         assert Counter(key for batch in backend.loads for key in batch) == Counter((b,))
     finally:
         await store.close()
@@ -106,15 +104,15 @@ async def test_overlapping_batches_share_each_immutable_origin_and_keep_bulk() -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("filesystem", (False, True))
 async def test_preload_rechecks_eviction_without_reading_warm_content(tmp_path: Path, filesystem: bool) -> None:
-    class ObservedCache(FilesystemContentCache if filesystem else InMemoryContentCache):
+    class ObservedCache(FilesystemCacheBackend if filesystem else InMemoryCacheBackend):
         reads = 0
         async def get(self, key):
             self.reads += 1
             return await super().get(key)
     backend = _PausedBackend()
     backend.release.set()
-    cache = ObservedCache(max_bytes=len(AssetCacheAdapter().to_cache(b"a")), **({"root": tmp_path} if filesystem else {}))
-    overlay = StorageOverlay(backend, writer=backend, content_cache=cache, cache_adapter=AssetCacheAdapter())
+    cache = ObservedCache(max_bytes=len(AssetContentCache(InMemoryCacheBackend(max_bytes=0)).to_cache(b"a")), **({"root": tmp_path} if filesystem else {}))
+    overlay = StorageOverlay(backend, writer=backend, content_cache=AssetContentCache(cache))
     await overlay.initialize()
     a, b, absent = (AssetKey("test", name) for name in ("a", "b", "absent"))
     await overlay.put(a, b"a")
@@ -128,8 +126,8 @@ async def test_preload_rechecks_eviction_without_reading_warm_content(tmp_path: 
         assert (await overlay.preload((b,))).loaded == 1
         evicted = await overlay.preload((a, a, absent))
         assert (evicted.requested, evicted.loaded, evicted.already_cached, evicted.failed) == (2, 1, 0, 1)
-        cached = await cache.get(overlay.cache_adapter.cache_key(a, await backend.stat(a)))
-        assert overlay.cache_adapter.from_cache(cached) == b"a"
+        cached = await cache.get(overlay.content_cache.cache_key(a, await backend.stat(a)))
+        assert overlay.content_cache.from_cache(cached) == b"a"
         await overlay.put(a, b"z")
         changed = await overlay.preload((a,))
         assert changed.loaded == 1 and changed.already_cached == 0
@@ -146,7 +144,7 @@ async def test_preload_and_online_batches_share_origins_and_close_ownership() ->
     backend, overlay, store, (a, b, c) = await _fixture()
     preload = asyncio.create_task(overlay.preload((a, b)))
     await backend.started.get()
-    online = asyncio.create_task(collect_values(store.get_many((b, c))))
+    online = asyncio.create_task(store.get_many((b, c)))
     await backend.started.get()
     joined = asyncio.create_task(overlay.preload((b,)))
     for _ in range(3):
@@ -176,14 +174,12 @@ async def test_preload_and_online_batches_share_origins_and_close_ownership() ->
 async def test_preload_reports_uncached_values_as_failed(failure: str) -> None:
     class MissingBackend(_PausedBackend):
         async def get_many(self, keys):
-            await collect_values(super().get_many(keys))
-            for _ in keys:
-                yield None
+            await super().get_many(keys)
+            return {}
     backend = MissingBackend() if failure == "missing" else _PausedBackend()
     backend.release.set()
-    cache = None if failure == "no-cache" else InMemoryContentCache(max_bytes=0 if failure == "capacity" else 1024)
-    overlay = StorageOverlay(backend, writer=backend, content_cache=cache,
-                             cache_adapter=AssetCacheAdapter() if cache is not None else None)
+    cache = None if failure == "no-cache" else InMemoryCacheBackend(max_bytes=0 if failure == "capacity" else 1024)
+    overlay = StorageOverlay(backend, writer=backend, content_cache=AssetContentCache(cache) if cache is not None else None)
     await overlay.initialize()
     key = AssetKey("test", "uncached")
     await overlay.put(key, b"value")
@@ -198,8 +194,8 @@ async def test_preload_reports_uncached_values_as_failed(failure: str) -> None:
 async def test_preload_retains_bounded_bulk_loading() -> None:
     backend = _PausedBackend()
     backend.release.set()
-    overlay = StorageOverlay(backend, writer=backend, content_cache=InMemoryContentCache(max_bytes=4096),
-                             cache_adapter=AssetCacheAdapter(), preload_batch_size=2)
+    overlay = StorageOverlay(backend, writer=backend, content_cache=AssetContentCache(InMemoryCacheBackend(max_bytes=4096)),
+ preload_batch_size=2)
     await overlay.initialize()
     keys = tuple(AssetKey("test", str(index)) for index in range(5))
     for key in keys:
@@ -218,7 +214,7 @@ async def test_cancelled_waiter_does_not_cancel_shared_origin_or_close_early() -
     backend, overlay, store, (key, _, _) = await _fixture()
     first = asyncio.create_task(store.get(key))
     await backend.started.get()
-    second = asyncio.create_task(collect_values(store.get_many((key,))))
+    second = asyncio.create_task(store.get_many((key,)))
     await overlay.entered.get()
     await overlay.entered.get()
     first.cancel()
@@ -274,8 +270,9 @@ async def test_sql_cold_evicted_and_warm_reads_have_bounded_origin_io(tmp_path: 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
     await provision_asset_database(engine)
     backend = SqlAssetBackend(engine, namespace="cache-miss")
-    cache, adapter = InMemoryContentCache(max_bytes=1024 * 1024), AssetCacheAdapter()
-    store = AssetStore(StorageOverlay(backend, writer=backend, content_cache=cache, cache_adapter=adapter))
+    cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
+    content_cache = AssetContentCache(cache)
+    store = AssetStore(StorageOverlay(backend, writer=backend, content_cache=content_cache))
     await store.initialize()
     key, content = AssetKey("test", "payload"), b"x" * 16384
     info = await store.put(key, content)
@@ -287,12 +284,12 @@ async def test_sql_cold_evicted_and_warm_reads_have_bounded_origin_io(tmp_path: 
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
         for _ in range(2):
-            await cache.delete(adapter.cache_key(key, info))
+            await cache.delete(content_cache.cache_key(key, info))
             content_reads.clear()
             assert await asyncio.gather(*(store.get(key) for _ in range(16))) == [content] * 16
             assert 0 < len(content_reads) <= 4, "concurrent cache misses must not read the origin per waiter"
             content_reads.clear()
-            assert await asyncio.gather(*(collect_values(store.get_many((key,))) for _ in range(16))) == [(content,)] * 16
+            assert await asyncio.gather(*(store.get_many((key,)) for _ in range(16))) == [(content,)] * 16
             assert not content_reads
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -308,7 +305,7 @@ async def test_one_invalid_origin_does_not_poison_other_inflight_keys() -> None:
             if key == bad:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     overlay.validator = RejectOne()
-    batch = asyncio.create_task(collect_values(store.get_many((bad, good))))
+    batch = asyncio.create_task(store.get_many((bad, good)))
     await backend.started.get()
     scalar = asyncio.create_task(store.get(good))
     await overlay.entered.get()
@@ -328,9 +325,8 @@ async def test_one_invalid_origin_does_not_poison_other_inflight_keys() -> None:
 async def test_shared_origin_does_not_share_mutable_decoded_values() -> None:
     class MutableBackend(_PausedBackend):
         async def get_many(self, keys):
-            async for value in super().get_many(keys):
-                yield None if value is None else list(value)
-    class MutableAdapter(AssetCacheAdapter):
+            return {key: list(value) for key, value in (await super().get_many(keys)).items()}
+    class MutableContentCache(AssetContentCache):
         def from_cache(self, value):
             return list(super().from_cache(value))
         def to_cache(self, value):
@@ -338,8 +334,7 @@ async def test_shared_origin_does_not_share_mutable_decoded_values() -> None:
     backend = MutableBackend()
     key = AssetKey("test", "mutable")
     await backend.put(key, b"ab")
-    overlay = _ObservedOverlay(backend, content_cache=InMemoryContentCache(max_bytes=1024),
-                               cache_adapter=MutableAdapter())
+    overlay = _ObservedOverlay(backend, content_cache=MutableContentCache(InMemoryCacheBackend(max_bytes=1024)))
     first = asyncio.create_task(overlay.get(key))
     await backend.started.get()
     second = asyncio.create_task(overlay.get(key))
@@ -402,10 +397,10 @@ async def test_layer_origin_failure_does_not_poison_or_abandon_other_layer() -> 
     failure = AIError(ErrorCode.STORAGE_UNAVAILABLE)
     bad.failure = failure
     overlay = _ObservedOverlay(bad, layers=(StorageLayer("good", good),),
-                               content_cache=InMemoryContentCache(max_bytes=1024), cache_adapter=AssetCacheAdapter())
+                               content_cache=AssetContentCache(InMemoryCacheBackend(max_bytes=1024)))
     store = AssetStore(overlay)
     await store.initialize()
-    batch = asyncio.create_task(collect_values(store.get_many((a, b))))
+    batch = asyncio.create_task(store.get_many((a, b)))
     await bad.started.get()
     await good.started.get()
     scalar = asyncio.create_task(store.get(b))
@@ -436,10 +431,10 @@ async def test_completed_layer_read_is_not_held_by_unrelated_inflight_layer() ->
     await slow.put(a, b"slow")
     await fast.put(b, b"fast")
     overlay = _ObservedOverlay(slow, layers=(StorageLayer("fast", fast),),
-                               content_cache=InMemoryContentCache(max_bytes=1024), cache_adapter=AssetCacheAdapter())
+                               content_cache=AssetContentCache(InMemoryCacheBackend(max_bytes=1024)))
     store = AssetStore(overlay)
     await store.initialize()
-    batch = asyncio.create_task(collect_values(store.get_many((a, b))))
+    batch = asyncio.create_task(store.get_many((a, b)))
     await slow.started.get()
     await fast.started.get()
     scalar = asyncio.create_task(store.get(b))
@@ -459,9 +454,9 @@ async def test_completed_layer_read_is_not_held_by_unrelated_inflight_layer() ->
 async def test_warm_key_does_not_wait_for_same_layer_cold_origin() -> None:
     backend, overlay, store, (cold, warm, _) = await _fixture()
     info = await backend.stat(warm)
-    await overlay.content_cache.put(overlay.cache_adapter.cache_key(warm, info),
-                            overlay.cache_adapter.to_cache(b"b"))
-    batch = asyncio.create_task(collect_values(store.get_many((cold, warm))))
+    await overlay.content_cache.backend.put(overlay.content_cache.cache_key(warm, info),
+                            overlay.content_cache.to_cache(b"b"))
+    batch = asyncio.create_task(store.get_many((cold, warm)))
     await backend.started.get()
     scalar = asyncio.create_task(store.get(warm))
     try:
@@ -490,9 +485,8 @@ async def test_nonbatch_origin_publishes_finished_key_before_slow_peer() -> None
                 entered.set()
                 await release.wait()
             return await backend.get(key)
-    overlay = _ObservedOverlay(SingleReader(), content_cache=InMemoryContentCache(max_bytes=1024),
-                               cache_adapter=AssetCacheAdapter())
-    batch = asyncio.create_task(collect_values(overlay.get_many((slow, fast))))
+    overlay = _ObservedOverlay(SingleReader(), content_cache=AssetContentCache(InMemoryCacheBackend(max_bytes=1024)))
+    batch = asyncio.create_task(overlay.get_many((slow, fast)))
     await entered.wait()
     scalar = asyncio.create_task(overlay.get(fast))
     try:

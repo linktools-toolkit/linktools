@@ -35,7 +35,7 @@ def _content_charge(size: int) -> int:
     return max(1, size)
 
 
-class ContentCache(Protocol):
+class CacheBackend(Protocol):
     async def get(self, key: ContentCacheKey) -> "bytes | None": ...
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None: ...
@@ -48,7 +48,7 @@ class ContentCache(Protocol):
     ) -> "frozenset[ContentCacheKey]": ...
 
 
-async def read_cache(cache: "ContentCache | None", key: ContentCacheKey) -> "bytes | None":
+async def read_cache(cache: "CacheBackend | None", key: ContentCacheKey) -> "bytes | None":
     if cache is None:
         return None
     try:
@@ -58,7 +58,7 @@ async def read_cache(cache: "ContentCache | None", key: ContentCacheKey) -> "byt
 
 
 async def write_cache(
-    cache: "ContentCache | None",
+    cache: "CacheBackend | None",
     key: ContentCacheKey,
     content: bytes,
 ) -> bool:
@@ -72,7 +72,7 @@ async def write_cache(
 
 
 async def contains_many(
-    cache: "ContentCache | None",
+    cache: "CacheBackend | None",
     keys: "tuple[ContentCacheKey, ...]",
 ) -> "frozenset[ContentCacheKey]":
     if cache is None or not keys:
@@ -83,7 +83,7 @@ async def contains_many(
         return frozenset()
 
 
-class InMemoryContentCache:
+class InMemoryCacheBackend:
     """Bounded LRU content cache.
 
     ``max_bytes`` is a payload budget with a one-byte minimum charge per entry,
@@ -143,7 +143,7 @@ class InMemoryContentCache:
             return frozenset(key for key in keys if key in self._items)
 
 
-class FilesystemContentCache:
+class FilesystemCacheBackend:
     """Bounded second-tier cache with unlocked content reads.
 
     Writers sharing a root coordinate through one filesystem mutation lock and
@@ -431,12 +431,12 @@ class FilesystemContentCache:
                 os.unlink(temporary)
 
 
-class TieredContentCache:
+class TieredCacheBackend:
     """L1/L2 cache composition. ``get`` promotes an L2 hit into L1; failures are
     misses. ``contains_many`` is satisfied if EITHER tier holds the key, and
     does NOT promote L2 content into L1 (existence is not an access)."""
 
-    def __init__(self, l1: ContentCache, l2: "ContentCache | None" = None) -> None:
+    def __init__(self, l1: CacheBackend, l2: "CacheBackend | None" = None) -> None:
         self.l1 = l1
         self.l2 = l2
 
@@ -502,11 +502,11 @@ class TieredContentCache:
 
 
 __all__ = [
-    "ContentCache",
+    "CacheBackend",
     "ContentCacheKey",
-    "FilesystemContentCache",
-    "InMemoryContentCache",
-    "TieredContentCache",
+    "FilesystemCacheBackend",
+    "InMemoryCacheBackend",
+    "TieredCacheBackend",
     "contains_many",
     "read_cache",
     "write_cache",

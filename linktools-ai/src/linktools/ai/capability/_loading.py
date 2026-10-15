@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Shared Asset capture and loader context for capability groups."""
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -49,21 +49,11 @@ class _CapabilityAssetReader:
     async def get_many(
         self,
         keys: Sequence[AssetKey],
-    ) -> "AsyncIterator[bytes | None]":
-        requested = tuple(keys)
-        remaining = dict.fromkeys(requested, 0)
-        for key in requested:
-            remaining[key] += 1
-        values: dict[AssetKey, bytes | None] = {}
-        for key in requested:
-            if key not in values:
-                ref = self._versions.get(key)
-                values[key] = None if ref is None else (await self._store.read_versions((ref,)))[0]
-            value = values[key]
-            remaining[key] -= 1
-            if remaining[key] == 0:
-                del values[key]
-            yield value
+    ) -> "tuple[bytes | None, ...]":
+        refs = tuple(self._versions.get(key) for key in keys)
+        selected = tuple(ref for ref in refs if ref is not None)
+        values = iter(await self._store.read_versions(selected))
+        return tuple(next(values) if ref is not None else None for ref in refs)
 
     async def local_paths(
         self,

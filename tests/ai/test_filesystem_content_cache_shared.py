@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from linktools.ai.storage import FilesystemContentCache
+from linktools.ai.storage import FilesystemCacheBackend
 
 
 def _charge(root: Path) -> int:
@@ -26,8 +26,8 @@ def _charge(root: Path) -> int:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("concurrent", (False, True))
 async def test_instances_share_content_budget(tmp_path: Path, concurrent: bool) -> None:
-    first = FilesystemContentCache(tmp_path, max_bytes=2)
-    second = FilesystemContentCache(tmp_path / ".", max_bytes=2)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=2)
+    second = FilesystemCacheBackend(tmp_path / ".", max_bytes=2)
     await first.put("first", b"aa")
     await second.put("second", b"bb")
     assert _charge(tmp_path) == 2
@@ -49,8 +49,8 @@ async def test_instances_share_content_budget(tmp_path: Path, concurrent: bool) 
 
 @pytest.mark.asyncio
 async def test_rescan_preserves_local_access_order(tmp_path: Path) -> None:
-    first = FilesystemContentCache(tmp_path, max_bytes=3)
-    second = FilesystemContentCache(tmp_path, max_bytes=3)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=3)
+    second = FilesystemCacheBackend(tmp_path, max_bytes=3)
     await first.put("a", b"a")
     await first.put("b", b"b")
     await first.get("a")
@@ -64,8 +64,8 @@ async def test_rescan_preserves_local_access_order(tmp_path: Path) -> None:
 async def test_writer_budget_applies_to_put_but_delete_only_removes_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    large = FilesystemContentCache(tmp_path, max_bytes=20)
-    small = FilesystemContentCache(tmp_path, max_bytes=2)
+    large = FilesystemCacheBackend(tmp_path, max_bytes=20)
+    small = FilesystemCacheBackend(tmp_path, max_bytes=2)
     await large.put("a", b"aaaa")
     await large.put("b", b"bbbb")
     await large.put("c", b"cccc")
@@ -90,8 +90,8 @@ async def test_writer_budget_applies_to_put_but_delete_only_removes_target(
 async def test_eviction_precedes_atomic_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = FilesystemContentCache(tmp_path, max_bytes=4)
-    second = FilesystemContentCache(tmp_path, max_bytes=4)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=4)
+    second = FilesystemCacheBackend(tmp_path, max_bytes=4)
     await first.put("a", b"aaaa")
     original_replace = os.replace
     observed: list[int] = []
@@ -114,7 +114,7 @@ async def test_eviction_precedes_atomic_publication(
 
 @pytest.mark.asyncio
 async def test_only_recognized_regular_files_are_accounted_or_removed(tmp_path: Path) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=2)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=2)
     target = tmp_path / "unrelated.txt"
     target.write_bytes(b"external-content")
     upper = tmp_path / ("A" * 64)
@@ -150,7 +150,7 @@ async def test_only_recognized_regular_files_are_accounted_or_removed(tmp_path: 
 async def test_failed_preparation_does_not_publish_new_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=4)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=4)
     await cache.put("old", b"old!")
     old = tmp_path / cache._name("old")
     orphan = tmp_path / f".content-cache-{cache._name('orphan')}.abc.tmp"
@@ -198,8 +198,8 @@ async def test_failed_preparation_does_not_publish_new_content(
 async def test_cancelled_owner_retains_shared_lock_until_worker_settles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = FilesystemContentCache(tmp_path, max_bytes=4)
-    second = FilesystemContentCache(tmp_path, max_bytes=4)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=4)
+    second = FilesystemCacheBackend(tmp_path, max_bytes=4)
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
@@ -244,8 +244,8 @@ async def test_cancelled_owner_retains_shared_lock_until_worker_settles(
 async def test_rescan_replaces_tokens_before_stale_missing_read_returns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=8)
-    other = FilesystemContentCache(tmp_path, max_bytes=8)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=8)
+    other = FilesystemCacheBackend(tmp_path, max_bytes=8)
     await cache.put("a", b"old")
     target = tmp_path / cache._name("a")
     loop = asyncio.get_running_loop()
@@ -277,11 +277,11 @@ async def test_rescan_replaces_tokens_before_stale_missing_read_returns(
 _WRITER = """
 import asyncio, sys
 from pathlib import Path
-from linktools.ai.storage import FilesystemContentCache
+from linktools.ai.storage import FilesystemCacheBackend
 root = Path(sys.argv[1])
 label = sys.argv[2]
 async def main():
-    cache = FilesystemContentCache(root, max_bytes=12)
+    cache = FilesystemCacheBackend(root, max_bytes=12)
     for index in range(20):
         await cache.put(f'{label}-{index}', b'xxx')
     print('done', flush=True)
@@ -314,7 +314,7 @@ async def test_processes_sharing_root_enforce_one_content_budget(tmp_path: Path)
 _CRASH_WRITER = """
 import asyncio, os, sys, time
 from pathlib import Path
-from linktools.ai.storage import FilesystemContentCache
+from linktools.ai.storage import FilesystemCacheBackend
 root = Path(sys.argv[1])
 original_replace = os.replace
 def blocked_replace(source, destination):
@@ -325,16 +325,16 @@ def blocked_replace(source, destination):
     time.sleep(60)
     original_replace(source, destination)
 os.replace = blocked_replace
-asyncio.run(FilesystemContentCache(root, max_bytes=4).put('crashed', b'dead'))
+asyncio.run(FilesystemCacheBackend(root, max_bytes=4).put('crashed', b'dead'))
 """
 
 _WAITING_WRITER = """
 import asyncio, sys
 from pathlib import Path
-from linktools.ai.storage import FilesystemContentCache
+from linktools.ai.storage import FilesystemCacheBackend
 async def main():
     print('started', flush=True)
-    await FilesystemContentCache(Path(sys.argv[1]), max_bytes=4).put('survivor', b'live')
+    await FilesystemCacheBackend(Path(sys.argv[1]), max_bytes=4).put('survivor', b'live')
     print('done', flush=True)
 asyncio.run(main())
 """
@@ -368,7 +368,7 @@ async def test_killed_writer_releases_lock_and_waiter_reclaims_only_orphan_temp(
         assert waiter.returncode == 0, error
         assert output == b"done\n"
         assert not temporary[0].exists()
-        cache = FilesystemContentCache(tmp_path, max_bytes=4)
+        cache = FilesystemCacheBackend(tmp_path, max_bytes=4)
         assert await cache.get("crashed") is None
         assert await cache.get("survivor") == b"live"
         assert _charge(tmp_path) == 4
@@ -383,9 +383,9 @@ async def test_killed_writer_releases_lock_and_waiter_reclaims_only_orphan_temp(
 async def test_cancelled_waiter_does_not_write_or_block_next_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = FilesystemContentCache(tmp_path, max_bytes=4)
-    second = FilesystemContentCache(tmp_path, max_bytes=4)
-    third = FilesystemContentCache(tmp_path, max_bytes=4)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=4)
+    second = FilesystemCacheBackend(tmp_path, max_bytes=4)
+    third = FilesystemCacheBackend(tmp_path, max_bytes=4)
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
@@ -424,7 +424,7 @@ async def test_failed_publication_accounts_for_the_file_that_remains(
 ) -> None:
     from linktools.ai.storage import _cache as cache_module
 
-    cache = FilesystemContentCache(tmp_path, max_bytes=6)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=6)
     await cache.put("a", b"old")
 
     original_replace = os.replace
@@ -453,7 +453,7 @@ async def test_failed_publication_accounts_for_the_file_that_remains(
 async def test_clean_mutations_reuse_shared_accounting_without_full_scans(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=8)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=8)
     await cache.put("a", b"aaaa")
 
     def forbid_scan() -> tuple[tuple[str, int], ...]:
@@ -473,7 +473,7 @@ async def test_clean_mutations_reuse_shared_accounting_without_full_scans(
 async def test_missing_corrupt_or_dirty_accounting_recovers_from_content(
     tmp_path: Path, record: bytes | None,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=6)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=6)
     await cache.put("old", b"old!")
     control = tmp_path / ".content-cache.control"
     if record is None:
@@ -488,10 +488,10 @@ async def test_missing_corrupt_or_dirty_accounting_recovers_from_content(
 
 @pytest.mark.asyncio
 async def test_new_instance_calibrates_even_when_control_looks_clean(tmp_path: Path) -> None:
-    original = FilesystemContentCache(tmp_path, max_bytes=6)
+    original = FilesystemCacheBackend(tmp_path, max_bytes=6)
     await original.put("old", b"old!")
     (tmp_path / ".content-cache.control").write_text('{"total":0,"dirty":false}')
-    reopened = FilesystemContentCache(tmp_path, max_bytes=6)
+    reopened = FilesystemCacheBackend(tmp_path, max_bytes=6)
     await reopened.put("new", b"new!")
     assert _charge(tmp_path) == 4
     assert await reopened.get("new") == b"new!"
@@ -499,8 +499,8 @@ async def test_new_instance_calibrates_even_when_control_looks_clean(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_stale_local_charges_never_change_shared_accounting(tmp_path: Path) -> None:
-    first = FilesystemContentCache(tmp_path, max_bytes=8)
-    second = FilesystemContentCache(tmp_path, max_bytes=8)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=8)
+    second = FilesystemCacheBackend(tmp_path, max_bytes=8)
     await first.put("a", b"aaaa")
     await first.put("b", b"bbbb")
     await second.put("a", b"a")
@@ -517,10 +517,10 @@ async def test_stale_candidates_reconcile_names_without_statting_every_missing_f
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     count = 128
-    first = FilesystemContentCache(tmp_path, max_bytes=count)
+    first = FilesystemCacheBackend(tmp_path, max_bytes=count)
     for index in range(count):
         await first.put(f"first-{index}", b"a")
-    second = FilesystemContentCache(tmp_path, max_bytes=count)
+    second = FilesystemCacheBackend(tmp_path, max_bytes=count)
     for index in range(count):
         await second.put(f"second-{index}", b"b")
     original = first._file_charge
@@ -540,8 +540,8 @@ async def test_stale_candidates_reconcile_names_without_statting_every_missing_f
 
 @pytest.mark.asyncio
 async def test_oversized_put_does_not_shrink_existing_content(tmp_path: Path) -> None:
-    large = FilesystemContentCache(tmp_path, max_bytes=8)
-    small = FilesystemContentCache(tmp_path, max_bytes=0)
+    large = FilesystemCacheBackend(tmp_path, max_bytes=8)
+    small = FilesystemCacheBackend(tmp_path, max_bytes=0)
     await large.put("existing", b"existing")
     await small.put("empty", b"")
     assert await small.get("existing") == b"existing"
@@ -552,14 +552,14 @@ async def test_oversized_put_does_not_shrink_existing_content(tmp_path: Path) ->
 _CONTROL_CRASH_WRITER = """
 import asyncio, json, os, re, sys, time
 from pathlib import Path
-from linktools.ai.storage import FilesystemContentCache
+from linktools.ai.storage import FilesystemCacheBackend
 root, stage = Path(sys.argv[1]), sys.argv[2]
 def stop(where):
     if where == stage:
         print('staged', flush=True)
         time.sleep(60)
 async def main():
-    cache = FilesystemContentCache(root, max_bytes=4)
+    cache = FilesystemCacheBackend(root, max_bytes=4)
     await cache.delete('absent')
     original_replace, original_unlink = os.replace, Path.unlink
     def replace(source, destination):
@@ -592,7 +592,7 @@ asyncio.run(main())
 async def test_surviving_instance_recovers_each_interrupted_mutation_stage(
     tmp_path: Path, stage: str,
 ) -> None:
-    survivor = FilesystemContentCache(tmp_path, max_bytes=8)
+    survivor = FilesystemCacheBackend(tmp_path, max_bytes=8)
     await survivor.put("a", b"aaaa")
     await survivor.put("b", b"bbbb")
     child = await asyncio.create_subprocess_exec(
@@ -623,8 +623,8 @@ async def test_surviving_instance_recovers_each_interrupted_mutation_stage(
 async def test_failed_control_publication_is_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dirty: bool, after_replace: bool,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=6)
-    other = FilesystemContentCache(tmp_path, max_bytes=6)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=6)
+    other = FilesystemCacheBackend(tmp_path, max_bytes=6)
     await cache.put("a", b"old")
     await other.delete("absent")
     original_replace = os.replace
@@ -661,7 +661,7 @@ async def test_reserved_metadata_symlinks_are_never_followed_or_removed(
     target.write_bytes(b"do-not-change")
     link = tmp_path / name
     link.symlink_to(target)
-    cache = FilesystemContentCache(tmp_path, max_bytes=4)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=4)
     await cache.put("new", b"data")
     assert await cache.get("new") is None
     assert link.is_symlink()
@@ -670,8 +670,8 @@ async def test_reserved_metadata_symlinks_are_never_followed_or_removed(
 
 @pytest.mark.asyncio
 async def test_remote_delete_churn_does_not_grow_local_candidates(tmp_path: Path) -> None:
-    writer = FilesystemContentCache(tmp_path, max_bytes=1)
-    remover = FilesystemContentCache(tmp_path, max_bytes=0)
+    writer = FilesystemCacheBackend(tmp_path, max_bytes=1)
+    remover = FilesystemCacheBackend(tmp_path, max_bytes=0)
     for index in range(128):
         key = f"entry-{index}"
         await writer.put(key, b"x")
@@ -686,10 +686,10 @@ async def test_remote_delete_churn_does_not_grow_local_candidates(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_calibration_and_recovery_keep_local_candidates_bounded(tmp_path: Path) -> None:
-    large = FilesystemContentCache(tmp_path, max_bytes=16)
+    large = FilesystemCacheBackend(tmp_path, max_bytes=16)
     for index in range(16):
         await large.put(f"entry-{index}", b"x")
-    small = FilesystemContentCache(tmp_path, max_bytes=2)
+    small = FilesystemCacheBackend(tmp_path, max_bytes=2)
     await small.delete("absent")
     assert len(small._entries) <= 2
     assert _charge(tmp_path) == 16

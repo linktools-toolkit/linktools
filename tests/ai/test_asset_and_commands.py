@@ -3,12 +3,12 @@
 """Raw AssetStore file checks."""
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from linktools.ai.asset import (
-    AssetCacheAdapter,
+    AssetContentCache,
     AssetInfo,
     AssetKey,
     AssetRoot,
@@ -20,7 +20,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
-    InMemoryContentCache,
+    InMemoryCacheBackend,
     StorageChange,
     StorageEntryStatus,
     StorageEntryRevision,
@@ -33,9 +33,6 @@ from linktools.ai.storage import (
 )
 
 
-from tests.ai._storage_stream_helpers import collect_values
-
-
 class CountingAssetBackend(InMemoryAssetBackend):
     def __init__(self, root: AssetRoot) -> None:
         super().__init__(root)
@@ -45,9 +42,9 @@ class CountingAssetBackend(InMemoryAssetBackend):
         self.reads += 1
         return await super().get(key)
 
-    def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
+    async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
         self.reads += 1
-        return super().get_many(keys)
+        return await super().get_many(keys)
 
 
 def make_store(
@@ -74,7 +71,7 @@ def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
         tombstone = await store.stat(key)
         assert tombstone is not None and tombstone.status is StorageEntryStatus.DELETED
         assert await store.get(key) is None
-        assert await collect_values(store.get_many((key,))) == (None,)
+        assert await store.get_many((key,)) == (None,)
         assert (await store.list_info()).items == ()
 
     asyncio.run(run())
@@ -89,7 +86,7 @@ def test_asset_get_many_and_cursor_preserve_order() -> None:
         two = AssetKey("sample", "two")
         await store.put(one, b"one")
         await store.put(two, b"two")
-        assert await collect_values(store.get_many((two, AssetKey("sample", "missing"), one))) == (b"two", None, b"one")
+        assert await store.get_many((two, AssetKey("sample", "missing"), one)) == (b"two", None, b"one")
         first_page = await store.list_info(limit=1)
         assert len(first_page.items) == 1
         assert first_page.next_cursor is not None
@@ -106,12 +103,11 @@ def test_asset_get_many_and_cursor_preserve_order() -> None:
 def test_asset_storage_uses_file_cache() -> None:
     async def run() -> None:
         backend = CountingAssetBackend(AssetRoot("memory", "cache"))
-        cache = InMemoryContentCache(max_bytes=1024 * 1024)
+        cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
         storage = StorageOverlay(
             backend,
             writer=backend,
-            content_cache=cache,
-            cache_adapter=AssetCacheAdapter(),
+            content_cache=AssetContentCache(cache),
         )
         store = AssetStore(storage)
         await store.initialize()
@@ -309,3 +305,30 @@ async def test_asset_version_read_preserves_backend_failures(code: ErrorCode) ->
         assert raised.value is cause
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ("uninitialized", "closed"))
+@pytest.mark.parametrize("empty", (False, True))
+async def test_sql_asset_batch_reads_require_ready_backend(phase: str, empty: bool) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from linktools.ai.asset import SqlAssetBackend
+    from linktools.ai.migrate import provision_asset_database
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await provision_asset_database(engine)
+    backend = SqlAssetBackend(engine, namespace="batch-read-lifecycle")
+    key = AssetKey("sample", "one")
+    try:
+        if phase == "closed":
+            await backend.initialize()
+            await backend.put(key, b"one")
+            assert await backend.get_many((key,)) == {key: b"one"}
+            await backend.close()
+        with pytest.raises(AIError) as error:
+            await backend.get_many(()) if empty else await backend.get_many((key,))
+        assert error.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+    finally:
+        await backend.close()
+        await engine.dispose()

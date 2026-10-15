@@ -21,7 +21,7 @@ from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._factory import _borrowed_runtime_history
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.state._step_archive import StateStepArchive
-from linktools.ai.storage import InMemoryContentCache, InMemoryObjectStore, ObjectRef, StoredPayload
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload
 
 from .test_runtime_history_public import _ResultExecutions, _TaskResults
 from .test_execution_result_read_io import _seed
@@ -38,7 +38,7 @@ class _CountingObjects(InMemoryObjectStore):
             yield chunk
 
 
-class _RecordingCache(InMemoryContentCache):
+class _RecordingCache(InMemoryCacheBackend):
     def __init__(self) -> None:
         super().__init__(max_bytes=1024 * 1024)
         self.writes: list[tuple[str, bytes]] = []
@@ -65,7 +65,7 @@ async def test_history_and_task_results_keep_execution_object_ownership(
     reference = ObjectRef("runtime", "result", digest, len(content))
     storage = RuntimeStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects,
-        content_cache=InMemoryContentCache(max_bytes=1024),
+        cache_backend=InMemoryCacheBackend(max_bytes=1024),
     )
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
@@ -119,7 +119,7 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
     route = RuntimeStorageRoute.sqlite(tmp_path / "runtime.db")
     storage = RuntimeStorage.from_plan(
         RuntimeStoragePlan(conversation=route, execution=route),
-        object_store=objects, content_cache=cache,
+        object_store=objects, cache_backend=cache,
     )
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
@@ -171,7 +171,7 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
     reference = ObjectRef("runtime", "result", digest, len(content))
     storage = RuntimeStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects,
-        content_cache=InMemoryContentCache(max_bytes=1024),
+        cache_backend=InMemoryCacheBackend(max_bytes=1024),
     )
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
@@ -218,7 +218,7 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
 @pytest.mark.asyncio
 async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: Path) -> None:
     objects = _CountingObjects()
-    cache = InMemoryContentCache(max_bytes=1024)
+    cache = InMemoryCacheBackend(max_bytes=1024)
     content = b'{"result":"persisted output"}'
     digest = hashlib.sha256(content).hexdigest()
 
@@ -227,7 +227,7 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, content_cache=cache)
+    storage = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache_backend=cache)
     await storage.initialize(namespace="history", tenant_id="tenant")
     principal = Principal("principal", "tenant", "service")
     try:
@@ -242,7 +242,7 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
     finally:
         await storage.close()
 
-    reopened = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, content_cache=cache)
+    reopened = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache_backend=cache)
     async with RuntimeHistory.open("history", storage=reopened, tenant_id="tenant") as history:
         assert (await history.result("execution", principal=principal)).output == {"result": "persisted output"}
         assert objects.reads == 1

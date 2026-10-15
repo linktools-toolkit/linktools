@@ -6,7 +6,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -101,11 +101,13 @@ class InMemoryAssetBackend:
             current = self._entries.get(key)
             return None if current is None or current[0].status is not StorageEntryStatus.NORMAL else current[1]
 
-    async def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
+    async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
         async with self._lock:
-            entries = tuple(self._entries.get(key) for key in keys)
-        for current in entries:
-            yield None if current is None or current[0].status is not StorageEntryStatus.NORMAL else current[1]
+            return {
+                key: current[1]
+                for key in keys
+                if (current := self._entries.get(key)) is not None and current[0].status is StorageEntryStatus.NORMAL
+            }
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         async with self._lock:

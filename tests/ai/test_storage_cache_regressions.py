@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache
+from linktools.ai.storage import FilesystemCacheBackend, InMemoryCacheBackend
 
 
 def _disk_charge(root: Path) -> int:
@@ -23,7 +23,7 @@ def _disk_charge(root: Path) -> int:
 
 @pytest.mark.asyncio
 async def test_empty_in_memory_entries_consume_capacity() -> None:
-    cache = InMemoryContentCache(max_bytes=2)
+    cache = InMemoryCacheBackend(max_bytes=2)
 
     await cache.put("a", b"")
     await cache.put("b", b"")
@@ -36,11 +36,11 @@ async def test_empty_in_memory_entries_consume_capacity() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reopen", (False, True))
 async def test_empty_filesystem_entries_consume_capacity(tmp_path: Path, reopen: bool) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=2)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=2)
     await cache.put("a", b"")
     await cache.put("b", b"")
     if reopen:
-        cache = FilesystemContentCache(tmp_path, max_bytes=2)
+        cache = FilesystemCacheBackend(tmp_path, max_bytes=2)
     await cache.put("c", b"")
     retained = await cache.contains_many(("a", "b", "c"))
     assert "c" in retained
@@ -53,7 +53,7 @@ async def test_empty_filesystem_entries_consume_capacity(tmp_path: Path, reopen:
 
 @pytest.mark.asyncio
 async def test_zero_filesystem_capacity_does_not_create_empty_entries(tmp_path: Path) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=0)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=0)
     await cache.put("empty", b"")
     assert await cache.get("empty") is None
     assert not tuple(tmp_path.iterdir())
@@ -63,7 +63,7 @@ async def test_zero_filesystem_capacity_does_not_create_empty_entries(tmp_path: 
 async def test_preindex_delete_does_not_corrupt_capacity_accounting(
     tmp_path: Path,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=10)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=10)
     (tmp_path / cache._name("old")).write_bytes(b"o" * 6)
     assert await cache.get("old") == b"o" * 6
     await cache.delete("old")
@@ -77,7 +77,7 @@ async def test_failed_index_scan_abandons_write_and_can_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=10)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=10)
     original_scan = cache._scan_index
 
     def fail_scan() -> tuple[tuple[str, int], ...]:
@@ -99,7 +99,7 @@ async def test_cancelled_write_settles_its_capacity_accounting(
     monkeypatch: pytest.MonkeyPatch,
     fails: bool,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=10)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=10)
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
@@ -153,7 +153,7 @@ async def test_stale_read_cannot_change_newer_cache_accounting(
     monkeypatch: pytest.MonkeyPatch,
     missing: bool,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=10)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=10)
     await cache.put("seed", b"")
     if not missing:
         await cache.put("a", b"a" * 6)
@@ -195,7 +195,7 @@ async def test_failed_delete_keeps_existing_file_charged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=10)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=10)
     await cache.put("a", b"a" * 6)
     target = tmp_path / cache._name("a")
     original_unlink = Path.unlink
@@ -215,7 +215,7 @@ async def test_failed_delete_keeps_existing_file_charged(
 
 @pytest.mark.asyncio
 async def test_content_reads_preserve_lru_order(tmp_path: Path) -> None:
-    cache = FilesystemContentCache(tmp_path, max_bytes=8)
+    cache = FilesystemCacheBackend(tmp_path, max_bytes=8)
     await cache.put("a", b"aaaa")
     await cache.put("b", b"bbbb")
     assert await cache.get("a") == b"aaaa"

@@ -6,8 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections import Counter
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -164,29 +163,15 @@ class FilesystemAssetBackend:
             return None
         return await self._read_info(info)
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
-        keys = tuple(keys)
-        remaining = Counter(keys)
+    async def get_many(self, keys: Sequence[AssetKey]) -> dict[AssetKey, bytes]:
         await self._ensure_ready()
-        async with self._process_lock:
-            await self._reload()
-            current = {key: self._entries.get(key) for key in remaining}
-        values: dict[AssetKey, bytes | None] = {}
+        await self._reload()
+        result: dict[AssetKey, bytes] = {}
         for key in keys:
-            if key in values:
-                value = values[key]
-            else:
-                info = current[key]
-                value = (
-                    None if info is None or info.status is not StorageEntryStatus.NORMAL
-                    else await self._read_info(info)
-                )
-            remaining[key] -= 1
-            if remaining[key]:
-                values[key] = value
-            else:
-                values.pop(key, None)
-            yield value
+            info = self._entries.get(key)
+            if info is not None and info.status is StorageEntryStatus.NORMAL:
+                result[key] = await self._read_info(info)
+        return result
 
     async def stat(self, key: AssetKey) -> AssetInfo | None:
         await self._ensure_ready()

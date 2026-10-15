@@ -16,7 +16,7 @@ from linktools.ai.runtime._transcript_staging import StagedTranscript
 from linktools.ai.runtime.state import _steps
 from linktools.ai.runtime.state._contracts import TranscriptSpanRef
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.storage import InMemoryContentCache, ObjectStoreInspection
+from linktools.ai.storage import InMemoryCacheBackend, ObjectStoreInspection
 
 from .test_step_projection import _execution
 
@@ -25,7 +25,7 @@ from .test_step_projection import _execution
 async def test_close_persists_queued_projection_referencing_external_transcript(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Cache(InMemoryContentCache):
+    class Cache(InMemoryCacheBackend):
         reads = 0
 
         async def get(self, key: str) -> bytes | None:
@@ -35,7 +35,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 60.0)
     cache = Cache(max_bytes=1024 * 1024)
     root = tmp_path / "state"
-    storage = RuntimeStorage.filesystem(root, content_cache=cache)
+    storage = RuntimeStorage.filesystem(root, cache_backend=cache)
     await storage.initialize(namespace="close-projection", tenant_id="tenant")
     message = ModelRequest(parts=[UserPromptPart("external transcript " * 4096)])
     try:
@@ -80,7 +80,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     finally:
         await storage.close()
 
-    reopened = RuntimeStorage.filesystem(root, content_cache=cache)
+    reopened = RuntimeStorage.filesystem(root, cache_backend=cache)
     await reopened.initialize(namespace="close-projection", tenant_id="tenant", read_only=True)
     try:
         archive = reopened.run_store.read_store(RuntimeDomain.EXECUTION)

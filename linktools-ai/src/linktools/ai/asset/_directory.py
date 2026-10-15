@@ -5,8 +5,7 @@
 import asyncio
 import hashlib
 import os
-from collections import Counter
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -238,28 +237,15 @@ class DirectoryAssetBackend:
             path = await asyncio.to_thread(self._file_path, key)
         return await asyncio.to_thread(_read_optional, path)
 
-    async def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
-        keys = tuple(keys)
-        remaining = Counter(keys)
+    async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
         async with self._lock:
             paths = await asyncio.to_thread(
                 lambda: {
                     key: self._file_path(self._validate_key(key))
-                    for key in remaining
+                    for key in dict.fromkeys(keys)
                 }
             )
-        values: dict[AssetKey, bytes | None] = {}
-        for key in keys:
-            if key in values:
-                value = values[key]
-            else:
-                value = await asyncio.to_thread(_read_optional, paths[key])
-            remaining[key] -= 1
-            if remaining[key]:
-                values[key] = value
-            else:
-                values.pop(key, None)
-            yield value
+        return await asyncio.to_thread(_read_many_sync, paths)
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         async with self._lock:
@@ -534,6 +520,10 @@ def _resolve_path(path: Path, *, strict: bool) -> Path:
         return path.resolve(strict=strict)
     except (OSError, RuntimeError) as error:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+
+def _read_many_sync(paths: Mapping[AssetKey, Path]) -> dict[AssetKey, bytes]:
+    return {key: read_bytes(path) for key, path in paths.items() if path.is_file()}
 
 
 def _read_optional(path: Path) -> bytes | None:

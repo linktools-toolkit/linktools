@@ -13,7 +13,7 @@ from aiosqlite import Cursor
 import linktools.ai.storage._object as object_contract
 import linktools.ai.storage._object_filesystem as object_module
 from linktools.ai.asset import (
-    AssetCacheAdapter,
+    AssetContentCache,
     AssetKey,
     AssetStore,
     InMemoryAssetBackend,
@@ -373,8 +373,7 @@ async def test_asset_store_close_settles_detached_cache_singleflight() -> None:
     storage = StorageOverlay(
         backend,
         writer=backend,
-        content_cache=cache,
-        cache_adapter=AssetCacheAdapter(),
+        content_cache=AssetContentCache(cache),
     )
     store = AssetStore(storage)
     await store.initialize()

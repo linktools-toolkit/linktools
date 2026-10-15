@@ -17,7 +17,7 @@ from ...core import (
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
-from ...storage import ContentCache, FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, read_object
+from ...storage import CacheBackend, FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, read_object
 from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
 from ._input_capture import input_capture_expiry_key, input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
@@ -99,12 +99,12 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        content_cache: "ContentCache | None" = None,
+        cache_backend: "CacheBackend | None" = None,
     ) -> None:
         _validate_storage_configuration(plan, object_store)
         self._plan = plan
         self._external_object_store = object_store
-        self._content_cache = content_cache
+        self._cache_backend = cache_backend
         self._lifecycle = _RuntimeStorageLifecycle.NEW
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -126,8 +126,8 @@ class RuntimeStorage:
         self._read_only = False
 
     @classmethod
-    def in_memory(cls, *, content_cache: "ContentCache | None" = None) -> "RuntimeStorage":
-        return cls(RuntimeStoragePlan(), content_cache=content_cache)
+    def in_memory(cls, *, cache_backend: "CacheBackend | None" = None) -> "RuntimeStorage":
+        return cls(RuntimeStoragePlan(), cache_backend=cache_backend)
 
     @classmethod
     def filesystem(
@@ -135,7 +135,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        content_cache: "ContentCache | None" = None,
+        cache_backend: "CacheBackend | None" = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(path)
         return cls(
@@ -150,7 +150,7 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            content_cache=content_cache,
+            cache_backend=cache_backend,
         )
 
     @classmethod
@@ -159,7 +159,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        content_cache: "ContentCache | None" = None,
+        cache_backend: "CacheBackend | None" = None,
     ) -> "RuntimeStorage":
         route = RuntimeStorageRoute.sqlite(path)
         return cls(
@@ -171,18 +171,18 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            content_cache=content_cache,
+            cache_backend=cache_backend,
         )
 
     @classmethod
     def from_root(
-        cls, root: "str | Path", *, content_cache: "ContentCache | None" = None,
+        cls, root: "str | Path", *, cache_backend: "CacheBackend | None" = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(root)
         return cls.sqlite(
             base / "runtime.db",
             object_store=FilesystemObjectStore(base / "objects"),
-            content_cache=content_cache,
+            cache_backend=cache_backend,
         )
 
     @classmethod
@@ -191,7 +191,7 @@ class RuntimeStorage:
         engine: "AsyncEngine",
         *,
         object_store: "ObjectStore | None" = None,
-        content_cache: "ContentCache | None" = None,
+        cache_backend: "CacheBackend | None" = None,
     ) -> "RuntimeStorage":
         route = RuntimeStorageRoute.sql(engine)
         return cls(
@@ -203,7 +203,7 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            content_cache=content_cache,
+            cache_backend=cache_backend,
         )
 
     @classmethod
@@ -212,9 +212,9 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        content_cache: "ContentCache | None" = None,
+        cache_backend: "CacheBackend | None" = None,
     ) -> "RuntimeStorage":
-        return cls(plan, object_store=object_store, content_cache=content_cache)
+        return cls(plan, object_store=object_store, cache_backend=cache_backend)
 
     @property
     def plan(self) -> RuntimeStoragePlan:
@@ -305,7 +305,7 @@ class RuntimeStorage:
                     namespace=namespace,
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
-                    content_cache=self._content_cache,
+                    cache_backend=self._cache_backend,
                     read_only=read_only,
                 )
                 self._assign_materialized(

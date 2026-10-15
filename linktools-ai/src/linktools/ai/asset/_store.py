@@ -6,7 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -23,6 +23,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import (
+    CacheBackend,
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
@@ -54,10 +55,10 @@ class AssetStoreReader(Protocol):
 
     async def get(self, key: AssetKey) -> "bytes | None": ...
 
-    def get_many(
+    async def get_many(
         self,
         keys: Sequence[AssetKey],
-    ) -> "AsyncIterator[bytes | None]": ...
+    ) -> "tuple[bytes | None, ...]": ...
 
     async def local_paths(
         self,
@@ -79,8 +80,11 @@ class AssetStoreReader(Protocol):
         ...
 
 
-class AssetCacheAdapter:
-    """Cache raw Asset file bytes using immutable metadata."""
+class AssetContentCache:
+    """Bind a borrowed cache backend to immutable Asset metadata and bytes."""
+
+    def __init__(self, backend: CacheBackend) -> None:
+        self.backend = backend
 
     def cache_key(self, key: AssetKey, info: AssetInfo) -> str:
         return ":".join(
@@ -171,10 +175,10 @@ class AssetStore:
         self._ensure_ready()
         return await self._storage.get(key)
 
-    def get_many(self, keys: "Sequence[AssetKey]") -> "AsyncIterator[bytes | None]":
-        """Yield ordered file bytes; close an unfinished stream when stopping early."""
+    async def get_many(self, keys: "Sequence[AssetKey]") -> "tuple[bytes | None, ...]":
+        """Return current file bytes in the same order as the requested keys."""
         self._ensure_ready()
-        return self._storage.get_many(keys)
+        return await self._storage.get_many(keys)
 
     async def local_paths(
         self,
@@ -679,20 +683,8 @@ class _SnapshotAssetStore(AssetStore):
             expected_size=info.size,
         )
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
-        requested = tuple(keys)
-        remaining = dict.fromkeys(requested, 0)
-        for key in requested:
-            remaining[key] += 1
-        values: dict[AssetKey, bytes | None] = {}
-        for key in requested:
-            if key not in values:
-                values[key] = await self.get(key)
-            value = values[key]
-            remaining[key] -= 1
-            if remaining[key] == 0:
-                del values[key]
-            yield value
+    async def get_many(self, keys: Sequence[AssetKey]) -> tuple[bytes | None, ...]:
+        return tuple([value async for value in _snapshot_values(self, keys)])
 
     async def list_info(
         self,
@@ -902,6 +894,14 @@ def _snapshot_cursor_start(
     return start
 
 
+async def _snapshot_values(
+    store: _SnapshotAssetStore,
+    keys: Sequence[AssetKey],
+):
+    for key in keys:
+        yield await store.get(key)
+
+
 def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
     if not isinstance(raw, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1018,4 +1018,4 @@ def _info_key(value: "AssetInfo | StorageLocatedInfo[AssetInfo]") -> AssetKey:
     return value.info.key if isinstance(value, StorageLocatedInfo) else value.key
 
 
-__all__ = ["AssetCacheAdapter", "AssetStore"]
+__all__ = ["AssetContentCache", "AssetStore"]

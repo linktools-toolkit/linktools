@@ -3,7 +3,6 @@
 """Three-table SQL Asset backend with optimistic global revision CAS."""
 
 import hashlib
-from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -314,32 +313,20 @@ class SqlAssetBackend:
             return None
         return await _read_asset_object(self._object_store, self._namespace_digest, key, info)
 
-    async def get_many(self, keys: Sequence[AssetKey]) -> AsyncIterator[bytes | None]:
+    async def get_many(self, keys: Sequence[AssetKey]) -> dict[AssetKey, bytes]:
         self._ensure_ready()
-        keys = tuple(keys)
-        remaining = Counter(keys)
-        current = await self._load_current(tuple(remaining))
-        values: dict[AssetKey, bytes | None] = {}
-        for key in keys:
-            if key in values:
-                value = values[key]
-            else:
-                info = current[key]
-                value = (
-                    None if info is None or info.status is not StorageEntryStatus.NORMAL
-                    else await _read_asset_object(
-                        self._object_store,
-                        self._namespace_digest,
-                        key,
-                        info,
-                    )
+        current = await self._load_current(tuple(dict.fromkeys(keys)))
+        result: dict[AssetKey, bytes] = {}
+        for key in dict.fromkeys(keys):
+            info = current[key]
+            if info is not None and info.status is StorageEntryStatus.NORMAL:
+                result[key] = await _read_asset_object(
+                    self._object_store,
+                    self._namespace_digest,
+                    key,
+                    info,
                 )
-            remaining[key] -= 1
-            if remaining[key]:
-                values[key] = value
-            else:
-                values.pop(key, None)
-            yield value
+        return result
 
     async def stat(self, key: AssetKey) -> AssetInfo | None:
         self._ensure_ready()

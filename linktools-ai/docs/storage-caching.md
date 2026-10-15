@@ -5,7 +5,8 @@ storage package separates content, revision discovery, and metadata projection.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `ContentCache` | Store discardable immutable byte content | Supply `StorageOverlay(content_cache=...)` or `RuntimeStorage(..., content_cache=...)` |
+| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage(..., cache_backend=...)` |
+| `ContentCache[KeyT, ValueT, InfoT]` | Bind a borrowed backend to domain keys and value encoding | Supply `StorageOverlay(content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
 
@@ -16,15 +17,14 @@ host adapter. Do not treat every revision as an ordered integer: revision
 semantics belong to the source.
 
 ```python
-from linktools.ai.asset import AssetCacheAdapter, AssetStore
+from linktools.ai.asset import AssetContentCache, AssetStore
 from linktools.ai.storage import StorageOverlay
 
 store = AssetStore(StorageOverlay(
     primary=backend,
     writer=backend,
     revision_source=revision_source,
-    content_cache=content_cache,
-    cache_adapter=AssetCacheAdapter(),
+    content_cache=AssetContentCache(cache_backend),
 ))
 await store.initialize()
 try:
@@ -33,9 +33,17 @@ finally:
     await store.close()
 ```
 
-`ContentCache` implementations provide `get`, `put`, `delete`, and
-`contains_many`. `InMemoryContentCache`, `FilesystemContentCache`, and
-`TieredContentCache` implement that contract. Empty content is a valid hit, not a
+`ContentCache` exposes its borrowed `backend` and the domain operations
+`cache_key(key, info)`, `to_cache(value)`, and `from_cache(bytes)`. The overlay
+uses this one object for both identity/encoding and byte-cache access. Asset
+callers use `AssetContentCache(cache_backend)`; another domain can implement the
+same protocol with its own key and codec. The cache backend is never closed by
+the content cache or overlay. Shared loads retain encoded bytes so each reader
+can decode its own mutable value; readers do not share a mutable decoded object.
+
+`CacheBackend` implementations provide `get`, `put`, `delete`, and
+`contains_many`. `InMemoryCacheBackend`, `FilesystemCacheBackend`, and
+`TieredCacheBackend` implement that contract. Empty content is a valid hit, not a
 miss; it consumes at least one byte of the built-in capacity budget. These
 capacity limits do not define domain retention or promise TTL expiration; the
 owning domain remains responsible for its retention rules.
@@ -88,17 +96,19 @@ content caching from the asset-store configuration above.
 
 ## Runtime content
 
-Runtime storage accepts a borrowed `content_cache` independently of asset
+Runtime storage accepts a borrowed `cache_backend` independently of asset
 storage. The ordinary history and session APIs continue to own authorization,
 retention and reference selection; their external object reads use the storage
-router. Inline payloads do not enter the object cache.
+router. Inline payloads do not enter the object cache. Runtime already owns its
+ObjectRef/domain/tenant/source rules, so callers supply the byte backend directly;
+there is no separate Runtime content adapter to construct.
 
 ```python
 from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.storage import InMemoryContentCache
+from linktools.ai.storage import InMemoryCacheBackend
 
-content_cache = InMemoryContentCache(max_bytes=16 * 1024 * 1024)
-storage = RuntimeStorage.from_root("./runtime", content_cache=content_cache)
+cache_backend = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
+storage = RuntimeStorage.from_root("./runtime", cache_backend=cache_backend)
 ```
 
 The host can retain the cache across successive storage lifetimes. Different
@@ -118,8 +128,8 @@ existing domain/history APIs.
 
 ## Choosing layers
 
-Use `TieredContentCache(memory, filesystem)` for local reusable content, or
-`TieredContentCache(memory, host_cache)` when a host-provided shared backend is
+Use `TieredCacheBackend(memory, filesystem)` for local reusable content, or
+`TieredCacheBackend(memory, host_cache)` when a host-provided shared backend is
 useful. Existing composition can be nested for a third layer. Each additional
 layer adds writes and promotion work; a filesystem cache in front of a local
 filesystem source can duplicate storage without providing a useful saving.
@@ -130,7 +140,7 @@ source membership and domain retention remain the read authority. Host adapters
 must bound network operation time as well as capacity; a failed backend is a
 miss, but an unbounded network wait still delays the read.
 
-`FilesystemContentCache` instances may share a directory. Mutations use one
+`FilesystemCacheBackend` instances may share a directory. Mutations use one
 filesystem lock and a recoverable shared usage record; local access order only
 provides eviction candidates, not an independent capacity total. Each instance
 calibrates on its first mutation. Missing, damaged or interrupted accounting is
@@ -153,31 +163,16 @@ temporary-file peaks. All writers sharing a root must use this coordination
 protocol; old implementations or external edits cannot participate safely.
 
 
-## Ordered batch streams
+## Batch reads
 
-Storage and Asset `get_many(keys)` return an `AsyncIterator`; consume them with
-`async for`, without `await` on the call. Every requested position yields one
-value, including repeated keys and `None` for an absent value. An error may occur
-after earlier values have already been consumed; missing data is not a substitute
-for a failed read. A metadata refresh only retries the unconsumed suffix.
+`BatchStorageReader.get_many(keys)` and the built-in Asset backends return an
+awaitable mapping of present keys to values. Missing or deleted entries are
+omitted, and repeated keys share one mapping entry.
 
-Use `contextlib.aclosing` when stopping a built-in stream before exhaustion:
-
-```python
-from contextlib import aclosing
-
-async with aclosing(store.get_many(keys)) as values:
-    async for value in values:
-        consume(value)
-        if enough():
-            break
-```
-
-Backends capture metadata/references in batches where supported, then read bodies
-as needed. SQL metadata sessions close before values are yielded. A non-cached
-Overlay stream closes its opened origin streams when the consumer closes it.
-Caching readers can consume each finished key without waiting for the whole
-batch, but an already admitted shared loader continues for its other readers;
-closing one reader does not cancel that shared work. Overlay shutdown settles
-those loaders before closing its backends. This is not full cache-path backpressure
-or a guarantee of one transaction covering the entire batch.
+`StorageOverlay.get_many(keys)` and `AssetStoreReader.get_many(keys)` return an
+awaitable tuple in input order, including repeated keys and `None` for missing
+entries. Live stores, snapshots and captured Asset readers use this facade
+contract. Batch reads finish before returning; they do not expose partial
+prefixes or require a stream-closing context. Origin errors propagate instead
+of becoming missing values. Backend metadata batching and shared cache loaders
+remain in use.
