@@ -49,7 +49,7 @@ def _manager(*entries: "tuple[str, Config, Any]", nginx: bool = True) -> "Contai
         consumer.manager = manager
         consumer.get_config = manager.env_config.get
         manager.containers[name] = consumer
-    manager.containers["authelia"].__dict__["_oidc_identity"] = {"issuer_url": "https://sso.test"}
+    manager.containers["authelia"].__dict__["public_url"] = "https://sso.test"
     manager.containers["nginx"] = SimpleNamespace(sites={})
     if nginx:
         manager.integration_snapshot["nginx"] = ()
@@ -240,19 +240,19 @@ def test_authelia_callbacks_resolve_nested_values_with_exact_deduplication() -> 
     )
 
 
-def test_authelia_endpoint_relative_callbacks_resolve_after_config_values() -> None:
+def test_authelia_endpoint_does_not_complete_callbacks_after_config_values() -> None:
     config = _Config(DOMAIN="app.test", CALLBACK="/callback?q=%2F", RETURN="{url}/return")
     callbacks = Authelia.oidc((ConfigRef("CALLBACK"), ConfigRef("RETURN"), ConfigRef("CALLBACK")))
     manager = _manager(("app", config, lambda producer: endpoint(
         producer, domain=ConfigRef("DOMAIN"), extensions=[callbacks])))
     assert manager.containers["authelia"].oidc_redirects == (
-        "https://sso.test", "https://app.test/callback?q=%2F", "https://app.test/return",
+        "https://sso.test",
     )
-    assert callbacks._base_url is MISSING
+    assert "DOMAIN" not in config.reads
 
 
-@pytest.mark.parametrize("url", ["/callback", "https://app.test/callback#fragment", "https:///callback",
-                                "https://app.test/{{callback}}", "//other.test/callback", 42, None,
+@pytest.mark.parametrize("url", ["https://app.test/callback#fragment",
+                                "https://app.test/{{callback}}", 42, None,
                                 ["https://nested.test/callback"]])
 def test_authelia_validates_callbacks_after_config_resolution(url: "Any") -> None:
     declaration = Authelia.oidc((ConfigLazy(lambda config: url),))
@@ -261,10 +261,9 @@ def test_authelia_validates_callbacks_after_config_resolution(url: "Any") -> Non
 
 
 @pytest.mark.parametrize("url", ["//other.test/callback", "/callback#fragment"])
-def test_authelia_bound_callbacks_keep_scheme_and_fragment_validation(url: str) -> None:
-    declaration = Authelia.oidc((ConfigRef("URL"),)).with_base_url("https://app.test")
-    with pytest.raises(ContainerError, match="Authelia redirect URI"):
-        declaration.resolve_redirect_uris(_Config(URL=url))
+def test_authelia_incomplete_callbacks_are_filtered_after_config_resolution(url: str) -> None:
+    declaration = Authelia.oidc((ConfigRef("URL"),))
+    assert declaration.resolve_redirect_uris(_Config(URL=url)) == ()
 
 
 def test_authelia_callback_sequence_and_rule_types_are_checked_after_resolution() -> None:
@@ -274,8 +273,8 @@ def test_authelia_callback_sequence_and_rule_types_are_checked_after_resolution(
         Authelia.access(ConfigLazy(lambda config: [])).resolve_rule(_Config())
 
 
-def test_authelia_empty_and_absolute_callbacks_skip_unused_base() -> None:
-    declaration = Authelia.oidc((ConfigRef("EMPTY"), ConfigRef("URL"))).with_base_url(ConfigLazy(_fail))
+def test_authelia_empty_and_absolute_callbacks_need_no_site() -> None:
+    declaration = Authelia.oidc((ConfigRef("EMPTY"), ConfigRef("URL")))
     assert declaration.resolve_redirect_uris(_Config(EMPTY="", URL="custom:callback")) == ("custom:callback",)
 
 

@@ -32,7 +32,7 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
                   https: bool = True) -> "Proxy":
     def make_url() -> str:
         port = container.get_config(key, type=int, default=0)
-        if 0 < port < 65535:
+        if 0 < port <= 65535:
             return utils.make_url(
                 "https" if https else "http",
                 container.host,
@@ -55,6 +55,22 @@ def load_nginx_url(container: "BaseContainer",
         return utils.join_url(url, *path, queries=container.env_config.resolve(queries)) if url else ""
 
     return lazy_load(make_url)
+
+
+def is_complete_url(value: str) -> bool:
+    """Recognize complete URI targets without restricting independent schemes."""
+    try:
+        parsed = urlsplit(value)
+        if not parsed.scheme:
+            return False
+        if parsed.scheme in ("http", "https"):
+            if not parsed.hostname:
+                return False
+            port = parsed.port
+            return port is None or 0 < port <= 65535
+        return True
+    except ValueError:
+        return False
 
 
 def resolve_url_reference(value: str, base_url: str) -> str:

@@ -102,7 +102,7 @@ class Container(BaseContainer):
     @cached_property
     def _oidc_identity(self) -> "Mapping[str, Any]":
         issuer = self.public_url
-        if not issuer.startswith("https://"):
+        if not issuer.startswith("https://") or not Authelia.oidc((issuer,)).resolve_redirect_uris(self.env_config):
             raise ContainerError("Authelia requires a concrete HTTPS public URL")
         return MappingProxyType({
             "client_id": f"{self.project_name}-web-client",
@@ -148,7 +148,7 @@ class Container(BaseContainer):
 
     @cached_property
     def oidc_redirects(self) -> "tuple[str, ...]":
-        redirects = [self._oidc_identity["issuer_url"]]
+        redirects = list(Authelia.oidc((self.public_url,)).resolve_redirect_uris(self.env_config))
         for producer, declaration in self.manager.iter_integrations("authelia"):
             if not isinstance(declaration, Authelia):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)

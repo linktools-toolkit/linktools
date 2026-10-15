@@ -62,7 +62,7 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     assert public._url is MISSING and direct._url is not MISSING
     assert access_copy is not access and access_copy.site is site
     assert access.site is None
-    assert oidc_copy is not oidc and oidc.site is MISSING
+    assert oidc_copy is oidc and oidc.site is MISSING
     assert all(isinstance(value, Proxy) for value in oidc._redirect_uris)
 
 
@@ -307,7 +307,8 @@ def test_declarative_urls_are_lazy_and_oidc_does_not_follow_auth(active, auth):
     })
     declarations = endpoint(producer, domain="app.test" if active else "", auth=auth, extensions=[
         Flare.public("Mihomo", "server", url=relative),
-        Authelia.oidc(("{url}", "/callback", "http://local.test:9000")),
+        Authelia.oidc((load_nginx_url(producer), load_nginx_url(producer, None, "callback"),
+                       "http://local.test:9000")),
     ])
     assert reads == []
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
@@ -324,13 +325,11 @@ def test_declarative_urls_are_lazy_and_oidc_does_not_follow_auth(active, auth):
                                             if active else ("http://local.test:9000",))
 
 
-def test_rebound_oidc_copies_cached_results_and_preserves_none_validation():
-    original = Authelia.oidc(("{url}", "/callback", "https://absolute.test/"))
-    first = original.with_base_url("https://one.test")
-    assert first.redirect_uris == ("https://one.test", "https://one.test/callback", "https://absolute.test/")
-    second = first.with_base_url("https://two.test")
-    assert second.redirect_uris == ("https://two.test", "https://two.test/callback", "https://absolute.test/")
-    assert first.redirect_uris[0] == "https://one.test"
-    for value in (None, "//other.test/callback", " //other.test/callback", "\t//other.test/callback"):
-        with pytest.raises(ContainerError, match="Authelia redirect URI"):
-            Authelia.oidc((value,)).with_base_url("https://app.test").redirect_uris
+def test_endpoint_does_not_complete_oidc_callback_references() -> None:
+    original = Authelia.oidc(("{url}", "/callback", "//other.test/callback", "https://absolute.test/"))
+    declarations = endpoint(object(), domain=lazy_load(fail), extensions=[original])
+    assert declarations[1] is original
+    assert original.redirect_uris == ("https://absolute.test/",)
+    assert not hasattr(original, "with_base_url")
+    with pytest.raises(ContainerError, match="Authelia redirect URI"):
+        Authelia.oidc((None,)).redirect_uris

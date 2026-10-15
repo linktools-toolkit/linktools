@@ -44,7 +44,7 @@ def test_empty_config_url_remains_empty(value):
     assert str(load_config_url(container, "URL", "must-not-appear")) == ""
 
 
-@pytest.mark.parametrize("port", [-1, 0, 65535, 65536])
+@pytest.mark.parametrize("port", [-1, 0, 65536])
 def test_invalid_port_does_not_resolve_host(port):
     container = Container(port)
     url = load_port_url(container, "PORT", "must-not-appear")
@@ -53,7 +53,7 @@ def test_invalid_port_does_not_resolve_host(port):
     assert container.reads == [("PORT", {"type": int, "default": 0})]
 
 
-@pytest.mark.parametrize("port", [1, 443, 65534])
+@pytest.mark.parametrize("port", [1, 443, 65534, 65535])
 def test_valid_port_resolves_host_lazily_and_preserves_boundaries(port):
     container = Container(port)
     url = load_port_url(container, "PORT", "ui", queries={"q": "a b"})

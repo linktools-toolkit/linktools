@@ -127,7 +127,7 @@ def test_config_values_endpoint_keeps_original_reference_and_legacy_url_proxy() 
 
 
 @pytest.mark.parametrize("factory,key,disabled", [(load_config_url, "URL", ""), (load_port_url, "PORT", 0),
-                                                  (load_port_url, "PORT", 65535)])
+                                                  (load_port_url, "PORT", 65536)])
 def test_config_values_url_helpers_skip_query_for_empty_or_invalid_base(factory: object, key: str, disabled: object) -> None:
     config = make_config(**{key: disabled})
     producer = SimpleNamespace(env_config=config, get_config=config.get, host=lazy_load(lambda: fail(config)))

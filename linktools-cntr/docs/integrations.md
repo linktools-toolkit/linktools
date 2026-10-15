@@ -148,7 +148,7 @@ return endpoint(
         ),
         Authelia.access(policy="one_factor"),
         Authelia.oidc(
-            redirect_uris=("/sso/callback",),
+            redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
         ),
     ],
 )
@@ -184,12 +184,14 @@ extensions=[
         self, None, "ui", "metacubexd", "#", "setup",
         queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
     )),
-    Authelia.oidc(("{url}", "/callback", "http://portainer.local:9000")),
+    Authelia.oidc((load_nginx_url(self), load_nginx_url(self, None, "callback"),
+                   "http://portainer.local:9000")),
 ]
 ```
 
-The endpoint binds only Flare URL fields and explicitly declared OIDC callbacks.
-Relative references use standard `urljoin` semantics, preserving query/fragment
+The endpoint binds Flare URL fields; OIDC declarations own complete URLs and are
+not bound or completed by the endpoint.
+Relative Flare references use standard `urljoin` semantics, preserving query/fragment
 structure. A leading `{url}` means the site's exact base URL: `{url}` preserves
 its existing trailing slash, whereas `/` explicitly selects the origin root with
 a trailing slash. Absolute URLs stay unchanged. No other placeholder or ordinary
@@ -202,8 +204,8 @@ with `None`, which requires exactly one declared site. A custom `ConfigLazy`
 that constructs a relative URL may resolve its query values before the endpoint
 discovers that its site is disabled. Relative URLs from a disabled site become
 empty; explicit absolute URLs remain independent. Flare None/empty URLs stay
-disabled; OIDC skips empty strings but still rejects non-string values and
-scheme-relative `//host` callbacks.
+disabled. OIDC omits empty and incomplete URLs, including scheme-relative
+`//host` callbacks, but still rejects non-string values.
 OIDC never follows reverse-proxy authentication switches or adds implicit callbacks.
 Existing extension lists, tuples and top-level generators remain supported.
 
@@ -284,7 +286,7 @@ when subsequent name-based reads should use that schema. Immediate
 Nginx resolves only the currently needed field. An absent nginx consumer or empty
 server name skips unrelated fields; explicit `auth=False` and `waf=False` skip
 those capabilities' global settings and dependent values. Flare resolves the URL
-before display metadata and skips empty URLs. An endpoint's relative extension
+before display metadata and skips empty or incomplete URLs. An endpoint's relative Flare extension
 URL is joined to the original site's URL after its explicit value is resolved.
 Authelia resolves native fields and callback values before its normal validation;
 disabled sites and authentication skip access rules.
@@ -425,9 +427,14 @@ Authelia.oidc(
 `Authelia.oidc` contributes URLs to the existing shared client; it never declares
 a second client or changes client IDs, credentials, scopes, or authorization policy.
 Use lazy URL/config references to defer evaluation. Empty URLs are omitted,
-including URLs derived from disabled optional sites; explicitly declared absolute
+including URLs derived from disabled optional sites. Relative URLs and HTTP(S)
+URLs without a host are also omitted at consumption; they are never completed
+from an endpoint. Explicitly declared absolute
 callbacks remain even when another site URL is empty.
-Nonempty callbacks must be absolute and have no fragment or template placeholder.
+Declared callbacks must resolve to complete absolute URLs, and cannot contain
+a fragment or template placeholder. Use `load_nginx_url` or `load_config_url`
+to declare full lazy URLs. Flare likewise writes only complete resolved URLs;
+independent absolute links do not depend on a public site.
 Provider-specific URI rules remain subject to [native Authelia validation](https://www.authelia.com/configuration/identity-providers/openid-connect/clients/#redirect_uris).
 Deduplication preserves exact strings and order,
 including path, query, and trailing slash differences.

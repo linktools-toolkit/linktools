@@ -4,8 +4,6 @@
 from copy import copy
 from typing import TYPE_CHECKING
 
-from linktools.types import MISSING
-
 from ._base import Integration
 from ._authelia import Authelia
 from ._flare import Flare
@@ -53,7 +51,5 @@ def endpoint(
             if declaration.site is None:
                 declaration = copy(declaration)
                 declaration.site = site
-            elif declaration.site is MISSING:
-                declaration = declaration.with_base_url(base_url)
         result.append(declaration)
     return tuple(result)

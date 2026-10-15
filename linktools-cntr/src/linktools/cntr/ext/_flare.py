@@ -9,7 +9,7 @@ from linktools.decorator import cached_property
 from linktools.types import MISSING
 from linktools.runtime import lazy_load
 from ._base import Integration
-from ._urls import resolve_url_reference
+from ._urls import is_complete_url, resolve_url_reference
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -84,10 +84,16 @@ class Flare(Integration):
             return None
         value = str(value)
         for base_url in self._base_urls:
-            if value.startswith("{url}") or not urlsplit(value).scheme:
+            try:
+                relative = not urlsplit(value).scheme
+            except ValueError:
+                return None
+            if value.startswith("{url}") or relative:
                 value = resolve_url_reference(value, config.resolve(base_url))
             if not value:
                 return None
+        if not is_complete_url(value):
+            return None
         return value
 
     def resolve_metadata(self, config: "Config", *, include_desc: bool = True) -> "dict[str, str | None]":

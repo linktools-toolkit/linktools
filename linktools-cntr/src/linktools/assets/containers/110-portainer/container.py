@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from linktools.core import ConfigRef, ConfigLazy, ConfigField
 from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
-from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_port_url
+from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_nginx_url, load_port_url
 
 if TYPE_CHECKING:
     from linktools.cntr import Integrations
@@ -42,6 +42,6 @@ class Container(BaseContainer):
                     icon="docker",
                     desc="Docker管理工具",
                 ),
-                Authelia.oidc(("{url}",)),
+                Authelia.oidc((load_nginx_url(self),)),
             ],
         )

@@ -31,8 +31,7 @@ def test_oidc_has_no_enable_switch():
         Authelia.oidc(("https://app.test/callback",), enabled=False)
 
 
-@pytest.mark.parametrize("value", ["//evil.test/path", "/callback", "/cb#", "https://a.test/#bad",
-                                   "callback", "https://app:{{port}}/callback", "https:///callback"])
+@pytest.mark.parametrize("value", ["https://a.test/#bad", "https://app:{{port}}/callback"])
 def test_invalid_oidc_callbacks_fail_without_nginx(value):
     with pytest.raises(ContainerError, match="Authelia redirect URI"):
         Authelia.oidc((value,)).redirect_uris
@@ -45,3 +44,8 @@ def test_independent_oidc_declarations_keep_separate_inputs():
     second = Authelia.oidc(("https://second.test/callback",))
     assert first.redirect_uris == ("https://first.test/callback",)
     assert second.redirect_uris == ("https://second.test/callback",)
+
+
+@pytest.mark.parametrize("value", ["", "//evil.test/path", "/callback", "/cb#", "callback", "{url}", "https:///callback"])
+def test_incomplete_oidc_callbacks_are_omitted_without_nginx(value: str) -> None:
+    assert Authelia.oidc((value, "http://local.test/callback")).redirect_uris == ("http://local.test/callback",)
