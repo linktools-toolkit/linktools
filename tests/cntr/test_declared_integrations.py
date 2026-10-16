@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Declarative integrations do not depend on navigation registration."""
-from linktools.core import ConfigLazy
 from linktools.cntr.ext import ResolvedSite
 
 from linktools.cntr.ext import Integration, Nginx, load_nginx_url
@@ -19,8 +18,8 @@ def test_portainer_site_is_independent_of_navigation(fresh_manager):
     assert first is portainer.integrations[0]
     assert not hasattr(first, "local_id")
 
-    load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(portainer, None)))
-    load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(portainer, None)), "settings")
+    load_nginx_url(ResolvedSite.find(portainer, None))
+    load_nginx_url(ResolvedSite.find(portainer, None), "settings")
     assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == baseline
 
 
@@ -52,7 +51,7 @@ def test_nginx_owns_one_site_snapshot_shared_by_all_consumers(fresh_manager, mon
     nginx = fresh_manager.containers["nginx"]
     sites = nginx.sites
     authelia = fresh_manager.containers["authelia"]
-    assert authelia.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(authelia, None)))) == authelia.public_url
+    assert authelia.env_config.resolve(load_nginx_url(ResolvedSite.find(authelia, None))) == authelia.public_url
     fresh_manager.containers["flare"]._navigation_files()
     assert nginx.sites is sites
     assert calls == [fresh_manager]
@@ -195,7 +194,7 @@ def test_navigation_uses_explicit_site_reference_and_skips_omitted_urls_lazily()
         "web": Nginx.site("app.test"),
         "silent": Nginx.site("silent.test"),
     }, lambda producer: [
-        public("Referenced", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
+        public("Referenced", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         public("Empty", "web", "", ""),
         public("None", "web", "", None),
         public("Explicit", "web", "", "custom://{{port}}"),
@@ -222,7 +221,7 @@ def test_disabled_or_uninstalled_sites_do_not_resolve_navigation_defaults():
     for server_name, nginx in (("", True), ("app.test", False)):
         manager, reads = _site_navigation_manager({"web": Nginx.site(
             server_name, public_url=lazy_load(fail),
-        )}, lambda producer: [public("App", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"]))))], nginx=nginx)
+        )}, lambda producer: [public("App", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"])))], nginx=nginx)
         assert _render_navigation(manager)["apps.yml"]["links"] == []
         assert reads == []
 
@@ -233,7 +232,7 @@ def test_site_navigation_category_does_not_change_auth_and_paths_are_independent
     category = Flare.category("team", "Team")
     declaration = Nginx.site("app.test", auth=True)
     manager, reads = _site_navigation_manager({"web": declaration}, lambda producer: {
-        "root": category("Root", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
+        "root": category("Root", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         "one": category("Path", "web", "", "https://app.test/one"),
         "two": category("Path", "web", "", "https://app.test/two?q=1"),
     })
@@ -253,7 +252,7 @@ def test_removed_attached_navigation_is_rejected_and_category_conflicts_remain()
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         Nginx.site("app.test", link=True)
     manager, _ = _site_navigation_manager({"web": Nginx.site("app.test")}, lambda producer: [
-        Flare.category("team", "Team")("Root", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
+        Flare.category("team", "Team")("Root", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         Flare.category("team", "Different")("Other", "web", "", "https://other.test"),
     ])
     with pytest.raises(ContainerError, match="Conflicting description"):
@@ -285,8 +284,8 @@ def test_navigation_merge_preserves_producer_ties_and_key_collisions():
         "web": Nginx.site("one.test"),
         "two": Nginx.site("two.test"),
     }, lambda producer: {
-        "web": public("One", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
-        "two": public("Two", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["two"])))),
+        "web": public("One", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
+        "two": public("Two", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["two"]))),
         "path": public("Path", "web", "", "https://one.test/path"),
     })
     producer = SimpleNamespace(name="other", order=10, manager=manager,
@@ -351,7 +350,7 @@ def test_flare_iterable_preserves_referenced_then_standalone_order():
 
     manager, _ = _site_navigation_manager({
         "web": Nginx.site("app.test"),
-    }, lambda producer: (Flare.public("Referenced", "web", "", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
+    }, lambda producer: (Flare.public("Referenced", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         Flare.public("First", "web", "", "https://one.test"),
         Flare.public("Second", "web", "", "https://two.test")))
     assert [link["name"] for link in _render_navigation(manager)["apps.yml"]["links"]] == [
@@ -391,7 +390,7 @@ def test_flare_category_output_area_is_independent_of_name() -> None:
     manager, _ = _site_navigation_manager({
         "web": Nginx.site("app.test"),
     }, lambda producer: [
-        dashboard("Referenced", "web", "Application", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
+        dashboard("Referenced", "web", "Application", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         public("Bookmark", "web", "", "https://bookmark.test"),
         favorites("Favorite", "web", "", "https://favorite.test"),
         dashboard("Custom app", "web", "Custom", "https://custom.test"),
@@ -441,7 +440,7 @@ def test_flare_bookmarks_accept_custom_category_ids_and_explicit_site_urls() -> 
     manager, reads = _site_navigation_manager({
         "web": Nginx.site("app.test"),
     }, lambda producer: [
-        Flare.bookmark("Referenced", "web", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"]))), category="tool"),
+        Flare.bookmark("Referenced", "web", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"])), category="tool"),
         Flare.public("App", "apps", "Application description", "https://app.test"),
         Flare.bookmark("Standalone", "book", "https://docs.test", category="tool"),
         Flare.bookmark("Unbound", "off", category="empty"),
@@ -494,7 +493,7 @@ def test_flare_container_factory_requires_explicit_site_urls() -> None:
     empty = Flare.container("Empty", "web", "")
     disabled = Flare.container("Disabled", "web", None)
     manager, reads = _site_navigation_manager({"web": Nginx.site("app.test")}, lambda producer: [
-        Flare.container("Referenced", "web", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.test_sites["web"])))),
+        Flare.container("Referenced", "web", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         omitted, empty, disabled, Flare.container("Unbound", "web"),
     ])
     assert reads == []

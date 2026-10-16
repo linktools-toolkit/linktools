@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Navigation never owns proxy registration or mutates declaration identities."""
-from linktools.core import ConfigLazy
 from linktools.cntr.ext import ResolvedSite
 from types import SimpleNamespace
 
@@ -23,8 +22,8 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
     container.manager = SimpleNamespace(containers={"nginx": SimpleNamespace(sites={
         declaration: site,
     })})
-    first = load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(container, None)))
-    second = load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(container, None)), "admin")
+    first = load_nginx_url(ResolvedSite.find(container, None))
+    second = load_nginx_url(ResolvedSite.find(container, None), "admin")
     assert container.env_config.resolve(first) == "https://app.example.com"
     assert container.env_config.resolve(second) == "https://app.example.com/admin"
     assert container.hooks.describe() == []

@@ -5,7 +5,6 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from linktools.types import MISSING
-from linktools.core import ConfigLazy
 
 from ._base import Integration
 from ._authelia import Authelia
@@ -46,7 +45,7 @@ def endpoint(
         auth_headers=auth_headers, cert_domains=cert_domains,
         template_vars=template_vars, default_server=default_server,
     )
-    base_url = load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, site)))
+    base_url = load_nginx_url(ResolvedSite.find(producer, site))
     result = [site]
     for declaration in Integration.iter_declarations(extensions):
         if isinstance(declaration, Flare):

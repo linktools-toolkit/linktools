@@ -3,10 +3,13 @@
 """The endpoint recipe returns ordinary independent lazy declarations."""
 from linktools.core import ConfigLazy
 from linktools.cntr.ext import ResolvedSite
+from linktools.core import ConfigRef
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+
+from linktools.errors import ConfigError
 
 from linktools.cntr import ContainerError
 from linktools.cntr.ext import Authelia, Flare, Integration, Nginx, endpoint
@@ -37,10 +40,10 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     template = lazy_load(fail)
     producer = Producer()
     public, direct = Flare.links(
-        Flare.public(), Flare.container(url=load_port_url("APP_PORT", https=False)),
+        Flare.public(), Flare.container(url=load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=False)),
         name="App", icon="web", desc="Application",
     )
-    oidc = Authelia.oidc((load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)), "callback"),))
+    oidc = Authelia.oidc((load_nginx_url(ResolvedSite.find(producer, None), "callback"),))
     access = Authelia.access(lazy_load(fail))
     declarations = endpoint(
         producer, domain=domain, proxy=proxy, auth=auth, auth_bypass=bypass,
@@ -105,9 +108,9 @@ def test_endpoint_resolves_public_direct_and_oidc_paths_independently() -> None:
     producer.env_config = Config(None, ConfigSchema(), [])
     producer.env_config.get = producer.get_config
     declarations = endpoint(producer, domain="app.test", proxy="http://app:8080", extensions=[
-        Flare.public("App", "web", "Application", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)), "ui")),
-        Flare.container("App", "web", load_port_url("APP_PORT", "ui", https=False)),
-        Authelia.oidc(tuple(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)), path)
+        Flare.public("App", "web", "Application", load_nginx_url(ResolvedSite.find(producer, None), "ui")),
+        Flare.container("App", "web", load_port_url(ConfigRef("APP_PORT", type=int, default=0), "ui", https=False)),
+        Authelia.oidc(tuple(load_nginx_url(ResolvedSite.find(producer, None), path)
                             for path in ("callback", "callback", "return"))),
     ])
     site = ResolvedSite(producer, declarations[0], 0)
@@ -247,10 +250,10 @@ def test_endpoint_binds_reused_access_and_public_links_to_each_actual_site() -> 
     assert access.site is None and link._url is MISSING
     assert first[2].resolve_url(producer.env_config) == "https://one.test"
     assert second[2].resolve_url(producer.env_config) == "https://two.test"
-    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, first)))) == "https://one.test"
-    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, second)))) == "https://two.test"
-    with pytest.raises(ContainerError, match="Expected one declared nginx site"):
-        ResolvedSite.find(producer, None)
+    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, first))) == "https://one.test"
+    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, second))) == "https://two.test"
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
+        producer.env_config.resolve(ResolvedSite.find(producer, None))
 
 
 
@@ -309,7 +312,7 @@ def test_declarative_urls_are_lazy_and_oidc_does_not_follow_auth(active, auth):
     })
     declarations = endpoint(producer, domain="app.test" if active else "", auth=auth, extensions=[
         Flare.public("Mihomo", "server", url=relative),
-        Authelia.oidc((load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None))), load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)), "callback"),
+        Authelia.oidc((load_nginx_url(ResolvedSite.find(producer, None)), load_nginx_url(ResolvedSite.find(producer, None), "callback"),
                        "http://local.test:9000")),
     ])
     assert reads == []

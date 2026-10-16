@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Direct navigation preserves valid ports independently of optional sites."""
-from linktools.core import ConfigLazy
 from linktools.cntr.ext import ResolvedSite
+from linktools.core import ConfigRef
 import pytest
 
 from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
@@ -15,8 +15,8 @@ def test_direct_port_boundary_survives_disabled_public_navigation(nginx: bool, p
     manager, reads = _site_navigation_manager(
         {"web": Nginx.site("")},
         lambda producer: [
-            Flare.public("Public", "web", url=load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)))),
-            Flare.container("Direct", "web", load_port_url("PORT", "ui", https=False)),
+            Flare.public("Public", "web", url=load_nginx_url(ResolvedSite.find(producer, None))),
+            Flare.container("Direct", "web", load_port_url(ConfigRef("PORT", type=int, default=0), "ui", https=False)),
         ],
         nginx=nginx,
     )

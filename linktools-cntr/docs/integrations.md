@@ -23,10 +23,10 @@ def integrations(self) -> "Integrations":
             auth_bypass=(r"^/public/",),
             waf_bypass=(),
         ),
-        Flare.public("App", "apps", "Application", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self)))),
+        Flare.public("App", "apps", "Application", load_nginx_url(ResolvedSite.find(self))),
         Flare.container(
             "App direct", "apps",
-            load_port_url("APP_PORT", https=False),
+            load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=False),
         ),
     ]
 ```
@@ -48,7 +48,7 @@ be read again; do not reuse an exhausted generator.
 
 The nginx container owns one command-local `sites` mapping from original Nginx
 objects to `ResolvedSite` views. `ResolvedSite.collect(manager)` rejects repeated
-site objects. `ResolvedSite.find(producer, reference=None)` resolves an original
+site objects. `ResolvedSite.find(producer, reference=None)` returns a ConfigLazy reference to an original
 Nginx declaration or an endpoint tuple containing exactly one such declaration.
 A reference belongs to one producer; reconstructing an equivalent endpoint is not
 a reference. Omission is allowed only when the producer has exactly one declared
@@ -57,7 +57,7 @@ The generic `iter_integrations` yields `(producer, declaration)` for installed
 consumers. No dictionary key, generated filename or render ordinal is an author identity.
 
 Navigation is an independent `Flare` declaration. Pass
-`load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self)))` to use the unique site's lazy URL.
+`load_nginx_url(ResolvedSite.find(self))` to use the unique site's lazy URL.
 An explicit URL stays unchanged; `None`, `""`, or an omitted standalone URL skips the
 navigation entry. Within endpoint extensions, an omitted application URL inherits that site URL. No URL is inherited from a neighboring nginx declaration.
 The link's category is presentation metadata, not an authentication policy;
@@ -143,7 +143,7 @@ return endpoint(
     extensions=[
         Flare.links(
             Flare.public(),
-            Flare.container(url=load_port_url("APP_PORT", https=True)),
+            Flare.container(url=load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=True)),
             name="App", icon="apps", desc="Application",
         ),
         Authelia.access(policy="one_factor"),
@@ -181,7 +181,7 @@ from linktools.core import ConfigLazy, ConfigRef
 
 extensions=[
     Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
-        ConfigLazy(lambda config: ResolvedSite.find(self)), "ui", "metacubexd", "#", "setup",
+        ResolvedSite.find(self), "ui", "metacubexd", "#", "setup",
         queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
     )),
     Authelia.oidc(("{base_url}", "{base_url}/callback",
@@ -205,7 +205,7 @@ configuration fields are not formatted by this URL step.
 
 Values remain lazy until consumed. Use `load_nginx_url` for site-dependent URLs
 with query values: it checks the site's URL before resolving `queries`, so a
-disabled site leaves those values unread. The example delays `ResolvedSite.find(self)`, which requires exactly one declared
+disabled site leaves those values unread. The example uses the lazy reference `ResolvedSite.find(self)`, which requires exactly one declared
 site; an explicit original site/endpoint can be supplied to `find` for multi-site producers. A custom `ConfigLazy`
 that constructs a relative URL may resolve its query values before the endpoint
 discovers that its site is disabled. Relative URLs from a disabled site become
@@ -229,7 +229,7 @@ def integrations(self):
 
 @cached_property
 def proxy_url(self):
-    return load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self, self.proxy_endpoint)))
+    return load_nginx_url(ResolvedSite.find(self, self.proxy_endpoint))
 ```
 
 Raw ext declarations can still be mixed with endpoint results and grouped links.
@@ -368,19 +368,32 @@ The former `BaseContainer.get_nginx_domain` method is removed.
 Import the URL factories from `linktools.cntr.ext`:
 
 ```python
-from linktools.core import ConfigLazy
+from linktools.core import ConfigRef
 from linktools.cntr.ext import ResolvedSite, load_config_url, load_nginx_url, load_port_url
 
-load_config_url("APP_URL", "ui", queries={"mode": "compact"})
-load_port_url("APP_PORT", "ui", https=False)
-load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self)), "ui")
+load_config_url(ConfigRef("APP_URL", type=str, default=None), "ui", queries={"mode": "compact"})
+load_port_url(ConfigRef("APP_PORT", type=int, default=0), "ui", https=False)
+load_nginx_url(ResolvedSite.find(self), "ui")
 ```
 
-Config and port URL factories return unbound `ConfigLazy` declarations. They
+Config and port URL factories accept values or ConfigValue declarations and
+return unbound ConfigLazy values. A string URL is literal, never an implicit
+configuration key; use ConfigRef explicitly for configuration lookup and its
+cast/default. For example, `load_config_url("https://app.example/ui")` and
+`load_port_url(8080, https=False)` work without a URL/port configuration key.
+Path components accept strings or ConfigValue declarations; `https` accepts a
+boolean or ConfigValue. Literal paths need no wrapping. These arguments and
+queries resolve only after the base URL or port is usable. Config/port values
 resolve through the consuming Config and stay empty when disabled. Ports must
 satisfy `0 < port <= 65535`; `HOST` is not read until the port is valid. Nginx URL factories likewise return ConfigLazy and require an explicit ResolvedSite
-or ConfigValue resolving to one. Defer lookup with ConfigLazy when declarations
-are being constructed; do not eagerly call ResolvedSite.find during construction.
+or ConfigValue resolving to one. `ResolvedSite.find(producer, reference=None)`
+is safe during declaration construction: it returns ConfigLazy without reading
+the snapshot. Each Config.resolve performs the lookup; no resolved site is cached
+in the reference. To read site properties immediately, use
+`config.resolve(ResolvedSite.find(producer)).get_url(default="")`.
+Lookup errors are raised at resolution time as ConfigError. The return value is
+a ConfigLazy declaration, not an immediately usable ResolvedSite; callers reading
+site properties must resolve it first. There is no separate synchronous alias.
 Missing, foreign or ambiguous references fail; declared disabled sites or absent
 nginx resolve to an empty URL.
 Path joining, query encoding and literal template placeholders remain unchanged.

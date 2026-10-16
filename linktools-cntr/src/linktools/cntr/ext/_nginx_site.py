@@ -13,6 +13,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any, Optional
+    from linktools.core import Config, ConfigLazy
     from ..container import BaseContainer
     from ..manager import ContainerManager
     from ._nginx import Nginx
@@ -44,27 +45,37 @@ class ResolvedSite:
 
     @classmethod
     def find(cls, producer: "BaseContainer",
-             reference: "Nginx | tuple[Integration, ...] | None" = None) -> "ResolvedSite":
-        """Resolve one original site or endpoint; omission requires one declared site."""
-        from ._nginx import Nginx
-        from ..errors import ContainerError
+             reference: "Nginx | tuple[Integration, ...] | None" = None) -> "ConfigLazy":
+        """Declare a lazy lookup of an original site or endpoint.
 
-        sites = producer.manager.containers["nginx"].sites
-        if reference is None:
-            matches = [site for site in sites.values() if site.producer is producer]
-        else:
-            if isinstance(reference, tuple):
-                declarations = [item for item in reference if isinstance(item, Nginx)]
-                if len(declarations) != 1:
-                    raise ContainerError("Endpoint reference must contain exactly one nginx site")
-                reference = declarations[0]
-            if not isinstance(reference, Nginx):
-                raise ContainerError("Expected an original nginx site or endpoint declaration")
-            site = sites.get(reference)
-            matches = [site] if site is not None and site.producer is producer else []
-        if len(matches) != 1:
-            raise ContainerError("Expected one declared nginx site in %s; reference the original endpoint" % producer.name)
-        return matches[0]
+        Omission requires one declared site. Lookup and validation happen on each
+        Config.resolve call against the producer's command-local snapshot.
+        """
+        from linktools.core import ConfigLazy
+
+        def resolve(config: "Config") -> "ResolvedSite":
+            from ._nginx import Nginx
+            from ..errors import ContainerError
+
+            target = reference
+            sites = producer.manager.containers["nginx"].sites
+            if target is None:
+                matches = [site for site in sites.values() if site.producer is producer]
+            else:
+                if isinstance(target, tuple):
+                    declarations = [item for item in target if isinstance(item, Nginx)]
+                    if len(declarations) != 1:
+                        raise ContainerError("Endpoint reference must contain exactly one nginx site")
+                    target = declarations[0]
+                if not isinstance(target, Nginx):
+                    raise ContainerError("Expected an original nginx site or endpoint declaration")
+                site = sites.get(target)
+                matches = [site] if site is not None and site.producer is producer else []
+            if len(matches) != 1:
+                raise ContainerError("Expected one declared nginx site in %s; reference the original endpoint" % producer.name)
+            return matches[0]
+
+        return ConfigLazy(resolve)
 
     def __init__(self, producer: "BaseContainer", declaration: "Nginx", position: int) -> None:
         self.producer = producer

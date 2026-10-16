@@ -9,44 +9,44 @@ from linktools.core import ConfigLazy
 
 if TYPE_CHECKING:
     from linktools.core import Config, ConfigValue
-    from linktools.types import ConfigKeyType, QueryType
+    from linktools.types import QueryType
     from ._nginx_site import ResolvedSite
 
 
-def load_config_url(key: "ConfigKeyType",
-                    *path: str, queries: "QueryType | ConfigValue | None" = None) -> "ConfigLazy":
+def load_config_url(url: "str | ConfigValue | None",
+                    *path: "str | ConfigValue", queries: "QueryType | ConfigValue | None" = None) -> "ConfigLazy":
     def make_url(config: "Config") -> str:
-        url = config.get(key, type=str, default=None)
-        if url:
-            return utils.join_url(url, *path, queries=config.resolve(queries))
+        resolved_url = config.resolve(url)
+        if resolved_url:
+            return utils.join_url(resolved_url, *config.resolve(path), queries=config.resolve(queries))
         return ""
 
     return ConfigLazy(make_url)
 
 
-def load_port_url(key: "ConfigKeyType",
-                  *path: str, queries: "QueryType | ConfigValue | None" = None,
-                  https: bool = True) -> "ConfigLazy":
+def load_port_url(port: "int | ConfigValue",
+                  *path: "str | ConfigValue", queries: "QueryType | ConfigValue | None" = None,
+                  https: "bool | ConfigValue" = True) -> "ConfigLazy":
     def make_url(config: "Config") -> str:
-        port = config.get(key, type=int, default=0)
-        if 0 < port <= 65535:
+        resolved_port = config.resolve(port)
+        if 0 < resolved_port <= 65535:
             return utils.make_url(
-                "https" if https else "http",
+                "https" if config.resolve(https) else "http",
                 config.get("HOST", type=str),
-                port,
-                *path,
+                resolved_port,
+                *config.resolve(path),
                 queries=config.resolve(queries))
         return ""
 
     return ConfigLazy(make_url)
 
 
-def load_nginx_url(reference: "ResolvedSite | ConfigValue", *path: str,
+def load_nginx_url(reference: "ResolvedSite | ConfigValue", *path: "str | ConfigValue",
                    queries: "QueryType | ConfigValue | None" = None) -> "ConfigLazy":
     def make_url(config: "Config") -> str:
         site = config.resolve(reference)
         url = site.get_url(default="")
-        return utils.join_url(url, *path, queries=config.resolve(queries)) if url else ""
+        return utils.join_url(url, *config.resolve(path), queries=config.resolve(queries)) if url else ""
 
     return ConfigLazy(make_url)
 

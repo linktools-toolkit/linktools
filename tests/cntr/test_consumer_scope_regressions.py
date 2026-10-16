@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Partial application follows current declarations and retained provenance."""
-from linktools.core import ConfigLazy
 from linktools.cntr.ext import ResolvedSite
 import os
 from pathlib import Path
@@ -43,7 +42,7 @@ def test_independent_navigation_and_named_site_preserve_running_consumers(
         ("other", {"other": {"image": "other:new"}}),
     ], running=("nginx", "flare", "other"))
     app = manager.containers["app"]
-    navigation = Flare.public("App", "web", "Application", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(app, None))))
+    navigation = Flare.public("App", "web", "Application", load_nginx_url(ResolvedSite.find(app, None)))
     navigation = (navigation,) if nested_navigation else navigation
     declarations = ([endpoint(app, domain=lazy_load(fail), extensions=[(navigation,)])]
                     if nested_endpoint else [Nginx.site(lazy_load(fail)), navigation])

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from linktools.errors import ConfigError
+
 from linktools.cntr import ContainerError
 from linktools.cntr.ext import Nginx, endpoint, load_config_url, load_nginx_url, load_port_url
 from linktools.core import Config, ConfigField, ConfigFormat, ConfigRef, ConfigSchema, RuntimeOverrideSource
@@ -116,22 +118,23 @@ def test_config_values_endpoint_keeps_original_reference_and_resolves_current_qu
     site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
                                       containers={"nginx": SimpleNamespace(sites={declarations[0]: site})})
-    url = load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, declarations)), "ui", queries={"q": ConfigRef("QUERY")})
+    url = load_nginx_url(ResolvedSite.find(producer, declarations), "ui", queries={"q": ConfigRef("QUERY")})
     assert type(declarations) is tuple
     assert type(url) is ConfigLazy
-    assert ResolvedSite.find(producer, declarations) is site
+    assert producer.env_config.resolve(ResolvedSite.find(producer, declarations)) is site
     assert config.resolve(url) == "http://app.test/ui?q=a+b"
     config.set("QUERY", "changed")
     assert config.resolve(url) == "http://app.test/ui?q=changed"
-    with pytest.raises(ContainerError, match="original endpoint"):
-        ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN")))
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
+        producer.env_config.resolve(ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN"))))
 
 
 @pytest.mark.parametrize("factory,key,disabled", [(load_config_url, "URL", ""), (load_port_url, "PORT", 0),
                                                   (load_port_url, "PORT", 65536)])
 def test_config_values_url_helpers_skip_query_for_empty_or_invalid_base(factory: object, key: str, disabled: object) -> None:
     config = make_config(HOST=ConfigLazy(fail), **{key: disabled})
-    value = factory(key, queries={"secret": ConfigLazy(fail)})
+    value = factory(ConfigRef(key, type=str if factory is load_config_url else int,
+                              default=None if factory is load_config_url else 0), queries={"secret": ConfigLazy(fail)})
     assert type(value) is ConfigLazy and config.resolve(value) == ""
 
 
@@ -142,7 +145,8 @@ def test_config_values_url_helpers_skip_query_for_empty_or_invalid_base(factory:
 def test_config_values_url_helpers_encode_nested_query_in_current_config(factory: object, key: str,
                                                                         value: object, expected: str) -> None:
     config = make_config(HOST="host.test", SECRET="a+b &c", **{key: value})
-    url = factory(key, queries={"secret": ConfigRef("SECRET")})
+    url = factory(ConfigRef(key, type=str if factory is load_config_url else int,
+                              default=None if factory is load_config_url else 0), queries={"secret": ConfigRef("SECRET")})
     assert config.resolve(url) == expected
     config.set("SECRET", "new")
     assert config.resolve(url) == expected.replace("a%2Bb+%26c", "new")
@@ -306,7 +310,8 @@ def test_url_helpers_reuse_inline_fields_and_query_refs_across_configs(
         factory: object, key: str, first: object, second: object, expected: str) -> None:
     field = ConfigField(key, default=first)
     query = ConfigRef(ConfigField("QUERY", default="first"))
-    value = factory(field, "ui", queries={"q": query})
+    value = factory(ConfigRef(field, type=str if factory is load_config_url else int,
+                                   default=None if factory is load_config_url else 0), "ui", queries={"q": query})
     one = make_config(HOST="one.test")
     two = make_config(HOST="two.test", QUERY="second", **{key: second})
     first_result = one.resolve(value)
@@ -315,3 +320,46 @@ def test_url_helpers_reuse_inline_fields_and_query_refs_across_configs(
     assert one.resolve(value) == first_result
     assert one.schema.get(key) is None and two.schema.get(key) is None
     assert one.schema.get("QUERY") is None and two.schema.get("QUERY") is None
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_url_helpers_accept_values_and_resolve_path_https_and_query(deferred: bool) -> None:
+    config = make_config(HOST="host.test", PATH="ui", HTTPS=False, QUERY="a b")
+    url = ConfigLazy(lambda config: "https://literal.test/base") if deferred else "https://literal.test/base"
+    port = ConfigLazy(lambda config: 8080) if deferred else 8080
+    path = ConfigRef("PATH")
+    query = {"q": ConfigRef("QUERY")}
+    assert config.resolve(load_config_url(url, path, queries=query)) == "https://literal.test/base/ui?q=a+b"
+    value = load_port_url(port, path, https=ConfigRef("HTTPS"), queries=query)
+    assert config.resolve(value) == "http://host.test:8080/ui?q=a+b"
+    config.set("HTTPS", True)
+    config.set("PATH", "other")
+    assert config.resolve(value) == "https://host.test:8080/other?q=a+b"
+
+
+@pytest.mark.parametrize("factory,value", [(load_config_url, None), (load_config_url, ""),
+                                           (load_port_url, 0), (load_port_url, -1), (load_port_url, 65536)])
+def test_disabled_url_values_skip_all_dependent_values(factory: object, value: object) -> None:
+    config = make_config(HOST=ConfigLazy(fail))
+    kwargs = {"https": ConfigLazy(fail)} if factory is load_port_url else {}
+    helper = factory(value, ConfigLazy(fail), queries=ConfigLazy(fail), **kwargs)
+    assert config.resolve(helper) == ""
+
+
+@pytest.mark.parametrize("raw,expected", [("8080", "https://host.test:8080/ui"), ("bad", ""), (0, "")])
+def test_port_url_explicit_reference_owns_cast_and_default(raw: object, expected: str) -> None:
+    config = make_config(HOST="host.test", PORT=raw)
+    value = load_port_url(ConfigRef("PORT", type=int, default=0), "ui")
+    assert config.resolve(value) == expected
+    assert make_config().resolve(load_port_url(ConfigRef("ABSENT", type=int, default=0), ConfigLazy(fail))) == ""
+
+
+def test_config_url_explicit_reference_owns_missing_default_and_string_cast() -> None:
+    config = make_config(URL=123)
+    assert config.resolve(load_config_url(ConfigRef("URL", type=str, default=None))) == "123"
+    assert make_config().resolve(load_config_url(ConfigRef("ABSENT", type=str, default=None), ConfigLazy(fail))) == ""
+
+
+def test_config_url_literal_string_is_not_a_configuration_key() -> None:
+    config = make_config(URL="https://configured.test")
+    assert config.resolve(load_config_url("URL")) == "URL"

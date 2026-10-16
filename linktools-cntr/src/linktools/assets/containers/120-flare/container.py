@@ -72,7 +72,7 @@ class Container(BaseContainer):
                 Flare.container(
                     "Flare",
                     "bookmark",
-                    load_port_url("FLARE_PORT", https=False),
+                    load_port_url(ConfigRef("FLARE_PORT", type=int, default=0), https=False),
                 ),
                 Authelia.access(
                     policy="one_factor",

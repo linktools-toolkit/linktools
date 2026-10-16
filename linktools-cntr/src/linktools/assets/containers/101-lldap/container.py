@@ -8,7 +8,7 @@ from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.ext import Flare, load_port_url
-from linktools.core import ConfigField, PromptProvider, LazyProvider
+from linktools.core import ConfigRef, ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
@@ -41,7 +41,7 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return [
             Flare.container("LDAP", "account", load_port_url(
-                "LLDAP_WEB_PORT",
+                ConfigRef("LLDAP_WEB_PORT", type=int, default=0),
                 https=False,
             )),
         ]

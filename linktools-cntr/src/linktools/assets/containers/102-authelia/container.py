@@ -88,7 +88,7 @@ class Container(BaseContainer):
         # Metadata may describe an unconfigured public identity; native OIDC
         # generation below still requires a concrete HTTPS endpoint.
         from linktools.cntr.ext import ResolvedSite
-        return ResolvedSite.find(self).get_url(default="")
+        return self.env_config.resolve(ResolvedSite.find(self)).get_url(default="")
 
     @cached_property
     def public_authority(self) -> str:
@@ -133,7 +133,7 @@ class Container(BaseContainer):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)
             if declaration.site is MISSING:
                 continue
-            site = ResolvedSite.find(producer, declaration.site)
+            site = producer.env_config.resolve(ResolvedSite.find(producer, declaration.site))
             if not site.enabled or not site.auth:
                 continue
             rule = dict(declaration.resolve_rule(producer.env_config))

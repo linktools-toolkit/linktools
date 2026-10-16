@@ -151,7 +151,7 @@ def test_builtin_public_site_declares_https_requirement(fresh_manager, monkeypat
             name: declarations for name, declarations in fresh_manager.integration_snapshot.items()
             if name != "nginx"
         })
-    site = ResolvedSite.find(fresh_manager.containers["authelia"])
+    site = fresh_manager.env_config.resolve(ResolvedSite.find(fresh_manager.containers["authelia"]))
     enabled = bool(domain) and installed
     if enabled and not https:
         with pytest.raises(ContainerError, match="https explicitly requires a disabled global capability"):
