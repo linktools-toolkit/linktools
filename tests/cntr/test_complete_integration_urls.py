@@ -11,7 +11,7 @@ from test_config_values_navigation import _Config, _manager, _navigation, _fail
 
 @pytest.mark.parametrize("url", ["", "/relative", "{url}/callback", "//host.test/path", "https:///path",
                                 "https://:443/path", "https://user@/path", "https://host.test:bad/path",
-                                "https://host.test:65536/path", "https://host.test:0/path", "https://[invalid"])
+                                "https://host.test:65536/path", "https://host.test:0/path", "https://[invalid", "https://{url}/path", "custom:{url}"])
 def test_flare_omits_incomplete_resolved_urls_before_metadata(url: str) -> None:
     config = _Config(URL=url)
     link = Flare.public(ConfigLazy(_fail), ConfigLazy(_fail), url=ConfigRef("URL"))
@@ -34,9 +34,9 @@ def test_authelia_written_config_uses_only_complete_resolved_callbacks(fresh_man
     provider.public_url = "https://sso.test"
     producer.env_config.set("CALLBACK_URL", "http://private.test:65535/cb?q=%2F")
     callbacks = Authelia.oidc(("/callback", "{url}", "//host.test/cb", "https:///cb", "",
-                              ConfigRef("CALLBACK_URL"), "custom:callback"))
+                              ConfigRef("CALLBACK_URL"), "custom://app.test/callback"))
     monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, callbacks),)))
-    expected = ("https://sso.test", "http://private.test:65535/cb?q=%2F", "custom:callback")
+    expected = ("https://sso.test", "http://private.test:65535/cb?q=%2F", "custom://app.test/callback")
     assert provider.oidc_redirects == expected
     rendered = provider.render_template(provider.get_source_path("templates", "configuration.oidc.yml"))
     # Authelia evaluates its native secret expression after the Jinja render.
@@ -60,11 +60,11 @@ def test_authelia_accepted_redirects_do_not_read_client_secret(fresh_manager, mo
 
 
 @pytest.mark.parametrize("url", ["https://:443/cb", "https://user@/cb", "https://host.test:bad/cb",
-                                "https://host.test:65536/cb", "https://host.test:0/cb", "https://[invalid"])
+                                "https://host.test:65536/cb", "https://host.test:0/cb", "custom:callback", "https://[invalid", "https://{url}/path", "custom:{url}"])
 def test_authelia_omits_incomplete_http_targets(url: str) -> None:
     config = _Config(URL=url)
-    callbacks = Authelia.oidc((ConfigRef("URL"), "https://host.test:65535/cb", "custom:callback"))
-    assert callbacks.resolve_redirect_uris(config) == ("https://host.test:65535/cb", "custom:callback")
+    callbacks = Authelia.oidc((ConfigRef("URL"), "https://host.test:65535/cb", "custom://app.test/callback"))
+    assert callbacks.resolve_redirect_uris(config) == ("https://host.test:65535/cb", "custom://app.test/callback")
 
 
 @pytest.mark.parametrize("issuer", ["https://:443", "https://sso.test:65536"])

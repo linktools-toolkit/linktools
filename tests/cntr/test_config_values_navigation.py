@@ -228,27 +228,27 @@ def test_authelia_disabled_access_skips_config_rule(domain: str, auth: bool, ngi
 def test_authelia_callbacks_resolve_nested_values_with_exact_deduplication() -> None:
     declaration = Authelia.oidc(ConfigLazy(lambda config: [
         ConfigRef("URL"), ConfigLazy(lambda current: ConfigRef("URL")),
-        ConfigFormat("custom:{name}", name=ConfigRef("NAME")), "",
+        ConfigFormat("custom://app.test/{name}", name=ConfigRef("NAME")), "",
     ]))
     first = _Config(URL="https://one.test/callback?q=%23", NAME="one")
     second = _Config(URL="https://two.test/callback", NAME="two")
     manager = _manager(("first", first, [declaration]), ("second", second, [declaration]))
     assert first.reads == second.reads == []
     assert manager.containers["authelia"].oidc_redirects == (
-        "https://sso.test", "https://one.test/callback?q=%23", "custom:one",
-        "https://two.test/callback", "custom:two",
+        "https://sso.test", "https://one.test/callback?q=%23", "custom://app.test/one",
+        "https://two.test/callback", "custom://app.test/two",
     )
 
 
-def test_authelia_endpoint_does_not_complete_callbacks_after_config_values() -> None:
+def test_authelia_endpoint_expands_only_explicit_placeholder_after_config_values() -> None:
     config = _Config(DOMAIN="app.test", CALLBACK="/callback?q=%2F", RETURN="{url}/return")
     callbacks = Authelia.oidc((ConfigRef("CALLBACK"), ConfigRef("RETURN"), ConfigRef("CALLBACK")))
     manager = _manager(("app", config, lambda producer: endpoint(
         producer, domain=ConfigRef("DOMAIN"), extensions=[callbacks])))
     assert manager.containers["authelia"].oidc_redirects == (
-        "https://sso.test",
+        "https://sso.test", "https://app.test/return",
     )
-    assert "DOMAIN" not in config.reads
+    assert "DOMAIN" in config.reads
 
 
 @pytest.mark.parametrize("url", ["https://app.test/callback#fragment",
@@ -275,7 +275,7 @@ def test_authelia_callback_sequence_and_rule_types_are_checked_after_resolution(
 
 def test_authelia_empty_and_absolute_callbacks_need_no_site() -> None:
     declaration = Authelia.oidc((ConfigRef("EMPTY"), ConfigRef("URL")))
-    assert declaration.resolve_redirect_uris(_Config(EMPTY="", URL="custom:callback")) == ("custom:callback",)
+    assert declaration.resolve_redirect_uris(_Config(EMPTY="", URL="custom://app.test/callback")) == ("custom://app.test/callback",)
 
 
 def test_navigation_legacy_proxy_results_remain_success_cached() -> None:

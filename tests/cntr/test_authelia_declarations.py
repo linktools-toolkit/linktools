@@ -11,14 +11,14 @@ from linktools.runtime import lazy_load
 def test_oidc_factory_is_lazy_and_preserves_exact_callback_identity():
     calls = []
     declaration = Authelia.oidc(lazy_load(lambda: calls.append(True) or (
-        "https://app.test/base?x=1", "https://app.test/callback?q=2", "custom:callback",
+        "https://app.test/base?x=1", "https://app.test/callback?q=2", "custom://app.test/callback",
         "https://app.test/base?x=1", "", "http://local.test/", "https://app.test",
     )))
     assert isinstance(declaration, Integration)
     assert declaration.consumer == "authelia"
     assert calls == []
     assert declaration.redirect_uris == (
-        "https://app.test/base?x=1", "https://app.test/callback?q=2", "custom:callback",
+        "https://app.test/base?x=1", "https://app.test/callback?q=2", "custom://app.test/callback",
         "http://local.test/", "https://app.test",
     )
     assert calls == [True]

@@ -62,7 +62,7 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     assert public._url is MISSING and direct._url is not MISSING
     assert access_copy is not access and access_copy.site is site
     assert access.site is None
-    assert oidc_copy is oidc and oidc.site is MISSING
+    assert oidc_copy is not oidc and oidc.site is MISSING
     assert all(isinstance(value, Proxy) for value in oidc._redirect_uris)
 
 
@@ -326,10 +326,45 @@ def test_declarative_urls_are_lazy_and_oidc_does_not_follow_auth(active, auth):
 
 
 def test_endpoint_does_not_complete_oidc_callback_references() -> None:
-    original = Authelia.oidc(("{url}", "/callback", "//other.test/callback", "https://absolute.test/"))
+    original = Authelia.oidc(("/callback", "//other.test/callback", "https://absolute.test/"))
     declarations = endpoint(object(), domain=lazy_load(fail), extensions=[original])
-    assert declarations[1] is original
+    assert declarations[1] is not original
     assert original.redirect_uris == ("https://absolute.test/",)
-    assert not hasattr(original, "with_base_url")
+    assert declarations[1].redirect_uris == original.redirect_uris
     with pytest.raises(ContainerError, match="Authelia redirect URI"):
         Authelia.oidc((None,)).redirect_uris
+
+
+@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize("nginx", [True, False])
+@pytest.mark.parametrize("auth", [True, False])
+def test_oidc_explicit_url_placeholder_is_lazy_and_validated_after_expansion(active, nginx, auth):
+    from linktools.core import ConfigRef
+    reads = []
+    producer = SimpleNamespace(name="app")
+    producer.env_config = Config(None, ConfigSchema(), [])
+    producer.env_config.get = lambda key, **kw: "{url}/callback?q=1"
+
+    def get_config(key, **kwargs):
+        reads.append(key)
+        return True if key.endswith("ENABLE") else 8443
+
+    producer.get_config = get_config
+    original = Authelia.oidc(("{url}", ConfigRef("CALLBACK"), "/path-only", "//other.test/path",
+                              "https://private.test:65535/callback", "custom://app.test/callback"))
+    declarations = endpoint(producer, domain="app.test" if active else "", auth=auth,
+                            extensions=[original, Flare.public("App", "web", url="{url}/ui")])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()} if nginx else {},
+                                      containers={"nginx": SimpleNamespace(sites={
+                                          declarations[0]: ResolvedSite(producer, declarations[0], 0),
+                                      })})
+    assert reads == []
+    expected = ("https://private.test:65535/callback", "custom://app.test/callback")
+    if active and nginx:
+        expected = ("https://app.test:8443", "https://app.test:8443/callback?q=1") + expected
+    assert declarations[1].resolve_redirect_uris(producer.env_config) == expected
+    assert declarations[2].resolve_url(producer.env_config) == (
+        "https://app.test:8443/ui" if active and nginx else None)
+    assert original.resolve_redirect_uris(producer.env_config) == expected[-2:]
+    if not active or not nginx:
+        assert reads == []

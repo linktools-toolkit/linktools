@@ -59,6 +59,8 @@ def load_nginx_url(container: "BaseContainer",
 
 def is_complete_url(value: str) -> bool:
     """Recognize complete URI targets without restricting independent schemes."""
+    if "{url}" in value:
+        return False
     try:
         parsed = urlsplit(value)
         if not parsed.scheme:
