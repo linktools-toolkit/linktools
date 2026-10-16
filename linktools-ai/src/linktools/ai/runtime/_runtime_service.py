@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, overload
 
 from linktools.core import environ
 from pydantic import BaseModel
+from pydantic_ai.capabilities import AbstractCapability
 
 from ..agent import (
     AgentBinding,
@@ -23,7 +24,7 @@ from ..agent import (
     OutputBinding,
     restore_output,
 )
-from ..capability import CapabilityGroup, CapabilityGroupCapture
+from ..capability import AgentContext, CapabilityGroup, CapabilityGroupCapture
 from ..core import (
     AuthorizationPolicy,
     RunBudget,
@@ -392,6 +393,7 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: None = None,
         capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupCapture[None]]" = (),
+        middleware: "Sequence[AbstractCapability[AgentContext[None]]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
@@ -410,6 +412,7 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: RuntimeContext[AppT],
         capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
+        middleware: "Sequence[AbstractCapability[AgentContext[AppT]]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
@@ -427,6 +430,7 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: "RuntimeContext[object] | None" = None,
         capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]" = (),
+        middleware: "Sequence[AbstractCapability[AgentContext[object]]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
@@ -438,11 +442,37 @@ class Runtime(Generic[AppT]):
 
         Explicit graph and execution recovery remain available when disabled.
         Closing still drains work owned by this Runtime.
+
+        Middleware contains always-on, host-owned Pydantic capabilities applied
+        to every agent run, independently of Agent capability selection. Native
+        hook ordering and per-run lifecycle apply; middleware is not persisted
+        in execution bindings.
         """
         if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
             raise TypeError("tool_responses must be ToolResponseFixture")
         if not isinstance(auto_recover, bool):
             raise TypeError("auto_recover must be bool")
+        selected_middleware = tuple(middleware)
+        middleware_ids: set[str] = set()
+
+        def validate_middleware(
+            item: AbstractCapability[AgentContext[object]], *, register_id: bool = True,
+        ) -> None:
+            if item.defer_loading:
+                raise ValueError("middleware must not defer loading")
+            if item.id is not None:
+                if not isinstance(item.id, str) or not item.id or item.id.startswith("linktools."):
+                    raise ValueError("middleware ids must be non-empty and must not use the linktools. prefix")
+                if register_id:
+                    if item.id in middleware_ids:
+                        raise ValueError("middleware ids must be unique")
+                    middleware_ids.add(item.id)
+
+        for item in selected_middleware:
+            if not isinstance(item, AbstractCapability):
+                raise TypeError("middleware must contain AbstractCapability instances")
+            validate_middleware(item, register_id=False)
+            item.apply(validate_middleware)
         resolved_namespace = validate_persistence_namespace(namespace)
         root_context = RuntimeContext(None) if context is None else context
         if not isinstance(root_context, RuntimeContext):
@@ -454,6 +484,7 @@ class Runtime(Generic[AppT]):
             models=models,
             storage=storage,
             capabilities=capabilities,
+            middleware=selected_middleware,
             metrics=metrics,
             limits=selected_limits,
             authorization=authorization,
@@ -1472,6 +1503,7 @@ async def _open_runtime(
     metrics: "Metrics | None",
     limits: PromptLimits,
     authorization: "AuthorizationPolicy | None",
+    middleware: "Sequence[AbstractCapability[AgentContext[object]]]" = (),
     auto_recover: bool = True,
     tool_responses: ToolResponseFixture | None = None,
     capability_filter: CapabilityFilter | None = None,
@@ -1485,6 +1517,7 @@ async def _open_runtime(
         models=models,
         storage=storage,
         capabilities=capabilities,
+        middleware=middleware,
         metrics=metrics,
         limits=limits,
         authorization=authorization,
