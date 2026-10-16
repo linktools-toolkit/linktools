@@ -148,8 +148,44 @@ def test_nginx_url_resolves_site_reference_in_each_consuming_config():
     assert first.resolve(value) == "https://one.test/ui?q=first"
 
 
-@pytest.mark.parametrize("reference", [None, "web", Nginx.site("app.test"), (Nginx.site("app.test"),)])
+@pytest.mark.parametrize("reference", ["web", Nginx.site("app.test"), (Nginx.site("app.test"),)])
 def test_nginx_url_does_not_implicitly_select_a_site(reference):
     value = load_nginx_url(reference)
     with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         Config(None, ConfigSchema(), []).resolve(value)
+
+
+def test_nginx_url_unbound_endpoint_reference_fails_without_reading_dependents():
+    reads = []
+    path = ConfigLazy(lambda config: reads.append("path") or "/ui")
+    query = ConfigLazy(lambda config: reads.append("secret") or {"secret": "fixture"})
+    value = load_nginx_url(path=path, queries=query)
+    assert reads == []
+    with pytest.raises(ConfigError):
+        Config(None, ConfigSchema(), []).resolve(value)
+    assert reads == []
+
+
+@pytest.mark.parametrize("path", ["/ui/#/setup", "", ConfigLazy(lambda config: "/ui/#/setup")])
+def test_nginx_url_keyword_path_matches_positional_path(path):
+    producer = SimpleNamespace(name="app")
+    site = ResolvedSite(producer, Nginx.site("app.test"), 0)
+    site.get_url = lambda default="": "https://app.test"
+    config = Config(None, ConfigSchema(), [])
+    query = {"q": "a b"}
+    assert config.resolve(load_nginx_url(site, path=path, queries=query)) == config.resolve(
+        load_nginx_url(site, path, queries=query))
+
+
+@pytest.mark.parametrize("path", ["/ui", "", ConfigLazy(lambda config: "/ui")])
+def test_nginx_url_rejects_both_path_forms_at_construction(path):
+    with pytest.raises(TypeError):
+        load_nginx_url(None, "first", path=path)
+
+
+def test_nginx_url_explicit_none_keyword_path_keeps_positional_paths():
+    producer = SimpleNamespace(name="app")
+    site = ResolvedSite(producer, Nginx.site("app.test"), 0)
+    site.get_url = lambda default="": "https://app.test"
+    config = Config(None, ConfigSchema(), [])
+    assert config.resolve(load_nginx_url(site, "ui", "settings", path=None)) == "https://app.test/ui/settings"

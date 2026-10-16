@@ -8,7 +8,7 @@ from linktools.decorator import cached_property
 from linktools.types import MISSING
 from linktools.runtime import lazy_load
 from ._base import Integration
-from ._urls import is_complete_url, resolve_url_reference
+from ._urls import bind_url, is_complete_url, resolve_url_reference
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -111,6 +111,7 @@ class Flare(Integration):
             if self.display_category.apps:
                 result._url = base_url
         elif self._url is not None:
+            result._url = bind_url(self._url, base_url)
             result._base_urls = self._base_urls + (base_url,)
             result.__dict__.pop("_legacy_url", None)
         return result

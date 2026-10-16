@@ -373,3 +373,64 @@ def test_oidc_explicit_url_placeholder_is_lazy_and_validated_after_expansion(act
     assert original.resolve_redirect_uris(producer.env_config) == expected[-2:]
     if not active or not nginx:
         assert reads == []
+
+
+@pytest.mark.parametrize("shared_link", [False, True])
+def test_endpoint_binds_unreferenced_url_without_mutating_shared_inputs(shared_link: bool) -> None:
+    from linktools.errors import ConfigError
+    config = Config(None, ConfigSchema(), [])
+    config.get = lambda key, **kwargs: {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}[key]
+    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    original_url = load_nginx_url(path="/ui/#/setup", queries={"q": "a b"})
+    original = Flare.public("App", "web", url=original_url)
+    first = endpoint(producer, domain="one.test", extensions=[original])
+    second_link = original if shared_link else Flare.public("Other", "web", url=original_url)
+    second = endpoint(producer, domain="two.test", extensions=[second_link])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
+        first[0]: ResolvedSite(producer, first[0], 0), second[0]: ResolvedSite(producer, second[0], 1),
+    })})
+    assert first[1].resolve_url(config) == "https://one.test/ui/#/setup?q=a+b"
+    assert second[1].resolve_url(config) == "https://two.test/ui/#/setup?q=a+b"
+    assert first[1].resolve_url(config) == "https://one.test/ui/#/setup?q=a+b"
+    assert original._url is second_link._url is original_url
+    with pytest.raises(ConfigError):
+        config.resolve(original_url)
+    with pytest.raises(ConfigError):
+        original.resolve_url(config)
+
+
+@pytest.mark.parametrize("nginx,domain", [(False, "app.test"), (True, "")])
+def test_endpoint_unreferenced_url_skips_path_query_and_secret_for_disabled_site(nginx: bool, domain: str) -> None:
+    reads = []
+
+    def unexpected(config):
+        reads.append("dependent")
+        raise AssertionError("disabled navigation evaluated a dependent value")
+
+    config = Config(None, ConfigSchema(), [])
+    config.get = lambda key, **kwargs: unexpected(config)
+    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    declaration = endpoint(producer, domain=domain, extensions=[Flare.public(
+        "App", "web", url=load_nginx_url(path=ConfigLazy(unexpected), queries={"secret": ConfigLazy(unexpected)}),
+    )])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()} if nginx else {},
+                                      containers={"nginx": SimpleNamespace(sites={
+                                          declaration[0]: ResolvedSite(producer, declaration[0], 0),
+                                      })})
+    assert declaration[1].resolve_url(config) is None
+    assert reads == []
+
+
+def test_endpoint_preserves_explicit_url_reference_to_another_endpoint() -> None:
+    config = Config(None, ConfigSchema(), [])
+    config.get = lambda key, **kwargs: {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}[key]
+    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    first = endpoint(producer, domain="one.test")
+    url = load_nginx_url(ResolvedSite.find(producer, first), path="/ui")
+    original = Flare.public("App", "web", url=url)
+    second = endpoint(producer, domain="two.test", extensions=[original])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
+        first[0]: ResolvedSite(producer, first[0], 0), second[0]: ResolvedSite(producer, second[0], 1),
+    })})
+    assert second[1].resolve_url(config) == "https://one.test/ui"
+    assert config.resolve(url) == "https://one.test/ui"

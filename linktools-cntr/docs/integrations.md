@@ -181,7 +181,7 @@ from linktools.core import ConfigLazy, ConfigRef
 
 extensions=[
     Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
-        ResolvedSite.find(self), "/ui/metacubexd/#/setup",
+        path="/ui/metacubexd/#/setup",
         queries={"hostname": ConfigRef("MIHOMO_DOMAIN"),
                  "port": ConfigRef("NGINX_DEFAULT_PORT"),
                  "secret": ConfigRef("MIHOMO_SECRET")},
@@ -209,8 +209,11 @@ Values remain lazy until consumed. Use `load_nginx_url` for site-dependent URLs
 with query values: it checks the site's URL before resolving `queries`, so a
 disabled site leaves those values unread. For a site inheriting the global HTTPS
 setting, NGINX_DEFAULT_PORT already selects the corresponding HTTP/HTTPS port;
-an explicit override of that configuration key is honored. The example uses the lazy reference `ResolvedSite.find(self)`, which requires exactly one declared
-site; an explicit original site/endpoint can be supplied to `find` for multi-site producers. A custom `ConfigLazy`
+an explicit override of that configuration key is honored. Here the omitted
+reference binds to this endpoint's site, even when the producer declares multiple
+endpoints. Each copied Flare declaration keeps its own binding. Outside endpoint
+Flare URLs, pass an explicit ResolvedSite.find reference; an unbound omitted
+reference raises ConfigError without reading paths or queries. A custom `ConfigLazy`
 that constructs a relative URL may resolve its query values before the endpoint
 discovers that its site is disabled. Relative URLs from a disabled site become
 empty; explicit absolute URLs remain independent. Flare None/empty URLs stay
@@ -389,8 +392,14 @@ Path components accept strings or ConfigValue declarations; `https` accepts a
 boolean or ConfigValue. Literal paths need no wrapping. These arguments and
 queries resolve only after the base URL or port is usable. Config/port values
 resolve through the consuming Config and stay empty when disabled. Ports must
-satisfy `0 < port <= 65535`; `HOST` is not read until the port is valid. Nginx URL factories likewise return ConfigLazy and require an explicit ResolvedSite
-or ConfigValue resolving to one. `ResolvedSite.find(producer, reference=None)`
+satisfy `0 < port <= 65535`; `HOST` is not read until the port is valid. Nginx URL factories return ConfigValue declarations. An explicit reference may
+be a ResolvedSite or ConfigValue resolving to one. For a Flare URL inside
+endpoint extensions, omit the reference and use `load_nginx_url(path="/ui", queries=...)`
+to bind that endpoint's own base URL. This shorthand does not infer a global or
+unique site and is not an OIDC callback template; use `{base_url}` for callbacks.
+An unbound reference-free declaration raises ConfigError. Existing positional
+path components remain supported; passing both positional paths and `path=`
+raises TypeError during construction. `ResolvedSite.find(producer, reference=None)`
 is safe during declaration construction: it returns ConfigLazy without reading
 the snapshot. Each Config.resolve performs the lookup; no resolved site is cached
 in the reference. To read site properties immediately, use
