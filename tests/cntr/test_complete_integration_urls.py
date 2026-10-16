@@ -9,7 +9,7 @@ from linktools.core import ConfigLazy, ConfigRef
 from test_config_values_navigation import _Config, _manager, _navigation, _fail
 
 
-@pytest.mark.parametrize("url", ["", "/relative", "{url}/callback", "//host.test/path", "https:///path",
+@pytest.mark.parametrize("url", ["", "/relative", "{base_url}/callback", "//host.test/path", "https:///path",
                                 "https://:443/path", "https://user@/path", "https://host.test:bad/path",
                                 "https://host.test:65536/path", "https://host.test:0/path", "https://[invalid"])
 def test_flare_omits_incomplete_resolved_urls_before_metadata(url: str) -> None:
@@ -33,7 +33,7 @@ def test_authelia_written_config_uses_only_complete_resolved_callbacks(fresh_man
     producer = fresh_manager.containers["portainer"]
     provider.public_url = "https://sso.test"
     producer.env_config.set("CALLBACK_URL", "http://private.test:65535/cb?q=%2F")
-    callbacks = Authelia.oidc(("/callback", "{url}", "//host.test/cb", "https:///cb", "",
+    callbacks = Authelia.oidc(("/callback", "{base_url}", "//host.test/cb", "https:///cb", "",
                               ConfigRef("CALLBACK_URL"), "custom://app.test/callback"))
     monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, callbacks),)))
     expected = ("https://sso.test", "http://private.test:65535/cb?q=%2F", "custom://app.test/callback")
@@ -60,7 +60,7 @@ def test_authelia_accepted_redirects_do_not_read_client_secret(fresh_manager, mo
 
 
 @pytest.mark.parametrize("url", ["https://:443/cb", "https://user@/cb", "https://host.test:bad/cb",
-                                "https://host.test:65536/cb", "https://host.test:0/cb", "custom:callback", "https://[invalid", "https://{url}/path"])
+                                "https://host.test:65536/cb", "https://host.test:0/cb", "custom:callback", "https://[invalid", "https://{base_url}/path"])
 def test_authelia_omits_incomplete_http_targets(url: str) -> None:
     config = _Config(URL=url)
     callbacks = Authelia.oidc((ConfigRef("URL"), "https://host.test:65535/cb", "custom://app.test/callback"))
@@ -91,7 +91,7 @@ def test_url_formatting_supports_standard_fields_and_escaped_braces():
     from linktools.core import ConfigFormat
     config = _Config(PATH="return")
     callbacks = Authelia.oidc((
-        "{url!s}/callback", "https://independent.test/return?from={url!s}",
+        "{base_url!s}/callback", "https://independent.test/return?from={base_url!s}",
         "https://independent.test/{{literal}}", ConfigFormat("https://other.test/{path}", path=ConfigRef("PATH")),
         "https://app:{{port}}/callback",
     )).with_base_url("https://app.test:8443")
@@ -99,5 +99,14 @@ def test_url_formatting_supports_standard_fields_and_escaped_braces():
         "https://app.test:8443/callback", "https://independent.test/return?from=https://app.test:8443",
         "https://independent.test/{literal}", "https://other.test/return",
     )
-    link = Flare.public("App", "web", url="https://other.test/?from={url!s}").with_base_url("https://app.test")
+    link = Flare.public("App", "web", url="https://other.test/?from={base_url!s}").with_base_url("https://app.test")
     assert link.resolve_url(config) == "https://other.test/?from=https://app.test"
+
+
+@pytest.mark.parametrize("value", ["{url}/callback", "https://app.test/?from={url}"])
+def test_previous_url_format_name_is_not_an_alias(value):
+    config = _Config()
+    with pytest.raises(KeyError, match="url"):
+        Authelia.oidc((value,)).with_base_url("https://app.test").resolve_redirect_uris(config)
+    with pytest.raises(KeyError, match="url"):
+        Flare.public("App", "web", url=value).with_base_url("https://app.test").resolve_url(config)

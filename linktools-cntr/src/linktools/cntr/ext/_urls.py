@@ -77,7 +77,7 @@ def resolve_url_reference(value: str, base_url: str) -> str:
     """Resolve one explicit URL reference without formatting unrelated data."""
     if not value:
         return ""
-    value = str(value).format(url=base_url)
+    value = str(value).format(base_url=base_url)
     try:
         if urlsplit(value).scheme:
             return value

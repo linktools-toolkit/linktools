@@ -184,20 +184,22 @@ extensions=[
         self, None, "ui", "metacubexd", "#", "setup",
         queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
     )),
-    Authelia.oidc(("{url}", "{url}/callback",
+    Authelia.oidc(("{base_url}", "{base_url}/callback",
                    "http://portainer.local:9000")),
 ]
 ```
 
-The endpoint binds the lazy `url` format argument for Flare URLs and OIDC callbacks.
+The endpoint binds the lazy `base_url` format argument for Flare URLs and OIDC callbacks.
 OIDC path-only references are not completed from the endpoint.
 Relative Flare references use standard `urljoin` semantics, preserving query/fragment
-structure. URL fields use standard `str.format(url=...)` before final URL validation.
-`{url}` means the site's exact base URL and preserves
+structure. URL fields use standard `str.format(base_url=...)` before final URL validation.
+`{base_url}` means the site's exact base URL and preserves
 its existing trailing slash, whereas `/` explicitly selects the origin root with
 a trailing slash. Independent absolute URLs do not evaluate the lazy site URL unless their format
 fields use it. Standard conversions, format specifications and escaped braces
 are supported; unknown fields and malformed formats raise their normal errors.
+The endpoint template parameter is named `base_url`; the outer Flare `url` field
+still denotes the final link. The former `url` parameter is not an alias.
 ConfigFormat resolves its explicit arguments first. Non-URL metadata and nginx
 configuration fields are not formatted by this URL step.
 
@@ -432,11 +434,11 @@ Authelia.oidc(
 a second client or changes client IDs, credentials, scopes, or authorization policy.
 Use lazy URL/config references to defer evaluation. Empty URLs are omitted,
 including URLs derived from disabled optional sites. Relative URLs and URLs without a scheme or host are also omitted at consumption. Callback strings are formatted with the endpoint's lazy public URL before this
-validation. Without an endpoint the `url` argument is empty. Plain paths are not
+validation. Without an endpoint the `base_url` argument is empty. Plain paths are not
 expanded. Absolute
 callbacks remain even when another site URL is empty.
 Declared callbacks must resolve to complete URLs with a scheme and host, and cannot contain
-a fragment. Use `{url}` within an endpoint,
+a fragment. Use `{base_url}` within an endpoint,
 or `load_nginx_url` or `load_config_url`
 to declare full lazy URLs. Flare likewise writes only complete resolved URLs;
 independent absolute links do not depend on a public site.

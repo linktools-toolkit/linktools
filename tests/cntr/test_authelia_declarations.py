@@ -46,6 +46,6 @@ def test_independent_oidc_declarations_keep_separate_inputs():
     assert second.redirect_uris == ("https://second.test/callback",)
 
 
-@pytest.mark.parametrize("value", ["", "//evil.test/path", "/callback", "/cb#", "callback", "{url}", "https:///callback"])
+@pytest.mark.parametrize("value", ["", "//evil.test/path", "/callback", "/cb#", "callback", "{base_url}", "https:///callback"])
 def test_incomplete_oidc_callbacks_are_omitted_without_nginx(value: str) -> None:
     assert Authelia.oidc((value, "http://local.test/callback")).redirect_uris == ("http://local.test/callback",)

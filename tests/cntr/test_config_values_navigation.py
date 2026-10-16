@@ -128,7 +128,7 @@ def test_flare_bookmark_does_not_resolve_unused_description() -> None:
 
 @pytest.mark.parametrize("reference,expected", [
     ("/ui?q=a%20b#settings", "https://app.test/ui?q=a%20b#settings"),
-    ("{url}/ui", "https://app.test/ui"),
+    ("{base_url}/ui", "https://app.test/ui"),
     ("relative", "https://app.test/relative"),
     ("https://external.test/cb?q=%23", "https://external.test/cb?q=%23"),
 ])
@@ -241,7 +241,7 @@ def test_authelia_callbacks_resolve_nested_values_with_exact_deduplication() -> 
 
 
 def test_authelia_endpoint_expands_only_explicit_placeholder_after_config_values() -> None:
-    config = _Config(DOMAIN="app.test", CALLBACK="/callback?q=%2F", RETURN="{url}/return")
+    config = _Config(DOMAIN="app.test", CALLBACK="/callback?q=%2F", RETURN="{base_url}/return")
     callbacks = Authelia.oidc((ConfigRef("CALLBACK"), ConfigRef("RETURN"), ConfigRef("CALLBACK")))
     manager = _manager(("app", config, lambda producer: endpoint(
         producer, domain=ConfigRef("DOMAIN"), extensions=[callbacks])))

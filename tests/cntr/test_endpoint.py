@@ -271,7 +271,7 @@ def test_endpoint_rejects_extension_factories_but_accepts_callable_declaration()
 
 
 @pytest.mark.parametrize("reference,expected", [
-    ("{url}", "https://app.test"), ("/", "https://app.test/"),
+    ("{base_url}", "https://app.test"), ("/", "https://app.test/"),
     ("/callback?x=1", "https://app.test/callback?x=1"),
     ("/ui/#/setup?a=b", "https://app.test/ui/#/setup?a=b"),
     ("//other.test/path", "https://other.test/path"),
@@ -283,13 +283,13 @@ def test_endpoint_resolves_only_declared_url_fields(reference, expected):
     producer = SimpleNamespace(name="app", get_config=lambda key, **kw: True if key.endswith("ENABLE") else 443)
     producer.env_config = Config(None, ConfigSchema(), [])
     producer.env_config.get = producer.get_config
-    original = Flare.public("literal {url}", "web", "{{metadata}}", reference)
+    original = Flare.public("literal {base_url}", "web", "{{metadata}}", reference)
     declarations = endpoint(producer, domain="app.test", extensions=[original])
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
         declarations[0]: ResolvedSite(producer, declarations[0], 0),
     })})
     assert declarations[1].url == expected
-    assert declarations[1].name == "literal {url}" and declarations[1].desc == "{{metadata}}"
+    assert declarations[1].name == "literal {base_url}" and declarations[1].desc == "{{metadata}}"
     assert original._url is reference
 
 
@@ -343,17 +343,17 @@ def test_oidc_explicit_url_placeholder_is_lazy_and_validated_after_expansion(act
     reads = []
     producer = SimpleNamespace(name="app")
     producer.env_config = Config(None, ConfigSchema(), [])
-    producer.env_config.get = lambda key, **kw: "{url}/callback?q=1"
+    producer.env_config.get = lambda key, **kw: "{base_url}/callback?q=1"
 
     def get_config(key, **kwargs):
         reads.append(key)
         return True if key.endswith("ENABLE") else 8443
 
     producer.get_config = get_config
-    original = Authelia.oidc(("{url}", ConfigRef("CALLBACK"), "/path-only", "//other.test/path",
+    original = Authelia.oidc(("{base_url}", ConfigRef("CALLBACK"), "/path-only", "//other.test/path",
                               "https://private.test:65535/callback", "custom://app.test/callback"))
     declarations = endpoint(producer, domain="app.test" if active else "", auth=auth,
-                            extensions=[original, Flare.public("App", "web", url="{url}/ui")])
+                            extensions=[original, Flare.public("App", "web", url="{base_url}/ui")])
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()} if nginx else {},
                                       containers={"nginx": SimpleNamespace(sites={
                                           declarations[0]: ResolvedSite(producer, declarations[0], 0),

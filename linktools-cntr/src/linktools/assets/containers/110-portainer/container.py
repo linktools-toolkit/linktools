@@ -42,6 +42,6 @@ class Container(BaseContainer):
                     icon="docker",
                     desc="Docker管理工具",
                 ),
-                Authelia.oidc(("{url}",)),
+                Authelia.oidc(("{base_url}",)),
             ],
         )

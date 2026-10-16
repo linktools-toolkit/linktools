@@ -91,7 +91,7 @@ class Authelia(Integration):
             base_url = "" if self._base_url is MISSING else self._base_url
             if config is not None:
                 base_url = lazy_load(config.resolve, base_url)
-            value = value.format(url=base_url)
+            value = value.format(base_url=base_url)
             if not is_complete_url(value):
                 continue
             if not urlsplit(value).hostname:
