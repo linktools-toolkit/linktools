@@ -145,6 +145,7 @@ def test_consumer_support_conflict_requires_explicit_selection(owner, category, 
     applied = support_model(owner)
     desired = deepcopy(applied)
     desired[category][name] = {"external": True}
+    desired["services"]["admin"][category] = deepcopy(desired["services"]["auth"][category])
     current = context(owner)
     store = AppliedServiceModels(owner.manager, desired)
     with pytest.raises(ContainerError, match="conflicts.*auth.*explicitly select"):
@@ -167,3 +168,27 @@ def test_consumer_missing_prepared_relative_input_fails_closed(owner):
     store = AppliedServiceModels(owner.manager, applied)
     with pytest.raises(ContainerError, match="Missing prepared input.*acl.yml"):
         bind_consumer_files(current, applied, store, ("auth",))
+
+
+@pytest.mark.parametrize("category,name", [("networks", "auth-net"), ("volumes", "auth-data"),
+                                           ("secrets", "auth-secret"), ("configs", "auth-config")])
+def test_consumer_only_support_retains_applied_definition_over_pending_value(owner, category, name):
+    applied = support_model(owner)
+    desired = deepcopy(applied)
+    desired[category][name] = {"external": True}
+    current = context(owner)
+    store = AppliedServiceModels(owner.manager, desired)
+    result = bind_consumer_files(current, desired, store, ("auth",))
+    assert result[category][name] == applied[category][name]
+
+
+def test_two_consumers_with_different_applied_support_cannot_overwrite_each_other(owner):
+    applied = support_model(owner)
+    second = deepcopy(applied)
+    second['services']['admin']['networks'] = {'auth-net': {}}
+    second['networks']['auth-net'] = {'name': 'other-applied-network'}
+    AppliedServiceModels(owner.manager, second).record(('admin',))
+    current = context(owner)
+    store = AppliedServiceModels(owner.manager, applied)
+    with pytest.raises(ContainerError, match='conflicts.*admin.*explicitly select'):
+        bind_consumer_files(current, applied, store, ('auth', 'admin'))

@@ -221,3 +221,25 @@ def test_shared_contributor_requirement_applies_only_to_changed_consumer(tmp_pat
     else:
         manager.compose_operations.up(['app'])
         assert [event[1] for event in manager.events if event[0] == 'apply'] == ['app']
+
+
+def test_consumer_only_network_preserves_applied_definition_without_false_conflict(tmp_path):
+    manager = consumer_case(tmp_path)
+    previous = AppliedServiceModels(manager, manager.model).previous_model('consumer')
+    previous['services']['consumer']['networks'] = {'private': {}}
+    previous['networks'] = {'private': {'name': 'applied-private'}}
+    AppliedServiceModels(manager, previous).record(('consumer',))
+    manager.model['services']['consumer']['networks'] = {'private': {}}
+    manager.model['networks'] = {'private': {'name': 'pending-private'}}
+    manager.compose_operations.up(['app'])
+    assert manager.applied_models[-1]['networks']['private'] == {'name': 'applied-private'}
+    assert {event[1] for event in manager.events if event[0] == 'apply'} == {'app', 'consumer'}
+
+
+def test_consumer_snapshot_can_predate_new_explicit_producer(tmp_path):
+    manager = consumer_case(tmp_path)
+    previous = AppliedServiceModels(manager, manager.model).previous_model('consumer')
+    previous['services'].pop('app')
+    AppliedServiceModels(manager, previous).record(('consumer',))
+    manager.compose_operations.up(['app'])
+    assert {event[1] for event in manager.events if event[0] == 'apply'} == {'app', 'consumer'}

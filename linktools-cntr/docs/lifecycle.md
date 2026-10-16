@@ -216,9 +216,9 @@ configuration; ACL-only changes do not change that service's file mount. If
 partial application leaves only the admin service needing new files, select
 Authelia explicitly so its service image can perform native validation.
 
-Flare prepares navigation files with its configured group access and checks that
-its effective numeric service user can read them. A pending user/group change
-that would make the files unreadable requires explicitly selecting Flare. Initial
+Flare prepares navigation files with its configured group access and validates
+the generated YAML. Host UID/GID values are not used to infer container access,
+which depends on the runtime and its identity mapping. Initial
 migration copies other legacy application assets to `runtime-app`, leaving the
 legacy directory available to an old Compose model. Application uses normal
 file mounts and service recreation, not migration callbacks around Compose.

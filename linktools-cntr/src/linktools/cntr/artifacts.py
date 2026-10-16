@@ -374,6 +374,15 @@ def bind_consumer_files(context: "OperationContext", model: dict,
 
     result = deepcopy(model)
     services = tuple(dict.fromkeys(services))
+    categories = ("networks", "volumes", "secrets", "configs")
+    protected = {category: {} for category in categories}
+    targets = context.target_services if context.target_services is not None else model["services"]
+    for service in targets:
+        if service in services or service not in model["services"]:
+            continue
+        support = _service_support(model, service)
+        for category in categories:
+            protected[category].update(support[category])
     roots = tuple(container.get_app_path("generated") for container in context.project_containers
                   if container.name in context.prepared_dirs)
     for service in services:
@@ -387,10 +396,11 @@ def bind_consumer_files(context: "OperationContext", model: dict,
                     continue
                 target = result.setdefault(category, {})
                 for name, definition in value.items():
-                    if name in target and target[name] != definition:
+                    if name in protected[category] and protected[category][name] != definition:
                         raise ContainerError("Applied {} {!r} conflicts for configuration consumer {}; "
                                              "explicitly select its container".format(category, name, service))
                     target[name] = definition
+                    protected[category][name] = definition
             elif category in result and result[category] != value:
                 raise ContainerError("Applied Compose {!r} conflicts for configuration consumer {}; "
                                      "explicitly select its container".format(category, service))

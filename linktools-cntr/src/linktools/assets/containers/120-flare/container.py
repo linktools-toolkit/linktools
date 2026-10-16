@@ -121,20 +121,8 @@ class Container(BaseContainer):
                             group=self.get_config("DOCKER_GID", type=int))
 
     def on_check(self, context: "OperationContext") -> None:
-        spec = context.compose_model["services"]["flare"] if context.compose_model is not None else {}
-        uid, _, gid = str(spec.get("user", "")).partition(":")
-        groups = {str(value) for value in spec.get("group_add", ())} | {gid}
         for name in ("apps.yml", "bookmarks.yml"):
-            path = context.file_path(self, name)
-            if uid.isdecimal() and gid.isdecimal():
-                info = path.stat()
-                mode = (0o400 if int(uid) == info.st_uid else
-                        0o040 if str(info.st_gid) in groups else 0o004)
-                readable = int(uid) == 0 or bool(info.st_mode & mode)
-                if not readable:
-                    raise ContainerError("Flare's applied user cannot read the generated configuration; "
-                                         "explicitly select the flare container to apply its user configuration.")
-            yaml.safe_load(path.read_text(encoding="utf-8"))
+            yaml.safe_load(context.file_path(self, name).read_text(encoding="utf-8"))
 
     def _navigation_files(self) -> "dict[str, str]":
 

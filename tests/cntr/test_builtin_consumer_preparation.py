@@ -231,22 +231,12 @@ def test_authelia_admin_only_validation_requires_explicit_container(monkeypatch)
         container.on_check(context)
 
 
-@pytest.mark.parametrize('access', ['owner', 'group', 'supplementary', 'unreadable'])
-def test_flare_checks_generated_files_against_effective_service_user(tmp_path, monkeypatch, access):
-    import os
+def test_flare_yaml_validation_does_not_infer_container_permissions_from_host_ids(tmp_path, monkeypatch):
     container = _container('120-flare', monkeypatch)
     for name in ('apps.yml', 'bookmarks.yml'):
         path = tmp_path / name
         path.write_text('links: []\n', encoding='utf-8')
         path.chmod(0o640)
-    owner, group = os.getuid(), os.getgid()
-    user = owner if access == 'owner' else owner + 12345
-    gid = group if access == 'group' else group + 12345
-    context = OperationContext(compose_model={'services': {'flare': {
-        'user': '{}:{}'.format(user, gid), 'group_add': [str(group)] if access == 'supplementary' else []}}})
+    context = OperationContext(compose_model={'services': {'flare': {'user': '12345:23456'}}})
     context.file_path = lambda owner, name: tmp_path / name
-    if access == 'unreadable':
-        with pytest.raises(ContainerError, match='explicitly select the flare'):
-            container.on_check(context)
-    else:
-        container.on_check(context)
+    container.on_check(context)
