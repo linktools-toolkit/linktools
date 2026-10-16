@@ -291,10 +291,14 @@ original complete read path; this preserves ancestor deletion/ownership checks.
 Reads inside an existing state transaction bypass the display cache entirely.
 
 A hit returns the entire original display, without mixing fresh status or
-metadata with an older timeline/body. Status changes, new turns, and terminal
-admission reconciliation may therefore remain undisplayed until expiry or a
-strong refresh. Independently removed/corrupted transcript facts or object
-bodies may likewise be detected up to `max_age` later. Sending, cancelling,
+metadata with an older timeline/body. A changed session revision or active
+execution binding, or a cached active execution that has become terminal,
+invalidates the capture and refreshes the complete display. These checks reuse
+the existing fresh reads; a session revision is not a version of every display
+dependency. Other execution display changes and new turns that do not change
+those fields may remain undisplayed until expiry or a strong refresh.
+Independently removed/corrupted transcript facts or object bodies may likewise
+be detected up to `max_age` later. Sending, cancelling,
 resuming, and all other control operations retain their authoritative reads.
 Root authorization and deletion are never cached. Signed input and output
 cursors are checked again and are not renewed by a cache hit.

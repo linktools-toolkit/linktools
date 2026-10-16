@@ -323,8 +323,9 @@ class DefaultSessionService:
     ) -> SessionDetail:
         """Read a complete display snapshot; zero age retains strong refresh behavior.
 
-        Positive ages allow stale display/admission and delayed detection of
-        independently removed or damaged bodies. Authorization and resource
+        Positive ages allow stale display and delayed detection of independently
+        removed or damaged bodies. Admission changes and terminal active executions
+        invalidate a cached display. Authorization and resource
         existence are checked on every call. Control operations never use this cache.
         """
         if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not math.isfinite(max_age) or max_age < 0:
@@ -526,7 +527,8 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             self._check_display_authority(record, header)
             if (record.timeline_parent_session_id is not None
-                    or self._display_session_identity(record) != entry["root"]):
+                    or self._display_session_identity(record) != entry["root"]
+                    or record.revision != detail.session.revision):
                 return False
             ids = tuple(identities)
             if record.active_execution_id is not None and record.active_execution_id not in identities:
@@ -534,9 +536,12 @@ class DefaultSessionService:
             records = await self._executions.get_many(ids, tenant_id=principal.tenant_id) if ids else {}
             if len(records) != len(ids):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_active_admitted_execution(
+            active = self._validate_active_admitted_execution(
                 record, records.get(record.active_execution_id) if record.active_execution_id else None,
             )
+            if (record.active_execution_id != detail.session.active_execution_id
+                    or record.active_execution_id is not None and active is None):
+                return False
             if any(value.session_id != record.session_id or value.parent_execution_id is not None
                    for value in records.values()):
                 return False
