@@ -40,7 +40,7 @@ def test_loading_preserves_native_capabilities_without_invoking_runtime_lifecycl
             on_prepare = fail
             on_starting = fail
             on_check = fail
-            get_runtime_requirements = fail
+            get_config_revision = fail
     """)
     assert errors == []
     assert len(containers) == 1
@@ -62,7 +62,7 @@ def test_plain_container_inherits_non_generated_lifecycle_defaults(tmp_path: Pat
     assert errors == []
     assert len(containers) == 1
     container = containers[0]
-    assert container.get_runtime_requirements({"example"}) == {}
+    assert container.get_config_revision("example") is None
     assert not hasattr(container, "render_config")
     assert not hasattr(container, "apply_config")
 

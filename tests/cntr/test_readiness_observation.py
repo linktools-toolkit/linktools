@@ -7,13 +7,15 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr.errors import ContainerError
+from linktools.cntr.artifacts import CONFIG_REVISION_LABEL
 from linktools.cntr.runtime.inspect import ProjectRuntimeState
 from linktools.cntr.runtime.compose import ComposeRunner
 from linktools.cntr.runtime.inspect import RuntimeInspectionOutputError
 
 
-def item(name, state="running", health="healthy", exit_code=0):
-    return SimpleNamespace(service=name, state=state, health=health, exit_code=exit_code, labels={})
+def item(name, state="running", health="healthy", exit_code=0, labels=None):
+    return SimpleNamespace(service=name, state=state, health=health, exit_code=exit_code,
+                           labels=labels or {}, image_id="sha256:app")
 
 
 def context(dependencies):
@@ -110,3 +112,59 @@ def test_single_service_wait_observes_every_replica(method, monkeypatch):
     getattr(runner, method)(ctx, "app", timeout=None)
     assert calls == [("app",), ("app",)]
     assert sleeps == [0.5]
+
+
+@pytest.mark.parametrize("expected", [None, "new"])
+@pytest.mark.parametrize("observed", [None, "old", "new"])
+def test_batch_readiness_requires_revision_on_every_regular_replica(expected, observed, monkeypatch):
+    ctx = context({})
+    ctx.compose_model["services"]["app"] = {
+        "scale": 2, "labels": {} if expected is None else {CONFIG_REVISION_LABEL: expected}}
+    actual = ProjectRuntimeState(project="test", backend="docker", services=(
+        item("app", labels={CONFIG_REVISION_LABEL: "new"}),
+        item("app", labels={} if observed is None else {CONFIG_REVISION_LABEL: observed}),
+        item("app", labels={"com.docker.compose.oneoff": "True", CONFIG_REVISION_LABEL: "old"})))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
+        get_project_state=lambda containers, services=None: actual)))
+    monkeypatch.setattr("time.sleep", lambda delay: pytest.fail("Revision mismatch must not poll"))
+    images = {"app": "sha256:app"}
+    ready = expected is None or observed == expected
+    assert runner.ready_services(ctx, ("app",), actual, images) == ({"app"} if ready else set())
+    if ready:
+        assert runner.wait_services_ready(ctx, ("app",), images) is actual
+    else:
+        with pytest.raises(ContainerError, match="desired configuration revision"):
+            runner.wait_services_ready(ctx, ("app",), images)
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("observed", [None, "old", "new"])
+def test_recovery_readiness_uses_saved_model_revision_for_every_replica(completed, observed, monkeypatch):
+    ctx = context({})
+    ctx.compose_model["services"]["app"]["labels"] = {CONFIG_REVISION_LABEL: "new"}
+    saved = {"services": {"app": {"labels": {CONFIG_REVISION_LABEL: "old"}}}}
+    if completed:
+        saved["services"]["caller"] = {"depends_on": {"app": {"condition": "service_completed_successfully"}}}
+        ctx.target_services = ("app", "caller")
+    state = "exited" if completed else "running"
+    actual = ProjectRuntimeState(project="test", backend="docker", services=(
+        item("app", state=state, labels={CONFIG_REVISION_LABEL: "old"}),
+        item("app", state=state, labels={} if observed is None else {CONFIG_REVISION_LABEL: observed}),
+        item("app", labels={"com.docker.compose.oneoff": "True", CONFIG_REVISION_LABEL: "new"})))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
+        get_project_state=lambda containers, services=None: actual)))
+    monkeypatch.setattr("time.sleep", lambda delay: pytest.fail("Revision mismatch must not poll"))
+    if observed == "old":
+        assert runner.wait_service_ready(ctx, "app", model=saved) is (not completed)
+    else:
+        with pytest.raises(ContainerError, match="desired configuration revision"):
+            runner.wait_service_ready(ctx, "app", model=saved)
+
+
+def test_single_service_without_expected_revision_accepts_existing_label():
+    ctx = context({})
+    actual = ProjectRuntimeState(project="test", backend="docker", services=(
+        item("app", labels={CONFIG_REVISION_LABEL: "existing"}),))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(
+        get_project_state=lambda containers, services=None: actual)))
+    assert runner.wait_service_ready(ctx, "app")

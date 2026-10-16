@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Configuration consumers retain applied settings and receive only owned inputs."""
+"""Configuration consumers retain applied settings and change only their revision."""
 from copy import deepcopy
 
 import pytest
 
-from linktools.cntr.artifacts import AppliedServiceModels, bind_consumer_files, bind_prepared_files
+from linktools.cntr.artifacts import AppliedServiceModels, bind_consumer_revisions, apply_config_revisions, CONFIG_REVISION_LABEL
 from linktools.cntr.errors import ContainerError
 from test_prepared_files import context, model, owner
 
@@ -19,7 +19,7 @@ def saved(owner, *, directory=False, mode=0o600):
     if directory:
         spec["volumes"] = [{"type": "bind", "source": str(owner.get_app_path("generated/current")),
                             "target": "/generated", "read_only": True}]
-    bound = bind_prepared_files(ctx, desired)
+    bound = apply_config_revisions(ctx, desired)
     AppliedServiceModels(owner.manager, bound).record(("auth", "admin"))
     return ctx, bound
 
@@ -35,10 +35,10 @@ def test_consumer_directory_rebind_preserves_applied_settings(owner, changed):
     candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "allow" if changed else "deny"})
     store = AppliedServiceModels(owner.manager, desired)
 
-    result = bind_consumer_files(current, desired, store, ("auth",))
+    result = bind_consumer_revisions(current, desired, store, ("auth",))
 
     expected = deepcopy(applied["services"]["auth"])
-    expected["volumes"][0]["source"] = str(candidate)
+    expected["labels"][CONFIG_REVISION_LABEL] = candidate.name
     assert result["services"]["auth"] == expected
     assert result["services"]["admin"] == desired["services"]["admin"]
     assert desired == original
@@ -49,7 +49,7 @@ def test_consumer_directory_rebind_preserves_applied_settings(owner, changed):
     assert candidate != old.prepared_dirs["auth"] if changed else candidate == old.prepared_dirs["auth"]
 
 
-def test_consumer_single_files_keep_identical_inputs(owner):
+def test_consumer_single_files_share_whole_tree_revision_without_rebinding(owner):
     _, applied = saved(owner)
     current = context(owner)
     candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
@@ -57,25 +57,28 @@ def test_consumer_single_files_keep_identical_inputs(owner):
     desired["services"]["auth"]["environment"] = {"VALUE": "pending"}
     store = AppliedServiceModels(owner.manager, desired)
 
-    result = bind_consumer_files(current, desired, store, ("auth", "admin"))
+    result = bind_consumer_revisions(current, desired, store, ("auth", "admin"))
 
-    assert result["services"]["admin"] == applied["services"]["admin"]
+    assert result["services"]["admin"]["volumes"] == applied["services"]["admin"]["volumes"]
+    assert result["services"]["admin"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
     mounts = result["services"]["auth"]["volumes"]
     assert mounts[0] == applied["services"]["auth"]["volumes"][0]
-    assert mounts[1]["source"] == str(candidate / "acl.yml")
+    assert mounts[1] == applied["services"]["auth"]["volumes"][1]
+    assert result["services"]["auth"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
     assert result["services"]["auth"]["environment"] == {"VALUE": "applied"}
 
 
-def test_consumer_permission_change_uses_new_single_file(owner):
+def test_consumer_permission_change_uses_new_revision_without_rebinding(owner):
     _, applied = saved(owner)
     current = context(owner)
     candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "deny"}, mode=0o640)
     store = AppliedServiceModels(owner.manager, model(owner))
 
-    result = bind_consumer_files(current, model(owner), store, ("auth",))
+    result = bind_consumer_revisions(current, model(owner), store, ("auth",))
 
-    assert result["services"]["auth"]["volumes"][0]["source"] == str(candidate / "base.yml")
-    assert result["services"]["auth"]["volumes"][0] != applied["services"]["auth"]["volumes"][0]
+    assert result["services"]["auth"]["volumes"] == applied["services"]["auth"]["volumes"]
+    assert result["services"]["auth"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
+    assert result["services"]["auth"]["labels"] != applied["services"]["auth"]["labels"]
 
 
 def test_consumer_missing_applied_model_requires_explicit_selection(owner):
@@ -83,11 +86,11 @@ def test_consumer_missing_applied_model_requires_explicit_selection(owner):
     current.write_files(owner, {"base.yml": "same", "acl.yml": "deny"})
     store = AppliedServiceModels(owner.manager, model(owner))
     with pytest.raises(ContainerError, match="No applied Compose model.*auth.*explicitly select"):
-        bind_consumer_files(current, model(owner), store, ("auth",))
+        bind_consumer_revisions(current, model(owner), store, ("auth",))
 
 
-def test_consumer_legacy_current_binding_and_unowned_mounts(owner):
-    applied = model(owner)
+def test_consumer_preserves_current_and_unowned_mounts(owner):
+    _, applied = saved(owner)
     mounts = applied["services"]["auth"]["volumes"]
     mounts.extend([
         {"type": "bind", "source": str(owner.get_app_path("generated/manual/file")), "target": "/manual"},
@@ -98,12 +101,11 @@ def test_consumer_legacy_current_binding_and_unowned_mounts(owner):
     candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
     store = AppliedServiceModels(owner.manager, model(owner))
 
-    result = bind_consumer_files(current, model(owner), store, ("auth",))
+    result = bind_consumer_revisions(current, model(owner), store, ("auth",))
 
     rebound = result["services"]["auth"]["volumes"]
-    assert rebound[0]["source"] == str(candidate / "base.yml")
-    assert rebound[1]["source"] == str(candidate / "acl.yml")
-    assert rebound[2:] == mounts[2:]
+    assert rebound == mounts
+    assert result["services"]["auth"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
 
 
 def support_model(owner):
@@ -128,7 +130,7 @@ def test_consumer_retains_referenced_support_without_importing_unrelated_old_sup
     current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
     store = AppliedServiceModels(owner.manager, desired)
 
-    result = bind_consumer_files(current, desired, store, ("auth",))
+    result = bind_consumer_revisions(current, desired, store, ("auth",))
 
     assert result["networks"] == {"auth-net": applied["networks"]["auth-net"],
                                   "unrelated-new": {"name": "new"}}
@@ -149,7 +151,7 @@ def test_consumer_support_conflict_requires_explicit_selection(owner, category, 
     current = context(owner)
     store = AppliedServiceModels(owner.manager, desired)
     with pytest.raises(ContainerError, match="conflicts.*auth.*explicitly select"):
-        bind_consumer_files(current, desired, store, ("auth",))
+        bind_consumer_revisions(current, desired, store, ("auth",))
 
 
 def test_consumer_project_support_conflict_requires_explicit_selection(owner):
@@ -158,16 +160,24 @@ def test_consumer_project_support_conflict_requires_explicit_selection(owner):
     current = context(owner)
     store = AppliedServiceModels(owner.manager, desired)
     with pytest.raises(ContainerError, match="Compose 'name' conflicts.*auth.*explicitly select"):
-        bind_consumer_files(current, desired, store, ("auth",))
+        bind_consumer_revisions(current, desired, store, ("auth",))
 
 
-def test_consumer_missing_prepared_relative_input_fails_closed(owner):
-    _, applied = saved(owner)
+@pytest.mark.parametrize("file_mount", [False, True])
+def test_consumer_without_managed_revision_requires_explicit_migration(owner, file_mount):
+    old, applied = saved(owner)
+    original = deepcopy(applied)
+    source = old.prepared_dirs["auth"] / "base.yml" if file_mount else old.prepared_dirs["auth"]
+    applied["services"]["auth"]["volumes"][0]["source"] = str(source)
+    applied["services"]["auth"].pop("labels")
+    AppliedServiceModels(owner.manager, applied).record(("auth",))
     current = context(owner)
-    current.write_files(owner, {"base.yml": "same"})
-    store = AppliedServiceModels(owner.manager, applied)
-    with pytest.raises(ContainerError, match="Missing prepared input.*acl.yml"):
-        bind_consumer_files(current, applied, store, ("auth",))
+    current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
+    store = AppliedServiceModels(owner.manager, original)
+    with pytest.raises(ContainerError, match="no applied configuration revision.*explicitly select"):
+        bind_consumer_revisions(current, original, store, ("auth",))
+    assert store.previous_model("auth") == applied
+    assert not owner.get_app_path("generated/current").exists()
 
 
 @pytest.mark.parametrize("category,name", [("networks", "auth-net"), ("volumes", "auth-data"),
@@ -178,7 +188,7 @@ def test_consumer_only_support_retains_applied_definition_over_pending_value(own
     desired[category][name] = {"external": True}
     current = context(owner)
     store = AppliedServiceModels(owner.manager, desired)
-    result = bind_consumer_files(current, desired, store, ("auth",))
+    result = bind_consumer_revisions(current, desired, store, ("auth",))
     assert result[category][name] == applied[category][name]
 
 
@@ -191,4 +201,4 @@ def test_two_consumers_with_different_applied_support_cannot_overwrite_each_othe
     current = context(owner)
     store = AppliedServiceModels(owner.manager, applied)
     with pytest.raises(ContainerError, match='conflicts.*admin.*explicitly select'):
-        bind_consumer_files(current, applied, store, ('auth', 'admin'))
+        bind_consumer_revisions(current, applied, store, ('auth', 'admin'))

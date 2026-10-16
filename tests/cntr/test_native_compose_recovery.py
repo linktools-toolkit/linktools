@@ -22,8 +22,8 @@ class Owner:
         self.services = {service: {} for service in services}
         self.generation_services = generation_services or tuple(services)
 
-    def get_runtime_requirements(self, required):
-        return {}
+    def get_config_revision(self, service: str) -> "str | None":
+        return None
 
 
 def test_optional_compose_provider_not_added_to_start_or_build_scope():
@@ -120,15 +120,13 @@ def test_selected_optional_dependency_still_orders_before_consumer():
     assert order_services((app, metrics), ("app", "metrics")) == ("metrics", "app")
 
 
-def test_native_provider_co_selection_does_not_create_runtime_edges():
+def test_unreferenced_native_provider_is_not_implicitly_selected():
     consumer = Owner("consumer", ("consumer",))
     provider = Owner("provider", ("provider",))
-    consumer.get_runtime_requirements = lambda required: (
-        {"provider": ("provider",)} if "consumer" in required else {})
     selection = ComposeOperations(SimpleNamespace()).required_selection(
         ComposeSelection((consumer, provider), (consumer,), ("consumer",), False))
-    assert set(selection.services) == {"provider", "consumer"}
-    assert set(owner.name for owner in selection.target_containers) == {"provider", "consumer"}
+    assert selection.services == ("consumer",)
+    assert tuple(owner.name for owner in selection.target_containers) == ("consumer",)
 
 
 @pytest.mark.parametrize("selected,condition,state,health,exit_code", [

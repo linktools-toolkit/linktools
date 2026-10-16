@@ -160,7 +160,8 @@ def test_authelia_prepares_new_password_without_overwriting_legacy(tmp_path, mon
     monkeypatch.setattr(container, "_create_pem_file", lambda path: None)
     values = {}
     context = SimpleNamespace(target_containers=[container], target_services=("authelia",),
-                              write_files=lambda owner, files: values.update(files))
+                              write_files=lambda owner, files: values.update(files) or tmp_path / "candidate",
+                              file_path=lambda owner, *parts: (tmp_path / "candidate").joinpath(*parts))
     container.on_starting(context)
     assert values == {}
     container.on_integrating(context)
@@ -192,7 +193,10 @@ def test_lldap_prepares_without_modifying_persistent_inputs(tmp_path, monkeypatc
     monkeypatch.setattr(container, "render_template", lambda path: "rendered " + path.name)
     monkeypatch.setattr(container, "get_config", lambda key: "new-password")
     files = {}
-    container.on_starting(SimpleNamespace(write_files=lambda owner, output: files.update(output)))
+    context = SimpleNamespace(write_files=lambda owner, output: files.update(output) or tmp_path / "candidate")
+    container.on_starting(context)
+    assert files == {}
+    container.on_integrating(context)
     assert (secrets / "jwt_secret").read_text() == "existing-jwt"
     assert (data / "users.db").read_bytes() == b"existing-database"
     assert files["ldap_user_pass"] == "new-password"

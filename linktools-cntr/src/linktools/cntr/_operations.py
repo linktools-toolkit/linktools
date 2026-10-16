@@ -132,14 +132,6 @@ class ComposeOperations:
                     providers.add(installed[name])
                     targets.add(installed[name])
                     services.update(set(installed[name].services).intersection(definitions))
-            required = {container.name for container in providers}
-            for container in selection.project_containers:
-                for name, selected in container.get_runtime_requirements(required).items():
-                    if name not in installed:
-                        raise ContainerError("Required provider {!r} is not installed".format(name))
-                    providers.add(installed[name])
-                    targets.add(installed[name])
-                    services.update(set(selected).intersection(definitions))
             if running:
                 for producer in tuple(providers):
                     exposed = {consumer.name for consumer in previous_consumers.get(producer.name, ())}
@@ -235,8 +227,8 @@ class ComposeOperations:
 
     def _start(self, names, pull, report, restart):
         import os
-        from .artifacts import (AppliedServiceModels, bind_consumer_files, bind_prepared_files, collect_candidates,
-                                publish_prepared_files, prune_prepared_files)
+        from .artifacts import (CONFIG_REVISION_LABEL, AppliedServiceModels, apply_config_revisions, bind_consumer_revisions, collect_candidates,
+                                switch_config_revisions, prune_prepared_files)
 
         manager = self.manager
         runner = manager.compose_runner
@@ -281,7 +273,7 @@ class ComposeOperations:
                 tuple(context.target_services) != selection.services):
             raise ContainerError("Lifecycle callbacks cannot change the resolved operation targets")
         extra_services = tuple(service for consumer in consumers if consumer.name in context.prepared_dirs
-                               for service in consumer.services if service in initial)
+                               for service in consumer.services if service in initial and consumer.get_config_revision(service) is not None)
         if extra_services:
             authors = service_owners(selection.project_containers)
             candidate = runner.final_model(context)
@@ -289,7 +281,7 @@ class ComposeOperations:
             changed_consumers = []
             for service in extra_services:
                 previous = candidate_store.previous_model(service)
-                prepared = bind_consumer_files(context, previous or candidate, candidate_store, (service,))
+                prepared = bind_consumer_revisions(context, previous or candidate, candidate_store, (service,))
                 if prepared["services"][service] != previous["services"][service]:
                     changed_consumers.append(service)
             extra_services = tuple(changed_consumers)
@@ -299,7 +291,7 @@ class ComposeOperations:
             if shared:
                 raise ContainerError("Shared integration consumer contributors must be explicitly selected: " +
                                      ", ".join(sorted(shared)))
-            effective = bind_consumer_files(context, candidate, candidate_store, extra_services)
+            effective = bind_consumer_revisions(context, candidate, candidate_store, extra_services)
             services = order_service_subset(selection.project_containers, {
                 name: effective["services"][name] for name in selection.services + extra_services})
             targets = tuple(dict.fromkeys(owner for service in services for owner in authors[service]))
@@ -327,8 +319,8 @@ class ComposeOperations:
                     break
                 model_store.retain_previous(runner.saved_service_models(context, tuple(sorted(legacy))))
                 missing.difference_update(legacy)
-            model = bind_consumer_files(context, raw_model, model_store, extra_services)
-            model = bind_prepared_files(context, model, model_store)
+            model = bind_consumer_revisions(context, raw_model, model_store, extra_services)
+            model = apply_config_revisions(context, model, selection.services)
             if extra_services:
                 services = dict(model["services"])
                 for service in extra_services:
@@ -348,6 +340,20 @@ class ComposeOperations:
                                          ordered, selection.full)
             context.target_services = selection.services
             model_store.set_model(context.compose_model)
+            config_groups = self._config_groups(context)
+            rollback_revisions = {}
+            for name, services in config_groups.items():
+                revisions = {previous["services"][service].get("labels", {}).get(CONFIG_REVISION_LABEL)
+                             for service in services for previous in (model_store.previous_model(service),)
+                             if previous is not None and service in initial}
+                revisions.discard(None)
+                if len(revisions) > 1:
+                    raise ContainerError("Applied configuration revisions disagree for consumer " + name)
+                if revisions:
+                    revision = next(iter(revisions))
+                    if not (context.prepared_dirs[name].parent / revision).is_dir():
+                        raise ContainerError("Applied configuration files are missing for consumer " + name)
+                    rollback_revisions[name] = revision
             if not selection.full:
                 self._check_external_requirements(selection, actual, context.compose_model)
                 for service in selection.services:
@@ -409,7 +415,12 @@ class ComposeOperations:
             updated, recreated = set(), set()
             stop_attempted = False
             stopped = False
+            previous_revisions = {}
             try:
+                previous_revisions = switch_config_revisions(context, {
+                    name: context.prepared_dirs[name].name for name, services in config_groups.items() if services
+                })
+                previous_revisions.update(rollback_revisions)
                 if stop_set:
                     stop_targets = tuple(container for container in selection.target_containers
                                          if set(container.services).intersection(stop_set))
@@ -519,8 +530,14 @@ class ComposeOperations:
                     cleanup = set()
                     if failed:
                         affected = set(failed)
-                        for service in failed:
-                            affected.update(self._shared_input_consumers(context, service, applied_services))
+                        while True:
+                            related = set().union(*(self._shared_input_consumers(context, service, applied_services)
+                                                    for service in affected))
+                            related.update(set().union(*(services for services in config_groups.values()
+                                                         if services.intersection(affected))))
+                            if related <= affected:
+                                break
+                            affected.update(related)
                         restore.update(affected & initial)
                         cleanup = affected - initial
                         if cleanup:
@@ -549,6 +566,10 @@ class ComposeOperations:
                             temporary = set()
                     else:
                         temporary = set()
+                    reverted_groups = {name: revision for name, revision in previous_revisions.items()
+                                       if not batch_attempted or config_groups[name].intersection(restore | cleanup)}
+                    if reverted_groups:
+                        switch_config_revisions(context, reverted_groups)
                     touched = restore | cleanup
                     successful = set(applied_services) - restore - cleanup
                     actions = {service: True for service in (*context.compose_model["services"], *model_store.previous)
@@ -628,10 +649,6 @@ class ComposeOperations:
                     raise ContainerError("Operation failed: {}; recovery failed: {}".format(
                         str(error) or type(error).__name__, recovery_error)) from error
                 raise
-            try:
-                publish_prepared_files(context, selection.services)
-            except Exception as error:
-                raise ContainerError("Services were applied; publishing file references failed: {}".format(error)) from error
         # Configuration-only containers have no Docker instance to observe.
         # Record their application only after publication and lifecycle callbacks succeed.
         from copy import copy
@@ -678,18 +695,11 @@ class ComposeOperations:
         installed = {container.name: container for container in selection.project_containers}
         selected = set(selection.services if selected_services is None else selected_services)
         required = {}
-        names = {container.name for container in selection.target_containers}
         for container in selection.target_containers:
             for name in container.dependencies:
                 if name not in installed:
                     raise ContainerError("Required dependency {!r} is not installed".format(name))
                 for service in installed[name].services:
-                    required.setdefault(service, [])
-        for container in selection.project_containers:
-            for name, services in container.get_runtime_requirements(names).items():
-                if name not in installed:
-                    raise ContainerError("Required provider {!r} is not installed".format(name))
-                for service in services:
                     required.setdefault(service, [])
         owners = service_owners(selection.project_containers)
         definitions = model["services"] if model is not None else {
@@ -863,6 +873,22 @@ class ComposeOperations:
                 return affected
             affected.update(found)
             changed.extend(source for service in found for source in sources[service])
+
+    def _config_groups(self, context):
+        """Services declaring one consumer's generated tree apply as one group."""
+        selected = set(context.target_services or ())
+        groups = {}
+        for container in context.project_containers:
+            if container.name not in context.prepared_dirs:
+                continue
+            services = {service for service in container.services
+                        if container.get_config_revision(service) is not None}
+            active = services & context.initial_runtime_state.running_services
+            if services.intersection(selected) and active - selected:
+                raise ContainerError("Configuration consumer services must be selected together: " +
+                                     ", ".join(sorted(active - selected)))
+            groups[container.name] = services & selected
+        return groups
 
     def _require_rollback_models(self, context, services):
         from .errors import ContainerError

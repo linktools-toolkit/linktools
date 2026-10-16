@@ -3,6 +3,8 @@
 The public context is `OperationContext`. A container uses `on_starting` for persistent initialization,
 `on_integrating(context) -> None` for derived integration files, and `on_check`
 for validation. A successful callback returns normally; failures raise exceptions.
+`get_config_revision(service) -> str | None` exposes a prepared configuration
+identity for each service; it does not prepare files or apply configuration.
 
 ## Operation context fields
 
@@ -26,16 +28,18 @@ immutable `ComposeSelection` fixes the action scope; `OperationContext` exposes
 that scope and the working inputs to callbacks, without granting hooks authority
 to select additional actions.
 
-- `context.compose_model` is the native Compose model bound to prepared files and
-  selected image revisions. The runner constructs commands from that model
+- `context.compose_model` is the native Compose model with configuration-revision
+  labels and selected image revisions. Deployment mount sources remain exactly
+  as declared; native checks override mounts to read the staged candidates
 - `context.initial_runtime_state` owns observed services, image IDs and exact
   namespace bindings. Derived views do not introduce another state cache
 - `context.service_models` (`AppliedServiceModels`) owns immutable current and
   previous per-service YAML snapshots. `previous_model(service)` returns an
   independent decoded copy; recording and restoring retain the disk format
-- `context.prepared_dirs` owns candidate immutable file trees. Publication changes
-  their public references only after application; retained snapshots protect
-  historical running and rollback inputs from pruning
+- `context.prepared_dirs` owns candidate immutable file trees. Publication switches
+  `generated/current` only after validation and before service application.
+  Successful applied snapshots and captured previous references retain the
+  generations needed by running services and rollback
 
 Image preparation has one orchestration entry point. The image preparer computes
 build/pull requirements; the runner executes commands; `ComposeOperations`
@@ -51,13 +55,18 @@ integration consumers. Current declarations and stored producer provenance both
 identify consumers, including removal of the final declaration. Stopped consumers
 are not initialized or started.
 
-Only consumers whose final generated mounts change join service application.
+Only consumers whose final configuration revision changes join service application.
 Their previously applied service models are retained: pending environment, port,
 image and other Compose changes are not applied. Their actual running images are
 pinned, without extra pull or build. Missing applied snapshots or required image
 changes require an explicit joint selection. Unchanged consumers receive no
 before/check/after application callbacks. Required external services must already
 satisfy their runtime conditions.
+
+There is no additional global runtime-provider discovery or readiness gate.
+Container dependencies and native Compose edges retain their existing meaning.
+Nginx performs its own validation when it is applied; an unselected nginx
+container does not impose checks on unrelated named operations.
 
 An operation without names still resolves the full project, its required
 providers and running declared consumers. Full-project generated-input metadata
@@ -90,13 +99,18 @@ The operation then runs:
 1. Explicit targets' `on_starting` initializes persistent state and build inputs.
 2. Targets and related running consumers' `on_integrating(context)` generate
    immutable files. This callback must not initialize secrets or mutate services.
-   The framework compares generated mounts against successful applied snapshots.
+   Each consumer exposes its prepared generation through
+   `get_config_revision(service)`. The framework compares revision labels against
+   successful applied snapshots.
 3. Actual application targets' container `BEFORE_START`, then manager
    `BEFORE_START` once. The final Compose model is read after these hooks.
 4. Explicit image preparation, then `on_check` and `CHECK` for application targets.
-   No service has been stopped or replaced at this point.
-5. Framework-managed service application in Compose dependency order, followed by
-   readiness confirmation and per-service applied-model recording.
+   Native checks read candidates through explicit mount overrides. No service
+   has been stopped or replaced and no `current` reference has changed yet.
+5. Switch each affected consumer's `generated/current` reference atomically, then
+   apply services in Compose dependency order. Confirm readiness before recording
+   successful applied models. Services sharing one consumer generation form one
+   recovery group.
 6. `on_started` and `AFTER_START` for applied owners. A failure here reports that
    services were applied; it does not trigger deployment rollback.
 
@@ -156,24 +170,38 @@ active generation. A group change needs no privilege when the CLI owns the file
 and the group is its effective primary or supplementary group; other changes
 retain the normal privilege path.
 
-Compose templates reference the corresponding logical sources under
-`APP_PATH / "generated/current"`. The framework resolves selected file mounts to
-immutable prepared inputs before image checks or service application. A native
-check reads the same mounts, or uses `context.file_path(self, name)` for a local
-format check. Check callbacks do not overwrite prepared inputs.
+Compose templates declare the runtime paths they need, usually under
+`APP_PATH / "generated/current"`. The framework does not rewrite deployment bind
+sources into hash-directory paths. A native check uses explicit `mount_overrides`
+to read the corresponding staged candidate, or `context.file_path(self, name)`
+for a local format check. Check callbacks do not overwrite prepared inputs or
+publish the candidate.
 
-Prefer an individual file bind for a service that consumes only one file. When
-another file changes, unchanged single-file consumers retain their prior mount
-source and are not forced to recreate. A directory bind consumes the complete
-prepared tree. Missing inputs or modified immutable trees cause an explicit
-failure before application.
+Store the directory name returned by `context.write_files` as the candidate
+revision. Return that value from `get_config_revision(service)` only for services
+that consume this generation; return `None` for other services or before a
+candidate has been prepared. Clear operation-local revision state in
+`on_prepare`. The getter must be a read-only query and its result must not contain
+configuration values or secrets. The base implementation returns `None`.
+
+The framework adds `io.linktools.cntr.config-revision` to the effective service
+model. This is a configuration identity, independent of
+`io.linktools.cntr.build-revision`: it does not request an image pull or build.
+The successful applied model is the baseline; preparing a generation or writing
+its artifact-index entry is not evidence of successful application.
+
+All services consuming the same generated tree share its revision, even when
+one service mounts only a single file. This keeps publication and failure
+recovery atomic for that consumer. Services that do not read the tree receive
+no configuration revision. Missing inputs or modified immutable trees cause an
+explicit failure before application.
 
 Persistent secrets, databases, user assets and ACME account state are not ordinary
 prepared configuration. They are not replaced by this file mechanism.
 
 ## Applying and recovering
 
-Changed file mounts or Compose definitions recreate the affected service.
+Changed configuration-revision labels or other Compose definitions recreate the affected service.
 Unchanged definitions are not force-recreated. Docker Compose can still replace a
 service when its locally selected image changes. Recreating a container does not
 by itself rebuild its image or request a new certificate.
@@ -185,9 +213,14 @@ blocks subsequent dependents.
 
 The per-service resolved applied model is the sole recovery authority. Recovery
 pins the pre-operation image ID and restores the failed service, any explicitly
-stopped services not yet reapplied, and related consumers sharing a changed file
-input. Newly started related consumers without a prior instance are stopped.
-Independent successful siblings are retained. Initial migration may read old saved Compose files, but
+stopped services not yet reapplied, and every affected service sharing the same
+consumer configuration tree. Existing recovery for services connected through
+changed shared bind inputs also applies, including transitive consumers.
+Restore the group's previous `current` reference
+before recreating its services from their old models. A partly successful group
+must not keep mixed old and new configuration revisions. Newly started related
+services without a prior instance are stopped. Independent successful groups are
+retained. Initial migration may read old saved Compose files, but
 new operations do not write a second container-level applied snapshot.
 Live namespace consumers are rebound after a retained provider changes, even if
 an independent service later fails. During full-project recovery, restoring a live consumer may temporarily
@@ -196,25 +229,30 @@ the provider is stopped again after recovery. Interrupting deployment runs
 recovery before propagating the interrupt; interrupting recovery itself stops
 that attempt immediately and may leave it incomplete.
 
-Running new containers bind immutable inputs, not `generated/current`. The latter
-is a convenience reference, updated after successful application and not changed
-while an unselected legacy service still dereferences it. Applied snapshots, not
-this convenience link, define the actual per-service input.
+`generated/current` is the publication reference used by the declared runtime
+mounts. Its switch occurs after CHECK and before `up`; switching it alone does not
+establish a successful service application. On failure, restore the previous
+reference together with the group's old service models. Only confirmed success
+advances the applied revision baseline. Retain the previous generation until it
+is no longer needed for running services or recovery.
 
 A failed recovery reports both the operation and recovery errors. The framework
 never claims to undo database or external-system changes.
 
 ## Built-in services
 
-LLDAP retains its initialization in `on_starting`. Authelia initializes persistent
-secrets there and generates integration configuration in `on_integrating`. Nginx
-and Flare likewise separate initialization from generated integration files.
+LLDAP and Authelia retain persistent initialization in `on_starting` and stage
+generated files in `on_integrating`. Nginx and Flare likewise separate
+initialization from generated integration files. Each built-in clears its
+candidate revision in `on_prepare` and exposes it only for services reading the
+generated tree.
 Nginx rejects collateral integration changes needing a different certificate image
 revision; select nginx explicitly to prepare that image.
-Authelia validates with its target image. Its admin service mounts only the base
-configuration; ACL-only changes do not change that service's file mount. If
-partial application leaves only the admin service needing new files, select
-Authelia explicitly so its service image can perform native validation.
+Authelia validates with its target image. Its main and admin services share the
+configuration-tree revision and recovery group; Redis has no configuration
+revision. Even an ACL-only change advances both readers' generation. If the
+Authelia service is unavailable for native validation, select Authelia explicitly
+instead of starting it implicitly for another container's operation.
 
 Flare prepares navigation files with its configured group access and validates
 the generated YAML. Host UID/GID values are not used to infer container access,

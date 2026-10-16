@@ -60,10 +60,9 @@ def test_implicit_service_preserves_compose_edges_without_owner_dependencies():
     assert result.services.index("database") < result.services.index("redis")
 
 
-def test_group_co_selection_does_not_inject_runtime_dependency_cycle():
+def test_explicit_co_selection_orders_only_native_dependency_edges():
     nginx = Container("nginx", {"nginx": {}})
     provider = Container("provider", {"provider": {"depends_on": ["nginx"]}})
-    nginx.get_runtime_requirements = lambda required: {"provider": ("provider",)}
     assert order_services((nginx, provider), ("nginx", "provider")) == ("nginx", "provider")
 
 

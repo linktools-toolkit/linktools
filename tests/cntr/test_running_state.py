@@ -237,8 +237,8 @@ def test_failed_start_preserves_config_only_state(monkeypatch, fresh_manager, pr
     def failed(context, services):
         raise RuntimeError("file publication failed")
 
-    monkeypatch.setattr("linktools.cntr.artifacts.publish_prepared_files", failed)
-    with pytest.raises(ContainerError, match="publishing file references failed"):
+    monkeypatch.setattr("linktools.cntr.artifacts.switch_config_revisions", failed)
+    with pytest.raises(RuntimeError, match="file publication failed"):
         cntr_main.command.on_command_up(names=["portainer", "nginx"], pull=False)
 
     assert ("portainer" in fresh_manager.running_state.get_persisted()) == previous

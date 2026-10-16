@@ -62,14 +62,12 @@ def test_shared_down_updates_all_authors_and_preserves_untouched_running_sibling
     assert manager.running_state.get_persisted() == (["overlay"] if sibling_running else [])
 
 
-def test_shared_profile_resolution_includes_runtime_providers_before_native_selection(tmp_path):
+def test_shared_profile_resolution_keeps_unreferenced_provider_disabled(tmp_path):
     manager = shared_case(tmp_path)
     provider = setup_case(tmp_path / "provider", [("provider", {"provider": {
         "image": "provider:new", "profiles": ["private"]}})]).containers["provider"]
     manager.containers["provider"] = provider
     manager.load_installed_config_metadata = lambda: list(manager.containers.values())
-    manager.containers["overlay"].get_runtime_requirements = lambda required: (
-        {"provider": ("provider",)} if "overlay" in required else {})
     manager.model["services"]["provider"] = deepcopy(provider.services["provider"])
     observed = []
 
@@ -81,9 +79,9 @@ def test_shared_profile_resolution_includes_runtime_providers_before_native_sele
     manager.compose_runner.final_model = native
     selection = manager.compose_operations.required_selection(
         manager.compose_operations.select(["base"], for_start=True), privilege=False)
-    assert set(selection.services) == {"app", "provider"}
-    assert {owner.name for owner in selection.target_containers} == {"base", "overlay", "provider"}
-    assert observed == [(("app", "provider"), False)]
+    assert selection.services == ("app",)
+    assert {owner.name for owner in selection.target_containers} == {"base", "overlay"}
+    assert observed == [(("app",), False)]
 
 
 def test_omitted_shared_contributor_is_diagnosed_before_side_effects(tmp_path):

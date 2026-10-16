@@ -25,9 +25,16 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
+    _config_revision: "str | None" = None
     _config_services = ("authelia", "authelia-admin")
     config_files = ("configuration.yml", "configuration.acl.yml",
                      "configuration.2fa.yml", "configuration.oidc.yml")
+
+    def on_prepare(self) -> None:
+        self._config_revision = None
+
+    def get_config_revision(self, service: str) -> "str | None":
+        return self._config_revision if service in self._config_services else None
 
     @property
     def dependencies(self) -> "Iterable[str]":
@@ -182,7 +189,10 @@ class Container(BaseContainer):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
         command = ["authelia", "config", "validate"]
         command.extend("--config=/generated/" + name for name in self.config_files)
-        result = self.manager.compose_runner.validate_service(context, "authelia", command, check=False)
+        mounts = {"/generated/" + name: str(context.file_path(self, name))
+                  for name in (*self.config_files, "authentication_backend_ldap_password")}
+        result = self.manager.compose_runner.validate_service(
+            context, "authelia", command, mount_overrides=mounts, check=False)
         if not result.succeeded:
             match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
             location = " at {}:{}".format(*match.groups()) if match else ""
@@ -243,10 +253,12 @@ class Container(BaseContainer):
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
 
     def on_integrating(self, context: "OperationContext") -> None:
-        if (context.target_containers is None or self in context.target_containers) and (
-                context.target_services is not None
-                and not set(context.target_services).intersection(self._config_services)):
+        self._config_revision = None
+        services = context.target_services
+        if context.target_containers is not None and self not in context.target_containers:
+            services = context.initial_runtime_state.running_services
+        if services is not None and not set(services).intersection(self._config_services):
             return
         files = {name: self.render_template(self.get_source_path("templates", name)) for name in self.config_files}
         files["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
-        context.write_files(self, files)
+        self._config_revision = context.write_files(self, files).name

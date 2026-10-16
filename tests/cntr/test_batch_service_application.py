@@ -96,9 +96,10 @@ def test_partial_batch_failure_preserves_successful_sibling_but_restores_mixed_c
                       instance("mixed", image="sha256:old-mixed", config="old")]
         raise ContainerError("native partial failure")
     runner.apply_services = apply
+    runner._matches_config_revision = ComposeRunner._matches_config_revision
     runner.ready_services = MethodType(ComposeRunner.ready_services, runner)
     runner._completed_services = MethodType(ComposeRunner._completed_services, runner)
-    with pytest.raises(ContainerError, match="native partial failure"):
+    with pytest.raises(ContainerError, match="^native partial failure$"):
         manager.compose_operations.up()
     assert [event[1] for event in manager.events if event[0] == "restore"] == [("mixed",)]
     receipts = AppliedServiceModels(manager, manager.model)

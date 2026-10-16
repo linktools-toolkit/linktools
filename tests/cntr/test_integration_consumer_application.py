@@ -5,9 +5,10 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+from _harness import builtin_container_type
 
-from linktools.cntr import OperationContext
-from linktools.cntr.artifacts import AppliedServiceModels, bind_prepared_files
+from linktools.cntr import OperationContext, ContainerError
+from linktools.cntr.artifacts import AppliedServiceModels, apply_config_revisions, switch_config_revisions
 from test_lifecycle_rebuild import setup_case
 
 
@@ -25,15 +26,17 @@ def consumer_case(tmp_path, running=True, changed=True, historical=False):
     previous = deepcopy(manager.model)
     previous["services"]["consumer"].update(image="consumer:old", environment={"PENDING": "old"})
     context = OperationContext(project_containers=list(manager.containers.values()), target_services=("consumer",))
-    context.write_files(owner, {"config.yml": "old"})
-    previous = bind_prepared_files(context, previous)
+    owner.revision = context.write_files(owner, {"config.yml": "old"}).name
+    owner.get_config_revision = lambda service: owner.revision
+    previous = apply_config_revisions(context, previous, ("consumer",))
+    switch_config_revisions(context, {"consumer": owner.revision})
     if running:
         AppliedServiceModels(manager, previous).record(("consumer",))
     if historical:
         manager.integration_snapshot["app"] = ()
     def integrate(ctx):
         manager.events.append(("integrate", "consumer"))
-        ctx.write_files(owner, {"config.yml": "new" if changed else "old"})
+        owner.revision = ctx.write_files(owner, {"config.yml": "new" if changed else "old"}).name
     owner.on_integrating = integrate
     owner.on_starting = lambda ctx: pytest.fail("collateral consumer initialization")
     old_image_id = manager.image_preparer.image_id
@@ -169,14 +172,12 @@ def test_collateral_image_comes_only_from_unambiguous_running_replicas(tmp_path,
         assert manager.applied_models[-1]['services']['consumer']['image'] == 'sha256:old-consumer'
 
 
-def test_partial_authelia_generations_never_validate_an_unselected_pending_image(tmp_path):
-    from types import MethodType
+def test_one_consumer_revision_group_restores_all_services_after_partial_failure(tmp_path):
     from linktools.cntr.errors import ContainerError
-    from test_builtin_generated_config import builtin_container_type
     manager = setup_case(tmp_path, [
         ('app', {'app': {'image': 'app:new'}}),
-        ('authelia', {'authelia': {'image': 'authelia:pending'},
-                      'authelia-admin': {'image': 'admin:pending', 'depends_on': ['authelia']}}),
+        ('authelia', {'authelia': {'image': 'authelia:new'},
+                      'authelia-admin': {'image': 'admin:new', 'depends_on': ['authelia']}}),
     ], running=('authelia', 'authelia-admin'))
     owner = manager.containers['authelia']
     owner.runtime = SimpleNamespace(chmod=lambda path, mode: path.chmod(mode))
@@ -185,23 +186,27 @@ def test_partial_authelia_generations_never_validate_an_unselected_pending_image
         manager.model['services'][service]['volumes'] = [{
             'type': 'bind', 'source': str(owner.get_app_path('generated/current/configuration.yml')),
             'target': '/generated/configuration.yml'}]
-    for service, content in (('authelia', 'new'), ('authelia-admin', 'old')):
-        context = OperationContext(project_containers=list(manager.containers.values()), target_services=(service,))
-        context.write_files(owner, {'configuration.yml': content})
-        previous = deepcopy(manager.model)
-        previous['services'][service]['image'] = service + ':old'
-        AppliedServiceModels(manager, bind_prepared_files(context, previous)).record((service,))
-    owner.on_integrating = lambda ctx: ctx.write_files(owner, {'configuration.yml': 'new'})
-    builtin = builtin_container_type('102-authelia')
-    owner._config_services, owner.config_files = builtin._config_services, builtin.config_files
-    owner.get_config = lambda key: True
-    owner.on_check = MethodType(builtin.on_check, owner)
-    manager.compose_runner.validate_service = lambda *args, **kwargs: pytest.fail('unselected validator image')
+    context = OperationContext(project_containers=list(manager.containers.values()),
+                               target_services=tuple(owner.services))
+    owner.revision = context.write_files(owner, {'configuration.yml': 'old'}).name
+    owner.get_config_revision = lambda service: owner.revision
+    previous = apply_config_revisions(context, deepcopy(manager.model), tuple(owner.services))
+    AppliedServiceModels(manager, previous).record(tuple(owner.services))
+    switch_config_revisions(context, {'authelia': owner.revision})
+    before = dict(AppliedServiceModels(manager, manager.model).previous)
+    old_revision = owner.revision
+    def integrate(ctx):
+        owner.revision = ctx.write_files(owner, {'configuration.yml': 'new'}).name
+    owner.on_integrating = integrate
     old_image_id = manager.image_preparer.image_id
     manager.image_preparer.image_id = lambda image: image if image.startswith('sha256:') else old_image_id(image)
-    with pytest.raises(ContainerError, match='explicitly select the authelia'):
+    manager.compose_runner.fail = 'authelia-admin'
+    with pytest.raises(ContainerError, match='apply failed authelia-admin'):
         manager.compose_operations.up(['app'])
-    assert not any(event[0] in ('apply', 'stop') for event in manager.events)
+    after = AppliedServiceModels(manager, manager.model).previous
+    assert all(after[name] == before[name] for name in owner.services)
+    assert owner.get_app_path('generated/current').resolve().name == old_revision
+    assert ('after-callback', 'authelia') not in manager.events
 
 
 @pytest.mark.parametrize('changed', [False, True])
@@ -243,3 +248,109 @@ def test_consumer_snapshot_can_predate_new_explicit_producer(tmp_path):
     AppliedServiceModels(manager, previous).record(('consumer',))
     manager.compose_operations.up(['app'])
     assert {event[1] for event in manager.events if event[0] == 'apply'} == {'app', 'consumer'}
+
+
+def test_configuration_switch_is_after_check_and_before_apply_without_mount_rewrite(tmp_path):
+    manager = consumer_case(tmp_path)
+    owner = manager.containers['consumer']
+    source = owner.get_app_path('generated/current/config.yml')
+    before = source.read_text()
+    check = owner.on_check
+    def checked(context):
+        assert source.read_text() == before
+        assert context.file_path(owner, 'config.yml').read_text() == 'new'
+        check(context)
+    owner.on_check = checked
+    apply = manager.compose_runner.apply_services
+    def applying(context, services):
+        assert source.read_text() == 'new'
+        assert context.compose_model['services']['consumer']['volumes'][0]['source'] == str(source)
+        apply(context, services)
+    manager.compose_runner.apply_services = applying
+    manager.compose_operations.up(['app'])
+
+
+def test_failed_check_does_not_switch_configuration_pointer(tmp_path):
+    from linktools.cntr.errors import ContainerError
+    manager = consumer_case(tmp_path)
+    owner = manager.containers['consumer']
+    current = owner.get_app_path('generated/current')
+    before = current.resolve()
+    def fail(context):
+        raise ContainerError('candidate invalid')
+    owner.on_check = fail
+    with pytest.raises(ContainerError, match='candidate invalid'):
+        manager.compose_operations.up(['app'])
+    assert current.resolve() == before
+    assert not any(event[0] == 'apply' for event in manager.events)
+
+
+def test_failed_apply_restores_successful_revision_not_interrupted_pointer(tmp_path):
+    from linktools.cntr.errors import ContainerError
+    manager = consumer_case(tmp_path)
+    owner = manager.containers['consumer']
+    current = owner.get_app_path('generated/current')
+    successful = current.resolve()
+    interrupted = OperationContext(project_containers=list(manager.containers.values()))
+    pending = interrupted.write_files(owner, {'config.yml': 'interrupted'})
+    switch_config_revisions(interrupted, {'consumer': pending.name})
+    manager.compose_runner.fail = 'consumer'
+    with pytest.raises(ContainerError, match='apply failed consumer'):
+        manager.compose_operations.up(['app'])
+    assert current.resolve() == successful
+
+
+def test_redis_only_collateral_consumer_skips_generation(tmp_path):
+    manager = setup_case(tmp_path, [
+        ('app', {'app': {'image': 'app:new'}}),
+        ('authelia', {name: {'image': name + ':new'} for name in ('authelia', 'authelia-admin', 'authelia-redis')}),
+    ], running=('authelia-redis',))
+    owner = manager.containers['authelia']
+    real = builtin_container_type('102-authelia')
+    owner._config_services = real._config_services
+    owner.config_files = real.config_files
+    owner.on_integrating = lambda ctx: real.on_integrating(owner, ctx)
+    owner.get_source_path = lambda *parts: '/'.join(parts)
+    def must_not_render(path):
+        pytest.fail('Stopped Authelia config consumers were rendered: ' + path)
+    owner.render_template = must_not_render
+    manager.integration_snapshot['app'] = (SimpleNamespace(consumer='authelia'),)
+    manager.compose_operations.up(['app'])
+    assert [event[1] for event in manager.events if event[0] == 'apply'] == ['app']
+
+
+def test_config_group_expansion_includes_transitive_shared_bind_peers(tmp_path):
+    old_file, new_file = tmp_path / 'old.cfg', tmp_path / 'new.cfg'
+    old_file.write_text('old')
+    new_file.write_text('new')
+    old_mount = {'type': 'bind', 'source': str(old_file), 'target': '/shared.cfg'}
+    new_mount = dict(old_mount, source=str(new_file))
+    manager = setup_case(tmp_path, [
+        ('peer', {'peer': {'image': 'peer:new', 'volumes': [new_mount]}}),
+        ('auth', {
+            'auth': {'image': 'auth:new', 'volumes': [new_mount]},
+            'admin': {'image': 'admin:new', 'depends_on': ['auth']},
+        }),
+    ], running=('peer', 'auth', 'admin'))
+    owner = manager.containers['auth']
+    owner.runtime = SimpleNamespace(chmod=lambda path, mode: path.chmod(mode))
+    owner.get_config_revision = lambda service: owner.revision if service in owner.services else None
+    prior = OperationContext(project_containers=list(manager.containers.values()), target_services=('peer', 'auth', 'admin'))
+    owner.revision = prior.write_files(owner, {'config.yml': 'old'}).name
+    previous = deepcopy(manager.model)
+    for name in ('peer', 'auth'):
+        previous['services'][name]['volumes'] = [old_mount]
+    previous = apply_config_revisions(prior, previous)
+    AppliedServiceModels(manager, previous).record(('peer', 'auth', 'admin'))
+    switch_config_revisions(prior, {'auth': owner.revision})
+    before = dict(AppliedServiceModels(manager, previous).previous)
+    def integrate(ctx):
+        owner.revision = ctx.write_files(owner, {'config.yml': 'new'}).name
+    owner.on_integrating = integrate
+    manager.compose_runner.fail = 'admin'
+    with pytest.raises(ContainerError, match='apply failed admin'):
+        manager.compose_operations.up(['peer', 'auth'])
+    restored = {service for event in manager.events if event[0] == 'restore' for service in event[1]}
+    assert restored == {'peer', 'auth', 'admin'}, (restored, manager.events)
+    after = AppliedServiceModels(manager, manager.model).previous
+    assert all(after[name] == before[name] for name in before)

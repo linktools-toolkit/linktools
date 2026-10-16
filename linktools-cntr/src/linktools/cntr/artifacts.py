@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from .manager import ContainerManager
 
 INDEX_SCHEMA_VERSION = 1
+CONFIG_REVISION_LABEL = "io.linktools.cntr.config-revision"
 
 
 class ArtifactIndexError(ContainerError):
@@ -296,55 +297,43 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
     return destination
 
 
-def bind_prepared_files(context: "OperationContext", model: dict,
-                        models: "AppliedServiceModels | None" = None) -> dict:
-    """Bind immutable inputs, reusing unchanged single-file mounts per consumer."""
-    from pathlib import Path
+def apply_config_revisions(context: "OperationContext", model: dict,
+                           services: "Iterable[str] | None" = None) -> dict:
+    """Use declared configuration identity without changing any Compose mount."""
+    from copy import deepcopy
 
-    roots = [(container.get_app_path("generated"), context.prepared_dirs[container.name])
-             for container in context.project_containers if container.name in context.prepared_dirs]
-    services = dict(model["services"])
-    for service, spec in model["services"].items():
-        if context.target_services is not None and service not in context.target_services:
+    result = deepcopy(model)
+    selected = context.target_services if services is None else tuple(services)
+    if selected is None:
+        selected = tuple(model["services"])
+    declared = set()
+    for service in selected:
+        revisions = set()
+        for container in context.project_containers:
+            if service not in container.services:
+                continue
+            revision = container.get_config_revision(service)
+            if revision is None:
+                continue
+            if not isinstance(revision, str) or not revision:
+                raise ContainerError("Configuration revision must be a nonempty string for service " + service)
+            prepared = context.prepared_dirs.get(container.name)
+            if prepared is not None and revision != prepared.name:
+                raise ContainerError("Configuration revision must identify the prepared tree for " + container.name)
+            declared.add(container.name)
+            revisions.add(revision)
+        if not revisions:
             continue
-        previous = models.previous_model(service) if models is not None else None
-        old = previous["services"][service] if previous is not None else {}
-        old_mounts = {item["target"]: item for item in old.get("volumes", ())
-                      if isinstance(item, dict) and item.get("type") == "bind"}
-        volumes = []
-        changed = False
-        for item in spec.get("volumes", ()):
-            replacement = item
-            if isinstance(item, dict) and item.get("type") == "bind":
-                source = Path(item["source"])
-                for root, candidate in roots:
-                    try:
-                        relative = source.relative_to(root / "current")
-                    except ValueError:
-                        continue
-                    prepared = candidate / relative
-                    if not prepared.exists():
-                        raise ContainerError("Missing prepared input for {}: {}".format(service, relative))
-                    prior = old_mounts.get(item["target"])
-                    if prior is not None and prepared.is_file():
-                        old_source = Path(prior["source"])
-                        try:
-                            old_relative = old_source.relative_to(root)
-                        except ValueError:
-                            old_relative = None
-                        if (old_relative is not None and old_relative.parts
-                                and old_relative.parts[0] != "current" and old_source.is_file()
-                                and old_source.stat().st_mode == prepared.stat().st_mode
-                                and old_source.stat().st_gid == prepared.stat().st_gid
-                                and old_source.read_bytes() == prepared.read_bytes()):
-                            prepared = old_source
-                    replacement = dict(item, source=str(prepared))
-                    changed = True
-                    break
-            volumes.append(replacement)
-        if changed:
-            services[service] = dict(spec, volumes=volumes)
-    return dict(model, services=services)
+        if len(revisions) != 1:
+            raise ContainerError("Conflicting configuration revisions for shared service " + service)
+        revision = next(iter(revisions))
+        result["services"][service].setdefault("labels", {})[CONFIG_REVISION_LABEL] = revision
+    for container in context.project_containers:
+        if (container.name in context.prepared_dirs and set(selected).intersection(container.services)
+                and container.name not in declared):
+            raise ContainerError("Generated configuration consumer {} must declare get_config_revision; "
+                                 "update its container definition before starting it".format(container.name))
+    return result
 
 
 def _service_support(model: dict, service: str) -> dict:
@@ -366,11 +355,10 @@ def _service_support(model: dict, service: str) -> dict:
     return support
 
 
-def bind_consumer_files(context: "OperationContext", model: dict,
-                        models: "AppliedServiceModels", services: "Iterable[str]") -> dict:
-    """Rebind generated inputs without adopting a consumer's pending configuration."""
-    from copy import copy, deepcopy
-    from pathlib import Path
+def bind_consumer_revisions(context: "OperationContext", model: dict,
+                            models: "AppliedServiceModels", services: "Iterable[str]") -> dict:
+    """Update only a consumer's revision while retaining its applied configuration."""
+    from copy import deepcopy
 
     result = deepcopy(model)
     services = tuple(dict.fromkeys(services))
@@ -383,13 +371,14 @@ def bind_consumer_files(context: "OperationContext", model: dict,
         support = _service_support(model, service)
         for category in categories:
             protected[category].update(support[category])
-    roots = tuple(container.get_app_path("generated") for container in context.project_containers
-                  if container.name in context.prepared_dirs)
     for service in services:
         previous = models.previous_model(service)
         if previous is None or service not in previous["services"]:
             raise ContainerError("No applied Compose model for configuration consumer {}; "
                                  "explicitly select its container".format(service))
+        if not previous["services"][service].get("labels", {}).get(CONFIG_REVISION_LABEL):
+            raise ContainerError("Configuration consumer {} has no applied configuration revision; "
+                                 "explicitly select its container to migrate".format(service))
         for category, value in _service_support(previous, service).items():
             if category in ("networks", "volumes", "secrets", "configs"):
                 if not value:
@@ -407,27 +396,8 @@ def bind_consumer_files(context: "OperationContext", model: dict,
             else:
                 result[category] = value
         spec = previous["services"][service]
-        for item in spec.get("volumes", ()):
-            if not isinstance(item, dict) or item.get("type") != "bind":
-                continue
-            source = Path(item["source"])
-            for root in roots:
-                try:
-                    relative = source.relative_to(root)
-                except ValueError:
-                    continue
-                if not relative.parts or ".." in relative.parts:
-                    continue
-                generation = relative.parts[0]
-                if generation != "current" and (len(generation) not in (32, 64) or
-                                                 any(char not in "0123456789abcdef" for char in generation)):
-                    continue
-                item["source"] = str(root.joinpath("current", *relative.parts[1:]))
-                break
         result["services"][service] = spec
-    scoped = copy(context)
-    scoped.target_services = services
-    return bind_prepared_files(scoped, result, models)
+    return apply_config_revisions(context, result, services)
 
 
 def _unapplied_running_services(context: "OperationContext", services: "Iterable[str]") -> "set[str]":
@@ -438,89 +408,96 @@ def _unapplied_running_services(context: "OperationContext", services: "Iterable
     return unapplied
 
 
-def publish_prepared_files(context: "OperationContext", services: "Iterable[str]") -> None:
-    """Expose confirmed inputs for later read-only Compose rendering.
-
-    AppliedServiceModels identifies each running service's immutable inputs.
-    Legacy or unknown running inputs must keep their current pointer untouched.
-    """
+def _switch_current(root: "Path", revision: "str | None") -> None:
     import uuid
+
+    current = root / "current"
+    if revision is None:
+        if current.is_symlink():
+            current.unlink()
+        return
+    if current.is_symlink() and os.readlink(str(current)) == revision:
+        return
+    temporary = root / (".current-" + uuid.uuid4().hex)
+    temporary.symlink_to(revision)
+    try:
+        os.replace(str(temporary), str(current))
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+
+
+def switch_config_revisions(context: "OperationContext",
+                            revisions: "Mapping[str, str | None]") -> "dict[str, str | None]":
+    """Switch consumer pointers after validation, returning their prior revisions."""
     from pathlib import Path
 
-    services = tuple(services)
-    unapplied = _unapplied_running_services(context, services)
-    if unapplied.intersection(context.service_models.untracked_services):
-        # Without a saved model, any generated tree may still be mounted.
-        return
-    legacy_sources = [Path(item["source"]) for service in unapplied
-                      if service in context.service_models.previous
-                      for item in context.service_models.previous_model(service)["services"][service].get("volumes", ())
-                      if isinstance(item, dict) and item.get("type") == "bind"]
-    sources = [Path(item["source"]) for service in services
-               for item in context.compose_model["services"][service].get("volumes", ())
-               if isinstance(item, dict) and item.get("type") == "bind"]
-    for candidate in context.prepared_dirs.values():
-        used = False
-        for source in sources:
-            try:
-                source.relative_to(candidate)
-            except ValueError:
-                continue
-            used = True
-            break
-        if not used:
-            continue
-        current = candidate.parent / "current"
-        # An unselected legacy service may still dereference generated/current.
-        # Its existing input must not change as a side effect of this deployment.
-        if any(source == candidate.parent or source == current or
-               current in source.parents for source in legacy_sources):
-            continue
-        if current.is_symlink() and os.readlink(str(current)) == candidate.name:
-            continue
+    containers = {container.name: container for container in context.project_containers}
+    roots, previous = {}, {}
+    for name, revision in revisions.items():
+        if name not in containers:
+            raise ContainerError("Unknown configuration consumer: " + name)
+        root = containers[name].get_app_path("generated")
+        current = root / "current"
         if os.path.lexists(str(current)) and not current.is_symlink():
-            raise ContainerError("Generated current must be a symbolic link")
-        temporary = candidate.parent / (".current-" + uuid.uuid4().hex)
-        temporary.symlink_to(candidate.name)
-        try:
-            os.replace(str(temporary), str(current))
-        finally:
-            if temporary.is_symlink():
-                temporary.unlink()
+            raise ContainerError("Generated current must be a symbolic link: " + name)
+        previous[name] = os.readlink(str(current)) if current.is_symlink() else None
+        for value in (revision, previous[name]):
+            if value is not None and (not isinstance(value, str) or not value or
+                                      value in (".", "..", "current") or Path(value).name != value or
+                                      "/" in value or "\\" in value):
+                raise ContainerError("Invalid generated configuration revision for " + name)
+        if revision is not None and (not (root / revision).is_dir() or (root / revision).is_symlink()):
+            raise ContainerError("Missing generated configuration revision for " + name)
+        roots[name] = root
+    changed = []
+    try:
+        for name, revision in revisions.items():
+            if revision != previous[name]:
+                _switch_current(roots[name], revision)
+                changed.append(name)
+    except BaseException as error:
+        for name in reversed(changed):
+            try:
+                _switch_current(roots[name], previous[name])
+            except OSError as recovery_error:
+                raise ContainerError("Configuration pointer switch failed: {}; restoring {} failed: {}".format(
+                    error, name, recovery_error)) from error
+        raise
+    return previous
 
 
 def prune_prepared_files(context: "OperationContext", models: "AppliedServiceModels") -> None:
-    """Retain every applied input and the preceding rollback inputs."""
+    """Retain successful and rollback revisions, including known legacy inputs."""
     import shutil
-    from pathlib import Path
-
     unapplied = _unapplied_running_services(context, context.target_services or ())
     if models.untracked_services.intersection(unapplied):
         return
-    references = []
+    specifications = []
     for collection, read in ((models.current, models.current_model), (models.previous, models.previous_model)):
         for service in collection:
-            spec = read(service)["services"][service]
-            references.extend(Path(item["source"]) for item in spec.get("volumes", ())
-                              if isinstance(item, dict) and item.get("type") == "bind")
-    for candidate in context.prepared_dirs.values():
+            specifications.append((service, read(service)["services"][service]))
+    containers = {container.name: container for container in context.project_containers}
+    declared = {service for container in containers.values() for service in container.services}
+    for name, candidate in context.prepared_dirs.items():
+        owner = containers[name]
+        configured = {service for service in owner.services if owner.get_config_revision(service) is not None}
         root = candidate.parent
-        if any(source == root or source == root / "current" or
-               root / "current" in source.parents for source in references):
-            # A legacy directory model does not identify its concrete file tree.
-            # Keep those inputs until subsequent applied models use immutable paths.
-            continue
         keep = {candidate.name}
         current = root / "current"
         if current.is_symlink():
             keep.add(os.readlink(str(current)))
-        for source in references:
-            try:
-                relative = source.relative_to(root)
-            except ValueError:
+        unknown = False
+        for service, spec in specifications:
+            if service not in configured and not (service not in declared and service in unapplied):
                 continue
-            if relative.parts:
-                keep.add(relative.parts[0])
+            revision = spec.get("labels", {}).get(CONFIG_REVISION_LABEL)
+            if revision:
+                keep.add(revision)
+            else:
+                unknown = True
+        if unknown:
+            continue
         for path in root.iterdir():
             if (path.name in keep or len(path.name) not in (32, 64)
                     or any(char not in "0123456789abcdef" for char in path.name)
@@ -530,6 +507,8 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
             prefix = os.path.relpath(str(path), str(models.manager.data_path)) + os.sep
             index.record({}, remove=tuple(key for key in index.load() if key.startswith(prefix)))
             shutil.rmtree(str(path))
+
+
 class AppliedServiceModels:
     """Track each service's applied model, retaining project support for rollback."""
 

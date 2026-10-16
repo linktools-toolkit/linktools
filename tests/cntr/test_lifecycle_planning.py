@@ -205,14 +205,9 @@ def test_starting_callbacks_all_finish_before_start_registry_lookup(lifecycle_ca
     ]
 
 
-def test_partial_restart_leaves_runtime_provider_outside_all_lifecycle_phases(lifecycle_case, monkeypatch) -> None:
+def test_partial_restart_leaves_unselected_provider_outside_all_lifecycle_phases(lifecycle_case) -> None:
     manager, containers, _, events = lifecycle_case
     provider, target = containers
-    target._dependencies = ()
-    monkeypatch.setattr(
-        provider, "get_runtime_requirements",
-        lambda names: {provider.name: tuple(provider.services)} if target.name in names else {},
-    )
     for container in containers:
         for phase in (HookPhase.CHECK, HookPhase.BEFORE_START, HookPhase.AFTER_START,
                       HookPhase.BEFORE_STOP, HookPhase.AFTER_STOP):

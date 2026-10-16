@@ -69,8 +69,6 @@ def application_case(tmp_path: Path, running: "tuple[str, ...]") -> SimpleNamesp
         ("redis", {"redis": {"image": "redis:new"}}),
     ], running=running)
     manager.containers["safeline"].dependencies = ("nginx",)
-    manager.containers["sublink"].get_runtime_requirements = lambda names: (
-        {"auth": ("auth",)} if "sublink" in names else {})
     instrument_images(manager)
     return manager
 

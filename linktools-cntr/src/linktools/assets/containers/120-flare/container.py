@@ -23,6 +23,13 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
+    _config_revision: "str | None" = None
+
+    def on_prepare(self) -> None:
+        self._config_revision = None
+
+    def get_config_revision(self, service: str) -> "str | None":
+        return self._config_revision if service == "flare" else None
 
     @cached_property
     def fields(self) -> "dict[str, Any]":
@@ -117,8 +124,9 @@ class Container(BaseContainer):
                 raise
 
     def on_integrating(self, context: "OperationContext") -> None:
-        context.write_files(self, self._navigation_files(), mode=0o640,
-                            group=self.get_config("DOCKER_GID", type=int))
+        self._config_revision = None
+        self._config_revision = context.write_files(
+            self, self._navigation_files(), mode=0o640, group=self.get_config("DOCKER_GID", type=int)).name
 
     def on_check(self, context: "OperationContext") -> None:
         for name in ("apps.yml", "bookmarks.yml"):

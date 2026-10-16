@@ -21,7 +21,7 @@ from ._container import template as _template
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
-    from typing import AbstractSet, Any, Mapping
+    from typing import Any
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .ext import Integrations
@@ -239,9 +239,9 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Optional local build identity; never refresh remote inputs."""
         return None
 
-    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
-        """Declare native providers needed by the selected project services."""
-        return {}
+    def get_config_revision(self, service: str) -> "str | None":
+        """Return the prepared configuration identity consumed by this service."""
+        return None
 
     def on_check(self, context: "OperationContext") -> None:
         pass

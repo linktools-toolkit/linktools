@@ -129,12 +129,20 @@ def test_container_authoring_has_one_integration_entry():
         assert not hasattr(BaseContainer, name)
 
 
-def test_proxy_runtime_dependency_does_not_select_authelia_admin(fresh_manager):
+def test_proxy_integrations_do_not_implicitly_select_runtime_providers(fresh_manager):
     operations = fresh_manager.compose_operations
     explicit = operations.select(["portainer"], for_start=True)
     selected = operations.required_selection(explicit)
-    assert {"authelia", "authelia-redis", "lldap"} <= set(selected.services)
-    assert "authelia-admin" not in selected.services
+    assert selected.services == ("portainer",)
+    assert [container.name for container in selected.target_containers] == ["portainer"]
+
+
+def test_explicit_authelia_dependencies_remain_required(fresh_manager):
+    operations = fresh_manager.compose_operations
+    explicit = operations.select(["authelia"], for_start=True)
+    selected = operations.required_selection(explicit)
+    assert {container.name for container in selected.target_containers} == {"authelia", "nginx", "lldap"}
+    assert set(selected.services) == {"authelia", "authelia-admin", "authelia-redis", "nginx", "lldap"}
 
 
 def test_integrations_public_type_accepts_leaves_and_ordered_compositions() -> None:
@@ -614,9 +622,9 @@ def test_integration_containers_preserve_dependencies(fresh_manager):
     assert tuple(fresh_manager.containers["safeline"].dependencies) == ("nginx",)
     installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])
     assert {container.name for container in installed} == {"nginx", "lldap", "authelia"}
-    selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
+    selection = fresh_manager.compose_operations.select(["safeline"], for_start=True)
     started = fresh_manager.compose_operations.required_selection(selection)
-    assert "lldap" in started.services
+    assert set(started.services) == set(fresh_manager.containers["safeline"].services) | {"nginx"}
 
 
 def test_flare_display_category_does_not_shadow_factory():

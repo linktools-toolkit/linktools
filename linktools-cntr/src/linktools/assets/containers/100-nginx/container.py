@@ -25,8 +25,8 @@ from linktools.types import MISSING
 if TYPE_CHECKING:
     from types import SimpleNamespace
     from linktools.cntr.ext import ResolvedSite, Nginx
-    from collections.abc import Iterable, Sequence
-    from typing import AbstractSet, Any, Callable, Iterator
+    from collections.abc import Sequence
+    from typing import Any, Callable, Iterator
     from linktools.core import Config
     from linktools.cntr import OperationContext
     from linktools.types import PathType
@@ -76,6 +76,13 @@ def _has_config_value(value: "Any", seen: "set[int] | None" = None) -> bool:
 
 
 class Container(BaseContainer):
+    _config_revision: "str | None" = None
+
+    def on_prepare(self) -> None:
+        self._config_revision = None
+
+    def get_config_revision(self, service: str) -> "str | None":
+        return self._config_revision if service == "nginx" else None
 
     # Snapshot native request values before business rewrites or auth subrequests.
     original_fields = (
@@ -262,16 +269,38 @@ class Container(BaseContainer):
     def on_check(self, context: "OperationContext") -> None:
         import shutil
         import tempfile
+        if context.target_services is not None and "nginx" not in context.target_services:
+            return
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
+        required = set()
+        for site in self.sites.values():
+            if not site.enabled:
+                continue
+            if site.auth:
+                required.add("authelia")
+            if site.waf:
+                required.update(self.containers["safeline"].services)
+        if context.target_services is not None:
+            unavailable = []
+            for service in sorted(required.difference(context.target_services)):
+                actual = context.initial_runtime_state
+                instances = actual.service_instances(service) if actual is not None else ()
+                if not instances or any(item.state != "running" for item in instances):
+                    unavailable.append(service)
+            if unavailable:
+                raise ContainerError("Nginx requires running integration services: " + ", ".join(unavailable) +
+                                     "; select their containers explicitly.")
         runner = self.manager.compose_runner
         command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
+        mounts = {"/etc/nginx/managed": str(context.file_path(self))}
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
+                mounts["/etc/certs"] = directory
                 source = self.get_app_path("certs", self.cert_image_revision, "live").resolve()
                 previous = Path(directory) / self.cert_image_revision / "previous"
                 previous.mkdir(parents=True, mode=0o700)
@@ -283,9 +312,9 @@ class Container(BaseContainer):
                 result = runner.validate_service(context, "nginx", (
                     "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
                     "exec nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t"),
-                    mount_overrides={"/etc/certs": directory}, check=False)
+                    mount_overrides=mounts, check=False)
         else:
-            result = runner.validate_service(context, "nginx", command, check=False)
+            result = runner.validate_service(context, "nginx", command, mount_overrides=mounts, check=False)
         if not result.succeeded or "conflicting server name" in (result.stdout + result.stderr).lower():
             match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
             location = " at {}:{}".format(*match.groups()) if match else ""
@@ -335,23 +364,6 @@ class Container(BaseContainer):
         if authentication:
             headers.update({"Content-Length": "", "Connection": "", "Upgrade": ""})
         return tuple((key, self.complex_value(value)) for key, value in headers.items())
-
-    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
-        manager = self.manager
-        sites = self.sites
-        needs_nginx = self.name in required or any(
-            site.producer.name in required and site.enabled for site in sites.values())
-        if not needs_nginx:
-            return {}
-        result = {self.name: tuple(self.services)}
-        for site in sites.values():
-            if not site.enabled or (self.name not in required and site.producer.name not in required):
-                continue
-            for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
-                if getattr(site, capability):
-                    result[provider] = (("authelia",) if provider == "authelia"
-                                        else tuple(manager.containers[provider].services))
-        return result
 
     def _render_site_template(self, container: "BaseContainer", source: "PathType",
                         site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
@@ -547,6 +559,7 @@ class Container(BaseContainer):
     def on_integrating(self, context: "OperationContext") -> None:
         from types import SimpleNamespace
 
+        self._config_revision = None
         if context.target_containers is not None and self not in context.target_containers:
             actual = context.initial_runtime_state
             instances = tuple(item for item in actual.service_instances("nginx")
@@ -562,4 +575,4 @@ class Container(BaseContainer):
         root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
-        context.write_files(self, result)
+        self._config_revision = context.write_files(self, result).name
