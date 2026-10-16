@@ -10,6 +10,7 @@ from linktools.cntr import ContainerError, ContainerManager, Integration
 from linktools.cntr.ext import Authelia, Nginx, endpoint
 from linktools.core import Config, ConfigSchema
 from linktools.runtime import lazy_load
+from linktools.errors import ConfigError
 
 
 def fail() -> None:
@@ -30,10 +31,10 @@ def _consumer(declarations: dict, *, nginx: bool = True, **overrides: object) ->
         return value() if callable(value) else value
 
     manager = object.__new__(ContainerManager)
-    manager.env_config = Config(None, ConfigSchema(), [])
-    manager.env_config.get = config
+    manager.config = Config(None, ConfigSchema(), [])
+    manager.config.get = config
     containers = {name: SimpleNamespace(name=name, integrations=entries, manager=manager, get_config=config,
-                                        env_config=manager.env_config)
+                                        config=manager.config)
                   for name, entries in declarations.items()}
     for name, builtin in (("nginx", "100-nginx"), ("authelia", "102-authelia")):
         container = object.__new__(builtin_container_type(builtin))
@@ -88,7 +89,7 @@ def test_access_rejects_non_declaration_references_only_when_consumed(reference:
     declaration = Authelia.access(lazy_load(fail), site=reference)
     authelia, reads = _consumer({"app": [Nginx.site(lazy_load(fail)), declaration]})
     assert reads == []
-    with pytest.raises(ContainerError, match="Expected an original nginx site or endpoint declaration"):
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         authelia.acl_rules
 
 
@@ -181,7 +182,7 @@ def test_nonliteral_site_requires_explicit_native_domain_or_regex(server_name: s
 def test_unknown_site_is_not_resolved_from_another_producer() -> None:
     authelia, _ = _consumer({"first": [Authelia.access(lazy_load(fail))],
                              "second": [Nginx.site("second.test")]})
-    with pytest.raises(ContainerError, match="Expected one declared nginx site in first"):
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         authelia.acl_rules
 
 
@@ -214,7 +215,7 @@ def test_access_endpoint_reference_selects_its_site_and_rejects_foreign_producer
     authelia, _ = _consumer({"app": [Nginx.site("other.test"), recipe, access]})
     assert authelia.acl_rules == [{"domain": "app.test", "policy": "one_factor"}]
     authelia, _ = _consumer({"app": [recipe], "other": [access]})
-    with pytest.raises(ContainerError, match="Expected one declared nginx site in other"):
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         authelia.acl_rules
 
 
@@ -234,7 +235,7 @@ def test_unbound_access_requires_one_declared_site_even_if_others_are_disabled()
     authelia, reads = _consumer({"app": [Nginx.site("app.test"), Nginx.site(""),
                                          Authelia.access(lazy_load(fail))]})
     assert reads == []
-    with pytest.raises(ContainerError, match="Expected one declared nginx site in app"):
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         authelia.acl_rules
     assert reads == []
 
@@ -242,5 +243,5 @@ def test_unbound_access_requires_one_declared_site_even_if_others_are_disabled()
 def test_equivalent_access_site_is_not_a_reference_to_the_original() -> None:
     authelia, _ = _consumer({"app": [Nginx.site("app.test"),
                                      Authelia.access(lazy_load(fail), site=Nginx.site("app.test"))]})
-    with pytest.raises(ContainerError, match="Expected one declared nginx site in app"):
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         authelia.acl_rules

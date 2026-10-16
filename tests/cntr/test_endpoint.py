@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """The endpoint recipe returns ordinary independent lazy declarations."""
+from linktools.core import ConfigLazy
+from linktools.cntr.ext import ResolvedSite
+from linktools.core import ConfigRef
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
+from linktools.errors import ConfigError
+
 from linktools.cntr import ContainerError
-from linktools.cntr.ext import Authelia, Flare, Integration, Nginx, ResolvedSite, endpoint
+from linktools.cntr.ext import Authelia, Flare, Integration, Nginx, endpoint
 from linktools.cntr.ext import load_nginx_url, load_port_url
 from linktools.core import Config, ConfigSchema
-from linktools.runtime import Proxy, lazy_load
+from linktools.runtime import lazy_load
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
@@ -35,10 +40,10 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     template = lazy_load(fail)
     producer = Producer()
     public, direct = Flare.links(
-        Flare.public(), Flare.container(url=load_port_url(producer, "APP_PORT", https=False)),
+        Flare.public(), Flare.container(url=load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=False)),
         name="App", icon="web", desc="Application",
     )
-    oidc = Authelia.oidc((load_nginx_url(producer, None, "callback"),))
+    oidc = Authelia.oidc((load_nginx_url(ResolvedSite.find(producer, None), "callback"),))
     access = Authelia.access(lazy_load(fail))
     declarations = endpoint(
         producer, domain=domain, proxy=proxy, auth=auth, auth_bypass=bypass,
@@ -58,12 +63,12 @@ def test_endpoint_constructs_plain_leaves_without_accessing_producer_state() -> 
     assert direct_copy.display_category is Flare.category("container")
     assert (public_copy.name, public_copy.icon, public_copy.desc) == ("App", "web", "Application")
     assert (direct_copy.name, direct_copy.icon, direct_copy.desc) == ("App", "web", "Application")
-    assert isinstance(public_copy._url, Proxy) and isinstance(direct_copy._url, Proxy)
+    assert isinstance(public_copy._url, ConfigLazy) and isinstance(direct_copy._url, ConfigLazy)
     assert public._url is MISSING and direct._url is not MISSING
     assert access_copy is not access and access_copy.site is site
     assert access.site is None
     assert oidc_copy is not oidc and oidc.site is MISSING
-    assert all(isinstance(value, Proxy) for value in oidc._redirect_uris)
+    assert all(isinstance(value, ConfigLazy) for value in oidc._redirect_uris)
 
 
 @pytest.mark.parametrize("extensions", [(), []])
@@ -93,30 +98,30 @@ def test_endpoint_optional_leaves_are_explicit(direct: bool, callbacks: bool, co
 
 def test_endpoint_resolves_public_direct_and_oidc_paths_independently() -> None:
     reads = []
-    values = {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443, "APP_PORT": 8080}
+    values = {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443, "APP_PORT": 8080, "HOST": "host.test"}
 
-    def config(key: str, **kwargs: object) -> int:
+    def config(key: str, **kwargs: object) -> "int | str":
         reads.append(key)
         return values[key]
 
     producer = SimpleNamespace(name="app", get_config=config, host="host.test")
-    producer.env_config = Config(None, ConfigSchema(), [])
-    producer.env_config.get = producer.get_config
+    producer.config = Config(None, ConfigSchema(), [])
+    producer.config.get = producer.get_config
     declarations = endpoint(producer, domain="app.test", proxy="http://app:8080", extensions=[
-        Flare.public("App", "web", "Application", load_nginx_url(producer, None, "ui")),
-        Flare.container("App", "web", load_port_url(producer, "APP_PORT", "ui", https=False)),
-        Authelia.oidc(tuple(load_nginx_url(producer, None, path)
+        Flare.public("App", "web", "Application", load_nginx_url(ResolvedSite.find(producer, None), "ui")),
+        Flare.container("App", "web", load_port_url(ConfigRef("APP_PORT", type=int, default=0), "ui", https=False)),
+        Authelia.oidc(tuple(load_nginx_url(ResolvedSite.find(producer, None), path)
                             for path in ("callback", "callback", "return"))),
     ])
     site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
                                       containers={"nginx": SimpleNamespace(sites={declarations[0]: site})})
     assert reads == []
-    assert declarations[2].url == "http://host.test:8080/ui"
-    assert reads == ["APP_PORT"]
-    assert declarations[1].url == "https://app.test:9443/ui"
-    assert declarations[3].redirect_uris == ("https://app.test:9443/callback", "https://app.test:9443/return")
-    assert reads == ["APP_PORT", "NGINX_HTTPS_ENABLE"] + ["NGINX_HTTPS_PORT"] * 4
+    assert declarations[2].resolve_url(producer.config) == "http://host.test:8080/ui"
+    assert reads == ["APP_PORT", "HOST"]
+    assert declarations[1].resolve_url(producer.config) == "https://app.test:9443/ui"
+    assert declarations[3].resolve_redirect_uris(producer.config) == ("https://app.test:9443/callback", "https://app.test:9443/return")
+    assert reads == ["APP_PORT", "HOST", "NGINX_HTTPS_ENABLE"] + ["NGINX_HTTPS_PORT"] * 4
     assert declarations[0] is site._declaration
 
 
@@ -165,7 +170,7 @@ def test_endpoint_nested_extensions_keep_generic_leaves_and_order() -> None:
     assert declarations[3] is not access and declarations[3].site is declarations[0]
     assert access.site is None
     assert declarations[4] is not application
-    assert isinstance(declarations[4]._url, Proxy)
+    assert isinstance(declarations[4]._url, ConfigLazy)
     assert application._url is MISSING
 
 
@@ -194,8 +199,8 @@ def test_endpoint_extensions_use_the_common_declaration_shape_validation(extensi
 
 def test_endpoint_inherits_only_omitted_application_urls_and_preserves_site_fields() -> None:
     producer = SimpleNamespace(name="app", get_config=lambda key, **kwargs: 8080)
-    producer.env_config = Config(None, ConfigSchema(), [])
-    producer.env_config.get = producer.get_config
+    producer.config = Config(None, ConfigSchema(), [])
+    producer.config.get = producer.get_config
     dashboard = Flare.category("dashboard", apps=True)
     explicit = lazy_load(fail)
     originals = [Flare.public("App", "web"), dashboard("Dashboard", "web"),
@@ -211,7 +216,7 @@ def test_endpoint_inherits_only_omitted_application_urls_and_preserves_site_fiel
     assert site.public_url == "http://app.test:8080"
     assert site.cert_domains == ("app.test",) and site.default_server is True
     assert site.https is site.auth is site.waf is False
-    assert [value.url for value in declarations[1:5]] == ["http://app.test:8080"] * 2 + [None, None]
+    assert [value.resolve_url(producer.config) for value in declarations[1:5]] == ["http://app.test:8080"] * 2 + [None, None]
     assert originals[4]._url is explicit
     assert declarations[6]._url is MISSING
     assert originals[0]._url is originals[1]._url is MISSING
@@ -228,8 +233,8 @@ def test_endpoint_preserves_explicit_access_references_without_mutating_them() -
 def test_endpoint_binds_reused_access_and_public_links_to_each_actual_site() -> None:
     values = {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}
     producer = SimpleNamespace(name="app", get_config=lambda key, **kwargs: values[key])
-    producer.env_config = Config(None, ConfigSchema(), [])
-    producer.env_config.get = producer.get_config
+    producer.config = Config(None, ConfigSchema(), [])
+    producer.config.get = producer.get_config
     access = Authelia.access(policy="one_factor")
     link = Flare.public("App", "web")
     first = endpoint(producer, domain="one.test", extensions=[access, link])
@@ -243,12 +248,12 @@ def test_endpoint_binds_reused_access_and_public_links_to_each_actual_site() -> 
     )
     assert first[1].site is first[0] and second[1].site is second[0]
     assert access.site is None and link._url is MISSING
-    assert first[2].url == "https://one.test"
-    assert second[2].url == "https://two.test"
-    assert str(load_nginx_url(producer, first)) == "https://one.test"
-    assert str(load_nginx_url(producer, second)) == "https://two.test"
-    with pytest.raises(ContainerError, match="Expected one declared nginx site"):
-        str(load_nginx_url(producer))
+    assert first[2].resolve_url(producer.config) == "https://one.test"
+    assert second[2].resolve_url(producer.config) == "https://two.test"
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, first))) == "https://one.test"
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, second))) == "https://two.test"
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
+        producer.config.resolve(ResolvedSite.find(producer, None))
 
 
 
@@ -271,25 +276,25 @@ def test_endpoint_rejects_extension_factories_but_accepts_callable_declaration()
 
 
 @pytest.mark.parametrize("reference,expected", [
-    ("{url}", "https://app.test"), ("/", "https://app.test/"),
+    ("{base_url}", "https://app.test"), ("/", "https://app.test/"),
     ("/callback?x=1", "https://app.test/callback?x=1"),
     ("/ui/#/setup?a=b", "https://app.test/ui/#/setup?a=b"),
     ("//other.test/path", "https://other.test/path"),
     ("https://other.test/exact/?x=1#fragment", "https://other.test/exact/?x=1#fragment"),
-    ("https://other.test/{{port}}", "https://other.test/{{port}}"),
+    ("https://other.test/{{port}}", "https://other.test/{port}"),
     (None, None), ("", None),
 ])
 def test_endpoint_resolves_only_declared_url_fields(reference, expected):
     producer = SimpleNamespace(name="app", get_config=lambda key, **kw: True if key.endswith("ENABLE") else 443)
-    producer.env_config = Config(None, ConfigSchema(), [])
-    producer.env_config.get = producer.get_config
-    original = Flare.public("literal {url}", "web", "{{metadata}}", reference)
+    producer.config = Config(None, ConfigSchema(), [])
+    producer.config.get = producer.get_config
+    original = Flare.public("literal {base_url}", "web", "{{metadata}}", reference)
     declarations = endpoint(producer, domain="app.test", extensions=[original])
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
         declarations[0]: ResolvedSite(producer, declarations[0], 0),
     })})
-    assert declarations[1].url == expected
-    assert declarations[1].name == "literal {url}" and declarations[1].desc == "{{metadata}}"
+    assert declarations[1].resolve_url(producer.config) == expected
+    assert declarations[1].name == "literal {base_url}" and declarations[1].desc == "{{metadata}}"
     assert original._url is reference
 
 
@@ -300,37 +305,132 @@ def test_declarative_urls_are_lazy_and_oidc_does_not_follow_auth(active, auth):
     from urllib.parse import urlsplit
     reads = []
     producer = SimpleNamespace(name="app", get_config=lambda key, **kw: True if key.endswith("ENABLE") else 443)
-    producer.env_config = Config(None, ConfigSchema(), [])
-    producer.env_config.get = producer.get_config
+    producer.config = Config(None, ConfigSchema(), [])
+    producer.config.get = producer.get_config
     relative = lazy_load(utils.join_url, "/ui/metacubexd/#/setup", queries={
         "secret": lazy_load(lambda: reads.append("query") or "public-fixture-value"),
     })
     declarations = endpoint(producer, domain="app.test" if active else "", auth=auth, extensions=[
         Flare.public("Mihomo", "server", url=relative),
-        Authelia.oidc(("{url}", "/callback", "http://local.test:9000")),
+        Authelia.oidc((load_nginx_url(ResolvedSite.find(producer, None)), load_nginx_url(ResolvedSite.find(producer, None), "callback"),
+                       "http://local.test:9000")),
     ])
     assert reads == []
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
         declarations[0]: ResolvedSite(producer, declarations[0], 0),
     })})
-    actual = declarations[1].url
+    actual = declarations[1].resolve_url(producer.config)
     if active:
         parsed = urlsplit(actual)
         assert parsed.query == "" and parsed.fragment == "/setup?secret=public-fixture-value"
     else:
         assert actual is None
     assert reads == ["query"]
-    assert declarations[2].redirect_uris == (("https://app.test", "https://app.test/callback", "http://local.test:9000")
+    assert declarations[2].resolve_redirect_uris(producer.config) == (("https://app.test", "https://app.test/callback", "http://local.test:9000")
                                             if active else ("http://local.test:9000",))
 
 
-def test_rebound_oidc_copies_cached_results_and_preserves_none_validation():
-    original = Authelia.oidc(("{url}", "/callback", "https://absolute.test/"))
-    first = original.with_base_url("https://one.test")
-    assert first.redirect_uris == ("https://one.test", "https://one.test/callback", "https://absolute.test/")
-    second = first.with_base_url("https://two.test")
-    assert second.redirect_uris == ("https://two.test", "https://two.test/callback", "https://absolute.test/")
-    assert first.redirect_uris[0] == "https://one.test"
-    for value in (None, "//other.test/callback", " //other.test/callback", "\t//other.test/callback"):
-        with pytest.raises(ContainerError, match="Authelia redirect URI"):
-            Authelia.oidc((value,)).with_base_url("https://app.test").redirect_uris
+def test_endpoint_does_not_complete_oidc_callback_references() -> None:
+    original = Authelia.oidc(("/callback", "//other.test/callback", "https://absolute.test/"))
+    declarations = endpoint(object(), domain=lazy_load(fail), extensions=[original])
+    assert declarations[1] is not original
+    assert original.redirect_uris == ("https://absolute.test/",)
+    assert declarations[1].redirect_uris == original.redirect_uris
+    with pytest.raises(ContainerError, match="Authelia redirect URI"):
+        Authelia.oidc((None,)).redirect_uris
+
+
+@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize("nginx", [True, False])
+@pytest.mark.parametrize("auth", [True, False])
+def test_oidc_explicit_url_placeholder_is_lazy_and_validated_after_expansion(active, nginx, auth):
+    from linktools.core import ConfigRef
+    reads = []
+    producer = SimpleNamespace(name="app")
+    producer.config = Config(None, ConfigSchema(), [])
+    producer.config.get = lambda key, **kw: "{base_url}/callback?q=1"
+
+    def get_config(key, **kwargs):
+        reads.append(key)
+        return True if key.endswith("ENABLE") else 8443
+
+    producer.get_config = get_config
+    original = Authelia.oidc(("{base_url}", ConfigRef("CALLBACK"), "/path-only", "//other.test/path",
+                              "https://private.test:65535/callback", "custom://app.test/callback"))
+    declarations = endpoint(producer, domain="app.test" if active else "", auth=auth,
+                            extensions=[original, Flare.public("App", "web", url="{base_url}/ui")])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()} if nginx else {},
+                                      containers={"nginx": SimpleNamespace(sites={
+                                          declarations[0]: ResolvedSite(producer, declarations[0], 0),
+                                      })})
+    assert reads == []
+    expected = ("https://private.test:65535/callback", "custom://app.test/callback")
+    if active and nginx:
+        expected = ("https://app.test:8443", "https://app.test:8443/callback?q=1") + expected
+    assert declarations[1].resolve_redirect_uris(producer.config) == expected
+    assert declarations[2].resolve_url(producer.config) == (
+        "https://app.test:8443/ui" if active and nginx else None)
+    assert original.resolve_redirect_uris(producer.config) == expected[-2:]
+    if not active or not nginx:
+        assert reads == []
+
+
+@pytest.mark.parametrize("shared_link", [False, True])
+def test_endpoint_binds_unreferenced_url_without_mutating_shared_inputs(shared_link: bool) -> None:
+    from linktools.errors import ConfigError
+    config = Config(None, ConfigSchema(), [])
+    config.get = lambda key, **kwargs: {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}[key]
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
+    original_url = load_nginx_url(path="/ui/#/setup", queries={"q": "a b"})
+    original = Flare.public("App", "web", url=original_url)
+    first = endpoint(producer, domain="one.test", extensions=[original])
+    second_link = original if shared_link else Flare.public("Other", "web", url=original_url)
+    second = endpoint(producer, domain="two.test", extensions=[second_link])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
+        first[0]: ResolvedSite(producer, first[0], 0), second[0]: ResolvedSite(producer, second[0], 1),
+    })})
+    assert first[1].resolve_url(config) == "https://one.test/ui/#/setup?q=a+b"
+    assert second[1].resolve_url(config) == "https://two.test/ui/#/setup?q=a+b"
+    assert first[1].resolve_url(config) == "https://one.test/ui/#/setup?q=a+b"
+    assert original._url is second_link._url is original_url
+    with pytest.raises(ConfigError):
+        config.resolve(original_url)
+    with pytest.raises(ConfigError):
+        original.resolve_url(config)
+
+
+@pytest.mark.parametrize("nginx,domain", [(False, "app.test"), (True, "")])
+def test_endpoint_unreferenced_url_skips_path_query_and_secret_for_disabled_site(nginx: bool, domain: str) -> None:
+    reads = []
+
+    def unexpected(config):
+        reads.append("dependent")
+        raise AssertionError("disabled navigation evaluated a dependent value")
+
+    config = Config(None, ConfigSchema(), [])
+    config.get = lambda key, **kwargs: unexpected(config)
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
+    declaration = endpoint(producer, domain=domain, extensions=[Flare.public(
+        "App", "web", url=load_nginx_url(path=ConfigLazy(unexpected), queries={"secret": ConfigLazy(unexpected)}),
+    )])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()} if nginx else {},
+                                      containers={"nginx": SimpleNamespace(sites={
+                                          declaration[0]: ResolvedSite(producer, declaration[0], 0),
+                                      })})
+    assert declaration[1].resolve_url(config) is None
+    assert reads == []
+
+
+def test_endpoint_preserves_explicit_url_reference_to_another_endpoint() -> None:
+    config = Config(None, ConfigSchema(), [])
+    config.get = lambda key, **kwargs: {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 443}[key]
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
+    first = endpoint(producer, domain="one.test")
+    url = load_nginx_url(ResolvedSite.find(producer, first), path="/ui")
+    original = Flare.public("App", "web", url=url)
+    second = endpoint(producer, domain="two.test", extensions=[original])
+    producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()}, containers={"nginx": SimpleNamespace(sites={
+        first[0]: ResolvedSite(producer, first[0], 0), second[0]: ResolvedSite(producer, second[0], 1),
+    })})
+    assert second[1].resolve_url(config) == "https://one.test/ui"
+    assert config.resolve(url) == "https://one.test/ui"

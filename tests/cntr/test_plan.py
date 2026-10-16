@@ -259,7 +259,7 @@ def test_cntr_help_has_no_removed_plan_command():
 
 
 def test_plan_command_includes_full_docker_compose_prefix(fresh_manager):
-    fresh_manager.env_config.set("DOCKER_TYPE", "docker-rootless")
+    fresh_manager.config.set("DOCKER_TYPE", "docker-rootless")
     plan = fresh_manager.planner.plan("up", names=["portainer"])
     up_command = plan.commands[0]
     assert up_command.args[:2] == ("docker", "compose")
@@ -269,7 +269,7 @@ def test_plan_command_includes_full_docker_compose_prefix(fresh_manager):
 
 
 def test_plan_display_args_show_sudo_for_rootful_docker(fresh_manager, monkeypatch):
-    fresh_manager.env_config.set("DOCKER_TYPE", "docker")
+    fresh_manager.config.set("DOCKER_TYPE", "docker")
     monkeypatch.setattr(type(fresh_manager), "system", "linux")
     monkeypatch.setattr(type(fresh_manager), "uid", 1000)
     plan = fresh_manager.planner.plan("up", names=["portainer"])
@@ -280,7 +280,7 @@ def test_plan_display_args_show_sudo_for_rootful_docker(fresh_manager, monkeypat
 
 
 def test_plan_display_args_no_sudo_for_rootless(fresh_manager):
-    fresh_manager.env_config.set("DOCKER_TYPE", "docker-rootless")
+    fresh_manager.config.set("DOCKER_TYPE", "docker-rootless")
     plan = fresh_manager.planner.plan("up", names=["portainer"])
     up_command = plan.commands[0]
     assert up_command.privilege is False
@@ -288,15 +288,15 @@ def test_plan_display_args_no_sudo_for_rootless(fresh_manager):
 
 
 def test_plan_respects_configured_docker_host(fresh_manager, monkeypatch):
-    fresh_manager.env_config.set("DOCKER_TYPE", "docker")
-    original_get = fresh_manager.env_config.get
+    fresh_manager.config.set("DOCKER_TYPE", "docker")
+    original_get = fresh_manager.config.get
 
     def fake_get(key, type=None, default=None):
         if key == "DOCKER_HOST":
             return "tcp://10.0.0.1:2376"
         return original_get(key, type=type, default=default)
 
-    monkeypatch.setattr(fresh_manager.env_config, "get", fake_get)
+    monkeypatch.setattr(fresh_manager.config, "get", fake_get)
     plan = fresh_manager.planner.plan("up", names=["portainer"])
     up_command = plan.commands[0]
     assert "-H" in up_command.args

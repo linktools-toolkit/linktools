@@ -107,7 +107,7 @@ class RuntimeProcessFactory:
         it -- the single source of truth ``create_docker_process`` and
         ``ExecutionPlanner`` both build on."""
         commands = []
-        host = self.manager.env_config.get("DOCKER_HOST", type=str, default=None)
+        host = self.manager.config.get("DOCKER_HOST", type=str, default=None)
         if self.manager.container_type in ("docker", "docker-rootless"):
             commands.append("docker")
             commands.extend(_docker_host_args(host))
@@ -169,7 +169,7 @@ class RuntimeProcessFactory:
               group: "str | int | None" = None) -> None:
         """Set ownership; numeric users need no host account and preserve an omitted group."""
         manager = self.manager
-        path = manager.env_config.cast(path, type="path")
+        path = manager.config.cast(path, type="path")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
         if not _is_chown_supported(manager.system):
@@ -210,7 +210,7 @@ class RuntimeProcessFactory:
 
     def chmod(self, path: "PathType", mode: int = 0o755, recursive: bool = False) -> None:
         manager = self.manager
-        path = manager.env_config.cast(path, type="path")
+        path = manager.config.cast(path, type="path")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path not found: {path}")
         if not _is_chown_supported(manager.system):

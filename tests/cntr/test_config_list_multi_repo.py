@@ -32,7 +32,7 @@ def _repo_with_port(tmp_path, name, port):
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'PORT': ConfigField(cast=int, default=0)}\n",
         encoding="utf-8",
     )
@@ -83,7 +83,7 @@ def test_same_repo_shared_config_key_shown_once(monkeypatch, tmp_path, capsys):
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'SHARED_KEY': ConfigField(default='v')}\n",
         encoding="utf-8",
     )
@@ -112,7 +112,7 @@ def test_manager_persistent_extra_shown_once_and_unambiguous(monkeypatch, tmp_pa
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_two_repos_with_ports(tmp_path)
-    manager.env_config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
+    manager.config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     ConfigCommand().on_command_list(names=[], show_secret=True)
@@ -173,10 +173,10 @@ def test_filtered_list_includes_only_selected_declarations_and_optional_dependen
             "    def dependencies(self):\n"
             "        return %r\n"
             "    @property\n"
-            "    def configs(self):\n"
+            "    def fields(self):\n"
             "        return {%r: ConfigField(default='value')}\n"
             "    @property\n"
-            "    def extend_configs(self):\n"
+            "    def extra_fields(self):\n"
             "        return {'EXTENDED': ConfigField(default='extended'),\n"
             "                'OPTIONAL': ConfigField(secret=True)}\n"
             % (dependencies, key), encoding="utf-8")
@@ -184,7 +184,7 @@ def test_filtered_list_includes_only_selected_declarations_and_optional_dependen
     manager = _fresh_standalone_manager(tmp_path)
     manager.repos.add(str(repo))
     manager.installed_state.add("app", "dependency", "other")
-    manager.env_config.persist_many({
+    manager.config.persist_many({
         "APP_VALUE": "persisted", "EXTENDED": "extended", "UNDECLARED": "extra"})
     monkeypatch.setattr(cntr_shared, "manager", manager)
 

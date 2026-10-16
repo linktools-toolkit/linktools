@@ -9,7 +9,7 @@ are errors; known optional consumers that are absent do not consume declarations
 ```python
 from linktools.core import ConfigRef
 from linktools.cntr import Integrations
-from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
+from linktools.cntr.ext import ResolvedSite, Flare, Nginx, load_nginx_url, load_port_url
 from linktools.decorator import cached_property
 
 
@@ -23,10 +23,10 @@ def integrations(self) -> "Integrations":
             auth_bypass=(r"^/public/",),
             waf_bypass=(),
         ),
-        Flare.public("App", "apps", "Application", load_nginx_url(self)),
+        Flare.public("App", "apps", "Application", load_nginx_url(ResolvedSite.find(self))),
         Flare.container(
             "App direct", "apps",
-            load_port_url(self, "APP_PORT", https=False),
+            load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=False),
         ),
     ]
 ```
@@ -48,7 +48,7 @@ be read again; do not reuse an exhausted generator.
 
 The nginx container owns one command-local `sites` mapping from original Nginx
 objects to `ResolvedSite` views. `ResolvedSite.collect(manager)` rejects repeated
-site objects. `ResolvedSite.find(producer, reference=None)` resolves an original
+site objects. `ResolvedSite.find(producer, reference=None)` returns a ConfigLazy reference to an original
 Nginx declaration or an endpoint tuple containing exactly one such declaration.
 A reference belongs to one producer; reconstructing an equivalent endpoint is not
 a reference. Omission is allowed only when the producer has exactly one declared
@@ -57,7 +57,7 @@ The generic `iter_integrations` yields `(producer, declaration)` for installed
 consumers. No dictionary key, generated filename or render ordinal is an author identity.
 
 Navigation is an independent `Flare` declaration. Pass
-`load_nginx_url(self)` to use the unique site's lazy URL.
+`load_nginx_url(ResolvedSite.find(self))` to use the unique site's lazy URL.
 An explicit URL stays unchanged; `None`, `""`, or an omitted standalone URL skips the
 navigation entry. Within endpoint extensions, an omitted application URL inherits that site URL. No URL is inherited from a neighboring nginx declaration.
 The link's category is presentation metadata, not an authentication policy;
@@ -124,6 +124,21 @@ set `Nginx.site(..., auth=False)` explicitly to retain its no-auth behavior.
 sites must use `auth=False` when global authentication is enabled.
 Migrate callers and templates together; there is no compatibility wrapper.
 
+## Configuration declarations and values
+
+Container and manager `fields` declare configuration fields and defaults;
+`config` is the shared Config instance that resolves their values.
+`environ.config` retains its existing meaning. `register_fields()` registers a
+container's normal fields at the existing loader/preparation boundaries.
+`extra_fields` describes additional fields computed on demand, such as selected
+DNS-provider credentials. Reading or registering normal fields does not evaluate
+these extras; their existing consumers still control evaluation and registration.
+
+Migrate `configs` to `fields`, `env_config` to `config`, `extend_configs` to
+`extra_fields`, and `register_configs()` to `register_fields()`. No old aliases
+remain. Configuration keys, namespaces, ConfigField/ConfigRef semantics and
+persistent values are unchanged.
+
 ## Primary endpoints and explicit extensions
 
 `endpoint` is a pure function returning ordinary declarations for the producer's
@@ -133,7 +148,7 @@ options, including templates, headers and capability inheritance, are forwarded
 without changing their semantics.
 
 ```python
-from linktools.cntr.ext import Authelia, Flare, endpoint, load_nginx_url, load_port_url
+from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
 from linktools.core import ConfigRef
 
 return endpoint(
@@ -143,12 +158,12 @@ return endpoint(
     extensions=[
         Flare.links(
             Flare.public(),
-            Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+            Flare.container(url=load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=True)),
             name="App", icon="apps", desc="Application",
         ),
         Authelia.access(policy="one_factor"),
         Authelia.oidc(
-            redirect_uris=("/sso/callback",),
+            redirect_uris=("{base_url}/sso/callback",),
         ),
     ],
 )
@@ -181,29 +196,44 @@ from linktools.core import ConfigRef
 
 extensions=[
     Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
-        self, None, "ui", "metacubexd", "#", "setup",
-        queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
+        path="/ui/metacubexd/#/setup",
+        queries={"hostname": ConfigRef("MIHOMO_DOMAIN"),
+                 "port": ConfigRef("NGINX_DEFAULT_PORT"),
+                 "secret": ConfigRef("MIHOMO_SECRET")},
     )),
-    Authelia.oidc(("{url}", "/callback", "http://portainer.local:9000")),
+    Authelia.oidc(("{base_url}", "{base_url}/callback",
+                   "http://portainer.local:9000")),
 ]
 ```
 
-The endpoint binds only Flare URL fields and explicitly declared OIDC callbacks.
-Relative references use standard `urljoin` semantics, preserving query/fragment
-structure. A leading `{url}` means the site's exact base URL: `{url}` preserves
+The endpoint binds the lazy `base_url` format argument for Flare URLs and OIDC callbacks.
+OIDC path-only references are not completed from the endpoint.
+Relative Flare references use standard `urljoin` semantics, preserving query/fragment
+structure. URL fields use standard `str.format(base_url=...)` before final URL validation.
+`{base_url}` means the site's exact base URL and preserves
 its existing trailing slash, whereas `/` explicitly selects the origin root with
-a trailing slash. Absolute URLs stay unchanged. No other placeholder or ordinary
-configuration field is formatted; nginx regexes and `{{port}}` stay literal.
+a trailing slash. Independent absolute URLs do not evaluate the lazy site URL unless their format
+fields use it. Standard conversions, format specifications and escaped braces
+are supported; unknown fields and malformed formats raise their normal errors.
+The endpoint template parameter is named `base_url`; the outer Flare `url` field
+still denotes the final link. The former `url` parameter is not an alias.
+ConfigFormat resolves its explicit arguments first. Non-URL metadata and nginx
+configuration fields are not formatted by this URL step.
 
 Values remain lazy until consumed. Use `load_nginx_url` for site-dependent URLs
 with query values: it checks the site's URL before resolving `queries`, so a
-disabled site leaves those values unread. The example omits the site reference
-with `None`, which requires exactly one declared site. A custom `ConfigLazy`
+disabled site leaves those values unread. For a site inheriting the global HTTPS
+setting, NGINX_DEFAULT_PORT already selects the corresponding HTTP/HTTPS port;
+an explicit override of that configuration key is honored. Here the omitted
+reference binds to this endpoint's site, even when the producer declares multiple
+endpoints. Each copied Flare declaration keeps its own binding. Outside endpoint
+Flare URLs, pass an explicit ResolvedSite.find reference; an unbound omitted
+reference raises ConfigError without reading paths or queries. A custom `ConfigLazy`
 that constructs a relative URL may resolve its query values before the endpoint
 discovers that its site is disabled. Relative URLs from a disabled site become
 empty; explicit absolute URLs remain independent. Flare None/empty URLs stay
-disabled; OIDC skips empty strings but still rejects non-string values and
-scheme-relative `//host` callbacks.
+disabled. OIDC omits empty and incomplete URLs, including scheme-relative
+`//host` callbacks, but still rejects non-string values.
 OIDC never follows reverse-proxy authentication switches or adds implicit callbacks.
 Existing extension lists, tuples and top-level generators remain supported.
 
@@ -221,7 +251,7 @@ def integrations(self):
 
 @cached_property
 def proxy_url(self):
-    return load_nginx_url(self, self.proxy_endpoint)
+    return load_nginx_url(ResolvedSite.find(self, self.proxy_endpoint))
 ```
 
 Raw ext declarations can still be mixed with endpoint results and grouped links.
@@ -259,14 +289,14 @@ lists and tuples without mutating them. It leaves ordinary strings, callables,
 custom objects, dictionary keys and existing `Proxy` values alone.
 
 Constructing or scanning these declarations does not read configuration. Consumers
-supply `producer.env_config`, so one expression can be reused with separate Config
+supply `producer.config`, so one expression can be reused with separate Config
 instances. The expressions do not cache results or register fields. Keep schema
-and provider declarations in `ConfigField`/`configs`. The URL factories retain
+and provider declarations in `ConfigField`/`fields`. The URL factories retain
 their existing successful-result caching. An inline field can supply its own
 provider, cast, validator and default without being registered in the schema.
 For example, `ConfigRef(ConfigField("APP_PORT", default="8080", cast=int))`
 resolves to an integer even when `APP_PORT` was not declared beforehand.
-Unnamed fields belong in `configs`, where the dictionary key supplies their name.
+Unnamed fields belong in `fields`, where the dictionary key supplies their name.
 Existing configured values still outrank the field's provider. With the standard
 `DefaultSource(schema)`, an existing same-name schema default remains ahead of
 the inline field's default. Explicit field reads do not share the name-keyed
@@ -277,14 +307,14 @@ field reads with `ConfigRef("KEY", type=..., default=...)`; use `ConfigFormat`
 or `ConfigLazy` for computed values. Built-in consumers resolve these declarations
 with the producer's Config; custom consumers call `config.resolve(value)`.
 For an ad-hoc `ConfigField`, pass the field directly to `ConfigRef(field)` to
-resolve it without registration. Declare it in `configs` or call `config.define(field)`
+resolve it without registration. Declare it in `fields` or call `config.define(field)`
 when subsequent name-based reads should use that schema. Immediate
 `container.get_config(ConfigField(...))` retains its explicit registration behavior.
 
 Nginx resolves only the currently needed field. An absent nginx consumer or empty
 server name skips unrelated fields; explicit `auth=False` and `waf=False` skip
 those capabilities' global settings and dependent values. Flare resolves the URL
-before display metadata and skips empty URLs. An endpoint's relative extension
+before display metadata and skips empty or incomplete URLs. An endpoint's relative Flare extension
 URL is joined to the original site's URL after its explicit value is resolved.
 Authelia resolves native fields and callback values before its normal validation;
 disabled sites and authentication skip access rules.
@@ -357,32 +387,55 @@ APP_DOMAIN = ConfigField(provider=Nginx.domain(self))
 It keeps the shared nginx root-domain, wildcard and disabled-provider behavior.
 The former `BaseContainer.get_nginx_domain` method is removed.
 
-Import the URL factories from `linktools.cntr.ext` and pass the owning container:
+Import the URL factories from `linktools.cntr.ext`:
 
 ```python
-from linktools.cntr.ext import load_config_url, load_nginx_url, load_port_url
+from linktools.core import ConfigRef
+from linktools.cntr.ext import ResolvedSite, load_config_url, load_nginx_url, load_port_url
 
-load_config_url(self, "APP_URL", "ui", queries={"mode": "compact"})
-load_port_url(self, "APP_PORT", "ui", https=False)
-load_nginx_url(self, None, "ui")
+load_config_url(ConfigRef("APP_URL", type=str, default=None), "ui", queries={"mode": "compact"})
+load_port_url(ConfigRef("APP_PORT", type=int, default=0), "ui", https=False)
+load_nginx_url(ResolvedSite.find(self), "ui")
 ```
 
-Each returns the existing lazy URL proxy. Config URLs and port URLs stay empty
-when disabled. Ports must satisfy `0 < port < 65535`; the host is not read until
-the port is valid. Original site/endpoint lookup waits until the proxy is read.
-Missing, foreign or ambiguous references fail; declared disabled sites or absent
-nginx resolve to an empty URL.
-Path joining, query encoding and literal template placeholders remain unchanged.
-The `queries` argument may contain ConfigValue declarations; they are resolved
-with the owning container's Config only after a nonempty URL or valid port is
-available. Query encoding still belongs to the URL utilities. The returned Proxy
-continues to cache its first successful result, including resolved query values.
+Config and port URL factories accept values or ConfigValue declarations and
+return unbound ConfigLazy values. A string URL is literal, never an implicit
+configuration key; use ConfigRef explicitly for configuration lookup and its
+cast/default. For example, `load_config_url("https://app.example/ui")` and
+`load_port_url(8080, https=False)` work without a URL/port configuration key.
+All three helpers accept one optional `path` argument, positionally or by keyword,
+and keyword-only `queries`. A path is a string, a sequence of components, or a
+ConfigValue producing either; components may also be ConfigValue declarations.
+None means no path. Use `path=["ui", "settings"]` for multiple components; strings
+remain whole components. There is no variadic-path compatibility. Only
+`load_port_url` also accepts keyword-only `https`, a boolean or ConfigValue.
+
+Config and port values resolve through the consuming Config without binding a
+container or caching across Config contexts. Empty bases and invalid ports return
+an empty URL before resolving paths or queries. Ports must satisfy
+`0 < port <= 65535`; HOST and https are read only after the port is valid.
+Query encoding and path joining remain owned by the URL utilities.
+
+Nginx URL factories return ConfigValue declarations. An explicit reference is a
+ResolvedSite or ConfigValue resolving to one. Inside endpoint Flare extensions,
+`load_nginx_url(path="/ui", queries=...)` binds that exact endpoint's base without
+inferring a global or unique site. This shorthand is not an OIDC callback
+template; use `{base_url}` for callbacks. An unbound reference-free declaration
+raises ConfigError without reading paths or queries.
+
+`ResolvedSite.find(producer, reference=None)` returns ConfigLazy without reading
+the snapshot. Every Config.resolve performs the lookup; the reference does not
+cache a resolved site. For immediate site properties, use
+`config.resolve(ResolvedSite.find(producer)).get_url(default="")`.
+Missing, foreign or ambiguous references raise ConfigError at resolution time.
+Declared disabled sites or absent nginx produce an empty URL. There is no
+separate synchronous alias.
 These factories never register hooks or write configuration.
 
 `BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
 exposure mixin are removed; no URL mixin or resolver wrapper replaces them.
 General Compose/Dockerfile templates expose the public URL factories as `urls`,
-alongside `utils`, so they can use `urls.load_nginx_url(container)`. Native nginx
+alongside `utils`, so they can use `config.resolve(urls.load_nginx_url(urls.ResolvedSite.find(container)))`. Native nginx
 templates retain only the explicit context described below.
 
 ## Site values
@@ -412,22 +465,28 @@ templates retain only the explicit context described below.
 
 ## Authelia OIDC callbacks
 
-Declare callbacks independently of nginx sites:
+Declare a callback outside an endpoint with an explicit lazy site reference:
 
 ```python
-from linktools.cntr.ext import Authelia, load_nginx_url
+from linktools.cntr.ext import ResolvedSite, Authelia, load_nginx_url
 
 Authelia.oidc(
-    redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
+    redirect_uris=(load_nginx_url(ResolvedSite.find(self), "sso/callback"),),
 )
 ```
 
 `Authelia.oidc` contributes URLs to the existing shared client; it never declares
 a second client or changes client IDs, credentials, scopes, or authorization policy.
 Use lazy URL/config references to defer evaluation. Empty URLs are omitted,
-including URLs derived from disabled optional sites; explicitly declared absolute
+including URLs derived from disabled optional sites. Relative URLs and URLs without a scheme or host are also omitted at consumption. Callback strings are formatted with the endpoint's lazy public URL before this
+validation. Without an endpoint the `base_url` argument is empty. Plain paths are not
+expanded. Absolute
 callbacks remain even when another site URL is empty.
-Nonempty callbacks must be absolute and have no fragment or template placeholder.
+Declared callbacks must resolve to complete URLs with a scheme and host, and cannot contain
+a fragment. Use `{base_url}` within an endpoint,
+or `load_nginx_url` or `load_config_url`
+to declare full lazy URLs. Flare likewise writes only complete resolved URLs;
+independent absolute links do not depend on a public site.
 Provider-specific URI rules remain subject to [native Authelia validation](https://www.authelia.com/configuration/identity-providers/openid-connect/clients/#redirect_uris).
 Deduplication preserves exact strings and order,
 including path, query, and trailing slash differences.

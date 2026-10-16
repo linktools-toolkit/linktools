@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 def render_template(container: "BaseContainer", source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
     from .. import ext
 
-    config = container.env_config
+    config = container.config
 
     def mkdir(path: "PathType") -> str:
         path = config.cast(path, type="path")

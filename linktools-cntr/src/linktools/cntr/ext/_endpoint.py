@@ -10,6 +10,7 @@ from ._base import Integration
 from ._authelia import Authelia
 from ._flare import Flare
 from ._nginx import Nginx
+from ._nginx_site import ResolvedSite
 from ._urls import load_nginx_url
 
 if TYPE_CHECKING:
@@ -44,7 +45,7 @@ def endpoint(
         auth_headers=auth_headers, cert_domains=cert_domains,
         template_vars=template_vars, default_server=default_server,
     )
-    base_url = load_nginx_url(producer, site)
+    base_url = load_nginx_url(ResolvedSite.find(producer, site))
     result = [site]
     for declaration in Integration.iter_declarations(extensions):
         if isinstance(declaration, Flare):

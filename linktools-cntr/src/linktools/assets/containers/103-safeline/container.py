@@ -22,7 +22,7 @@ class Container(BaseContainer):
         return ["nginx"]
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",
@@ -51,7 +51,7 @@ class Container(BaseContainer):
                 Flare.links(
                     Flare.public(),
                     Flare.container(
-                        url=load_port_url(self, "SAFELINE_PORT", https=True),
+                        url=load_port_url(ConfigRef("SAFELINE_PORT"), https=True),
                     ),
                     name="Safeline",
                     icon="alienOutline",

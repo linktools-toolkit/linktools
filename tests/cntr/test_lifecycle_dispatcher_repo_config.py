@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """LifecycleDispatcher.reconcile_removed must register a removed-but-still-
-running container's `configs` defaults -- since it was no longer in the
+running container's `fields` defaults -- since it was no longer in the
 installed list, they were never registered when containers were loaded, so
 on_removed would otherwise fail to resolve them."""
 import os
@@ -19,7 +19,7 @@ def _repo_with_field_only_container(tmp_path, name="repo_src"):
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'REPO_ONLY_FIELD': ConfigField(default='repo-default-value')}\n",
         encoding="utf-8",
     )
@@ -58,8 +58,8 @@ def test_notify_remove_registers_configs_for_a_repo_container_removed_while_runn
     assert container.repo_context is not None
     assert not container.repo_context.builtin
     # Every container, builtin or third-party, shares the manager's own
-    # env_config outright.
-    assert container.env_config is manager.env_config
+    # config outright.
+    assert container.config is manager.config
 
     manager.running_state._set(["repo_src"])
 
@@ -74,6 +74,6 @@ def test_notify_remove_registers_configs_for_a_repo_container_removed_while_runn
     manager.lifecycle.reconcile_removed(ctx)
 
     # The field must resolve -- this raised ConfigNotFoundError before the
-    # fix, since a removed-but-still-running container's `configs` defaults
+    # fix, since a removed-but-still-running container's `fields` defaults
     # were never registered.
-    assert container.env_config.get("REPO_ONLY_FIELD") == "repo-default-value"
+    assert container.config.get("REPO_ONLY_FIELD") == "repo-default-value"

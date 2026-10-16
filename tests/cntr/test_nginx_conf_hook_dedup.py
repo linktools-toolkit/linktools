@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Navigation never owns proxy registration or mutates declaration identities."""
+from linktools.cntr.ext import ResolvedSite
 from types import SimpleNamespace
 
 from linktools.cntr import BaseContainer
@@ -13,16 +14,18 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
     class Links:
         name = "app"
         hooks = HookRegistry()
-        env_config = Config(None, ConfigSchema(), [DictSource({})])
+        config = Config(None, ConfigSchema(), [DictSource({})])
     container = Links()
     declaration = Nginx.site("app.example.com")
+    site = ResolvedSite(container, declaration, 0)
+    site.get_url = lambda default="": "https://app.example.com"
     container.manager = SimpleNamespace(containers={"nginx": SimpleNamespace(sites={
-        declaration: SimpleNamespace(producer=container, get_url=lambda default="": "https://app.example.com"),
+        declaration: site,
     })})
-    first = load_nginx_url(container)
-    second = load_nginx_url(container, None, "admin")
-    assert str(first) == "https://app.example.com"
-    assert str(second) == "https://app.example.com/admin"
+    first = load_nginx_url(ResolvedSite.find(container, None))
+    second = load_nginx_url(ResolvedSite.find(container, None), "admin")
+    assert container.config.resolve(first) == "https://app.example.com"
+    assert container.config.resolve(second) == "https://app.example.com/admin"
     assert container.hooks.describe() == []
 
 

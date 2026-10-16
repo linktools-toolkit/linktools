@@ -73,7 +73,7 @@ class Owner:
     def on_removed(self, context):
         self.manager.events.append(("removed-callback", self.name))
 
-    def register_configs(self):
+    def register_fields(self):
         pass
 
     def get_app_path(self, *parts):

@@ -15,7 +15,7 @@ import pytest
 @pytest.fixture
 def certificate_case(fresh_manager, tmp_path):
     container = fresh_manager.containers["nginx"]
-    settings = fresh_manager.env_config
+    settings = fresh_manager.config
     settings.set("NGINX_ROOT_DOMAIN", "example.test")
     settings.set("NGINX_HTTPS_ENABLE", True)
     settings.set("ACME_DNS_API", "dns_cf")
@@ -183,9 +183,9 @@ def test_new_revision_does_not_modify_older_certificate(certificate_case):
 @pytest.mark.parametrize("source", ["target", "running", "seed", "empty"])
 def test_build_account_uses_current_storage_without_migrating_old_files(fresh_manager, monkeypatch, source):
     container = fresh_manager.containers["nginx"]
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
     revision, running_revision = "1234567890abcdef", "fedcba0987654321"
-    container.__dict__.update(cert_image_revision=revision, extend_configs={}, _rendered_site_files=({}, False))
+    container.__dict__.update(cert_image_revision=revision, extra_fields={}, _rendered_site_files=({}, False))
     accounts = {
         "target": container.get_app_path("certs", revision, "live", "acme"),
         "running": container.get_app_path("certs", running_revision, "live", "acme"),

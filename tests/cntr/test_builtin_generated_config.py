@@ -21,7 +21,7 @@ FlareContainer = builtin_container_type("120-flare")
 
 def instance(module, **manager):
     container = object.__new__(module.Container)
-    manager.setdefault("env_config", Config(None, ConfigSchema(), []))
+    manager.setdefault("config", Config(None, ConfigSchema(), []))
     container.manager = SimpleNamespace(**manager)
     return container
 
@@ -30,7 +30,7 @@ def flare_instance(module, entries):
     snapshot = {"flare": []}
     containers = {}
     for producer, key, link in entries:
-        producer.env_config = Config(None, ConfigSchema(), [])
+        producer.config = Config(None, ConfigSchema(), [])
         containers[producer.name] = producer
         snapshot.setdefault(producer.name, []).append(link)
     manager = object.__new__(ContainerManager)
@@ -84,7 +84,7 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
     from linktools.cntr.ext import Authelia
     declaration = Authelia.oidc(("https://app.test", "https://app.test"))
     container = instance(module, project_name="project")
-    producer = SimpleNamespace(name="app", env_config=Config(None, ConfigSchema(), []))
+    producer = SimpleNamespace(name="app", config=Config(None, ConfigSchema(), []))
     container.manager.iter_integrations = lambda consumer: iter(((producer, declaration),))
     monkeypatch.setitem(container.__dict__, "public_url", "https://sso.test")
     monkeypatch.setattr(container, "get_config", lambda key: "saved-secret")
@@ -113,7 +113,7 @@ def test_portainer_callback_declaration_is_lazy_and_auth_independent(monkeypatch
         return values[key]
 
     monkeypatch.setattr(container, "get_config", config)
-    container.env_config.get = config
+    container.config.get = config
     declarations = container.integrations
     declaration = next(value for value in declarations if isinstance(value, Authelia))
     assert calls == []
@@ -121,7 +121,7 @@ def test_portainer_callback_declaration_is_lazy_and_auth_independent(monkeypatch
     container.manager.containers = {"nginx": SimpleNamespace(sites={
         declarations[0]: ResolvedSite(container, declarations[0], 0),
     })}
-    assert declaration.redirect_uris == ("https://portainer.test",)
+    assert declaration.resolve_redirect_uris(container.config) == ("https://portainer.test",)
     assert calls == ["PORTAINER_DOMAIN", "NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
 
 

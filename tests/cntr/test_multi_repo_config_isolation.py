@@ -33,7 +33,7 @@ def _repo_with_shared_field(tmp_path, name, storage_value):
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'SHARED_FIELD': ConfigField(default='builtin-default')}\n",
         encoding="utf-8",
     )
@@ -77,7 +77,7 @@ def test_repos_share_the_same_repository_config_instance(tmp_path):
     container_a = manager.containers["repo_a"]
     container_b = manager.containers["repo_b"]
 
-    assert container_a.env_config is container_b.env_config
+    assert container_a.config is container_b.config
 
 
 def test_repo_local_environment_no_longer_overrides_config(tmp_path):
@@ -100,7 +100,7 @@ def test_persisted_value_overrides_both_repos_simultaneously(tmp_path):
     container_a = manager.containers["repo_a"]
     container_b = manager.containers["repo_b"]
 
-    container_a.env_config.persist("SHARED_FIELD", "persisted-everywhere")
+    container_a.config.persist("SHARED_FIELD", "persisted-everywhere")
 
     assert container_a.get_config("SHARED_FIELD") == "persisted-everywhere"
     assert container_b.get_config("SHARED_FIELD") == "persisted-everywhere"
@@ -111,7 +111,7 @@ def test_runtime_override_applies_to_both_repos_simultaneously(tmp_path):
     container_a = manager.containers["repo_a"]
     container_b = manager.containers["repo_b"]
 
-    container_b.env_config.set("SHARED_FIELD", "runtime-everywhere")
+    container_b.config.set("SHARED_FIELD", "runtime-everywhere")
 
     assert container_a.get_config("SHARED_FIELD") == "runtime-everywhere"
     assert container_b.get_config("SHARED_FIELD") == "runtime-everywhere"

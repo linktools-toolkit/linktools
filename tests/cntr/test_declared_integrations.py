@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Declarative integrations do not depend on navigation registration."""
+from linktools.cntr.ext import ResolvedSite
 
 from linktools.cntr.ext import Integration, Nginx, load_nginx_url
 from linktools.cntr.lifecycle import HookPhase
@@ -17,8 +18,8 @@ def test_portainer_site_is_independent_of_navigation(fresh_manager):
     assert first is portainer.integrations[0]
     assert not hasattr(first, "local_id")
 
-    load_nginx_url(portainer)
-    load_nginx_url(portainer, None, "settings")
+    load_nginx_url(ResolvedSite.find(portainer, None))
+    load_nginx_url(ResolvedSite.find(portainer, None), "settings")
     assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == baseline
 
 
@@ -50,7 +51,7 @@ def test_nginx_owns_one_site_snapshot_shared_by_all_consumers(fresh_manager, mon
     nginx = fresh_manager.containers["nginx"]
     sites = nginx.sites
     authelia = fresh_manager.containers["authelia"]
-    assert str(load_nginx_url(authelia)) == authelia.public_url
+    assert authelia.config.resolve(load_nginx_url(ResolvedSite.find(authelia, None))) == authelia.public_url
     fresh_manager.containers["flare"]._navigation_files()
     assert nginx.sites is sites
     assert calls == [fresh_manager]
@@ -101,9 +102,9 @@ def test_absent_flare_does_not_consume_navigation(fresh_manager, monkeypatch):
 def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manager):
     import yaml
 
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
-    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", 9443)
     operations = fresh_manager.compose_operations
     selection = operations.select(["nginx"], for_start=True)
     synchronized = selection.project_containers
@@ -156,10 +157,10 @@ def _site_navigation_manager(declarations, links=None, nginx=True):
         reads.append(key)
         return {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443}[key]
     manager = object.__new__(ContainerManager)
-    manager.env_config = Config(None, ConfigSchema(), [])
-    manager.env_config.get = config
+    manager.config = Config(None, ConfigSchema(), [])
+    manager.config.get = config
     producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config,
-                               env_config=manager.env_config)
+                               config=manager.config)
     manager.containers = {"app": producer, "nginx": SimpleNamespace(sites={}),
                           "flare": SimpleNamespace(name="flare", order=0)}
     producer.test_sites = declarations
@@ -193,7 +194,7 @@ def test_navigation_uses_explicit_site_reference_and_skips_omitted_urls_lazily()
         "web": Nginx.site("app.test"),
         "silent": Nginx.site("silent.test"),
     }, lambda producer: [
-        public("Referenced", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        public("Referenced", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         public("Empty", "web", "", ""),
         public("None", "web", "", None),
         public("Explicit", "web", "", "custom://{{port}}"),
@@ -220,7 +221,7 @@ def test_disabled_or_uninstalled_sites_do_not_resolve_navigation_defaults():
     for server_name, nginx in (("", True), ("app.test", False)):
         manager, reads = _site_navigation_manager({"web": Nginx.site(
             server_name, public_url=lazy_load(fail),
-        )}, lambda producer: [public("App", "web", "", load_nginx_url(producer, producer.test_sites["web"]))], nginx=nginx)
+        )}, lambda producer: [public("App", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"])))], nginx=nginx)
         assert _render_navigation(manager)["apps.yml"]["links"] == []
         assert reads == []
 
@@ -231,7 +232,7 @@ def test_site_navigation_category_does_not_change_auth_and_paths_are_independent
     category = Flare.category("team", "Team")
     declaration = Nginx.site("app.test", auth=True)
     manager, reads = _site_navigation_manager({"web": declaration}, lambda producer: {
-        "root": category("Root", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        "root": category("Root", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         "one": category("Path", "web", "", "https://app.test/one"),
         "two": category("Path", "web", "", "https://app.test/two?q=1"),
     })
@@ -251,7 +252,7 @@ def test_removed_attached_navigation_is_rejected_and_category_conflicts_remain()
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         Nginx.site("app.test", link=True)
     manager, _ = _site_navigation_manager({"web": Nginx.site("app.test")}, lambda producer: [
-        Flare.category("team", "Team")("Root", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+        Flare.category("team", "Team")("Root", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         Flare.category("team", "Different")("Other", "web", "", "https://other.test"),
     ])
     with pytest.raises(ContainerError, match="Conflicting description"):
@@ -268,7 +269,7 @@ def test_builtin_navigation_matches_complete_output_baseline(fresh_manager):
         "NGINX_HTTPS_PORT": 9443, "LLDAP_WEB_PORT": 17170,
         "SAFELINE_PORT": 9200, "PORTAINER_PORT": 9000, "FLARE_PORT": 5000,
     }.items():
-        fresh_manager.env_config.set(key, value)
+        fresh_manager.config.set(key, value)
     expected = json.loads((Path(__file__).parent / "snapshots/navigation.json").read_text(encoding="utf-8"))
     assert _render_navigation(fresh_manager) == expected
     assert sum(len(data["links"]) for data in expected.values()) == 7
@@ -283,12 +284,12 @@ def test_navigation_merge_preserves_producer_ties_and_key_collisions():
         "web": Nginx.site("one.test"),
         "two": Nginx.site("two.test"),
     }, lambda producer: {
-        "web": public("One", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
-        "two": public("Two", "web", "", load_nginx_url(producer, producer.test_sites["two"])),
+        "web": public("One", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
+        "two": public("Two", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["two"]))),
         "path": public("Path", "web", "", "https://one.test/path"),
     })
     producer = SimpleNamespace(name="other", order=10, manager=manager,
-                               env_config=manager.env_config)
+                               config=manager.config)
     manager.containers["other"] = producer
     site = Nginx.site("other.test")
     manager.integration_snapshot["other"] = (
@@ -349,7 +350,7 @@ def test_flare_iterable_preserves_referenced_then_standalone_order():
 
     manager, _ = _site_navigation_manager({
         "web": Nginx.site("app.test"),
-    }, lambda producer: (Flare.public("Referenced", "web", "", load_nginx_url(producer, producer.test_sites["web"])),
+    }, lambda producer: (Flare.public("Referenced", "web", "", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         Flare.public("First", "web", "", "https://one.test"),
         Flare.public("Second", "web", "", "https://two.test")))
     assert [link["name"] for link in _render_navigation(manager)["apps.yml"]["links"]] == [
@@ -389,7 +390,7 @@ def test_flare_category_output_area_is_independent_of_name() -> None:
     manager, _ = _site_navigation_manager({
         "web": Nginx.site("app.test"),
     }, lambda producer: [
-        dashboard("Referenced", "web", "Application", load_nginx_url(producer, producer.test_sites["web"])),
+        dashboard("Referenced", "web", "Application", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         public("Bookmark", "web", "", "https://bookmark.test"),
         favorites("Favorite", "web", "", "https://favorite.test"),
         dashboard("Custom app", "web", "Custom", "https://custom.test"),
@@ -439,7 +440,7 @@ def test_flare_bookmarks_accept_custom_category_ids_and_explicit_site_urls() -> 
     manager, reads = _site_navigation_manager({
         "web": Nginx.site("app.test"),
     }, lambda producer: [
-        Flare.bookmark("Referenced", "web", load_nginx_url(producer, producer.test_sites["web"]), category="tool"),
+        Flare.bookmark("Referenced", "web", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"])), category="tool"),
         Flare.public("App", "apps", "Application description", "https://app.test"),
         Flare.bookmark("Standalone", "book", "https://docs.test", category="tool"),
         Flare.bookmark("Unbound", "off", category="empty"),
@@ -492,7 +493,7 @@ def test_flare_container_factory_requires_explicit_site_urls() -> None:
     empty = Flare.container("Empty", "web", "")
     disabled = Flare.container("Disabled", "web", None)
     manager, reads = _site_navigation_manager({"web": Nginx.site("app.test")}, lambda producer: [
-        Flare.container("Referenced", "web", load_nginx_url(producer, producer.test_sites["web"])),
+        Flare.container("Referenced", "web", load_nginx_url(ResolvedSite.find(producer, producer.test_sites["web"]))),
         omitted, empty, disabled, Flare.container("Unbound", "web"),
     ])
     assert reads == []
@@ -560,28 +561,28 @@ def test_flare_bookmarks_reject_application_categories() -> None:
 
 
 def test_authelia_admin_link_does_not_change_oidc_issuer(fresh_manager):
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
-    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", 9443)
     authelia = fresh_manager.containers["authelia"]
     from linktools.cntr.ext import Flare
 
     link = next(value for value in authelia.integrations if isinstance(value, Flare))
-    assert link.url == "https://sso.example.test:9443/auth-admin"
+    assert link.resolve_url(authelia.config) == "https://sso.example.test:9443/auth-admin"
     assert authelia.oidc_client["issuer_url"] == "https://sso.example.test:9443"
     assert authelia.oidc_client["authorization_url"] == "https://sso.example.test:9443/api/oidc/authorization"
 
 
 def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
     container = fresh_manager.containers["portainer"]
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
-    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", 9443)
     template = tmp_path / "docker-compose.yml"
-    template.write_text('{{ urls.load_nginx_url(container, None, "settings", queries={"mode": "a b"}) }}')
-    assert container.render_template(template) == "https://portainer.example.test:9443/settings?mode=a+b"
+    template.write_text('{{ container.config.resolve(urls.load_nginx_url(site, "settings", queries={"mode": "a b"})) }}')
+    assert container.render_template(template, site=ResolvedSite.find(container)) == "https://portainer.example.test:9443/settings?mode=a+b"
 
 
 def test_namespace_factories_preserve_typed_constructor_and_mixed_list():

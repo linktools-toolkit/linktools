@@ -273,11 +273,11 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 导航和 OIDC 回调独立声明，使用原站点对象引用；只有一个站点时可省略引用：
 
 ```python
-from linktools.cntr.ext import Flare, Nginx, load_nginx_url
+from linktools.cntr.ext import Flare, Nginx, ResolvedSite, load_nginx_url
 
 return [
     Nginx.site("app.example.com", proxy="http://app:8080"),
-    Flare.public("应用", "web", "应用描述", load_nginx_url(self)),
+    Flare.public("应用", "web", "应用描述", load_nginx_url(ResolvedSite.find(self))),
     Flare.bookmark("工具", "web", "https://tool.example.com", category="tool"),
 ]
 ```
@@ -294,7 +294,7 @@ return endpoint(
     extensions=[
         Flare.links(
             Flare.public(),
-            Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+            Flare.container(url=load_port_url(ConfigRef("APP_PORT", type=int, default=0), https=True)),
             name="应用", icon="web", desc="应用描述",
         ),
         Authelia.access(policy="one_factor"),
@@ -304,11 +304,15 @@ return endpoint(
 
 `endpoint` 不需要站点标识，不接收导航信息，也不自动生成导航。
 只有首页应用省略 URL 时关联本站；扩展中的相对 URL 按标准规则绑定本站，
-`{url}` 前缀保留精确基准地址，绝对 URL、`None` 和空字符串不改写。
+URL 先通过标准 format 展开 `{base_url}`，再按消费方要求校验；
+OIDC 回调必须包含 scheme 和 host，普通 path 不自动补全。独立绝对地址保留，
+`None` 和空字符串不生成导航。
 `Flare.links` 仅共享省略的显示字段，直连地址仍自行指定。两者返回普通元组，
 可以直接作为数组元素；框架按声明顺序统一展开列表/元组，不需要 `*`。
 同一容器可以返回多个 endpoint。跨声明引用时保存原 endpoint 对象，
-例如 `load_nginx_url(self, self.proxy_endpoint)`；多站点省略引用会明确报错。
+例如 `load_nginx_url(ResolvedSite.find(self, self.proxy_endpoint))`；多站点省略引用会明确报错。
+`ResolvedSite.find` 返回 ConfigLazy，由 Config.resolve 执行查找；直接读取站点属性前先解析。
+URL/端口参数接收字面值或 ConfigValue；配置键显式使用 ConfigRef，不再隐式查键。
 `Nginx` 不含 `local_id` / `link` / `auth_rule`；授权规则归 `Authelia.access`，
 OIDC 回调仍由 `Authelia.oidc` 声明准确的绝对地址。
 

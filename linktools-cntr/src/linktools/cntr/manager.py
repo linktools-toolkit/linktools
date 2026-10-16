@@ -44,7 +44,7 @@ def describe_origin(container: "BaseContainer") -> str:
     identify the two sides of a duplicate-container-name error."""
     context = container.repo_context
     if context is None:
-        return "container:%s" % id(container.env_config)
+        return "container:%s" % id(container.config)
     origin = "builtin" if context.builtin else (context.repo_name or "repo")
     root_path = context.root_path
     return f"{origin} ({root_path})" if root_path else origin
@@ -57,8 +57,8 @@ class ContainerManager:
         self.name = name or environ.name
         self.logger = environ.get_logger("container")
 
-        self.env_config = self.environ.build_config("container", "")
-        self.env_config.update_defaults(**self.configs)
+        self.config = self.environ.build_config("container", "")
+        self.config.update_defaults(**self.fields)
 
         # Populated by the `containers` cached_property -- structured load
         # failures (import/on_init errors) from the last time containers
@@ -90,7 +90,7 @@ class ContainerManager:
         return get_machine()
 
     @property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             HOST=ConfigField.chain(
                 PromptProvider(),
@@ -133,24 +133,24 @@ class ContainerManager:
 
     @property
     def debug(self) -> bool:
-        # Routed through env_config (cast=bool) instead of a raw
+        # Routed through config (cast=bool) instead of a raw
         # os.environ.get(...) -- DEBUG=0/DEBUG=false must parse as False,
         # not the truthy-any-non-empty-string behavior a bare os.environ
         # read (or Python's own bool(str)) would give.
-        return self.env_config.get("DEBUG", type=bool, default=self.environ.debug)
+        return self.config.get("DEBUG", type=bool, default=self.environ.debug)
 
     # Plain @property, not @cached_property -- these few config-derived
-    # values are cheap to resolve (env_config.get() is itself memoized per
+    # values are cheap to resolve (config.get() is itself memoized per
     # revision), and caching them here would let a set_config/persist/reload
     # within the same process keep returning a stale value forever, since
     # nothing ever invalidates a manager-level cached_property.
     @property
     def container_type(self) -> str:
-        return self.env_config.get("DOCKER_TYPE", type=str)
+        return self.config.get("DOCKER_TYPE", type=str)
 
     @property
     def container_host(self) -> str:
-        host = self.env_config.get("DOCKER_HOST", type=str)
+        host = self.config.get("DOCKER_HOST", type=str)
         if host:
             left, sep, right = host.partition("://")
             return right or left
@@ -158,11 +158,11 @@ class ContainerManager:
 
     @property
     def host(self) -> str:
-        return self.env_config.get("HOST", type=str)
+        return self.config.get("HOST", type=str)
 
     @property
     def project_name(self) -> str:
-        return self.env_config.get("COMPOSE_PROJECT_NAME")
+        return self.config.get("COMPOSE_PROJECT_NAME")
 
     @cached_property
     def root_path(self) -> "Path":
@@ -170,11 +170,11 @@ class ContainerManager:
 
     @property
     def app_path(self) -> "Path":
-        return self.env_config.get("DOCKER_APP_PATH")
+        return self.config.get("DOCKER_APP_PATH")
 
     @property
     def app_data_path(self) -> "Path":
-        return self.env_config.get("DOCKER_APP_DATA_PATH")
+        return self.config.get("DOCKER_APP_DATA_PATH")
 
     @cached_property
     def data_path(self) -> "Path":
@@ -351,7 +351,7 @@ class ContainerManager:
         for container in self.containers.values():
             container.enable = container in containers
         for container in reversed(containers):
-            container.register_configs()
+            container.register_fields()
         return containers
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":

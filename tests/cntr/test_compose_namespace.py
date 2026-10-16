@@ -113,8 +113,8 @@ def test_compose_with_dependencies_expands_selection(monkeypatch, fresh_manager)
 def test_nginx_joins_safeline_tengine_network(monkeypatch, fresh_manager, installed, waf, prefix):
     if not installed:
         fresh_manager.installed_state.remove("safeline")
-    fresh_manager.env_config.set("NGINX_WAF_ENABLE", waf)
-    fresh_manager.env_config.set("SAFELINE_SUBNET_PREFIX", prefix)
+    fresh_manager.config.set("NGINX_WAF_ENABLE", waf)
+    fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", prefix)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
 
@@ -178,7 +178,7 @@ def test_nginx_joins_safeline_network_when_installed_as_dependency(monkeypatch, 
     assert fresh_manager.installed_state.load_names() == ["portainer"]
     assert set(models) == {"nginx", "safeline", "portainer"}
     assert "safeline-ce" not in models["nginx"]["networks"]
-    prefix = fresh_manager.env_config.get("SAFELINE_SUBNET_PREFIX")
+    prefix = fresh_manager.config.get("SAFELINE_SUBNET_PREFIX")
     assert models["nginx"]["services"]["nginx"]["networks"]["safeline-ce"] == {
         "ipv4_address": prefix + ".253",
         "aliases": ["nginx-origin"],

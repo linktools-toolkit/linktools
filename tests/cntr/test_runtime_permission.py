@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Verifies consistent path normalization for chown and chmod: both resolve
-their `path` argument identically via env_config.cast(type="path"), for a
+their `path` argument identically via config.cast(type="path"), for a
 Path object, a plain string, a relative path, or a `~/...` path.
 """
 import os
