@@ -18,9 +18,9 @@ from linktools.runtime import lazy_load
 class Producer:
     def __init__(self, site, installed=("nginx", "authelia", "safeline"), **config):
         self.name = "app"
-        self.config = dict(NGINX_HTTPS_ENABLE=True, NGINX_AUTH_ENABLE=True,
+        self.values = dict(NGINX_HTTPS_ENABLE=True, NGINX_AUTH_ENABLE=True,
                            NGINX_WAF_ENABLE=True, NGINX_HTTP_PORT=80, NGINX_HTTPS_PORT=443)
-        self.config.update(config)
+        self.values.update(config)
         self.config = Config(None, ConfigSchema(), [])
         self.config.get = self.get_config
         self.manager = SimpleNamespace(
@@ -31,7 +31,7 @@ class Producer:
         self.manager.containers["nginx"].sites = {site: ResolvedSite(self, site, 0)}
 
     def get_config(self, key, **kwargs):
-        return self.config[key]
+        return self.values[key]
 
     @property
     def site(self):
@@ -175,9 +175,9 @@ def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
 
 def test_explicit_false_does_not_read_unneeded_global_switches():
     producer = Producer(Nginx.site("a.test", proxy="http://app", https=False, auth=False, waf=False))
-    del producer.config["NGINX_HTTPS_ENABLE"]
-    del producer.config["NGINX_AUTH_ENABLE"]
-    del producer.config["NGINX_WAF_ENABLE"]
+    del producer.values["NGINX_HTTPS_ENABLE"]
+    del producer.values["NGINX_AUTH_ENABLE"]
+    del producer.values["NGINX_WAF_ENABLE"]
     assert producer.site.public_url == "http://a.test"
     assert producer.site.resolve() is producer.site
 
