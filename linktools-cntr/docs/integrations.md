@@ -181,8 +181,10 @@ from linktools.core import ConfigLazy, ConfigRef
 
 extensions=[
     Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
-        ResolvedSite.find(self), "ui", "metacubexd", "#", "setup",
-        queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
+        ResolvedSite.find(self), "/ui/metacubexd/#/setup",
+        queries={"hostname": ConfigRef("MIHOMO_DOMAIN"),
+                 "port": ConfigRef("NGINX_DEFAULT_PORT"),
+                 "secret": ConfigRef("MIHOMO_SECRET")},
     )),
     Authelia.oidc(("{base_url}", "{base_url}/callback",
                    "http://portainer.local:9000")),
@@ -205,7 +207,9 @@ configuration fields are not formatted by this URL step.
 
 Values remain lazy until consumed. Use `load_nginx_url` for site-dependent URLs
 with query values: it checks the site's URL before resolving `queries`, so a
-disabled site leaves those values unread. The example uses the lazy reference `ResolvedSite.find(self)`, which requires exactly one declared
+disabled site leaves those values unread. For a site inheriting the global HTTPS
+setting, NGINX_DEFAULT_PORT already selects the corresponding HTTP/HTTPS port;
+an explicit override of that configuration key is honored. The example uses the lazy reference `ResolvedSite.find(self)`, which requires exactly one declared
 site; an explicit original site/endpoint can be supplied to `find` for multi-site producers. A custom `ConfigLazy`
 that constructs a relative URL may resolve its query values before the endpoint
 discovers that its site is disabled. Relative URLs from a disabled site become

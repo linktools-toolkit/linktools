@@ -363,3 +363,23 @@ def test_config_url_explicit_reference_owns_missing_default_and_string_cast() ->
 def test_config_url_literal_string_is_not_a_configuration_key() -> None:
     config = make_config(URL="https://configured.test")
     assert config.resolve(load_config_url("URL")) == "URL"
+
+
+@pytest.mark.parametrize("name,key,default", [
+    ("lldap", "LLDAP_WEB_PORT", 0), ("safeline", "SAFELINE_PORT", 9200),
+    ("portainer", "PORTAINER_PORT", 9000), ("flare", "FLARE_PORT", 5000),
+])
+def test_builtin_port_fields_own_reference_cast_and_default(
+        fresh_manager: "ContainerManager", name: str, key: str, default: int) -> None:
+    field = ConfigField.coerce(key, fresh_manager.containers[name].configs[key])
+    assert field.cast is int and field.default == default
+    config = make_config(HOST="host.test")
+    config.define(field)
+    concise = load_port_url(ConfigRef(key), https=False)
+    explicit = load_port_url(ConfigRef(key, type=int, default=0), https=False)
+    expected = "http://host.test:%s" % default if default else ""
+    assert config.resolve(concise) == config.resolve(explicit) == expected
+    for raw in ("0", "8080", 65535, 65536):
+        config.set(key, raw)
+        assert type(config.resolve(ConfigRef(key))) is int
+        assert config.resolve(concise) == config.resolve(explicit)
