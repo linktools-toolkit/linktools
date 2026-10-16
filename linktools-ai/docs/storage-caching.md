@@ -313,3 +313,77 @@ rejects new calls and drains admitted display-cache reads before closing their
 sources. Cancelling a close waiter does not cancel that owned drain; a later
 close can await it. A custom backend that does not settle can delay close, rather
 than being reported closed while cache I/O is still in progress.
+
+## Readable final-value buffering
+
+`StorageBuffer` adds an explicitly buffered view over an initialized byte-valued
+store with `get` and `apply_batch`. Existing `AssetStore` and `StorageOverlay`
+can supply these operations; a custom store implements the same structural
+contract. The chosen store must support its batch operation. In particular,
+`AssetStore.apply_batch` requires an atomic-capable Asset backend; the buffer
+cannot create a capability missing from the source.
+
+```python
+from linktools.ai.storage import StorageBuffer, WriteCache
+
+buffer = StorageBuffer(
+    assets,
+    write_cache=WriteCache(),
+    read_pending=True,
+)
+await buffer.enqueue(key, b"first")
+await buffer.enqueue(key, b"latest")
+preview = await buffer.get(key)
+await buffer.flush()
+await buffer.close()
+```
+
+`enqueue` waits for admission capacity and returns only after acceptance. It
+does not return a durable receipt. `enqueue_delete` accepts a deletion in the
+same order. Closing or a failed buffer rejects new writes explicitly rather
+than returning an easily ignored boolean. Cancellation while waiting for
+capacity does not accept the waiting mutation.
+
+`read_pending` is selected once at construction. The default `False` reads the
+actual committed source. `True` overlays the latest accepted, unresolved local
+value or deletion, then falls back to the source. It does not expose another
+buffer's pending writes. In pending-visible mode, a source read overlapping a
+complete enqueue/commit/settlement cycle is rechecked rather than returning its
+obsolete result. Committed-only mode preserves one source read's snapshot
+contract; it does not retry to chase later concurrent commits.
+Domain authorization still belongs to the domain owner before using this
+storage capability.
+
+This is a final-value buffer: repeated keys within one dispatch can collapse to
+the last value. Intermediate values need not be persisted. The source receives
+ordinary `StorageChange` PUT/DELETE entries; conditional revisions, RESET,
+metadata changes and business atomic batches are not implicitly queued.
+`Metrics` continues to use append buffering, where every observation matters.
+
+A successful `flush` confirms that intentions accepted before the call have
+been persisted, or superseded by a later same-key value that was successfully
+persisted. It does not promise an intermediate version or a transactional
+snapshot. A failed or unknown write stops further acceptance and is reported
+by `flush` and `close`; it is not silently retried or described as rolled back.
+Reads then use actual source data, which may include a write whose response was
+lost. Queue entries never dispatched are not called committed.
+
+All writes for a buffered key must follow the same owner ordering. Writing
+straight to the source while older buffered work remains can allow that older
+work to overwrite the new value. Source `put` retains its existing durable
+contract, but it is not an ordering bypass for this buffer.
+
+The buffer borrows its store and does not close it. Close stops admission and
+drains accepted reads and real sink work. Cancelling a close waiter does not
+abandon owned work; wait for close to finish before closing the borrowed store.
+An uncooperative sink cannot be reported quiescent merely because a timeout or
+cancellation was requested. Queue capacity remains an entry-count bound plus
+one in-flight batch, not a byte-hard memory limit; pending views reference the
+same immutable bytes rather than copying them into another payload cache.
+
+Committed reads retain the store's existing `ContentCache`, metadata and
+source-validation behavior. This buffer can reduce repeated writes and serve
+local pending values; it does not promise zero-SQL committed reads. Native SQL
+batching, transaction-local record reuse, CAS and atomic Runtime commands stay
+with the authoritative store. No execution control state is moved into this
+best-effort buffer merely because it shares a database.

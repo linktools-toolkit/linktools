@@ -368,7 +368,7 @@ WriteCacheScope.confirmed 只表示回调成功返回。用于已提交读视图
 | 独立 DURABLE RuntimeHistory | archive / 权威对象 reader | 只读已提交；不保证看到另一实例尚未落库的 staging |
 | revision 提示与能力元数据 | 已提交 head、RevisionSource、Capability reader | 读缓存/失效问题，不是需要批量写库的 pending 事实；继续单飞与生命周期修复 |
 | 已提交正文 | ObjectStore + CacheBackend | 可丢读副本，不能混入未确认正文来提高命中率 |
-| 显式允许失败的领域暂存读 | 需要由相应领域 reader 封装 pending 与 committed 的交接 | 尚需收敛通用接线；不能要求业务调用方自己拼接队列和数据库结果 |
+| 显式允许失败的按 key 最终值读写 | StorageBuffer 复用源 get/apply_batch，内部封装 pending 与 committed 交接 | 第14节的单一视图负责接纳、覆盖、源读竞态与失败回源，不要求普通消费者拼接队列 |
 
 因此，“两条路径”不需要两个 WriteCacheScope 或可靠/不可靠 mode，也不能以提供 pending_items 就声称通用可读路径已完成。框架必须封装使用方所需的读取语义；原有领域 staging 可以直接复用，不能为覆盖名义新增没有实际消费者的万能 KV 存储。
 
@@ -378,12 +378,44 @@ StorageWriter 的单项写与 BatchStorageWriter.apply_batch 仍保留真实提�
 
 简单把空 InMemoryAssetBackend 放在持久层前面不能表达通用删除暂存：删除只存在于下层的 key 可能仍让下层可读。非 primary writer 的新值也可能被更高层遮挡。因此不把任意 StorageOverlay 自动包装成乐观写缓存。
 
-任何后续按 key 可读封装都必须处理源读跨并发变更：读取旧源开始后，同 key 可经历接纳、落库、清空 pending；源读返回时仅再看一次 pending 仍可能返回旧值。必须保留该次读取期间的变更证据，变化后重新核对或回源；证据只随未结算项/活跃读取存在，不能永久积累所有历史 key。未接纳或已结算失败项不得覆盖后来值；删除暂存必须与“没有 pending”明确区分。
+pending-visible 按 key 可读封装必须处理源读跨并发变更：读取旧源开始后，同 key 可经历接纳、落库、清空 pending；源读返回时仅再看一次 pending 仍可能返回旧值。必须保留该次读取期间的变更证据，变化后重新核对或回源；证据只随未结算项/活跃读取存在，不能永久积累所有历史 key。未接纳或已结算失败项不得覆盖后来值；删除暂存必须与“没有 pending”明确区分。
 
 append/聚合查询则不能套按 key 覆盖：inflight 与持久结果可能是同一条记录，先查询数据库再读取 pending 也可能在交接窗口漏项。稳定 ID、高水位和去重由原领域 owner 内部封装，不能丢给普通调用方，也不能靠通用 tuple 拼接解决。
 
 ### 当前公开接口结论与设计状态
 
-保留第8节单一 WriteCacheScope 的接纳、批写、flush/status/close 合同。仅已提交读视图沿现有 reader 与已提交 CacheBackend；可读暂存优先使用已有领域 owner 的读取接口。不新增 BufferedStorage 类、mode 参数或 pending_items 公共 API，也不将第8节纯写缓冲误称为已覆盖通用未落库读取。
+第8节 WriteCacheScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
 
-本节已确认两种读取可见性及共同批写机制，修正了“第二条路径必须直接写库”的错误假定。通用可读接线还需以实际读取合同收敛并独立复审；本节不是新增 API 的实现承诺或全范围设计通过声明。实现验证须增加：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
+两种读取可见性都支持共同批写机制，仅已提交可读不要求同步逐项写入。第14节的最终值缓存和第8节的 append 缓冲保持不同的数据语义。验收必须覆盖：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
+
+## 14. 通用按 key 可读缓冲
+
+`StorageBuffer(store, read_pending=False, write_cache=WriteCache(...))` 为已存在的
+字节值 store 增加独立的跨调用缓冲视图。store 继续通过公开 `get` / `apply_batch`
+提供权威读取和批写；不要求另一套持久适配器，不替代 `StorageWriter` 的持久回执、
+CAS、RESET 或领域原子事务。普通消费者只操作一个 buffer：`enqueue` /
+`enqueue_delete` 接纳、`get` 读取、`flush` 确认及 `close` 排空。
+
+接纳容量不足时等待，关闭或失败明确报错；返回不代表已持久化。读取模式在装配时
+选择一次：默认仅源的已提交视图；启用 `read_pending` 时，最新未结算值或删除覆盖
+源值。同 key 同批可只写最后意图，不能把中间版本未落库称为数据丢失。Metrics 的
+append 记录不采用这种覆盖合并。
+
+`flush` 成功表示调用前意图已落库，或已被之后成功落库的同 key 值覆盖；不是精确
+前缀快照或每个中间版本的持久承诺。首个写失败或结果未知使 buffer 停止接纳新写，
+读取回源，`flush` / `close` 明确失败；不自动重放、不增加 receipt/ack/reset 系统。
+已经部分提交的事实仍由源决定，不把异常当作回滚。
+
+并发正确性归 buffer：pending-visible 源读取跨完整接纳、提交和移除 pending 的窗口必须重验；
+committed-only 保留单次源读取的快照合同，不追踪等待期间的后续提交。旧批
+结算不能删新值；未 dispatch 队列在关闭时也必须结算清理。pending 与活跃读取的
+代次记录仅保留必要生命周期，不永久积累历史 key。使用同一不可变 bytes 引用，沿用
+排队条数加一个 inflight 批次的容量合同，不声称字节级硬上限。
+
+源为借用资源。关闭先停止新接纳，等待实际写入和已接纳读取退出后才能允许源关闭；
+取消等待者不能丢失内部任务所有权。同 key 写入不得绕过 buffer 与旧队列竞争。
+读取仍遵守领域授权，已提交读取可复用源已有 ContentCache，但不能因此跳过其源校验。
+
+这项通用能力不要求 ExecutionStatus 改为可丢状态，不接管 Runtime 事务内 identity
+map、原生批 SQL、checkpoint、取消、恢复和终态提交。它补充的是两种读取可见性与
+最终值的跨调用聚合；源的强一致责任保持在原 owner。

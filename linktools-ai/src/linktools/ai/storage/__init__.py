@@ -119,13 +119,14 @@ from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
 
-from ._write_cache import WriteCache, WriteCacheFlushResult, WriteCacheScope, WriteCacheStatus
+from ._write_cache import StorageBuffer, WriteCache, WriteCacheFlushResult, WriteCacheScope, WriteCacheStatus
 
 __all__ = [
     "StreamBackend",
     "StreamWriter",
     "StreamBatch",
     "InMemoryStreamBackend",
+    "StorageBuffer",
     "WriteCache",
     "WriteCacheFlushResult",
     "WriteCacheScope",
