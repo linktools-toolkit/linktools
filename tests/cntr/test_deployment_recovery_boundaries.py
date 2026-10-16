@@ -49,7 +49,7 @@ def test_inspection_cannot_overwrite_migration_recovery_input(tmp_path, saved_sn
     owner.get_source_path = lambda name: tmp_path / "source" / name
     owner.get_docker_compose_file = lambda: write_docker_compose_file(owner)
     manager.docker_compose_names = ("compose.yml",)
-    manager.env_config = SimpleNamespace(get=lambda *args, **kwargs: None)
+    manager.config = SimpleNamespace(get=lambda *args, **kwargs: None)
     manager.container_type = "docker-rootless"
     manager.runtime = RuntimeProcessFactory(manager)
     manager.runtime.create_process = lambda *args, **kwargs: SimpleNamespace(args=args)

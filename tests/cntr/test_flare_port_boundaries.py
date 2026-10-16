@@ -28,7 +28,7 @@ def test_direct_port_boundary_survives_disabled_public_navigation(nginx: bool, p
         return port if key == "PORT" else "host.test"
 
     producer.get_config = get_config
-    producer.env_config.get = get_config
+    producer.config.get = get_config
     assert reads == []
     result = _render_navigation(manager)
     assert result["apps.yml"]["links"] == []

@@ -101,7 +101,7 @@ def test_unchanged_group_does_not_run_chgrp(file_owner):
 def ownership_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(process_module.shutil, "which", lambda name: "/usr/bin/" + name)
     runtime = RuntimeProcessFactory(SimpleNamespace(system="linux",
-        env_config=SimpleNamespace(cast=lambda value, **kwargs: value),
+        config=SimpleNamespace(cast=lambda value, **kwargs: value),
         logger=SimpleNamespace(debug=lambda message: None, warning=lambda message: None)))
     calls = []
     runtime.create_process = lambda *args, **kwargs: SimpleNamespace(
@@ -151,8 +151,8 @@ def test_numeric_group_change_checks_effective_memberships(ownership_runtime, mo
 @pytest.mark.parametrize("uid", [0, 98765])
 def test_template_ownership_accepts_lazy_numeric_ids_and_root(fresh_manager, tmp_path, monkeypatch, uid):
     owner = fresh_manager.containers["flare"]
-    fresh_manager.env_config.set("DOCKER_UID", uid)
-    fresh_manager.env_config.set("DOCKER_GID", 87654)
+    fresh_manager.config.set("DOCKER_UID", uid)
+    fresh_manager.config.set("DOCKER_GID", 87654)
     hooks = []
     monkeypatch.setattr(owner, "add_start_hook", lambda key, hook, **kwargs: hooks.append(hook))
     calls = []

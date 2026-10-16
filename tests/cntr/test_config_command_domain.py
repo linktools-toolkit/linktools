@@ -21,14 +21,14 @@ def _patch_shared_manager(fresh_manager, monkeypatch):
 
 
 def test_get_prints_resolved_value(fresh_manager, capsys):
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
     ConfigCommand().on_command_get(keys=["HOST"], show_secret=True)
     assert "HOST=10.0.0.5" in capsys.readouterr().out
 
 
 def test_get_supports_multiple_keys(fresh_manager, capsys):
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
-    fresh_manager.env_config.persist("DOCKER_USER", "alice")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
+    fresh_manager.config.persist("DOCKER_USER", "alice")
     ConfigCommand().on_command_get(keys=["HOST", "DOCKER_USER"], show_secret=True)
     out = capsys.readouterr().out
     assert "HOST=10.0.0.5" in out
@@ -36,26 +36,26 @@ def test_get_supports_multiple_keys(fresh_manager, capsys):
 
 
 def test_explain_reports_source_and_resolved_value(fresh_manager):
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
-    info = fresh_manager.env_config.explain("HOST")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
+    info = fresh_manager.config.explain("HOST")
     assert info["resolved_value"] == "10.0.0.5"
     assert info["selected_source"] == "persistent"
 
 
 def test_explain_json_output_is_serializable(fresh_manager, capsys):
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
     ConfigCommand().on_command_explain(key="HOST", as_json=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["resolved_value"] == "10.0.0.5"
 
 
 def test_validate_passes_when_all_persisted_values_are_well_typed(fresh_manager):
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
     ConfigCommand().on_command_validate()  # must not raise
 
 
 def test_validate_json_reports_valid_true_when_clean(fresh_manager, capsys):
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
     ConfigCommand().on_command_validate(as_json=True)
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is True
@@ -68,10 +68,10 @@ def test_validate_raises_on_a_malformed_persisted_value(fresh_manager):
     # A synthetic field with a real numeric cast: most built-in cntr fields
     # use permissive string/path casts that never fail on arbitrary text, so
     # this is the only reliable way to exercise a cast failure.
-    fresh_manager.env_config.define(ConfigField(name="TEST_PORT", cast=int))
+    fresh_manager.config.define(ConfigField(name="TEST_PORT", cast=int))
     store = fresh_manager.environ._config_store
     store.set("container.TEST_PORT", "not-a-number")
-    fresh_manager.env_config.reload()
+    fresh_manager.config.reload()
 
     with pytest.raises(ContainerError):
         ConfigCommand().on_command_validate()
@@ -84,7 +84,7 @@ def test_validate_does_not_invoke_docker_compose(fresh_manager, monkeypatch):
         raise AssertionError("config validate must not create a docker compose process")
 
     monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fail)
-    fresh_manager.env_config.persist("HOST", "10.0.0.5")
+    fresh_manager.config.persist("HOST", "10.0.0.5")
     ConfigCommand().on_command_validate()
 
 
@@ -101,7 +101,7 @@ def test_validate_does_not_prompt_for_unconfigured_fields(fresh_manager, monkeyp
 
 def test_unknown_key_round_trips_without_a_schema_field(fresh_manager, capsys):
     ConfigCommand().on_command_set(configs={"UNDECLARED": "value"})
-    assert fresh_manager.env_config.schema.get("UNDECLARED") is None
+    assert fresh_manager.config.schema.get("UNDECLARED") is None
     ConfigCommand().on_command_get(keys=["UNDECLARED"], show_secret=True)
     assert capsys.readouterr().out == "UNDECLARED=value\n"
     ConfigCommand().on_command_explain(key="UNDECLARED", as_json=True)

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=Nginx.domain(self),

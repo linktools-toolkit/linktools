@@ -51,7 +51,7 @@ def test_nginx_owns_one_site_snapshot_shared_by_all_consumers(fresh_manager, mon
     nginx = fresh_manager.containers["nginx"]
     sites = nginx.sites
     authelia = fresh_manager.containers["authelia"]
-    assert authelia.env_config.resolve(load_nginx_url(ResolvedSite.find(authelia, None))) == authelia.public_url
+    assert authelia.config.resolve(load_nginx_url(ResolvedSite.find(authelia, None))) == authelia.public_url
     fresh_manager.containers["flare"]._navigation_files()
     assert nginx.sites is sites
     assert calls == [fresh_manager]
@@ -102,9 +102,9 @@ def test_absent_flare_does_not_consume_navigation(fresh_manager, monkeypatch):
 def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manager):
     import yaml
 
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
-    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", 9443)
     operations = fresh_manager.compose_operations
     selection = operations.select(["nginx"], for_start=True)
     synchronized = selection.project_containers
@@ -157,10 +157,10 @@ def _site_navigation_manager(declarations, links=None, nginx=True):
         reads.append(key)
         return {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443}[key]
     manager = object.__new__(ContainerManager)
-    manager.env_config = Config(None, ConfigSchema(), [])
-    manager.env_config.get = config
+    manager.config = Config(None, ConfigSchema(), [])
+    manager.config.get = config
     producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config,
-                               env_config=manager.env_config)
+                               config=manager.config)
     manager.containers = {"app": producer, "nginx": SimpleNamespace(sites={}),
                           "flare": SimpleNamespace(name="flare", order=0)}
     producer.test_sites = declarations
@@ -269,7 +269,7 @@ def test_builtin_navigation_matches_complete_output_baseline(fresh_manager):
         "NGINX_HTTPS_PORT": 9443, "LLDAP_WEB_PORT": 17170,
         "SAFELINE_PORT": 9200, "PORTAINER_PORT": 9000, "FLARE_PORT": 5000,
     }.items():
-        fresh_manager.env_config.set(key, value)
+        fresh_manager.config.set(key, value)
     expected = json.loads((Path(__file__).parent / "snapshots/navigation.json").read_text(encoding="utf-8"))
     assert _render_navigation(fresh_manager) == expected
     assert sum(len(data["links"]) for data in expected.values()) == 7
@@ -289,7 +289,7 @@ def test_navigation_merge_preserves_producer_ties_and_key_collisions():
         "path": public("Path", "web", "", "https://one.test/path"),
     })
     producer = SimpleNamespace(name="other", order=10, manager=manager,
-                               env_config=manager.env_config)
+                               config=manager.config)
     manager.containers["other"] = producer
     site = Nginx.site("other.test")
     manager.integration_snapshot["other"] = (
@@ -561,27 +561,27 @@ def test_flare_bookmarks_reject_application_categories() -> None:
 
 
 def test_authelia_admin_link_does_not_change_oidc_issuer(fresh_manager):
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
-    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", 9443)
     authelia = fresh_manager.containers["authelia"]
     from linktools.cntr.ext import Flare
 
     link = next(value for value in authelia.integrations if isinstance(value, Flare))
-    assert link.resolve_url(authelia.env_config) == "https://sso.example.test:9443/auth-admin"
+    assert link.resolve_url(authelia.config) == "https://sso.example.test:9443/auth-admin"
     assert authelia.oidc_client["issuer_url"] == "https://sso.example.test:9443"
     assert authelia.oidc_client["authorization_url"] == "https://sso.example.test:9443/api/oidc/authorization"
 
 
 def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
     container = fresh_manager.containers["portainer"]
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
-    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", 9443)
     template = tmp_path / "docker-compose.yml"
-    template.write_text('{{ container.env_config.resolve(urls.load_nginx_url(site, "settings", queries={"mode": "a b"})) }}')
+    template.write_text('{{ container.config.resolve(urls.load_nginx_url(site, "settings", queries={"mode": "a b"})) }}')
     assert container.render_template(template, site=ResolvedSite.find(container)) == "https://portainer.example.test:9443/settings?mode=a+b"
 
 

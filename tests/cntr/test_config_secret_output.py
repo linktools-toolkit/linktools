@@ -19,7 +19,7 @@ _SECRET_VALUE = "very-sensitive-value-78231"
 
 
 def _define_secret_field(manager):
-    manager.env_config.define(ConfigField(name="CREDENTIAL", secret=True))
+    manager.config.define(ConfigField(name="CREDENTIAL", secret=True))
 
 
 def test_set_redacts_secret_in_logger_output(monkeypatch, fresh_manager, caplog):
@@ -38,7 +38,7 @@ def test_set_redacts_secret_in_logger_output(monkeypatch, fresh_manager, caplog)
 def test_get_default_redacts_secret(monkeypatch, fresh_manager, caplog):
     import logging
     _define_secret_field(fresh_manager)
-    fresh_manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    fresh_manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
     with caplog.at_level(logging.INFO):
@@ -51,7 +51,7 @@ def test_get_default_redacts_secret(monkeypatch, fresh_manager, caplog):
 
 def test_get_show_secret_reveals_value(monkeypatch, fresh_manager, capsys):
     _define_secret_field(fresh_manager)
-    fresh_manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    fresh_manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
     ConfigCommand().on_command_get(keys=["CREDENTIAL"], show_secret=True)
@@ -62,7 +62,7 @@ def test_get_show_secret_reveals_value(monkeypatch, fresh_manager, capsys):
 def test_list_default_redacts_secret(monkeypatch, fresh_manager, caplog):
     import logging
     _define_secret_field(fresh_manager)
-    fresh_manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    fresh_manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
     with caplog.at_level(logging.INFO):
@@ -75,7 +75,7 @@ def test_list_default_redacts_secret(monkeypatch, fresh_manager, caplog):
 
 def test_list_show_secret_reveals_value(monkeypatch, fresh_manager, capsys):
     _define_secret_field(fresh_manager)
-    fresh_manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    fresh_manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
     ConfigCommand().on_command_list(names=[], show_secret=True)
@@ -85,7 +85,7 @@ def test_list_show_secret_reveals_value(monkeypatch, fresh_manager, capsys):
 
 def test_explain_json_does_not_leak_secret(monkeypatch, fresh_manager, capsys):
     _define_secret_field(fresh_manager)
-    fresh_manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    fresh_manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
     ConfigCommand().on_command_explain(key="CREDENTIAL", as_json=True)
@@ -96,7 +96,7 @@ def test_explain_json_does_not_leak_secret(monkeypatch, fresh_manager, capsys):
 def test_explain_text_does_not_leak_secret(monkeypatch, fresh_manager, caplog):
     import logging
     _define_secret_field(fresh_manager)
-    fresh_manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    fresh_manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
 
     with caplog.at_level(logging.INFO):

@@ -14,7 +14,7 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
     class Links:
         name = "app"
         hooks = HookRegistry()
-        env_config = Config(None, ConfigSchema(), [DictSource({})])
+        config = Config(None, ConfigSchema(), [DictSource({})])
     container = Links()
     declaration = Nginx.site("app.example.com")
     site = ResolvedSite(container, declaration, 0)
@@ -24,8 +24,8 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
     })})
     first = load_nginx_url(ResolvedSite.find(container, None))
     second = load_nginx_url(ResolvedSite.find(container, None), "admin")
-    assert container.env_config.resolve(first) == "https://app.example.com"
-    assert container.env_config.resolve(second) == "https://app.example.com/admin"
+    assert container.config.resolve(first) == "https://app.example.com"
+    assert container.config.resolve(second) == "https://app.example.com/admin"
     assert container.hooks.describe() == []
 
 

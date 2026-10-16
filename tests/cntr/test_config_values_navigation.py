@@ -40,21 +40,21 @@ def _fail(config: "Config") -> None:
 
 def _manager(*entries: "tuple[str, Config, Any]", nginx: bool = True) -> "ContainerManager":
     manager = object.__new__(ContainerManager)
-    manager.env_config = _Config()
+    manager.config = _Config()
     manager.containers = {}
     manager.integration_snapshot = {"flare": (), "authelia": ()}
     for name, builtin in (("flare", "120-flare"), ("authelia", "102-authelia")):
         consumer = object.__new__(builtin_container_type(builtin))
         consumer._name = name
         consumer.manager = manager
-        consumer.get_config = manager.env_config.get
+        consumer.get_config = manager.config.get
         manager.containers[name] = consumer
     manager.containers["authelia"].__dict__["public_url"] = "https://sso.test"
     manager.containers["nginx"] = SimpleNamespace(sites={})
     if nginx:
         manager.integration_snapshot["nginx"] = ()
     for order, (name, config, declarations) in enumerate(entries):
-        producer = SimpleNamespace(name=name, order=order, env_config=config,
+        producer = SimpleNamespace(name=name, order=order, config=config,
                                    manager=manager, get_config=config.get)
         manager.containers[name] = producer
         values = declarations(producer) if callable(declarations) else declarations

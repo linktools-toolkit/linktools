@@ -124,6 +124,21 @@ set `Nginx.site(..., auth=False)` explicitly to retain its no-auth behavior.
 sites must use `auth=False` when global authentication is enabled.
 Migrate callers and templates together; there is no compatibility wrapper.
 
+## Configuration declarations and values
+
+Container and manager `fields` declare configuration fields and defaults;
+`config` is the shared Config instance that resolves their values.
+`environ.config` retains its existing meaning. `register_fields()` registers a
+container's normal fields at the existing loader/preparation boundaries.
+`extra_fields` describes additional fields computed on demand, such as selected
+DNS-provider credentials. Reading or registering normal fields does not evaluate
+these extras; their existing consumers still control evaluation and registration.
+
+Migrate `configs` to `fields`, `env_config` to `config`, `extend_configs` to
+`extra_fields`, and `register_configs()` to `register_fields()`. No old aliases
+remain. Configuration keys, namespaces, ConfigField/ConfigRef semantics and
+persistent values are unchanged.
+
 ## Primary endpoints and explicit extensions
 
 `endpoint` is a pure function returning ordinary declarations for the producer's
@@ -274,14 +289,14 @@ lists and tuples without mutating them. It leaves ordinary strings, callables,
 custom objects, dictionary keys and existing `Proxy` values alone.
 
 Constructing or scanning these declarations does not read configuration. Consumers
-supply `producer.env_config`, so one expression can be reused with separate Config
+supply `producer.config`, so one expression can be reused with separate Config
 instances. The expressions do not cache results or register fields. Keep schema
-and provider declarations in `ConfigField`/`configs`. The URL factories retain
+and provider declarations in `ConfigField`/`fields`. The URL factories retain
 their existing successful-result caching. An inline field can supply its own
 provider, cast, validator and default without being registered in the schema.
 For example, `ConfigRef(ConfigField("APP_PORT", default="8080", cast=int))`
 resolves to an integer even when `APP_PORT` was not declared beforehand.
-Unnamed fields belong in `configs`, where the dictionary key supplies their name.
+Unnamed fields belong in `fields`, where the dictionary key supplies their name.
 Existing configured values still outrank the field's provider. With the standard
 `DefaultSource(schema)`, an existing same-name schema default remains ahead of
 the inline field's default. Explicit field reads do not share the name-keyed
@@ -292,7 +307,7 @@ field reads with `ConfigRef("KEY", type=..., default=...)`; use `ConfigFormat`
 or `ConfigLazy` for computed values. Built-in consumers resolve these declarations
 with the producer's Config; custom consumers call `config.resolve(value)`.
 For an ad-hoc `ConfigField`, pass the field directly to `ConfigRef(field)` to
-resolve it without registration. Declare it in `configs` or call `config.define(field)`
+resolve it without registration. Declare it in `fields` or call `config.define(field)`
 when subsequent name-based reads should use that schema. Immediate
 `container.get_config(ConfigField(...))` retains its explicit registration behavior.
 

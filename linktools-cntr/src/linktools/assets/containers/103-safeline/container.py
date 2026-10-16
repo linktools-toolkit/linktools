@@ -22,7 +22,7 @@ class Container(BaseContainer):
         return ["nginx"]
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",

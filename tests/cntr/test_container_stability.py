@@ -71,17 +71,17 @@ def test_subcommand_methods_stay_in_base_container_dict():
         assert name in BaseContainer.__dict__, f"{name} moved off BaseContainer"
 
 
-def test_configs_override_is_used_by_manager_prepare(fresh_manager, tmp_path):
+def test_fields_override_is_used_by_manager_prepare(fresh_manager, tmp_path):
     calls = []
 
     class _Custom(BaseContainer):
         @property
-        def configs(self):
+        def fields(self):
             calls.append(1)
-            return super().configs
+            return super().fields
 
     container = _Custom(fresh_manager, tmp_path, name="999-custom")
-    fresh_manager.env_config.update_defaults(**container.configs)
+    fresh_manager.config.update_defaults(**container.fields)
     assert calls == [1]
 
 
@@ -166,3 +166,39 @@ def test_source_container_context_path_uses_overridden_source_properties(fresh_m
 
     container = _Custom(fresh_manager, tmp_path, name="999-custom")
     assert container.get_docker_context_path() == container._source_root / "current" / "unpacked"
+
+
+def test_field_registration_does_not_evaluate_extra_fields(fresh_manager, tmp_path):
+    from linktools.core import ConfigField
+    calls = []
+
+    class Custom(BaseContainer):
+        @property
+        def fields(self):
+            calls.append("fields")
+            return {"NORMAL_FIELD": ConfigField(cast=int, default=7)}
+
+        @property
+        def extra_fields(self):
+            calls.append("extra")
+            return {"EXTRA_FIELD": ConfigField(name="EXTRA_FIELD", cast=int, default=self.get_config("NORMAL_FIELD") + 1)}
+
+    container = Custom(fresh_manager, tmp_path, name="999-fields")
+    assert container.config is fresh_manager.config
+    container.register_fields()
+    assert calls == ["fields"]
+    assert container.get_config("NORMAL_FIELD") == 7
+    field = container.extra_fields["EXTRA_FIELD"]
+    assert calls == ["fields", "extra"]
+    assert container.config.schema.get("EXTRA_FIELD") is None
+    assert container.get_config(field) == 8
+
+
+def test_configuration_names_have_no_legacy_aliases(fresh_manager, tmp_path):
+    container = BaseContainer(fresh_manager, tmp_path, name="999-fields")
+    for owner in (container, fresh_manager):
+        assert not hasattr(owner, "env_config")
+        assert not hasattr(owner, "configs")
+    assert not hasattr(container, "extend_configs")
+    assert not hasattr(container, "register_configs")
+    assert fresh_manager.environ.config is not fresh_manager.config

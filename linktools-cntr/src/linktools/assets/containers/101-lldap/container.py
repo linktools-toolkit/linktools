@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
             domain = cfg.get("NGINX_ROOT_DOMAIN")
             parts = domain.split(".")

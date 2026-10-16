@@ -32,7 +32,7 @@ def test_authelia_written_config_uses_only_complete_resolved_callbacks(fresh_man
     provider = fresh_manager.containers["authelia"]
     producer = fresh_manager.containers["portainer"]
     provider.public_url = "https://sso.test"
-    producer.env_config.set("CALLBACK_URL", "http://private.test:65535/cb?q=%2F")
+    producer.config.set("CALLBACK_URL", "http://private.test:65535/cb?q=%2F")
     callbacks = Authelia.oidc(("/callback", "{base_url}", "//host.test/cb", "https:///cb", "",
                               ConfigRef("CALLBACK_URL"), "custom://app.test/callback"))
     monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, callbacks),)))

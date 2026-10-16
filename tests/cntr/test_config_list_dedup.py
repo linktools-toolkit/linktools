@@ -31,7 +31,7 @@ def _install_repo_with_secret_field(tmp_path):
         "from linktools.cntr import BaseContainer\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return dict(AIONUI_JWT_SECRET=ConfigField(secret=True, default='generated-secret'))\n"
     )
     manager.repos.add(str(repo))
@@ -44,10 +44,10 @@ def test_repo_field_persisted_key_is_not_listed_twice(monkeypatch, tmp_path, cap
     container = manager.containers["aionui"]
     # Register the field, then persist it (as a cached secret provider would
     # on first resolution) -- this is what makes it show up via the shared
-    # manager.env_config.persisted_keys() sweep as well as the container's
+    # manager.config.persisted_keys() sweep as well as the container's
     # own configs.
-    container.env_config.update_defaults(**container.configs)
-    container.env_config.persist("AIONUI_JWT_SECRET", "s3cr3t")
+    container.config.update_defaults(**container.fields)
+    container.config.persist("AIONUI_JWT_SECRET", "s3cr3t")
 
     monkeypatch.setattr(cntr_shared, "manager", manager)
     ConfigCommand().on_command_list(names=[], show_secret=True)

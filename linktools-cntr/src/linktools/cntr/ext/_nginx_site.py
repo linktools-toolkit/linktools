@@ -95,7 +95,7 @@ class ResolvedSite:
 
     @cached_property
     def server_name(self) -> str:
-        return self._text(self.producer.env_config.resolve(self._declaration.server_name), "server_name")
+        return self._text(self.producer.config.resolve(self._declaration.server_name), "server_name")
 
     @cached_property
     def enabled(self) -> bool:
@@ -103,7 +103,7 @@ class ResolvedSite:
 
     @cached_property
     def default_server(self) -> bool:
-        return bool(self.producer.env_config.resolve(self._declaration.default_server)) if self.enabled else False
+        return bool(self.producer.config.resolve(self._declaration.default_server)) if self.enabled else False
 
     @cached_property
     def literal_domain(self) -> "Optional[str]":
@@ -113,7 +113,7 @@ class ResolvedSite:
     def _switch(self, name: str) -> bool:
         if not self.enabled:
             return False
-        requested = self.producer.env_config.resolve(getattr(self._declaration, name))
+        requested = self.producer.config.resolve(getattr(self._declaration, name))
         if requested is not None and not isinstance(requested, bool):
             self._error(name + " must be None or a boolean")
         if requested is not None and not bool(requested):
@@ -150,7 +150,7 @@ class ResolvedSite:
         """Resolve a public URL, optionally leaving a non-concrete identity unset."""
         if not self.enabled:
             return ""
-        explicit = self.producer.env_config.resolve(self._declaration.public_url)
+        explicit = self.producer.config.resolve(self._declaration.public_url)
         if explicit is not None:
             return self._text(explicit, "public_url")
         if self.literal_domain is None:
@@ -165,23 +165,23 @@ class ResolvedSite:
     def template(self) -> "Optional[str]":
         if not self.enabled:
             return None
-        value = self.producer.env_config.resolve(self._declaration.template)
+        value = self.producer.config.resolve(self._declaration.template)
         if value is MISSING:
             self._error("template must be a path or None")
         return None if value is None else str(value)
 
     @cached_property
     def proxy(self) -> "Optional[str]":
-        return self._text(self.producer.env_config.resolve(self._declaration.proxy), "proxy", optional=True) if self.enabled else None
+        return self._text(self.producer.config.resolve(self._declaration.proxy), "proxy", optional=True) if self.enabled else None
 
     def _sequence(self, field: str, active: bool = True) -> "tuple[str, ...]":
         if not self.enabled or not active:
             return ()
-        values = self.producer.env_config.resolve(getattr(self._declaration, field))
+        values = self.producer.config.resolve(getattr(self._declaration, field))
         if isinstance(values, (str, bytes)):
             self._error(field + " must be a sequence of strings")
         try:
-            return tuple(self._text(self.producer.env_config.resolve(value), field) for value in values)
+            return tuple(self._text(self.producer.config.resolve(value), field) for value in values)
         except TypeError:
             self._error(field + " must be a sequence of strings")
 
@@ -190,10 +190,10 @@ class ResolvedSite:
             return MappingProxyType({})
         value = getattr(self._declaration, field)
         if resolve:
-            value = self.producer.env_config.resolve(value)
+            value = self.producer.config.resolve(value)
         if not isinstance(value, Mapping):
             self._error(field + " must be a mapping")
-        return MappingProxyType(self.producer.env_config.resolve(dict(value)) if resolve else dict(value))
+        return MappingProxyType(self.producer.config.resolve(dict(value)) if resolve else dict(value))
 
     @cached_property
     def waf_bypass(self) -> "tuple[str, ...]":

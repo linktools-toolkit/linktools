@@ -104,9 +104,9 @@ def safe_display_url(url: "Any") -> "Any":
     return parsed._replace(netloc=netloc).geturl()
 
 
-def _compute_manager_config_keys(env_config: "Config") -> "frozenset[str]":
+def _compute_manager_config_keys(config: "Config") -> "frozenset[str]":
     keys = set()
-    for field in env_config.schema.fields():
+    for field in config.schema.fields():
         keys.add(field.name)
         keys.update(field.aliases)
     return frozenset(keys)
@@ -504,14 +504,14 @@ class RepoService(object):
         """Manager-owned keys (``_compute_manager_config_keys``) this
         repository's own ``.linktools.json`` declares under ``env``
         -- every container resolves fields through the manager's own shared
-        ``env_config``, so a repository's local ``env`` section is
+        ``config``, so a repository's local ``env`` section is
         never actually consulted for these (or any other key);
         ``describe()``/``validate()`` surface them as a warning instead of
         leaving the mismatch invisible. Never rejects the repository over
         this -- an existing file with a reserved key must keep loading.
         """
         local_env = file_config.get("env", {})
-        reserved = _compute_manager_config_keys(self.manager.env_config)
+        reserved = _compute_manager_config_keys(self.manager.config)
         return sorted(key for key in local_env if key in reserved)
 
     def validate(self, url: "str | None" = None) -> "tuple[dict[str, Any], list[str]]":

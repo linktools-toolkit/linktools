@@ -25,10 +25,10 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             # NGINX_WILDCARD_DOMAIN is owned by the nginx container (its own
-            # `configs` declares the field's cast/provider/default); this
+            # `fields` declares the field's cast/provider/default); this
             # container must not redeclare it with a different default.
             FLARE_TAG="latest",
             FLARE_DOMAIN=Nginx.domain(self, ""),
@@ -130,7 +130,7 @@ class Container(BaseContainer):
         for producer, link in self._iter_links():
             if not isinstance(link, Flare):
                 continue
-            url = link.resolve_url(producer.env_config)
+            url = link.resolve_url(producer.config)
             if not url:
                 continue
             category = link.display_category
@@ -143,7 +143,7 @@ class Container(BaseContainer):
                     if getattr(existing[0], field) != getattr(category, field):
                         raise ContainerError(
                             f"Conflicting {label} for Flare category {category.name!r}")
-            value = deepcopy(link.resolve_metadata(producer.env_config, include_desc=category.apps))
+            value = deepcopy(link.resolve_metadata(producer.config, include_desc=category.apps))
             value["link"] = url
             if category.apps:
                 apps["links"].append(value)

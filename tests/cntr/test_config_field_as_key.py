@@ -4,7 +4,7 @@
 
 Lets a container reference a one-off field (e.g. a nginx domain with its own
 fallback) directly at the call site instead of also declaring a separate
-`configs` property purely to give the field a home.
+`fields` property purely to give the field a home.
 """
 import os
 from typing import TYPE_CHECKING
@@ -75,10 +75,10 @@ def test_get_config_accepts_configfield_and_uses_its_default(tmp_path, field_key
 def test_get_config_field_is_readable_via_its_name_afterwards(tmp_path, field_key_repo):
     manager, c = _install_single(tmp_path, field_key_repo, "c")
     c.resolved_default  # defines "ONE_OFF" into the schema as a side effect
-    # "c" is loaded from a third-party repo, so its env_config is that
+    # "c" is loaded from a third-party repo, so its config is that
     # repo's own Config, not the manager's shared one -- read it back off
     # the same Config the field was defined into.
-    assert c.env_config.get("ONE_OFF") == "fallback"
+    assert c.config.get("ONE_OFF") == "fallback"
 
 
 def test_repeated_field_definition_is_idempotent(tmp_path, field_key_repo):
@@ -94,20 +94,20 @@ def test_configfield_without_name_raises(fresh_manager):
 
 
 def test_get_config_still_accepts_plain_string_key(fresh_manager):
-    assert fresh_manager.env_config.get("DOCKER_HOST") == fresh_manager.containers["portainer"].get_config("DOCKER_HOST")
+    assert fresh_manager.config.get("DOCKER_HOST") == fresh_manager.containers["portainer"].get_config("DOCKER_HOST")
 
 
 def test_deferred_config_ref_reads_an_explicitly_defined_field(fresh_manager: "ContainerManager") -> None:
     container = fresh_manager.containers["portainer"]
     calls = []
     field = ConfigField(name="DEFERRED_FIELD", provider=LazyProvider(lambda config: calls.append(config) or "42"))
-    container.env_config.define(field)
+    container.config.define(field)
     reference = ConfigRef(field.name, type=int)
     assert calls == []
-    assert container.env_config.resolve(reference) == 42
+    assert container.config.resolve(reference) == 42
     assert len(calls) == 1
-    container.env_config.set(field.name, "43")
-    assert container.env_config.resolve(reference) == 43
+    container.config.set(field.name, "43")
+    assert container.config.resolve(reference) == 43
     assert len(calls) == 1
 
 
@@ -132,7 +132,7 @@ def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys,
         "from linktools.cntr.ext import Nginx\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'AIONUI_DOMAIN': Nginx.domain(self)}\n",
         encoding="utf-8",
     )
@@ -141,7 +141,7 @@ def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys,
 
     manager.prepare_installed_containers()
 
-    assert container.env_config.get("AIONUI_DOMAIN") == "_"
+    assert container.config.get("AIONUI_DOMAIN") == "_"
 
     import linktools.cntr.commands._shared as shared
     from linktools.cntr.commands.config import ConfigCommand

@@ -130,7 +130,7 @@ class Container(BaseContainer):
             return json.load(fd)
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             NGINX_TAG="stable-alpine",
             NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
@@ -186,20 +186,20 @@ class Container(BaseContainer):
         return choose("ACME_DNS_API", list(self.dnsapi.keys()))
 
     @cached_property
-    def extend_configs(self) -> "dict[str, Any]":
-        configs = {}
+    def extra_fields(self) -> "dict[str, Any]":
+        fields = {}
         if self.get_config("NGINX_HTTPS_ENABLE"):
             dns_api = self.get_config("ACME_DNS_API")
             if dns_api not in self.dnsapi:
                 raise ContainerError(f"Not supported dns_api: {dns_api}")
             env_vars = self.dnsapi.get(dns_api).get("env", {})
             for env_var, meta in env_vars.items():
-                configs[env_var] = ConfigField.chain(
+                fields[env_var] = ConfigField.chain(
                     PromptProvider(cached=True, allow_empty=not meta.get("required", True)),
                     name=env_var, secret=True,
                     default=MISSING if meta.get("required", True) else "",
                 )
-        return configs
+        return fields
 
     @cached_property
     def acme_ssl_domains(self) -> "list[str]":
@@ -384,16 +384,16 @@ class Container(BaseContainer):
         variables = site.template_vars if template_vars is None else template_vars
         if not isinstance(variables, _TemplateVariables):
             variables = _TemplateVariables({
-                key: ((container.env_config, value),) for key, value in variables.items()
+                key: ((container.config, value),) for key, value in variables.items()
             })
         try:
             return environment.get_template(template_name).render(
                 site=site,
                 container=container,
                 nginx=nginx,
-                config=container.env_config,
+                config=container.config,
                 waf_addresses=lazy_load(lambda: {
-                    name: str(container.env_config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
+                    name: str(container.config.get("SAFELINE_SUBNET_PREFIX")) + "." + suffix
                     for name, suffix in (("nginx", "253"), ("tengine", "254"))
                 }),
                 template_vars=variables,
@@ -471,7 +471,7 @@ class Container(BaseContainer):
                                 key, domain, port, owners[key][0], site.producer.name))
                     candidates = template_vars.setdefault(key, [])
                     selected[key] = len(candidates)
-                    candidates.append((site.producer.env_config, value))
+                    candidates.append((site.producer.config, value))
                     owners.setdefault(key, []).append(site.producer.name)
 
             def conflict(key: str) -> None:
@@ -511,7 +511,7 @@ class Container(BaseContainer):
                 self.get_app_path(name).mkdir(parents=True, exist_ok=True)
             self.runtime.chmod(self.get_app_path("acme-secrets"), 0o700)
             values = []
-            for key, field in self.extend_configs.items():
+            for key, field in self.extra_fields.items():
                 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                     raise ContainerError("Invalid DNS environment variable name: " + key)
                 value = str(self.get_config(field))

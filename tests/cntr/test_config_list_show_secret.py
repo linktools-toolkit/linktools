@@ -16,7 +16,7 @@ def test_show_secret_prints_real_value_bypassing_redaction(monkeypatch, fresh_ma
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     config_command = ConfigCommand()
 
-    fresh_manager.env_config.persist("DOCKER_APP_PATH", "/srv/app")
+    fresh_manager.config.persist("DOCKER_APP_PATH", "/srv/app")
     config_command.on_command_list(names=[], show_secret=True)
     out = capsys.readouterr().out
     # A plain (non-secret) configured value -- confirms real values (not
@@ -30,7 +30,7 @@ def test_default_still_redacts_via_logger(monkeypatch, fresh_manager, caplog):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     config_command = ConfigCommand()
 
-    fresh_manager.env_config.persist("SOME_PASSWORD", "hunter2")
+    fresh_manager.config.persist("SOME_PASSWORD", "hunter2")
     with caplog.at_level(logging.INFO):
         config_command.on_command_list(names=[], show_secret=False)
 
@@ -43,7 +43,7 @@ def test_show_secret_reveals_the_actual_password(monkeypatch, fresh_manager, cap
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     config_command = ConfigCommand()
 
-    fresh_manager.env_config.persist("SOME_PASSWORD", "hunter2")
+    fresh_manager.config.persist("SOME_PASSWORD", "hunter2")
     config_command.on_command_list(names=[], show_secret=True)
 
     out = capsys.readouterr().out

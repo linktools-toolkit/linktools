@@ -32,7 +32,7 @@ def _repo_with_secret_field(tmp_path, name="repo_secret"):
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'CREDENTIAL': ConfigField(secret=True)}\n",
         encoding="utf-8",
     )
@@ -56,7 +56,7 @@ def _repo_with_port_field(tmp_path, name, field_expr):
         "from linktools.cntr.container import BaseContainer\n\n\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'PORT': %s}\n" % field_expr,
         encoding="utf-8",
     )
@@ -64,14 +64,14 @@ def _repo_with_port_field(tmp_path, name, field_expr):
 
 
 def test_repo_field_is_defined_on_the_shared_manager_schema(tmp_path):
-    # Third-party repository containers share the manager's own env_config
+    # Third-party repository containers share the manager's own config
     # outright (no separate per-repository Config/schema) -- a repo-declared
     # field lands directly on Manager's schema, the same one every other
     # container (builtin or repo) resolves through.
     manager = _install_repo_with_secret(tmp_path)
     container = manager.containers["repo_secret"]
-    assert container.env_config is manager.env_config
-    assert manager.env_config.schema.get("CREDENTIAL").secret is True
+    assert container.config is manager.config
+    assert manager.config.schema.get("CREDENTIAL").secret is True
 
 
 def test_set_redacts_repo_only_secret(monkeypatch, tmp_path, caplog):
@@ -94,7 +94,7 @@ def test_get_default_redacts_repo_only_secret(monkeypatch, tmp_path, caplog):
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_repo_with_secret(tmp_path)
-    manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     with caplog.at_level(logging.INFO):
@@ -110,7 +110,7 @@ def test_get_show_secret_reveals_repo_only_value(monkeypatch, tmp_path, capsys):
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_repo_with_secret(tmp_path)
-    manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     ConfigCommand().on_command_get(keys=["CREDENTIAL"], show_secret=True)
@@ -123,7 +123,7 @@ def test_explain_json_does_not_leak_repo_only_secret(monkeypatch, tmp_path, caps
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_repo_with_secret(tmp_path)
-    manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     ConfigCommand().on_command_explain(key="CREDENTIAL", as_json=True)
@@ -136,7 +136,7 @@ def test_explain_text_does_not_leak_repo_only_secret(monkeypatch, tmp_path, capl
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_repo_with_secret(tmp_path)
-    manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     with caplog.at_level(logging.INFO):
@@ -151,7 +151,7 @@ def test_list_redacts_repo_only_secret(monkeypatch, tmp_path, caplog):
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_repo_with_secret(tmp_path)
-    manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     with caplog.at_level(logging.INFO):
@@ -167,7 +167,7 @@ def test_validate_uses_repo_field_secret_and_never_prints_it(monkeypatch, tmp_pa
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_repo_with_secret(tmp_path)
-    manager.env_config.persist("CREDENTIAL", _SECRET_VALUE)
+    manager.config.persist("CREDENTIAL", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     ConfigCommand().on_command_validate(as_json=True)
@@ -192,7 +192,7 @@ def test_two_repos_disagreeing_on_a_field_spec_last_registered_wins(tmp_path):
     manager.installed_state.add("repo_a", "repo_b")
 
     manager.prepare_installed_containers()
-    field = manager.env_config.schema.get("PORT")
+    field = manager.config.schema.get("PORT")
     assert field is not None
     assert field.secret in (True, False)
 
@@ -222,14 +222,14 @@ def _install_two_plain_repos(tmp_path):
 
 def test_get_stays_single_target_for_plain_manager_key_with_multiple_repos(monkeypatch, tmp_path, capsys):
     """Every container (builtin or third-party) shares the manager's own
-    env_config outright, so an ordinary manager key must still resolve as a
+    config outright, so an ordinary manager key must still resolve as a
     single target with two plain (no custom config) repos installed, not
     fan out into one row per installed repo."""
     import linktools.cntr.commands._shared as cntr_shared
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_two_plain_repos(tmp_path)
-    manager.env_config.persist("HOST", "10.0.0.5")
+    manager.config.persist("HOST", "10.0.0.5")
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     ConfigCommand().on_command_get(keys=["HOST"], show_secret=True)
@@ -244,7 +244,7 @@ def test_explain_stays_single_target_for_plain_manager_key_with_multiple_repos(m
     from linktools.cntr.commands.config import ConfigCommand
 
     manager = _install_two_plain_repos(tmp_path)
-    manager.env_config.persist("HOST", "10.0.0.5")
+    manager.config.persist("HOST", "10.0.0.5")
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     ConfigCommand().on_command_explain(key="HOST", as_json=True)
@@ -292,7 +292,7 @@ def test_validate_reports_invalid_repo_secret_without_disclosure(monkeypatch, tm
     manager = _fresh_standalone_manager(tmp_path)
     manager.repos.add(str(repo))
     manager.installed_state.add("repo")
-    manager.env_config.persist("PORT", _SECRET_VALUE)
+    manager.config.persist("PORT", _SECRET_VALUE)
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     with pytest.raises(ContainerError):

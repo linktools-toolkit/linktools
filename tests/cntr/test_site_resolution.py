@@ -21,8 +21,8 @@ class Producer:
         self.config = dict(NGINX_HTTPS_ENABLE=True, NGINX_AUTH_ENABLE=True,
                            NGINX_WAF_ENABLE=True, NGINX_HTTP_PORT=80, NGINX_HTTPS_PORT=443)
         self.config.update(config)
-        self.env_config = Config(None, ConfigSchema(), [])
-        self.env_config.get = self.get_config
+        self.config = Config(None, ConfigSchema(), [])
+        self.config.get = self.get_config
         self.manager = SimpleNamespace(
             integration_snapshot={name: () for name in installed},
             containers={"nginx": SimpleNamespace(sites={})},
@@ -45,15 +45,15 @@ def fail():
 def test_url_only_resolves_required_values():
     producer = Producer(Nginx.site("app.example.com", proxy=lazy_load(fail),
                                  auth_headers=lazy_load(fail)))
-    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, None))) == "https://app.example.com"
-    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, None), "ui", queries={"a": "b"})) == "https://app.example.com/ui?a=b"
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, None))) == "https://app.example.com"
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, None), "ui", queries={"a": "b"})) == "https://app.example.com/ui?a=b"
 
 
 @pytest.mark.parametrize("installed,domain", [((), None), (("nginx",), "")])
 def test_disabled_sites_do_not_resolve_unrelated_fields(installed, domain):
     domain = lazy_load(fail) if domain is None else domain
     producer = Producer(Nginx.site(domain, proxy=lazy_load(fail), template=lazy_load(fail)), installed=installed)
-    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, None))) == ""
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, None))) == ""
     assert producer.site.resolve() is producer.site
     with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
         Config(None, ConfigSchema(), []).resolve(ResolvedSite.find(producer, Nginx.site(lazy_load(fail))))
@@ -105,8 +105,8 @@ def test_placeholder_domain_skips_navigation_without_oidc_coupling():
         "_", proxy="http://app",
     ))
     link = Flare.public("App", "app", "Application", load_nginx_url(ResolvedSite.find(producer, None)))
-    assert link.resolve_url(producer.env_config) is None
-    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, None))) == ""
+    assert link.resolve_url(producer.config) is None
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, None))) == ""
     assert producer.site.resolve() is producer.site
 
 
@@ -166,10 +166,10 @@ def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
     app = Counted()
     manager = manager_with({"app": app, "nginx": SimpleNamespace(name="nginx")}, ["app"])
     app.manager = manager
-    app.env_config = Config(None, ConfigSchema(), [])
+    app.config = Config(None, ConfigSchema(), [])
     assert list(manager.iter_integrations("nginx")) == []
     assert tuple(manager.containers["nginx"].sites) == manager.integration_snapshot["app"]
-    assert app.env_config.resolve(load_nginx_url(ResolvedSite.find(app, None))) == ""
+    assert app.config.resolve(load_nginx_url(ResolvedSite.find(app, None))) == ""
     assert app.calls == 1
 
 
@@ -519,7 +519,7 @@ def test_equivalent_new_declarations_do_not_match_the_original_site() -> None:
                       endpoint(producer, domain="app.test", proxy="http://app")):
         with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
             Config(None, ConfigSchema(), []).resolve(ResolvedSite.find(producer, reference))
-    assert producer.env_config.resolve(load_nginx_url(ResolvedSite.find(producer, producer.declaration))) == "https://app.test"
+    assert producer.config.resolve(load_nginx_url(ResolvedSite.find(producer, producer.declaration))) == "https://app.test"
 
 
 @pytest.mark.parametrize("domains", [("app.test", ""), ("", ""), ("app.test", "other.test")])
@@ -573,9 +573,9 @@ def test_find_repeated_resolution_queries_current_sites_without_resolving_fields
     producer.manager.containers["nginx"] = consumer
     reference = ResolvedSite.find(producer, reference=producer.declaration)
     assert reads == []
-    assert producer.env_config.resolve(reference) is first
+    assert producer.config.resolve(reference) is first
     consumer.current = second
-    assert producer.env_config.resolve(reference) is second
+    assert producer.config.resolve(reference) is second
     assert reads == ["sites", "sites"]
 
 
@@ -585,7 +585,7 @@ def test_find_single_endpoint_defers_selection_until_consumption(explicit):
     producer = Producer(Nginx.site(lazy_load(fail)))
     reference = ResolvedSite.find(producer, reference=(producer.declaration,)) if explicit else ResolvedSite.find(producer)
     assert type(reference) is ConfigLazy
-    assert producer.env_config.resolve(reference) is producer.site
+    assert producer.config.resolve(reference) is producer.site
 
 
 def test_find_missing_site_error_is_deferred_to_resolution():
@@ -593,4 +593,4 @@ def test_find_missing_site_error_is_deferred_to_resolution():
     producer.manager.containers["nginx"].sites.clear()
     reference = ResolvedSite.find(producer)
     with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
-        producer.env_config.resolve(reference)
+        producer.config.resolve(reference)

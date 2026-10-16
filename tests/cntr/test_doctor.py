@@ -122,16 +122,16 @@ def test_doctor_cli_does_not_resolve_new_cached_values(
         key = root.name.upper() + "_IMAGE"
         (root / "compose.yml").write_text('services:\n  app:\n    image: "{{ ' + key + ' }}"\n')
         container = BaseContainer(manager, root, name=root.name)
-        manager.env_config.define(ConfigField(key, provider=provider))
+        manager.config.define(ConfigField(key, provider=provider))
         containers.append(container)
     monkeypatch.setattr(manager, "containers", {container.name: container for container in containers})
     manager.settings.set("INSTALLED_CONTAINERS", [container.name for container in containers])
-    manager.env_config.persist("DOCKER_TYPE", "docker")
-    manager.env_config.persist("EXISTING", "unchanged")
+    manager.config.persist("DOCKER_TYPE", "docker")
+    manager.config.persist("EXISTING", "unchanged")
     monkeypatch.setattr(_shared, "manager", manager)
     before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
               for path in manager.environ.paths.config.glob("*.json")}
-    persisted = manager.env_config.persisted_keys()
+    persisted = manager.config.persisted_keys()
 
     assert Command()(["doctor", "--json", "--check"]) != 0
 
@@ -141,7 +141,7 @@ def test_doctor_cli_does_not_resolve_new_cached_values(
     assert {finding["component"] for finding in unavailable} == {root.name for root in roots}
     assert all("read-only" in finding["message"] for finding in unavailable)
     assert calls == []
-    assert manager.env_config.persisted_keys() == persisted
+    assert manager.config.persisted_keys() == persisted
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
             for path in manager.environ.paths.config.glob("*.json")} == before
     assert not Config.is_read_only_resolution()
@@ -153,7 +153,7 @@ def test_doctor_reports_unconfigured_runtime_without_skipping_other_checks(
     from test_loader_structured_errors import _fresh_standalone_manager
 
     manager = _fresh_standalone_manager(tmp_path)
-    manager.env_config.define(ConfigField("DOCKER_TYPE", provider=PromptProvider(cached=True)))
+    manager.config.define(ConfigField("DOCKER_TYPE", provider=PromptProvider(cached=True)))
     monkeypatch.setattr(manager, "containers", {})
     monkeypatch.setattr(manager.repos, "get_all", lambda: {})
     doctor = Doctor(manager)
@@ -164,7 +164,7 @@ def test_doctor_reports_unconfigured_runtime_without_skipping_other_checks(
 
     assert any(finding.severity == WARN and "read-only" in finding.message for finding in findings)
     assert later in findings
-    assert manager.env_config.persisted_keys() == []
+    assert manager.config.persisted_keys() == []
     assert not Config.is_read_only_resolution()
 
 
@@ -178,9 +178,9 @@ def test_doctor_json_does_not_create_project_value_after_checks(
 
     manager = _fresh_standalone_manager(tmp_path)
     calls = []
-    manager.env_config.define(ConfigField("COMPOSE_PROJECT_NAME", provider=LazyProvider(
+    manager.config.define(ConfigField("COMPOSE_PROJECT_NAME", provider=LazyProvider(
         lambda config: calls.append("project") or "generated-project", cached=True)))
-    manager.env_config.persist("DOCKER_TYPE", "docker")
+    manager.config.persist("DOCKER_TYPE", "docker")
     manager.settings.set("INSTALLED_CONTAINERS", [])
     monkeypatch.setattr(manager, "containers", {})
     monkeypatch.setattr(_shared, "manager", manager)
@@ -195,7 +195,7 @@ def test_doctor_json_does_not_create_project_value_after_checks(
     assert any(finding["severity"] == WARN and finding["component"] == "project" and
                "read-only" in finding["message"] for finding in payload["findings"])
     assert calls == []
-    assert manager.env_config.persisted_keys() == ["DOCKER_TYPE"]
+    assert manager.config.persisted_keys() == ["DOCKER_TYPE"]
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
             for path in manager.environ.paths.config.glob("*.json")} == before
     assert not Config.is_read_only_resolution()

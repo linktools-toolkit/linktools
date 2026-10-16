@@ -132,7 +132,7 @@ def test_external_prepare_runs_after_configs_before_selected_services(tmp_path, 
                 return self.requirements
 
             @property
-            def configs(self):
+            def fields(self):
                 return {"PREPARED_SERVICE": "example-service"}
 
             def on_prepare(self):
@@ -259,7 +259,7 @@ def test_execution_prepare_refreshes_render_hooks_after_preview_and_retry(tmp_pa
     owner = containers[0]
     (Path(owner.root_path) / "compose.yml").write_text("services:\n  app:\n    image: fixture:local\n")
     manager = owner.manager
-    manager.env_config.set("DOCKER_TYPE", "docker-rootless")
+    manager.config.set("DOCKER_TYPE", "docker-rootless")
     monkeypatch.setattr(manager, "containers", {owner.name: owner})
     monkeypatch.setattr(manager.installed_state, "get", lambda **kwargs: containers)
     monkeypatch.setattr(manager.docker_inspector, "get_project_state",

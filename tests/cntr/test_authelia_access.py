@@ -31,10 +31,10 @@ def _consumer(declarations: dict, *, nginx: bool = True, **overrides: object) ->
         return value() if callable(value) else value
 
     manager = object.__new__(ContainerManager)
-    manager.env_config = Config(None, ConfigSchema(), [])
-    manager.env_config.get = config
+    manager.config = Config(None, ConfigSchema(), [])
+    manager.config.get = config
     containers = {name: SimpleNamespace(name=name, integrations=entries, manager=manager, get_config=config,
-                                        env_config=manager.env_config)
+                                        config=manager.config)
                   for name, entries in declarations.items()}
     for name, builtin in (("nginx", "100-nginx"), ("authelia", "102-authelia")):
         container = object.__new__(builtin_container_type(builtin))

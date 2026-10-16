@@ -30,7 +30,7 @@ def make_config(**values: "Any") -> Config:
 
 
 def make_site(config: Config, declaration: Nginx, installed: "tuple[str, ...]" = ("nginx",)) -> ResolvedSite:
-    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
     site = ResolvedSite(producer, declaration, 0)
     producer.manager = SimpleNamespace(
         integration_snapshot={name: () for name in installed},
@@ -55,9 +55,9 @@ def test_config_values_site_uses_producer_config_without_binding_the_declaration
     assert first.proxy == "http://one:8080" and second.proxy == "http://two:8080"
     assert first.cert_domains == ("*.one.test",) and second.cert_domains == ("*.two.test",)
     assert declaration.server_name is domain
-    first.producer.env_config.set("DOMAIN", "changed.test")
+    first.producer.config.set("DOMAIN", "changed.test")
     assert first.server_name == "one.test"
-    assert make_site(first.producer.env_config, declaration).server_name == "changed.test"
+    assert make_site(first.producer.config, declaration).server_name == "changed.test"
 
 
 @pytest.mark.parametrize("installed,domain", [((), ConfigLazy(fail)), (("nginx",), ConfigRef("DOMAIN"))])
@@ -113,7 +113,7 @@ def test_config_values_site_retains_capability_type_validation(value: object) ->
 
 def test_config_values_endpoint_keeps_original_reference_and_resolves_current_query() -> None:
     config = make_config(DOMAIN="app.test", NGINX_HTTP_PORT=80, QUERY="a b")
-    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
     declarations = endpoint(producer, domain=ConfigRef("DOMAIN"), proxy="http://app", https=False)
     site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
@@ -121,12 +121,12 @@ def test_config_values_endpoint_keeps_original_reference_and_resolves_current_qu
     url = load_nginx_url(ResolvedSite.find(producer, declarations), "ui", queries={"q": ConfigRef("QUERY")})
     assert type(declarations) is tuple
     assert type(url) is ConfigLazy
-    assert producer.env_config.resolve(ResolvedSite.find(producer, declarations)) is site
+    assert producer.config.resolve(ResolvedSite.find(producer, declarations)) is site
     assert config.resolve(url) == "http://app.test/ui?q=a+b"
     config.set("QUERY", "changed")
     assert config.resolve(url) == "http://app.test/ui?q=changed"
     with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
-        producer.env_config.resolve(ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN"))))
+        producer.config.resolve(ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN"))))
 
 
 @pytest.mark.parametrize("factory,key,disabled", [(load_config_url, "URL", ""), (load_port_url, "PORT", 0),
@@ -154,7 +154,7 @@ def test_config_values_url_helpers_encode_nested_query_in_current_config(factory
 
 def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
     container = fresh_manager.containers["portainer"]
-    container.env_config.set("TITLE", "{{not_jinja}} {not_format}")
+    container.config.set("TITLE", "{{not_jinja}} {not_format}")
     source = tmp_path / "values.j2"
     source.write_text("{{ title }}|{{ data['items'][0] }}|{{ flag is false }}|{{ empty is none }}", encoding="utf-8")
     rendered = container.render_template(
@@ -166,7 +166,7 @@ def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_mana
 def test_config_values_compose_template_consumes_inline_field_without_registration(
         fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
     container = fresh_manager.containers["portainer"]
-    config = container.env_config
+    config = container.config
     field = ConfigField("INLINE_PORT", default="8080", cast=int)
     reference = ConfigRef(field)
     revision = config.revision
@@ -188,7 +188,7 @@ def test_config_values_compose_template_context_reads_lazily_once_per_render(
     config = make_config(**{key: "first", "UNUSED": ConfigLazy(fail)})
     config.define(ConfigField(key))
     config.define(ConfigField("UNUSED"))
-    monkeypatch.setattr(fresh_manager, "env_config", config)
+    monkeypatch.setattr(fresh_manager, "config", config)
     reads = []
     get = config.get
 
@@ -207,7 +207,7 @@ def test_config_values_compose_template_context_reads_lazily_once_per_render(
     assert reads == ["DEBUG", key, "DEBUG", key]
     other = make_config(**{key: "other"})
     other.define(ConfigField(key))
-    monkeypatch.setattr(fresh_manager, "env_config", other)
+    monkeypatch.setattr(fresh_manager, "config", other)
     assert container.render_template(source) == "other|other"
     assert reads == ["DEBUG", key, "DEBUG", key]
 
@@ -218,7 +218,7 @@ def test_config_values_compose_template_kwargs_override_deferred_context_without
     config = make_config(OVERRIDDEN=ConfigLazy(fail), DOCKER_USER=ConfigLazy(fail))
     config.define(ConfigField("OVERRIDDEN"))
     config.define(ConfigField("DOCKER_USER"))
-    monkeypatch.setattr(fresh_manager, "env_config", config)
+    monkeypatch.setattr(fresh_manager, "config", config)
     source = tmp_path / "override.j2"
     source.write_text("{{ OVERRIDDEN is none }}|{{ docker_user is false }}", encoding="utf-8")
     assert container.render_template(source, OVERRIDDEN=None, docker_user=False) == "True|True"
@@ -371,7 +371,7 @@ def test_config_url_literal_string_is_not_a_configuration_key() -> None:
 ])
 def test_builtin_port_fields_own_reference_cast_and_default(
         fresh_manager: "ContainerManager", name: str, key: str, default: int) -> None:
-    field = ConfigField.coerce(key, fresh_manager.containers[name].configs[key])
+    field = ConfigField.coerce(key, fresh_manager.containers[name].fields[key])
     assert field.cast is int and field.default == default
     config = make_config(HOST="host.test")
     config.define(field)

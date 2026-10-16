@@ -118,7 +118,7 @@ class LifecycleDispatcher:
         if not removed:
             return
         for container in removed:
-            container.register_configs()
+            container.register_fields()
             self._invoke_callback(container.on_removed, context)
             container.hooks.call(HookPhase.AFTER_REMOVE, context)
         self.manager.hooks.call(HookPhase.AFTER_REMOVE, context)

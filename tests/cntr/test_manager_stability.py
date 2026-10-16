@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Verifies the stable public contract of ContainerManager: its public
-surface, configs override dispatch, migration retry semantics, and
+surface, fields override dispatch, migration retry semantics, and
 persistent vs transient store routing, so internal reorganization cannot
 silently change any of them.
 """
@@ -56,7 +56,7 @@ class _FakeEnviron:
         return _FakeEnvConfig()
 
     def get_data_path(self, *parts):
-        # configs property builds str(self.data_path.joinpath(...)) defaults.
+        # fields property builds str(self.data_path.joinpath(...)) defaults.
         return Path(tempfile.gettempdir())
 
 
@@ -105,7 +105,7 @@ MANAGER_API = (
     "docker_container_name", "docker_compose_names",
     "root_path", "app_path", "app_data_path",
     "data_path", "temp_path", "settings",
-    "env_config", "compose_runner", "compose_operations",
+    "config", "compose_runner", "compose_operations",
     "resolver", "loader", "runtime",
     "lifecycle", "running_state", "installed_state", "repos",
 )
@@ -134,7 +134,7 @@ _METHOD_SIGNATURES = {}
 # name -> expected class-level descriptor type
 _DESCRIPTOR_TYPES = {
     "debug": property,
-    "configs": property,
+    "fields": property,
     # review P2-06: plain @property, not @cached_property -- caching these
     # would let a set_config/persist/reload within the same process keep
     # returning a stale value forever, since nothing ever invalidates a
@@ -205,9 +205,9 @@ def test_manager_descriptor_types_unchanged():
         assert isinstance(descriptor, expected_type), f"{name} is no longer a {expected_type.__name__}"
 
 
-def test_manager_configs_override_is_dispatched_through_property(tmp_path, monkeypatch):
-    """__init__ must call self.configs (not a module-level builder directly),
-    so a subclass overriding ``configs`` still has its extra fields registered.
+def test_manager_fields_override_is_dispatched_through_property(tmp_path, monkeypatch):
+    """__init__ must call self.fields (not a module-level builder directly),
+    so a subclass overriding ``fields`` still has its extra fields registered.
     """
     import _harness
 
@@ -221,13 +221,13 @@ def test_manager_configs_override_is_dispatched_through_property(tmp_path, monke
 
     class CustomManager(ContainerManager):
         @property
-        def configs(self):
-            configs = super().configs
-            configs["CUSTOM_KEY"] = "custom-value"
-            return configs
+        def fields(self):
+            fields = super().fields
+            fields["CUSTOM_KEY"] = "custom-value"
+            return fields
 
     mgr = CustomManager(Environ(), name="contract-test")
-    assert mgr.env_config.get("CUSTOM_KEY") == "custom-value"
+    assert mgr.config.get("CUSTOM_KEY") == "custom-value"
 
 
 # -- Persistent vs transient store routing ------------------------------------

@@ -19,8 +19,8 @@ class Container:
     def __init__(self, value):
         self.value = value
         self.reads = []
-        self.env_config = Config(None, ConfigSchema(), [])
-        self.env_config.get = self.get_config
+        self.config = Config(None, ConfigSchema(), [])
+        self.config.get = self.get_config
 
     def get_config(self, key, **kwargs):
         self.reads.append((key, kwargs))
@@ -32,15 +32,15 @@ def test_config_factory_is_lazy_and_preserves_path_queries():
     url = load_config_url(ConfigRef("URL", type=str, default=None), "settings", queries={"mode": "a b"})
     assert isinstance(url, ConfigLazy)
     assert container.reads == []
-    assert container.env_config.resolve(url) == "https://config.test/base/settings?mode=a+b"
-    assert container.env_config.resolve(url) == "https://config.test/base/settings?mode=a+b"
+    assert container.config.resolve(url) == "https://config.test/base/settings?mode=a+b"
+    assert container.config.resolve(url) == "https://config.test/base/settings?mode=a+b"
     assert container.reads == [("URL", {"type": str, "default": None})] * 2
 
 
 @pytest.mark.parametrize("value", [None, ""])
 def test_empty_config_url_remains_empty(value):
     container = Container(value)
-    assert container.env_config.resolve(load_config_url(ConfigRef("URL", type=str, default=None), "must-not-appear")) == ""
+    assert container.config.resolve(load_config_url(ConfigRef("URL", type=str, default=None), "must-not-appear")) == ""
 
 
 @pytest.mark.parametrize("port", [-1, 0, 65536])
@@ -48,7 +48,7 @@ def test_invalid_port_does_not_resolve_host(port):
     container = Container(port)
     url = load_port_url(ConfigRef("PORT", type=int, default=0), "must-not-appear")
     assert container.reads == []
-    assert container.env_config.resolve(url) == ""
+    assert container.config.resolve(url) == ""
     assert container.reads == [("PORT", {"type": int, "default": 0})]
 
 
@@ -58,30 +58,30 @@ def test_valid_port_resolves_host_lazily_and_preserves_boundaries(port):
     url = load_port_url(ConfigRef("PORT", type=int, default=0), "ui", queries={"q": "a b"})
     assert container.reads == []
     expected_port = "" if port == 443 else ":%s" % port
-    assert container.env_config.resolve(url) == "https://host.test%s/ui?q=a+b" % expected_port
+    assert container.config.resolve(url) == "https://host.test%s/ui?q=a+b" % expected_port
     assert container.reads == [("PORT", {"type": int, "default": 0}), ("HOST", {"type": str})]
 
 
 def test_http_port_factory_retains_literal_template_path():
     container = Container(80)
-    assert container.env_config.resolve(load_port_url(ConfigRef("PORT", type=int, default=0), "{{path}}", https=False)) == "http://host.test/{{path}}"
+    assert container.config.resolve(load_port_url(ConfigRef("PORT", type=int, default=0), "{{path}}", https=False)) == "http://host.test/{{path}}"
 
 
 @pytest.mark.parametrize("reference", ["", 0, False, ("web",), {}])
 def test_invalid_nginx_reference_is_rejected_when_consumed(reference):
-    container = SimpleNamespace(name="app", env_config=Config(None, ConfigSchema(), []), manager=SimpleNamespace(
+    container = SimpleNamespace(name="app", config=Config(None, ConfigSchema(), []), manager=SimpleNamespace(
         containers={"nginx": SimpleNamespace(sites={})}))
     url = load_nginx_url(ResolvedSite.find(container, reference))
     with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
-        container.env_config.resolve(url)
+        container.config.resolve(url)
 
 
 def test_nginx_object_lookup_is_deferred_and_uses_producer_identity():
     reads = []
     declaration = Nginx.site("app.test")
     foreign = Nginx.site("other.test")
-    container = SimpleNamespace(name="app", env_config=Config(None, ConfigSchema(), []))
-    other = SimpleNamespace(name="other", env_config=container.env_config)
+    container = SimpleNamespace(name="app", config=Config(None, ConfigSchema(), []))
+    other = SimpleNamespace(name="other", config=container.config)
     app_site = ResolvedSite(container, declaration, 0)
     app_site.get_url = lambda default="": "https://app.test"
     foreign_site = ResolvedSite(other, foreign, 1)
@@ -96,13 +96,13 @@ def test_nginx_object_lookup_is_deferred_and_uses_producer_identity():
     container.manager = SimpleNamespace(containers={"nginx": Consumer()})
     url = load_nginx_url(ResolvedSite.find(container, declaration), "ui")
     assert reads == []
-    assert container.env_config.resolve(url) == "https://app.test/ui"
+    assert container.config.resolve(url) == "https://app.test/ui"
     assert reads == ["sites"]
     for reference in (foreign, Nginx.site("app.test")):
         missing = load_nginx_url(ResolvedSite.find(container, reference))
         before = len(reads)
         with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
-            container.env_config.resolve(missing)
+            container.config.resolve(missing)
         assert len(reads) == before + 1
 
 

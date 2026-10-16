@@ -21,22 +21,22 @@ def _record(monkeypatch, manager):
 
 
 def _override_docker_host(monkeypatch, manager, value):
-    # Wraps (not replaces) env_config.get: container_type is a plain
+    # Wraps (not replaces) config.get: container_type is a plain
     # property now (not cached), so it also resolves through
-    # env_config.get() on every access -- a blanket replacement intercepts
+    # config.get() on every access -- a blanket replacement intercepts
     # that too, not just the DOCKER_HOST read this is meant to override.
-    original_get = manager.env_config.get
+    original_get = manager.config.get
 
     def fake_get(key, type=None, default=None):
         if key == "DOCKER_HOST":
             return value
         return original_get(key, type=type, default=default)
 
-    monkeypatch.setattr(manager.env_config, "get", fake_get)
+    monkeypatch.setattr(manager.config, "get", fake_get)
 
 
 def test_default_docker_host_emits_no_explicit_host_arg(fresh_manager, monkeypatch):
-    fresh_manager.env_config.set("DOCKER_TYPE", "docker")
+    fresh_manager.config.set("DOCKER_TYPE", "docker")
     calls = _record(monkeypatch, fresh_manager)
 
     fresh_manager.runtime.create_docker_process("ps")
@@ -49,7 +49,7 @@ def test_default_docker_host_emits_no_explicit_host_arg(fresh_manager, monkeypat
     ("docker-rootless", "-H"),
 ])
 def test_custom_docker_host_is_passed_to_the_cli(fresh_manager, monkeypatch, container_type, flag):
-    fresh_manager.env_config.set("DOCKER_TYPE", container_type)
+    fresh_manager.config.set("DOCKER_TYPE", container_type)
     _override_docker_host(monkeypatch, fresh_manager, "tcp://10.0.0.1:2376")
     calls = _record(monkeypatch, fresh_manager)
 
@@ -59,7 +59,7 @@ def test_custom_docker_host_is_passed_to_the_cli(fresh_manager, monkeypatch, con
 
 
 def test_bare_socket_path_gets_a_unix_scheme(fresh_manager, monkeypatch):
-    fresh_manager.env_config.set("DOCKER_TYPE", "docker")
+    fresh_manager.config.set("DOCKER_TYPE", "docker")
     _override_docker_host(monkeypatch, fresh_manager, "/custom/docker.sock")
     calls = _record(monkeypatch, fresh_manager)
 
@@ -72,7 +72,7 @@ def test_podman_container_type_raises_explicit_error_not_silent_fallback(fresh_m
     """A legacy DOCKER_TYPE=podman must fail loudly, never
     silently resolve to docker."""
     from linktools.cntr.container import ContainerError
-    fresh_manager.env_config.set("DOCKER_TYPE", "podman")
+    fresh_manager.config.set("DOCKER_TYPE", "podman")
     calls = _record(monkeypatch, fresh_manager)
 
     with pytest.raises(ContainerError, match="Podman is no longer supported"):
@@ -93,7 +93,7 @@ def test_podman_container_type_raises_explicit_error_not_silent_fallback(fresh_m
 ])
 def test_display_host_and_connection_endpoint_keep_distinct_semantics(
         fresh_manager, monkeypatch, container_type, configured, display, args):
-    fresh_manager.env_config.set("DOCKER_TYPE", container_type)
+    fresh_manager.config.set("DOCKER_TYPE", container_type)
     _override_docker_host(monkeypatch, fresh_manager, configured)
 
     assert fresh_manager.container_host == display
