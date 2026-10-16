@@ -9,8 +9,9 @@ from urllib.parse import urlsplit
 
 from linktools.decorator import cached_property
 from linktools.types import MISSING
+from linktools.runtime import lazy_load
 from ._base import Integration
-from ._urls import resolve_url_reference
+from ._urls import is_complete_url
 from ..errors import ContainerError
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ class Authelia(Integration):
         return self
 
     def with_base_url(self, base_url: "str | ConfigValue") -> "Authelia":
-        """Bind explicitly declared callback references without changing their owner."""
+        """Bind callback formatting to the endpoint's lazy public URL."""
         result = copy(self)
         result._base_url = base_url
         result.__dict__.pop("redirect_uris", None)
@@ -87,18 +88,15 @@ class Authelia(Integration):
             value = str(value)
             if not value:
                 continue
-            if self._base_url is not MISSING:
-                reference = urlsplit(value)
-                if not reference.scheme and reference.netloc:
-                    raise ContainerError("Authelia redirect URI must use an explicit scheme")
-                if not reference.scheme:
-                    base_url = self._base_url if config is None else config.resolve(self._base_url)
-                    value = resolve_url_reference(value, base_url)
-            if not value:
+            base_url = "" if self._base_url is MISSING else self._base_url
+            if config is not None:
+                base_url = lazy_load(config.resolve, base_url)
+            value = value.format(base_url=base_url)
+            if not is_complete_url(value):
                 continue
-            parsed = urlsplit(value)
-            if (not parsed.scheme or "#" in value or "{{" in value or "}}" in value
-                    or parsed.scheme in ("http", "https") and not parsed.netloc):
+            if not urlsplit(value).hostname:
+                continue
+            if "#" in value:
                 raise ContainerError("Authelia redirect URI must be absolute without a fragment")
             if value not in result:
                 result.append(value)

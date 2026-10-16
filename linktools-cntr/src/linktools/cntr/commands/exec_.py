@@ -23,7 +23,7 @@ class ExecCommand(BaseCommand):
 
     @property
     def config(self) -> "Config":
-        return _shared.manager.env_config
+        return _shared.manager.config
 
     @property
     def _subparser(self) -> "CommandParser":

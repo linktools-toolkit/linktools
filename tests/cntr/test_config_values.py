@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Config-dependent integration fields resolve only at their consumption boundary."""
+from linktools.core import ConfigLazy
+from linktools.cntr.ext import ResolvedSite
 from collections import UserDict
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
+from linktools.errors import ConfigError
+
 from linktools.cntr import ContainerError
-from linktools.cntr.ext import Nginx, ResolvedSite, endpoint, load_config_url, load_nginx_url, load_port_url
-from linktools.core import Config, ConfigField, ConfigFormat, ConfigLazy, ConfigRef, ConfigSchema, RuntimeOverrideSource
-from linktools.runtime import Proxy, lazy_load
+from linktools.cntr.ext import Nginx, endpoint, load_config_url, load_nginx_url, load_port_url
+from linktools.core import Config, ConfigField, ConfigFormat, ConfigRef, ConfigSchema, RuntimeOverrideSource
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
@@ -27,7 +30,7 @@ def make_config(**values: "Any") -> Config:
 
 
 def make_site(config: Config, declaration: Nginx, installed: "tuple[str, ...]" = ("nginx",)) -> ResolvedSite:
-    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
     site = ResolvedSite(producer, declaration, 0)
     producer.manager = SimpleNamespace(
         integration_snapshot={name: () for name in installed},
@@ -52,9 +55,9 @@ def test_config_values_site_uses_producer_config_without_binding_the_declaration
     assert first.proxy == "http://one:8080" and second.proxy == "http://two:8080"
     assert first.cert_domains == ("*.one.test",) and second.cert_domains == ("*.two.test",)
     assert declaration.server_name is domain
-    first.producer.env_config.set("DOMAIN", "changed.test")
+    first.producer.config.set("DOMAIN", "changed.test")
     assert first.server_name == "one.test"
-    assert make_site(first.producer.env_config, declaration).server_name == "changed.test"
+    assert make_site(first.producer.config, declaration).server_name == "changed.test"
 
 
 @pytest.mark.parametrize("installed,domain", [((), ConfigLazy(fail)), (("nginx",), ConfigRef("DOMAIN"))])
@@ -108,50 +111,50 @@ def test_config_values_site_retains_capability_type_validation(value: object) ->
         site.auth
 
 
-def test_config_values_endpoint_keeps_original_reference_and_legacy_url_proxy() -> None:
+def test_config_values_endpoint_keeps_original_reference_and_resolves_current_query() -> None:
     config = make_config(DOMAIN="app.test", NGINX_HTTP_PORT=80, QUERY="a b")
-    producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
+    producer = SimpleNamespace(name="app", config=config, get_config=config.get)
     declarations = endpoint(producer, domain=ConfigRef("DOMAIN"), proxy="http://app", https=False)
     site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
                                       containers={"nginx": SimpleNamespace(sites={declarations[0]: site})})
-    url = load_nginx_url(producer, declarations, "ui", queries={"q": ConfigRef("QUERY")})
+    url = load_nginx_url(ResolvedSite.find(producer, declarations), "ui", queries={"q": ConfigRef("QUERY")})
     assert type(declarations) is tuple
-    assert type(url) is Proxy
-    assert ResolvedSite.find(producer, declarations) is site
-    assert str(url) == "http://app.test/ui?q=a+b"
+    assert type(url) is ConfigLazy
+    assert producer.config.resolve(ResolvedSite.find(producer, declarations)) is site
+    assert config.resolve(url) == "http://app.test/ui?q=a+b"
     config.set("QUERY", "changed")
-    assert str(url) == "http://app.test/ui?q=a+b"
-    with pytest.raises(ContainerError, match="original endpoint"):
-        ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN")))
+    assert config.resolve(url) == "http://app.test/ui?q=changed"
+    with pytest.raises(ConfigError, match="ConfigLazy callback failed"):
+        producer.config.resolve(ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN"))))
 
 
 @pytest.mark.parametrize("factory,key,disabled", [(load_config_url, "URL", ""), (load_port_url, "PORT", 0),
-                                                  (load_port_url, "PORT", 65535)])
+                                                  (load_port_url, "PORT", 65536)])
 def test_config_values_url_helpers_skip_query_for_empty_or_invalid_base(factory: object, key: str, disabled: object) -> None:
-    config = make_config(**{key: disabled})
-    producer = SimpleNamespace(env_config=config, get_config=config.get, host=lazy_load(lambda: fail(config)))
-    value = factory(producer, key, queries={"secret": ConfigLazy(fail)})
-    assert type(value) is Proxy and str(value) == ""
+    config = make_config(HOST=ConfigLazy(fail), **{key: disabled})
+    value = factory(ConfigRef(key, type=str if factory is load_config_url else int,
+                              default=None if factory is load_config_url else 0), queries={"secret": ConfigLazy(fail)})
+    assert type(value) is ConfigLazy and config.resolve(value) == ""
 
 
 @pytest.mark.parametrize("factory,key,value,expected", [
     (load_config_url, "URL", "https://app.test/#/setup", "https://app.test/#/setup?secret=a%2Bb+%26c"),
     (load_port_url, "PORT", 8443, "https://host.test:8443?secret=a%2Bb+%26c"),
 ])
-def test_config_values_url_helpers_encode_nested_query_and_cache_success(factory: object, key: str,
+def test_config_values_url_helpers_encode_nested_query_in_current_config(factory: object, key: str,
                                                                         value: object, expected: str) -> None:
-    config = make_config(SECRET="a+b &c", **{key: value})
-    producer = SimpleNamespace(env_config=config, get_config=config.get, host="host.test")
-    url = factory(producer, key, queries={"secret": ConfigRef("SECRET")})
-    assert str(url) == expected
+    config = make_config(HOST="host.test", SECRET="a+b &c", **{key: value})
+    url = factory(ConfigRef(key, type=str if factory is load_config_url else int,
+                              default=None if factory is load_config_url else 0), queries={"secret": ConfigRef("SECRET")})
+    assert config.resolve(url) == expected
     config.set("SECRET", "new")
-    assert str(url) == expected
+    assert config.resolve(url) == expected.replace("a%2Bb+%26c", "new")
 
 
 def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
     container = fresh_manager.containers["portainer"]
-    container.env_config.set("TITLE", "{{not_jinja}} {not_format}")
+    container.config.set("TITLE", "{{not_jinja}} {not_format}")
     source = tmp_path / "values.j2"
     source.write_text("{{ title }}|{{ data['items'][0] }}|{{ flag is false }}|{{ empty is none }}", encoding="utf-8")
     rendered = container.render_template(
@@ -163,7 +166,7 @@ def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_mana
 def test_config_values_compose_template_consumes_inline_field_without_registration(
         fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
     container = fresh_manager.containers["portainer"]
-    config = container.env_config
+    config = container.config
     field = ConfigField("INLINE_PORT", default="8080", cast=int)
     reference = ConfigRef(field)
     revision = config.revision
@@ -185,7 +188,7 @@ def test_config_values_compose_template_context_reads_lazily_once_per_render(
     config = make_config(**{key: "first", "UNUSED": ConfigLazy(fail)})
     config.define(ConfigField(key))
     config.define(ConfigField("UNUSED"))
-    monkeypatch.setattr(fresh_manager, "env_config", config)
+    monkeypatch.setattr(fresh_manager, "config", config)
     reads = []
     get = config.get
 
@@ -204,7 +207,7 @@ def test_config_values_compose_template_context_reads_lazily_once_per_render(
     assert reads == ["DEBUG", key, "DEBUG", key]
     other = make_config(**{key: "other"})
     other.define(ConfigField(key))
-    monkeypatch.setattr(fresh_manager, "env_config", other)
+    monkeypatch.setattr(fresh_manager, "config", other)
     assert container.render_template(source) == "other|other"
     assert reads == ["DEBUG", key, "DEBUG", key]
 
@@ -215,7 +218,7 @@ def test_config_values_compose_template_kwargs_override_deferred_context_without
     config = make_config(OVERRIDDEN=ConfigLazy(fail), DOCKER_USER=ConfigLazy(fail))
     config.define(ConfigField("OVERRIDDEN"))
     config.define(ConfigField("DOCKER_USER"))
-    monkeypatch.setattr(fresh_manager, "env_config", config)
+    monkeypatch.setattr(fresh_manager, "config", config)
     source = tmp_path / "override.j2"
     source.write_text("{{ OVERRIDDEN is none }}|{{ docker_user is false }}", encoding="utf-8")
     assert container.render_template(source, OVERRIDDEN=None, docker_user=False) == "True|True"
@@ -297,3 +300,86 @@ def test_config_values_plain_template_kwargs_keep_their_native_types(
     source.write_text("{{ data | tojson }}|{{ items | tojson }}|{{ pair | tojson }}", encoding="utf-8")
     assert container.render_template(source, data={"enabled": False}, items=[1, 2], pair=(3, 4)) == (
         '{"enabled": false}|[1, 2]|[3, 4]')
+
+
+@pytest.mark.parametrize("factory,key,first,second,expected", [
+    (load_config_url, "URL", "https://one.test", "https://two.test", "https://two.test/ui?q=second"),
+    (load_port_url, "PORT", 8443, 65535, "https://two.test:65535/ui?q=second"),
+])
+def test_url_helpers_reuse_inline_fields_and_query_refs_across_configs(
+        factory: object, key: str, first: object, second: object, expected: str) -> None:
+    field = ConfigField(key, default=first)
+    query = ConfigRef(ConfigField("QUERY", default="first"))
+    value = factory(ConfigRef(field, type=str if factory is load_config_url else int,
+                                   default=None if factory is load_config_url else 0), "ui", queries={"q": query})
+    one = make_config(HOST="one.test")
+    two = make_config(HOST="two.test", QUERY="second", **{key: second})
+    first_result = one.resolve(value)
+    assert "one.test" in first_result and first_result.endswith("?q=first")
+    assert two.resolve(value) == expected
+    assert one.resolve(value) == first_result
+    assert one.schema.get(key) is None and two.schema.get(key) is None
+    assert one.schema.get("QUERY") is None and two.schema.get("QUERY") is None
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_url_helpers_accept_values_and_resolve_path_https_and_query(deferred: bool) -> None:
+    config = make_config(HOST="host.test", PATH="ui", HTTPS=False, QUERY="a b")
+    url = ConfigLazy(lambda config: "https://literal.test/base") if deferred else "https://literal.test/base"
+    port = ConfigLazy(lambda config: 8080) if deferred else 8080
+    path = ConfigRef("PATH")
+    query = {"q": ConfigRef("QUERY")}
+    assert config.resolve(load_config_url(url, path, queries=query)) == "https://literal.test/base/ui?q=a+b"
+    value = load_port_url(port, path, https=ConfigRef("HTTPS"), queries=query)
+    assert config.resolve(value) == "http://host.test:8080/ui?q=a+b"
+    config.set("HTTPS", True)
+    config.set("PATH", "other")
+    assert config.resolve(value) == "https://host.test:8080/other?q=a+b"
+
+
+@pytest.mark.parametrize("factory,value", [(load_config_url, None), (load_config_url, ""),
+                                           (load_port_url, 0), (load_port_url, -1), (load_port_url, 65536)])
+def test_disabled_url_values_skip_all_dependent_values(factory: object, value: object) -> None:
+    config = make_config(HOST=ConfigLazy(fail))
+    kwargs = {"https": ConfigLazy(fail)} if factory is load_port_url else {}
+    helper = factory(value, ConfigLazy(fail), queries=ConfigLazy(fail), **kwargs)
+    assert config.resolve(helper) == ""
+
+
+@pytest.mark.parametrize("raw,expected", [("8080", "https://host.test:8080/ui"), ("bad", ""), (0, "")])
+def test_port_url_explicit_reference_owns_cast_and_default(raw: object, expected: str) -> None:
+    config = make_config(HOST="host.test", PORT=raw)
+    value = load_port_url(ConfigRef("PORT", type=int, default=0), "ui")
+    assert config.resolve(value) == expected
+    assert make_config().resolve(load_port_url(ConfigRef("ABSENT", type=int, default=0), ConfigLazy(fail))) == ""
+
+
+def test_config_url_explicit_reference_owns_missing_default_and_string_cast() -> None:
+    config = make_config(URL=123)
+    assert config.resolve(load_config_url(ConfigRef("URL", type=str, default=None))) == "123"
+    assert make_config().resolve(load_config_url(ConfigRef("ABSENT", type=str, default=None), ConfigLazy(fail))) == ""
+
+
+def test_config_url_literal_string_is_not_a_configuration_key() -> None:
+    config = make_config(URL="https://configured.test")
+    assert config.resolve(load_config_url("URL")) == "URL"
+
+
+@pytest.mark.parametrize("name,key,default", [
+    ("lldap", "LLDAP_WEB_PORT", 0), ("safeline", "SAFELINE_PORT", 9200),
+    ("portainer", "PORTAINER_PORT", 9000), ("flare", "FLARE_PORT", 5000),
+])
+def test_builtin_port_fields_own_reference_cast_and_default(
+        fresh_manager: "ContainerManager", name: str, key: str, default: int) -> None:
+    field = ConfigField.coerce(key, fresh_manager.containers[name].fields[key])
+    assert field.cast is int and field.default == default
+    config = make_config(HOST="host.test")
+    config.define(field)
+    concise = load_port_url(ConfigRef(key), https=False)
+    explicit = load_port_url(ConfigRef(key, type=int, default=0), https=False)
+    expected = "http://host.test:%s" % default if default else ""
+    assert config.resolve(concise) == config.resolve(explicit) == expected
+    for raw in ("0", "8080", 65535, 65536):
+        config.set(key, raw)
+        assert type(config.resolve(ConfigRef(key))) is int
+        assert config.resolve(concise) == config.resolve(explicit)

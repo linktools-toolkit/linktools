@@ -32,7 +32,7 @@ def test_config_set_works_on_fresh_install_with_nothing_installed(tmp_path, monk
 
     # Must not raise "No container installed".
     ConfigCommand().on_command_set(configs={"HOST": "example.com"})
-    assert manager.env_config.get("HOST") == "example.com"
+    assert manager.config.get("HOST") == "example.com"
 
 
 def test_config_list_works_on_fresh_install_with_nothing_installed(tmp_path, monkeypatch):

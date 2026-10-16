@@ -30,8 +30,8 @@ def test_host_does_not_reprompt_once_persisted(monkeypatch, fresh_manager):
 
     monkeypatch.setattr(rich, "prompt", fail)
 
-    fresh_manager.env_config.persist("HOST", "203.0.113.5")
-    assert fresh_manager.env_config.get("HOST") == "203.0.113.5"
+    fresh_manager.config.persist("HOST", "203.0.113.5")
+    assert fresh_manager.config.get("HOST") == "203.0.113.5"
 
 
 def test_host_still_resolves_via_provider_when_unset(fresh_manager, monkeypatch):
@@ -39,8 +39,8 @@ def test_host_still_resolves_via_provider_when_unset(fresh_manager, monkeypatch)
     # provider fallback independently of this machine's network interfaces.
     calls = []
     monkeypatch.setattr("linktools.cntr.manager.get_lan_ip", lambda: calls.append(1) or "192.0.2.10")
-    fresh_manager.env_config.reload()
-    assert fresh_manager.env_config.get("HOST") == "192.0.2.10"
+    fresh_manager.config.reload()
+    assert fresh_manager.config.get("HOST") == "192.0.2.10"
     assert calls == [1]
 
 

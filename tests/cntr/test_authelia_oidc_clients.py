@@ -9,10 +9,10 @@ from linktools.cntr.ext import Nginx, Authelia, ResolvedSite
 
 @pytest.fixture(autouse=True)
 def configure_https_identity(fresh_manager):
-    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.com")
-    fresh_manager.env_config.set("AUTHELIA_DOMAIN", "sso.example.com")
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
-    fresh_manager.env_config.set("NGINX_AUTH_ENABLE", True)
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.com")
+    fresh_manager.config.set("AUTHELIA_DOMAIN", "sso.example.com")
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.config.set("NGINX_AUTH_ENABLE", True)
 
 
 def test_oidc_client_is_read_only_and_uses_saved_secret(fresh_manager):
@@ -62,7 +62,7 @@ def test_acl_supports_native_optional_fields(fresh_manager, monkeypatch):
 @pytest.mark.parametrize("port,authority", [(443, "sso.example.com"), (8443, "sso.example.com:8443")])
 def test_session_oidc_and_admin_reuse_declared_public_url(fresh_manager, port, authority):
     import yaml
-    fresh_manager.env_config.set("NGINX_HTTPS_PORT", port)
+    fresh_manager.config.set("NGINX_HTTPS_PORT", port)
     authelia = fresh_manager.containers["authelia"]
     expected = "https://" + authority
     assert authelia.public_url == expected
@@ -101,7 +101,7 @@ def test_explicit_public_base_path_keeps_origin_and_cookie_domain_separate(fresh
 
 def test_unconfigured_public_identity_remains_metadata_only(fresh_manager):
     from linktools.cntr import ContainerError
-    fresh_manager.env_config.set("AUTHELIA_DOMAIN", "_")
+    fresh_manager.config.set("AUTHELIA_DOMAIN", "_")
     authelia = fresh_manager.containers["authelia"]
     assert authelia.public_url == ""
     assert "TRUSTED_ORIGINS=" in authelia.services["authelia-admin"]["environment"]
@@ -129,7 +129,7 @@ def test_optional_site_url_only_defaults_for_absent_concrete_identity(fresh_mana
 def test_optional_site_url_does_not_swallow_provider_configuration_errors(fresh_manager):
     from linktools.cntr import ContainerError
     authelia = fresh_manager.containers["authelia"]
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", False)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", False)
     site = ResolvedSite(authelia, Nginx.site(
         server_name="sso.example.com", https=True, proxy="http://app"), 0)
     with pytest.raises(ContainerError, match="disabled global capability"):
@@ -142,16 +142,16 @@ def test_optional_site_url_does_not_swallow_provider_configuration_errors(fresh_
 @pytest.mark.parametrize("installed", [False, True])
 def test_builtin_public_site_declares_https_requirement(fresh_manager, monkeypatch, domain, https, auth, installed):
     from linktools.cntr import ContainerError
-    fresh_manager.env_config.set("AUTHELIA_DOMAIN", domain)
-    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", https)
-    fresh_manager.env_config.set("NGINX_AUTH_ENABLE", auth)
-    fresh_manager.env_config.set("NGINX_WAF_ENABLE", False)
+    fresh_manager.config.set("AUTHELIA_DOMAIN", domain)
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", https)
+    fresh_manager.config.set("NGINX_AUTH_ENABLE", auth)
+    fresh_manager.config.set("NGINX_WAF_ENABLE", False)
     if not installed:
         monkeypatch.setattr(fresh_manager, "integration_snapshot", {
             name: declarations for name, declarations in fresh_manager.integration_snapshot.items()
             if name != "nginx"
         })
-    site = ResolvedSite.find(fresh_manager.containers["authelia"])
+    site = fresh_manager.config.resolve(ResolvedSite.find(fresh_manager.containers["authelia"]))
     enabled = bool(domain) and installed
     if enabled and not https:
         with pytest.raises(ContainerError, match="https explicitly requires a disabled global capability"):

@@ -90,11 +90,11 @@ class BaseContainer(metaclass=AbstractMetaClass):
         return []
 
     @property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return {}
 
     @property
-    def extend_configs(self) -> "dict[str, Any]":
+    def extra_fields(self) -> "dict[str, Any]":
         return {}
 
     @property
@@ -151,10 +151,10 @@ class BaseContainer(metaclass=AbstractMetaClass):
         self._repo_context = context
 
     @property
-    def env_config(self) -> "Config":
+    def config(self) -> "Config":
         # Every container, builtin or third-party, resolves fields through
         # the manager's own shared Config.
-        return self.manager.env_config
+        return self.manager.config
 
     @property
     def runtime(self) -> "RuntimeProcessFactory":
@@ -320,15 +320,15 @@ class BaseContainer(metaclass=AbstractMetaClass):
     def on_unmount_file(self, service_name: "str | None" = None) -> None:
         return _actions.umount(self, service_name=service_name)
 
-    def register_configs(self) -> None:
-        """Register this container's own ``configs`` onto its Config."""
-        for key, spec in self.configs.items():
-            self.env_config.define(ConfigField.coerce(key, spec))
+    def register_fields(self) -> None:
+        """Register this container's own ``fields`` onto its Config."""
+        for key, spec in self.fields.items():
+            self.config.define(ConfigField.coerce(key, spec))
 
     def register_dynamic_config_field(self, field: "ConfigField") -> str:
         """Register a single ad-hoc ``ConfigField`` this container defines
         at call time (``get_config(ConfigField(...))``)."""
-        self.env_config.define(field)
+        self.config.define(field)
         return field.name
 
     def _resolve_config_key(self, key: "ConfigKeyType") -> str:
@@ -336,7 +336,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
         Lets a container reference a one-off field (e.g. a nginx domain with
         its own fallback) directly at the call site -- ``get_config(ConfigField(
-        name="X", default=...))`` -- instead of also declaring a ``configs``
+        name="X", default=...))`` -- instead of also declaring a ``fields``
         property purely to give the field a home. Defining is idempotent
         (``ConfigSchema.define`` just overwrites the same name), so repeated
         calls are safe.
@@ -348,7 +348,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
         return key
 
     def get_config(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
-        return self.env_config.get(self._resolve_config_key(key), type=type, default=default)
+        return self.config.get(self._resolve_config_key(key), type=type, default=default)
 
     def make_exec_context(self, commands: "str | Iterable[str]") -> "OperationContext":
         from .context import OperationContext

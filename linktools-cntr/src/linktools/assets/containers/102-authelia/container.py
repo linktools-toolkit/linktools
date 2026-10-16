@@ -13,7 +13,7 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_nginx_url
+from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia
 from linktools.core import ConfigField, ConfigLazy, ConfigRef, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -34,7 +34,7 @@ class Container(BaseContainer):
         return ["nginx", "lldap"]
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=Nginx.domain(self, "sso"),
@@ -77,7 +77,7 @@ class Container(BaseContainer):
                     "Authelia",
                     "account",
                     "单点登录",
-                    load_nginx_url(self, None, "auth-admin"),
+                    "{base_url}/auth-admin",
                 ),
             ],
         )
@@ -88,7 +88,7 @@ class Container(BaseContainer):
         # Metadata may describe an unconfigured public identity; native OIDC
         # generation below still requires a concrete HTTPS endpoint.
         from linktools.cntr.ext import ResolvedSite
-        return ResolvedSite.find(self).get_url(default="")
+        return self.config.resolve(ResolvedSite.find(self)).get_url(default="")
 
     @cached_property
     def public_authority(self) -> str:
@@ -102,7 +102,7 @@ class Container(BaseContainer):
     @cached_property
     def _oidc_identity(self) -> "Mapping[str, Any]":
         issuer = self.public_url
-        if not issuer.startswith("https://"):
+        if not issuer.startswith("https://") or not Authelia.oidc((issuer,)).resolve_redirect_uris(self.config):
             raise ContainerError("Authelia requires a concrete HTTPS public URL")
         return MappingProxyType({
             "client_id": f"{self.project_name}-web-client",
@@ -133,10 +133,10 @@ class Container(BaseContainer):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)
             if declaration.site is MISSING:
                 continue
-            site = ResolvedSite.find(producer, declaration.site)
+            site = producer.config.resolve(ResolvedSite.find(producer, declaration.site))
             if not site.enabled or not site.auth:
                 continue
-            rule = dict(declaration.resolve_rule(producer.env_config))
+            rule = dict(declaration.resolve_rule(producer.config))
             if "domain" not in rule and "domain_regex" not in rule:
                 if site.literal_domain is None:
                     raise ContainerError("Authelia access for %s requires domain or domain_regex" % producer.name)
@@ -148,11 +148,11 @@ class Container(BaseContainer):
 
     @cached_property
     def oidc_redirects(self) -> "tuple[str, ...]":
-        redirects = [self._oidc_identity["issuer_url"]]
+        redirects = list(Authelia.oidc((self.public_url,)).resolve_redirect_uris(self.config))
         for producer, declaration in self.manager.iter_integrations("authelia"):
             if not isinstance(declaration, Authelia):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)
-            for redirect in declaration.resolve_redirect_uris(producer.env_config):
+            for redirect in declaration.resolve_redirect_uris(producer.config):
                 if redirect not in redirects:
                     redirects.append(redirect)
         return tuple(redirects)

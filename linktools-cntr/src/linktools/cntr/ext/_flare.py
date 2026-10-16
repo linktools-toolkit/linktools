@@ -3,13 +3,12 @@
 """Flare application, bookmark, and category declarations."""
 from copy import copy
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 from linktools.decorator import cached_property
 from linktools.types import MISSING
 from linktools.runtime import lazy_load
 from ._base import Integration
-from ._urls import resolve_url_reference
+from ._urls import bind_url, is_complete_url, resolve_url_reference
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -84,10 +83,11 @@ class Flare(Integration):
             return None
         value = str(value)
         for base_url in self._base_urls:
-            if value.startswith("{url}") or not urlsplit(value).scheme:
-                value = resolve_url_reference(value, config.resolve(base_url))
+            value = resolve_url_reference(value, lazy_load(config.resolve, base_url))
             if not value:
                 return None
+        if not is_complete_url(value):
+            return None
         return value
 
     def resolve_metadata(self, config: "Config", *, include_desc: bool = True) -> "dict[str, str | None]":
@@ -111,6 +111,7 @@ class Flare(Integration):
             if self.display_category.apps:
                 result._url = base_url
         elif self._url is not None:
+            result._url = bind_url(self._url, base_url)
             result._base_urls = self._base_urls + (base_url,)
             result.__dict__.pop("_legacy_url", None)
         return result

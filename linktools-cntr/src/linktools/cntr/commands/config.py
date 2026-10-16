@@ -25,7 +25,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
     def on_command_set(self, configs: "dict[str, str]") -> None:
         _shared.manager.load_installed_config_metadata()
-        config = _shared.manager.env_config
+        config = _shared.manager.config
         # Validate the entire batch before the single atomic store write.
         for key, value in configs.items():
             config.validate_value(key, value)
@@ -39,7 +39,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
     def on_command_remove(self, configs: "dict[str, str]") -> None:
         for key in configs.keys():
-            _shared.manager.env_config.remove(key)
+            _shared.manager.config.remove(key)
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
 
     @subcommand("list", order=CONFIG_COMMAND_ORDER["list"], help="list container configs")
@@ -51,7 +51,7 @@ class ConfigCommand(BaseCommandGroup):
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
     def on_command_list(self, names: "list[str]", with_dependencies: bool = False, show_secret: bool = False) -> None:
         manager = _shared.manager
-        config = manager.env_config
+        config = manager.config
         containers = manager.load_installed_config_metadata()
         target_containers = [c for c in containers if c.name in names] if names else containers
         if with_dependencies and names:
@@ -59,10 +59,10 @@ class ConfigCommand(BaseCommandGroup):
 
         keys = set()
         for container in target_containers:
-            keys.update(container.configs)
-            keys.update(container.extend_configs)
+            keys.update(container.fields)
+            keys.update(container.extra_fields)
         if not names:
-            keys.update(key for key, value in manager.configs.items() if not isinstance(value, ConfigField))
+            keys.update(key for key, value in manager.fields.items() if not isinstance(value, ConfigField))
             # Unconfigured manager fields may prompt, so only include persisted extras.
             keys.update(config.persisted_keys())
 
@@ -84,7 +84,7 @@ class ConfigCommand(BaseCommandGroup):
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
     def on_command_get(self, keys: "list[str]", show_secret: bool = False) -> None:
         _shared.manager.load_installed_config_metadata()
-        config = _shared.manager.env_config
+        config = _shared.manager.config
         for key in keys:
             value = config.get(key)
             if show_secret:
@@ -99,7 +99,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     def on_command_explain(self, key: str, as_json: bool = False) -> None:
         _shared.manager.load_installed_config_metadata()
-        info = _shared.manager.env_config.explain(key)
+        info = _shared.manager.config.explain(key)
         if as_json:
             import json
             print(json.dumps(info, indent=2, sort_keys=True, default=str))
@@ -112,7 +112,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     def on_command_validate(self, as_json: bool = False) -> None:
         _shared.manager.load_installed_config_metadata()
-        config = _shared.manager.env_config
+        config = _shared.manager.config
         errors = []
         # Do not resolve schema-only fields that nobody has configured yet.
         for key in config.persisted_keys():
@@ -142,5 +142,5 @@ class ConfigCommand(BaseCommandGroup):
 
     @subcommand("reload", order=CONFIG_COMMAND_ORDER["reload"], help="reload container configs")
     def on_command_reload(self) -> None:
-        _shared.manager.env_config.reload()
+        _shared.manager.config.reload()
         _shared.manager.load_installed_config_metadata()

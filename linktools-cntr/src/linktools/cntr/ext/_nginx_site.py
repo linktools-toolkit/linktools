@@ -13,6 +13,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any, Optional
+    from linktools.core import Config, ConfigLazy
     from ..container import BaseContainer
     from ..manager import ContainerManager
     from ._nginx import Nginx
@@ -44,27 +45,37 @@ class ResolvedSite:
 
     @classmethod
     def find(cls, producer: "BaseContainer",
-             reference: "Nginx | tuple[Integration, ...] | None" = None) -> "ResolvedSite":
-        """Resolve one original site or endpoint; omission requires one declared site."""
-        from ._nginx import Nginx
-        from ..errors import ContainerError
+             reference: "Nginx | tuple[Integration, ...] | None" = None) -> "ConfigLazy":
+        """Declare a lazy lookup of an original site or endpoint.
 
-        sites = producer.manager.containers["nginx"].sites
-        if reference is None:
-            matches = [site for site in sites.values() if site.producer is producer]
-        else:
-            if isinstance(reference, tuple):
-                declarations = [item for item in reference if isinstance(item, Nginx)]
-                if len(declarations) != 1:
-                    raise ContainerError("Endpoint reference must contain exactly one nginx site")
-                reference = declarations[0]
-            if not isinstance(reference, Nginx):
-                raise ContainerError("Expected an original nginx site or endpoint declaration")
-            site = sites.get(reference)
-            matches = [site] if site is not None and site.producer is producer else []
-        if len(matches) != 1:
-            raise ContainerError("Expected one declared nginx site in %s; reference the original endpoint" % producer.name)
-        return matches[0]
+        Omission requires one declared site. Lookup and validation happen on each
+        Config.resolve call against the producer's command-local snapshot.
+        """
+        from linktools.core import ConfigLazy
+
+        def resolve(config: "Config") -> "ResolvedSite":
+            from ._nginx import Nginx
+            from ..errors import ContainerError
+
+            target = reference
+            sites = producer.manager.containers["nginx"].sites
+            if target is None:
+                matches = [site for site in sites.values() if site.producer is producer]
+            else:
+                if isinstance(target, tuple):
+                    declarations = [item for item in target if isinstance(item, Nginx)]
+                    if len(declarations) != 1:
+                        raise ContainerError("Endpoint reference must contain exactly one nginx site")
+                    target = declarations[0]
+                if not isinstance(target, Nginx):
+                    raise ContainerError("Expected an original nginx site or endpoint declaration")
+                site = sites.get(target)
+                matches = [site] if site is not None and site.producer is producer else []
+            if len(matches) != 1:
+                raise ContainerError("Expected one declared nginx site in %s; reference the original endpoint" % producer.name)
+            return matches[0]
+
+        return ConfigLazy(resolve)
 
     def __init__(self, producer: "BaseContainer", declaration: "Nginx", position: int) -> None:
         self.producer = producer
@@ -84,7 +95,7 @@ class ResolvedSite:
 
     @cached_property
     def server_name(self) -> str:
-        return self._text(self.producer.env_config.resolve(self._declaration.server_name), "server_name")
+        return self._text(self.producer.config.resolve(self._declaration.server_name), "server_name")
 
     @cached_property
     def enabled(self) -> bool:
@@ -92,7 +103,7 @@ class ResolvedSite:
 
     @cached_property
     def default_server(self) -> bool:
-        return bool(self.producer.env_config.resolve(self._declaration.default_server)) if self.enabled else False
+        return bool(self.producer.config.resolve(self._declaration.default_server)) if self.enabled else False
 
     @cached_property
     def literal_domain(self) -> "Optional[str]":
@@ -102,7 +113,7 @@ class ResolvedSite:
     def _switch(self, name: str) -> bool:
         if not self.enabled:
             return False
-        requested = self.producer.env_config.resolve(getattr(self._declaration, name))
+        requested = self.producer.config.resolve(getattr(self._declaration, name))
         if requested is not None and not isinstance(requested, bool):
             self._error(name + " must be None or a boolean")
         if requested is not None and not bool(requested):
@@ -139,7 +150,7 @@ class ResolvedSite:
         """Resolve a public URL, optionally leaving a non-concrete identity unset."""
         if not self.enabled:
             return ""
-        explicit = self.producer.env_config.resolve(self._declaration.public_url)
+        explicit = self.producer.config.resolve(self._declaration.public_url)
         if explicit is not None:
             return self._text(explicit, "public_url")
         if self.literal_domain is None:
@@ -154,23 +165,23 @@ class ResolvedSite:
     def template(self) -> "Optional[str]":
         if not self.enabled:
             return None
-        value = self.producer.env_config.resolve(self._declaration.template)
+        value = self.producer.config.resolve(self._declaration.template)
         if value is MISSING:
             self._error("template must be a path or None")
         return None if value is None else str(value)
 
     @cached_property
     def proxy(self) -> "Optional[str]":
-        return self._text(self.producer.env_config.resolve(self._declaration.proxy), "proxy", optional=True) if self.enabled else None
+        return self._text(self.producer.config.resolve(self._declaration.proxy), "proxy", optional=True) if self.enabled else None
 
     def _sequence(self, field: str, active: bool = True) -> "tuple[str, ...]":
         if not self.enabled or not active:
             return ()
-        values = self.producer.env_config.resolve(getattr(self._declaration, field))
+        values = self.producer.config.resolve(getattr(self._declaration, field))
         if isinstance(values, (str, bytes)):
             self._error(field + " must be a sequence of strings")
         try:
-            return tuple(self._text(self.producer.env_config.resolve(value), field) for value in values)
+            return tuple(self._text(self.producer.config.resolve(value), field) for value in values)
         except TypeError:
             self._error(field + " must be a sequence of strings")
 
@@ -179,10 +190,10 @@ class ResolvedSite:
             return MappingProxyType({})
         value = getattr(self._declaration, field)
         if resolve:
-            value = self.producer.env_config.resolve(value)
+            value = self.producer.config.resolve(value)
         if not isinstance(value, Mapping):
             self._error(field + " must be a mapping")
-        return MappingProxyType(self.producer.env_config.resolve(dict(value)) if resolve else dict(value))
+        return MappingProxyType(self.producer.config.resolve(dict(value)) if resolve else dict(value))
 
     @cached_property
     def waf_bypass(self) -> "tuple[str, ...]":

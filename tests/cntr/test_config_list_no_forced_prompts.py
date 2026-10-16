@@ -3,7 +3,7 @@
 schema-declared manager field -- only ones actually configured.
 
 Regression: on_command_list's "add everything else" fallback used
-`manager.env_config.keys()`, which (per Config.keys()) includes every
+`manager.config.keys()`, which (per Config.keys()) includes every
 schema-declared field name whether or not it has ever been set. So a
 manager-level field nothing has configured yet (e.g. DOCKER_DOWNLOAD_PATH -- a
 cached=True PromptProvider field almost nothing actually reads) got
@@ -16,14 +16,14 @@ import linktools.cntr.commands._shared as cntr_shared
 
 
 def test_persisted_keys_excludes_unconfigured_manager_fields(fresh_manager):
-    assert "DOCKER_DOWNLOAD_PATH" not in fresh_manager.env_config.persisted_keys()
+    assert "DOCKER_DOWNLOAD_PATH" not in fresh_manager.config.persisted_keys()
     # Sanity: it IS a real, resolvable schema field (just not yet configured).
-    assert "DOCKER_DOWNLOAD_PATH" in fresh_manager.env_config.keys()
+    assert "DOCKER_DOWNLOAD_PATH" in fresh_manager.config.keys()
 
 
 def test_persisted_keys_includes_explicitly_set_fields(fresh_manager):
-    fresh_manager.env_config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
-    assert "DOCKER_DOWNLOAD_PATH" in fresh_manager.env_config.persisted_keys()
+    fresh_manager.config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
+    assert "DOCKER_DOWNLOAD_PATH" in fresh_manager.config.persisted_keys()
 
 
 def test_config_list_does_not_prompt_for_unconfigured_manager_fields(monkeypatch, fresh_manager):
@@ -44,7 +44,7 @@ def test_config_list_does_not_prompt_for_unconfigured_manager_fields(monkeypatch
 
 
 def test_config_list_still_shows_persisted_manager_fields(monkeypatch, fresh_manager, capsys):
-    fresh_manager.env_config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
+    fresh_manager.config.persist("DOCKER_DOWNLOAD_PATH", "/srv/downloads")
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     config_command = ConfigCommand()
 

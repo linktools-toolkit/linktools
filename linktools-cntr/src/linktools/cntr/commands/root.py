@@ -67,7 +67,7 @@ class Command(StatusCommands, BaseCommandGroup):
     def on_command_list(self, names: "list[str] | None" = None, detail: bool = False) -> None:
         manager = _shared.manager
         # Registers every resolved-installed container's own config defaults
-        # into env_config -- `list` is often the first command run against a
+        # into config -- `list` is often the first command run against a
         # project, so it must not depend on some other command having done
         # this already. Metadata only (never on_prepare()): `list` must work
         # on a fresh install with nothing installed yet, and must not run
@@ -106,7 +106,7 @@ class Command(StatusCommands, BaseCommandGroup):
                 message += f"{os.linesep}    [dim]Path: {container.root_path}[/]"
                 message += f"{os.linesep}    [dim]Description: {container.description}[/]"
                 message += f"{os.linesep}    [dim]Dependencies: \\[{', '.join(container.dependencies)}][/]"
-                message += f"{os.linesep}    [dim]Configs: \\[{', '.join(container.configs.keys())}][/]"
+                message += f"{os.linesep}    [dim]Configs: \\[{', '.join(container.fields.keys())}][/]"
             self.logger.info(message, extra={"markup": True})
 
     @subcommand("add", order=ROOT_COMMAND_ORDER["add"], help="add containers to installed list")

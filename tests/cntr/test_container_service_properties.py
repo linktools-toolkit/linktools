@@ -12,7 +12,7 @@ from linktools.cntr.runtime.process import RuntimeProcessFactory
 def test_container_service_properties_are_manager_singletons(fresh_manager):
     container = fresh_manager.containers["nginx"]
     assert container.environ is fresh_manager.environ
-    assert container.env_config is fresh_manager.env_config
+    assert container.config is fresh_manager.config
     assert container.runtime is fresh_manager.runtime
     assert container.compose_runner is fresh_manager.compose_runner
     assert container.lifecycle is fresh_manager.lifecycle

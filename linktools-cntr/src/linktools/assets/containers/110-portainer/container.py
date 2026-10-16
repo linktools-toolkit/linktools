@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self) -> "dict[str, Any]":
+    def fields(self) -> "dict[str, Any]":
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=Nginx.domain(self),
@@ -36,12 +36,12 @@ class Container(BaseContainer):
                 Flare.links(
                     Flare.public(),
                     Flare.container(
-                        url=load_port_url(self, "PORTAINER_PORT", https=False),
+                        url=load_port_url(ConfigRef("PORTAINER_PORT"), https=False),
                     ),
                     name="Portainer",
                     icon="docker",
                     desc="Docker管理工具",
                 ),
-                Authelia.oidc(("{url}",)),
+                Authelia.oidc(("{base_url}",)),
             ],
         )

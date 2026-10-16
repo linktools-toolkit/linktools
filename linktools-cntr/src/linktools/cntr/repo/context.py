@@ -21,8 +21,8 @@ class RepositoryConfigContext(object):
     ``.linktools.json`` of its own) -- consulted only for the
     ``requires.linktools-cntr`` compatibility gate, never for config field
     resolution (every container, builtin or third-party, resolves fields
-    through the manager's own shared ``env_config`` -- see
-    ``BaseContainer.env_config``). ``repo_name`` is the short,
+    through the manager's own shared ``config`` -- see
+    ``BaseContainer.config``). ``repo_name`` is the short,
     credential-free name for this repository (as opposed to ``url``, which
     may embed a Git credential) -- the only one safe to show a user (e.g.
     as a ``config list`` owner label).

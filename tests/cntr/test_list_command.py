@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """``ct-cntr list``: the very first command a user runs against a project,
 so it must not depend on some other command having already registered every
-installed container's own config defaults into env_config."""
+installed container's own config defaults into config."""
 import os
 
 import pytest
@@ -54,9 +54,9 @@ def test_list_registers_container_configs_before_checking_status(tmp_path, monke
 
     cntr_main.command.on_command_list()
 
-    # LLDAP_PORT is declared only by lldap's own `configs`; it only becomes a
-    # resolvable env_config key once that container's configs are registered.
-    assert manager.env_config.get("LLDAP_PORT", type=int) == 0
+    # LLDAP_PORT is declared only by lldap's own `fields`; it only becomes a
+    # resolvable config key once that container's configs are registered.
+    assert manager.config.get("LLDAP_PORT", type=int) == 0
 
 
 def test_list_never_queries_the_docker_runtime(tmp_path, monkeypatch):

@@ -149,8 +149,8 @@ def make_manager(data_path, temp_path, name: str = "aio"):
     for key in ("DOCKER_USER", "DOCKER_TYPE", "DOCKER_APP_PATH", "DOCKER_USER_DATA_PATH",
                 "NGINX_ROOT_DOMAIN", "NGINX_HTTP_PORT", "NGINX_HTTPS_ENABLE", "ACME_DNS_API",
                 "LLDAP_ADMIN_PASSWORD"):
-        manager.env_config.get(key)
-    for field in manager.containers["nginx"].extend_configs.values():
+        manager.config.get(key)
+    for field in manager.containers["nginx"].extra_fields.values():
         manager.containers["nginx"].get_config(field)
     return manager
 
@@ -159,8 +159,8 @@ def _scrub_pairs(manager):
     """(value, token) pairs to scrub from snapshot text, longest value first."""
     from linktools.capabilities.cntr import __cap_cntr__
 
-    docker_uid = manager.env_config.get("DOCKER_UID", default=None)
-    docker_gid = manager.env_config.get("DOCKER_GID", default=None)
+    docker_uid = manager.config.get("DOCKER_UID", default=None)
+    docker_gid = manager.config.get("DOCKER_GID", default=None)
     docker_identity = None
     if docker_uid is not None and docker_gid is not None:
         docker_identity = "%s:%s" % (docker_uid, docker_gid)
@@ -169,8 +169,8 @@ def _scrub_pairs(manager):
         ("<DOCKER_UID>:<DOCKER_GID>", docker_identity),
         ("<APP_DATA>", getattr(manager, "app_data_path", None)),
         ("<APP>", getattr(manager, "app_path", None)),
-        ("<USER_DATA>", manager.env_config.get("DOCKER_USER_DATA_PATH", default=None)),
-        ("<DOWNLOAD>", manager.env_config.get("DOCKER_DOWNLOAD_PATH", default=None)),
+        ("<USER_DATA>", manager.config.get("DOCKER_USER_DATA_PATH", default=None)),
+        ("<DOWNLOAD>", manager.config.get("DOCKER_DOWNLOAD_PATH", default=None)),
         ("<DATA>", str(manager.environ.data_path)),
         ("<TEMP>", str(manager.environ.temp_path)),
         ("<ASSETS>", str(__cap_cntr__.get_asset_path("containers"))),

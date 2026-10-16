@@ -54,7 +54,7 @@ def test_authelia_waf_bypass_preserves_auth_and_other_sites(
     for key, value in (("NGINX_ROOT_DOMAIN", "example.test"), ("NGINX_WILDCARD_DOMAIN", True),
                        ("NGINX_WAF_ENABLE", waf_enabled), ("NGINX_HTTPS_ENABLE", True),
                        ("NGINX_AUTH_ENABLE", True), ("AUTHELIA_ADMIN_AUTH_ENABLE", True)):
-        fresh_manager.env_config.set(key, value)
+        fresh_manager.config.set(key, value)
     nginx = fresh_manager.containers["nginx"]
     site = next(site for site in nginx.sites.values() if site.producer.name == "authelia")
     files, _ = nginx._rendered_site_files

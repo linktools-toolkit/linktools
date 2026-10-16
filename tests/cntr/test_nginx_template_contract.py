@@ -41,8 +41,8 @@ def prepared_config(nginx):
 
 
 def test_waf_forwarding_and_origin_trust_use_only_tengine_peer(fresh_manager):
-    fresh_manager.env_config.set("SAFELINE_SUBNET_PREFIX", "172.29.171")
-    fresh_manager.env_config.set("NGINX_WAF_PORT", 8880)
+    fresh_manager.config.set("SAFELINE_SUBNET_PREFIX", "172.29.171")
+    fresh_manager.config.set("NGINX_WAF_PORT", 8880)
     nginx = fresh_manager.containers["nginx"]
     rendered = nginx._render_site_template(nginx, nginx.get_source_path("templates", "server.conf"), make_site())
     assert 'set $waf_target "http://172.29.171.254:8880";' in rendered
@@ -197,7 +197,7 @@ def generation_site(nginx: "BaseContainer", key: str = "web",
     config = Config(None, ConfigSchema(), [])
     config.get = get_config
     producer = SimpleNamespace(name=key, manager=nginx.manager,
-                               get_config=get_config, env_config=config)
+                               get_config=get_config, config=config)
     values = dict(server_name="app.example.test", proxy="http://app:8080",
                   https=False, waf=False, auth=False)
     values.update(kwargs)

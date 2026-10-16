@@ -34,7 +34,7 @@ def _repo_with_int_field(tmp_path, name):
         "from linktools.cntr import BaseContainer\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
-        "    def configs(self):\n"
+        "    def fields(self):\n"
         "        return {'PORT_FIELD': ConfigField(cast=int, default=80)}\n",
         encoding="utf-8",
     )
@@ -58,8 +58,8 @@ def test_set_rolls_back_whole_batch_when_one_key_invalid(tmp_path, monkeypatch):
 
     # Neither key was persisted -- HOST (which would have validated fine on
     # its own) must not be written just because it came first in the batch.
-    assert "HOST" not in manager.env_config.persisted_keys()
-    assert "PORT_FIELD" not in manager.env_config.persisted_keys()
+    assert "HOST" not in manager.config.persisted_keys()
+    assert "PORT_FIELD" not in manager.config.persisted_keys()
 
 
 def test_set_persists_everything_when_all_keys_valid(tmp_path, monkeypatch):
@@ -70,20 +70,20 @@ def test_set_persists_everything_when_all_keys_valid(tmp_path, monkeypatch):
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
     writes = []
-    persist_many = manager.env_config.persist_many
+    persist_many = manager.config.persist_many
 
     def record_write(values):
         writes.append(dict(values))
         persist_many(values)
 
-    monkeypatch.setattr(manager.env_config, "persist_many", record_write)
+    monkeypatch.setattr(manager.config, "persist_many", record_write)
     ConfigCommand().on_command_set(configs={"HOST": "example.com", "PORT_FIELD": "8080"})
 
     assert writes == [{"HOST": "example.com", "PORT_FIELD": "8080"}]
 
-    assert manager.env_config.get("HOST") == "example.com"
+    assert manager.config.get("HOST") == "example.com"
     container = manager.containers["repo"]
-    assert container.env_config.get("PORT_FIELD") == 8080
+    assert container.config.get("PORT_FIELD") == 8080
 
 
 def _two_repos_sharing_a_name(tmp_path, shared_basename):
@@ -109,7 +109,7 @@ def _two_repos_sharing_a_name(tmp_path, shared_basename):
             "from linktools.cntr.container import BaseContainer\n\n\n"
             "class Container(BaseContainer):\n"
             "    @property\n"
-            "    def configs(self):\n"
+            "    def fields(self):\n"
             "        return {'SHARED_FIELD': ConfigField(default='builtin-default')}\n",
             encoding="utf-8",
         )

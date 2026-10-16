@@ -82,7 +82,7 @@ class ContainerLoader:
         # (for example Nginx.domain()) can resolve shared builtin fields
         # such as NGINX_ROOT_DOMAIN.
         for container in containers:
-            container.register_configs()
+            container.register_fields()
 
         for url, meta in manager.repos.get_all().items():
             # Log messages only ever show the credential-free display form

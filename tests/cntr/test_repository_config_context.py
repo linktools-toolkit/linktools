@@ -48,7 +48,7 @@ def _repo_with_container(tmp_path, name, environment=None, extra_config_field=No
     if extra_config_field:
         configs_body = (
             "    @property\n"
-            "    def configs(self):\n"
+            "    def fields(self):\n"
             f"        return {{'{extra_config_field}': ConfigField(cast='path', default='./x')}}\n"
         )
     (repo_dir / "container.py").write_text(
@@ -63,7 +63,7 @@ def _repo_with_container(tmp_path, name, environment=None, extra_config_field=No
 
 def test_repo_local_cannot_override_manager_key(tmp_path):
     manager = _fresh_standalone_manager(tmp_path)
-    manager.env_config.persist("DOCKER_APP_PATH", str(tmp_path / "manager-app"))
+    manager.config.persist("DOCKER_APP_PATH", str(tmp_path / "manager-app"))
 
     repo_dir = _repo_with_container(tmp_path, "repo_a", environment={"DOCKER_APP_PATH": "./repo-app"})
     manager.repos.add(str(repo_dir))
@@ -107,7 +107,7 @@ def test_runtime_override_still_wins_over_manager_and_repo(tmp_path):
     manager.prepare_installed_containers()
 
     container = manager.containers["repo_a"]
-    manager.env_config.set("DOCKER_APP_PATH", str(tmp_path / "runtime-app"))
+    manager.config.set("DOCKER_APP_PATH", str(tmp_path / "runtime-app"))
     assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "runtime-app")
 
 
@@ -119,7 +119,7 @@ def test_persisted_value_still_wins_over_manager_default_and_repo(tmp_path):
     manager.prepare_installed_containers()
 
     container = manager.containers["repo_a"]
-    manager.env_config.persist("DOCKER_APP_PATH", str(tmp_path / "persisted-app"))
+    manager.config.persist("DOCKER_APP_PATH", str(tmp_path / "persisted-app"))
     assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "persisted-app")
 
 
@@ -161,11 +161,11 @@ def test_manager_config_source_reflects_already_cached_manager_write(tmp_path):
     manager.prepare_installed_containers()
 
     container = manager.containers["repo_a"]
-    manager.env_config.persist("DOCKER_APP_PATH", str(tmp_path / "first-app"))
+    manager.config.persist("DOCKER_APP_PATH", str(tmp_path / "first-app"))
     assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "first-app")  # cache it
 
-    manager.env_config.persist("DOCKER_APP_PATH", str(tmp_path / "second-app"))
+    manager.config.persist("DOCKER_APP_PATH", str(tmp_path / "second-app"))
     assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "second-app")
 
-    manager.env_config.set("DOCKER_APP_PATH", str(tmp_path / "runtime-app"))
+    manager.config.set("DOCKER_APP_PATH", str(tmp_path / "runtime-app"))
     assert container.get_config("DOCKER_APP_PATH") == str(tmp_path / "runtime-app")
