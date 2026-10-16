@@ -476,3 +476,143 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     initial, restored = map(json.loads, backend.open_keys)
     assert initial[:4] == restored[:4]
     assert restored[4] > initial[4] and initial[5] != restored[5]
+
+
+async def _marker_batch_stream(records, *, durable_count=3):
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.runtime._shared_stream import stream_key
+
+    backend = InMemoryStreamBackend(max_bytes=10000)
+    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    for sequence, record in enumerate(records, 1):
+        await writer.append(sequence, canonical_json_bytes(record))
+    service, executions, events = _event_service(backend, durable_count=durable_count)
+    stream = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
+    return stream, executions, events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("targets,positions", [
+    ([1, 2, 3], [1, 2, 3]),
+    ([1, 3], [1, 1, 2]),
+    ([1, 1, 3], [1, 2, 3]),
+    ([2, 1, 3], [0, 1, 3]),
+])
+async def test_marker_batch_reuses_page_without_changing_cursor_positions(
+    targets: list[int], positions: list[int],
+) -> None:
+    stream, executions, events = await _marker_batch_stream(
+        [{"kind": "event", "durable": target} for target in targets],
+    )
+    try:
+        values = [await anext(stream) for _ in range(3)]
+        assert [value.durable_seq for value in values] == [1, 2, 3]
+        assert [value.position[1] for value in values] == positions
+        assert events.reads == 1 and executions.reads == 1
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_marker_batch_does_not_prefetch_across_preview_delta() -> None:
+    stream, _, events = await _marker_batch_stream([
+        {"kind": "event", "durable": 1},
+        {"kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "preview"},
+        {"kind": "event", "durable": 3},
+    ])
+    try:
+        assert (await anext(stream)).durable_seq == 1
+        assert events.reads == 1
+        assert (await anext(stream)).payload["text"] == "preview"
+        assert (await anext(stream)).durable_seq == 2
+        assert (await anext(stream)).durable_seq == 3
+        assert events.reads == 2
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_marker_batch_corrupt_tail_preserves_valid_prefix() -> None:
+    stream, _, events = await _marker_batch_stream([
+        {"kind": "event", "durable": 1},
+        {"kind": "event", "durable": True},
+        {"kind": "event", "durable": 3},
+    ])
+    try:
+        assert (await anext(stream)).durable_seq == 1
+        assert events.reads == 1
+        assert (await anext(stream)).event_type == "STREAM_RESET"
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_marker_batch_prefetched_tail_respects_authority_deadline() -> None:
+    from types import SimpleNamespace
+
+    stream, executions, events = await _marker_batch_stream([
+        {"kind": "event", "durable": target} for target in (1, 2, 3)
+    ])
+    try:
+        assert (await anext(stream)).durable_seq == 1
+        assert events.reads == 1
+        executions.head = SimpleNamespace(
+            producer_generation=1, producer_claim_id="claim", state=SimpleNamespace(value="sealed"),
+        )
+        await asyncio.sleep(1.05)
+        assert (await anext(stream)).event_type == "STREAM_RESET"
+        assert executions.reads == 2
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_marker_batch_prefetch_remains_bounded_to_durable_page_size() -> None:
+    stream, _, events = await _marker_batch_stream([
+        {"kind": "event", "durable": target} for target in (1, 201, 401)
+    ], durable_count=401)
+    original_list = events.list
+    limits = []
+
+    async def record_list(*args, **kwargs):
+        limits.append(kwargs["limit"])
+        return await original_list(*args, **kwargs)
+
+    events.list = record_list
+    try:
+        values = [await anext(stream) for _ in range(401)]
+        assert [value.durable_seq for value in values] == list(range(1, 402))
+        assert [value.position[1] for value in values] == [1] * 200 + [2] * 200 + [3]
+        assert events.reads == 3 and limits == [200, 200, 1]
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_marker_batch_terminal_does_not_deliver_prefetched_suffix() -> None:
+    from linktools.ai.core import Page
+    from linktools.ai.runtime.service_api import ExecutionEvent
+
+    stream, _, events = await _marker_batch_stream([
+        {"kind": "event", "durable": target} for target in (1, 2, 3)
+    ])
+    original_list = events.list
+
+    async def terminal_list(*args, **kwargs):
+        page = await original_list(*args, **kwargs)
+        return Page(tuple(
+            ExecutionEvent(value.execution_id, value.event_seq,
+                           "EXECUTION_SUCCEEDED" if value.event_seq == 2 else value.event_type,
+                           value.payload)
+            for value in page.items
+        ), page.next_cursor)
+
+    events.list = terminal_list
+    try:
+        values = [value async for value in stream]
+        assert [value.durable_seq for value in values] == [1, 2]
+        assert [value.position[1] for value in values] == [1, 2]
+        assert values[-1].event_type == "EXECUTION_SUCCEEDED"
+        assert events.reads == 1
+    finally:
+        await stream.aclose()

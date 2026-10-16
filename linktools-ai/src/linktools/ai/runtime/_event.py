@@ -1085,9 +1085,11 @@ class DefaultEventService:
                         continue
                     gap = True
                     break
-                for sequence, payload in batch.records:
+                prefetched: deque[ExecutionEvent] = deque()
+                for index, (sequence, payload) in enumerate(batch.records):
                     # A consumer may pause between yields while a batch remains buffered.
                     if loop.time() >= deadline:
+                        prefetched.clear()
                         current = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
                         if (current is None or current.producer_generation != generation
                                 or current.producer_claim_id != claim or current.state.value != "open"):
@@ -1127,14 +1129,32 @@ class DefaultEventService:
                             break
                         # Only the durable owner supplies semantic facts. The log is a wakeup.
                         while cursor < target:
-                            page = await self._read_durable(
-                                execution_id, tenant_id=principal.tenant_id,
-                                after_event_seq=cursor, limit=min(200, target - cursor),
-                            )
-                            if not page.items:
+                            if not prefetched:
+                                high_water = target
+                                for offset, (next_sequence, next_payload) in enumerate(
+                                    batch.records[index + 1:], start=1,
+                                ):
+                                    if next_sequence != sequence + offset:
+                                        break
+                                    try:
+                                        following = decode_stream_record(next_payload)
+                                    except AIError:
+                                        break
+                                    next_target = following.get("durable")
+                                    if (following["kind"] != "event" or isinstance(next_target, bool)
+                                            or not isinstance(next_target, int) or next_target < 1):
+                                        break
+                                    high_water = max(high_water, next_target)
+                                page = await self._read_durable(
+                                    execution_id, tenant_id=principal.tenant_id,
+                                    after_event_seq=cursor, limit=min(200, high_water - cursor),
+                                )
+                                prefetched.extend(page.items)
+                            if not prefetched:
                                 gap = True
                                 break
-                            for event in page.items:
+                            while prefetched and cursor < target:
+                                event = prefetched.popleft()
                                 if event.event_seq != cursor + 1:
                                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                                 cursor = event.event_seq
