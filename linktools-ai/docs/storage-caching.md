@@ -204,3 +204,62 @@ contract. Batch reads finish before returning; they do not expose partial
 prefixes or require a stream-closing context. Origin errors propagate instead
 of becoming missing values. Backend metadata batching and shared cache loaders
 remain in use.
+
+## Ordered live streams
+
+`RuntimeStorage(..., stream_backend=...)` borrows an optional `StreamBackend`
+for ordered, disposable live previews. `object_store` still owns authoritative
+payloads and `cache_backend` still caches reproducible content. A live preview
+is not a successful durable commit. Configure shared authoritative execution
+storage as well as a shared stream backend to observe another Runtime's live
+output. Execution routes must have `DURABLE` retention; temporary execution
+storage cannot supply the authoritative history and recovery boundary.
+
+With `stream_backend=None`, Runtime keeps its existing local streaming path.
+The SDK does not construct Redis clients or require Redis. An adapter implements
+`StreamBackend.open/read` and the returned `StreamWriter.append/seal` operations.
+Runtime supplies keys, producer identities, sequence numbers and encoded frames;
+application run/watch/cancel callers do not construct them.
+
+`InMemoryStreamBackend(max_bytes=...)` is an event-loop-local reference adapter.
+Its shared logical payload budget covers all streams, with at least one byte
+charged per record and empty stream. It is not an RSS or physical-disk limit.
+Writes evict other least-recently-written streams before trimming the current
+stream. Missing or trimmed records produce an explicit gap. `StreamBatch.sealed`
+is true only when the returned batch reaches the sealed tail, so a limited read
+must consume preceding batches before stopping.
+
+Adapters must preserve sequence order and same-payload retry idempotency for retained
+records (retries of trimmed records fail closed), reject
+conflicting retries, and atomically append the seal record while refusing future
+writes. An evicted stream invalidates its previous writer. Runtime never retries
+an unknown open or recreates a lost stream under the same admission; observation
+falls back to authoritative history. A later admission has a distinct generation.
+
+The borrowed adapter's connection remains host-owned. Runtime drains its own
+read and publication work before releasing its resources; closing one Runtime
+does not close the shared client or delete another Runtime's streams. Host
+adapters must bound retained data and make blocking reads cancellable.
+
+Remote text deltas are provisional; semantic events are shared after their
+existing durable confirmation boundary. Reconnection must reconcile previews
+with canonical history rather than append the same final content twice.
+Generation and terminal checks run independently of incoming text, backing off
+from one second to a maximum interval of 30 seconds. Lost notifications can
+therefore take up to that interval plus authoritative I/O to converge. A shared
+log does not remove child-discovery scans or guarantee lower SQL counts.
+
+This transport does not route control requests to an execution's owning
+process. Existing unsuccessful/unknown non-owner cancellation results remain
+meaningful; a host requiring prompt remote cancellation must route the request
+to the owner. Stream delivery is not proof of cancellation or task migration.
+
+After a preview gap or admission change, the current watch uses durable replay
+for the remainder of that observation. A cursor containing only durable
+progress does not silently resume provisional text from another admission.
+Realtime continuation across every recovery is therefore not guaranteed; the
+reset and authoritative history are the safe recovery result.
+
+Preview cursor continuation applies to execution watch and its model observation
+projection. TaskGraph observation retains its durable event replay contract;
+configuring the backend does not add provisional TaskGraph cursor semantics.

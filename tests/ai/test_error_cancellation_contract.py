@@ -19,6 +19,7 @@ from linktools.ai.runtime._agent_executor import (
 )
 from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._mcp import (
     _MCPBinding,
     _MCPCapability,
@@ -583,6 +584,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     assert failure.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
     backend = object.__new__(LocalExecutionBackend)
+    backend._live_broker = LiveExecutionEventBroker()
     backend._accepting = True
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())

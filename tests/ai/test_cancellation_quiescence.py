@@ -31,6 +31,9 @@ class _ExecutionRecords:
 
 
 class _LiveBroker:
+    async def close_shared(self) -> None:
+        pass
+
     def complete(self, execution_id: str) -> None:
         del execution_id
 

@@ -19,6 +19,32 @@ _WATCH_CURSOR_VERSION = 1
 _RESULTS_CURSOR_VERSION = 1
 
 
+class ExecutionWatchPositions(dict[str, int]):
+    def __init__(self, events: Mapping[str, int], previews: Mapping[str, tuple[str, int]]) -> None:
+        super().__init__(events)
+        self.previews = dict(previews)
+
+
+def get_preview_positions(events: Mapping[str, int] | None) -> dict[str, tuple[str, int]]:
+    return dict(events.previews) if isinstance(events, ExecutionWatchPositions) else {}
+
+
+def _decode_execution_positions(value: Mapping[str, object]) -> Mapping[str, int]:
+    if isinstance(value.get("events"), Mapping):
+        if set(value) != {"events", "previews"} or not isinstance(value["previews"], dict):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        previews = {}
+        for key, position in value["previews"].items():
+            if (not isinstance(key, str) or not key or not isinstance(position, list)
+                    or len(position) != 2 or not isinstance(position[0], str) or not position[0]
+                    or len(position[0]) > 4096 or isinstance(position[1], bool)
+                    or not isinstance(position[1], int) or position[1] < 0):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            previews[key] = (position[0], position[1])
+        return ExecutionWatchPositions(_execution_event_seqs(value["events"]), previews)
+    return _execution_event_seqs(value)
+
+
 def encode_execution_watch_cursor(
     namespace: str,
     tenant_id: str,
@@ -26,6 +52,7 @@ def encode_execution_watch_cursor(
     *,
     include_content: bool,
     event_seqs: Mapping[str, int],
+    preview_positions: Mapping[str, tuple[str, int]] | None = None,
 ) -> str:
     normalized = _execution_event_seqs(event_seqs)
     return encode_runtime_cursor(
@@ -38,7 +65,7 @@ def encode_execution_watch_cursor(
             kind="execution",
         ),
         position=json.dumps(
-            normalized,
+            ({"events": normalized, "previews": dict(preview_positions)} if preview_positions else normalized),
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -74,7 +101,7 @@ def decode_execution_watch_cursor(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.CURSOR_INVALID)
     try:
-        return _execution_event_seqs(value)
+        return _decode_execution_positions(value)
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
 
@@ -86,6 +113,7 @@ def encode_execution_observation_cursor(
     *,
     include_content: bool,
     event_seqs: Mapping[str, int],
+    preview_positions: Mapping[str, tuple[str, int]] | None = None,
 ) -> str:
     normalized = _execution_event_seqs(event_seqs)
     return encode_runtime_cursor(
@@ -98,7 +126,7 @@ def encode_execution_observation_cursor(
             kind="execution_observation",
         ),
         position=json.dumps(
-            normalized,
+            ({"events": normalized, "previews": dict(preview_positions)} if preview_positions else normalized),
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -134,7 +162,7 @@ def decode_execution_observation_cursor(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.CURSOR_INVALID)
     try:
-        return _execution_event_seqs(value)
+        return _decode_execution_positions(value)
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
 
@@ -367,6 +395,7 @@ def _graph_execution_event_seqs(
 
 
 __all__ = [
+    "get_preview_positions", "ExecutionWatchPositions",
     "decode_evaluation_watch_cursor",
     "decode_task_results_cursor",
     "decode_execution_watch_cursor",

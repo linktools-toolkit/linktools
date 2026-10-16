@@ -2681,6 +2681,8 @@ class LocalExecutionBackend:
                 return_exceptions=True,
             )
 
+        await self._live_broker.close_shared()
+
         pending_workers = tuple(
             task for task in self._tasks.values() if not task.done()
         )
@@ -2971,6 +2973,15 @@ class LocalExecutionBackend:
                 producer_generation = resume.producer_generation
             if producer_generation is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if self._live_broker.shared is not None:
+                shared_head = await self._execution.executions.get_history_head(
+                    execution_id, tenant_id=self._tenant_id,
+                )
+                if (shared_head is not None and shared_head.producer_generation == producer_generation
+                        and shared_head.producer_claim_id is not None):
+                    self._live_broker.admit_shared_producer(
+                        execution_id, producer_generation, shared_head.producer_claim_id,
+                    )
             if isinstance(self._run_store, RuntimeAgentRunStore):
                 self._run_store.bind_execution_producer(
                     agent_run_id,

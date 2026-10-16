@@ -56,6 +56,7 @@ from ._evaluation import RuntimeEvaluations
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
+from ._shared_stream import SharedStreamPublisher
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history_projection import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
@@ -528,7 +529,11 @@ async def _build_local_components(
         metric_buffer = None if metrics is None else _RuntimeMetricRecorder(metrics.recorder())
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
-        live_broker = LiveExecutionEventBroker()
+        live_broker = LiveExecutionEventBroker(shared=(
+            None if storage.stream_backend is None else SharedStreamPublisher(
+                storage.stream_backend, namespace, tenant_id,
+            )
+        ))
         history_service = DefaultExecutionHistoryService(
             storage.execution.executions,
             authorization,

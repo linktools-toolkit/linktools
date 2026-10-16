@@ -9,12 +9,14 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run import _WorkerFailure
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._event import LiveExecutionEventBroker
 
 
 @pytest.mark.asyncio
 async def test_local_execution_close_surfaces_recorded_worker_failure() -> None:
     backend = object.__new__(LocalExecutionBackend)
     backend._accepting = True
+    backend._live_broker = LiveExecutionEventBroker()
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())
     backend._subagent_dispatcher = None
