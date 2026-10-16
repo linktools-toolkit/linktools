@@ -235,7 +235,7 @@ async def test_query_features_follow_required_server_capabilities(
     dialect: str, version: tuple[int, ...], supported: bool,
 ) -> None:
     session = AsyncMock(spec=AsyncSession)
-    session.connection.return_value = SimpleNamespace(dialect=SimpleNamespace(server_version_info=version))
+    session.connection.return_value = SimpleNamespace(dialect=SimpleNamespace(server_version_info=version), info={})
     assert await _sql_features_available(session, dialect, _plan()) is supported
     assert session.execute.await_count == (1 if dialect == "sqlite" and supported else 0)
 
@@ -251,7 +251,7 @@ async def test_only_missing_sqlite_probe_features_select_scan(
     message: str, missing: bool,
 ) -> None:
     session = AsyncMock(spec=AsyncSession)
-    session.connection.return_value = SimpleNamespace(dialect=SimpleNamespace(server_version_info=(3, 46, 1)))
+    session.connection.return_value = SimpleNamespace(dialect=SimpleNamespace(server_version_info=(3, 46, 1)), info={})
     error = OperationalError("probe", {}, sqlite3.OperationalError(message))
     session.execute.side_effect = error
     if missing:
