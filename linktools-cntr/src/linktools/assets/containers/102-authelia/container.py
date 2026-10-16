@@ -13,7 +13,7 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia, load_nginx_url
+from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia
 from linktools.core import ConfigField, ConfigLazy, ConfigRef, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -77,7 +77,7 @@ class Container(BaseContainer):
                     "Authelia",
                     "account",
                     "单点登录",
-                    load_nginx_url(self, None, "auth-admin"),
+                    "{base_url}/auth-admin",
                 ),
             ],
         )

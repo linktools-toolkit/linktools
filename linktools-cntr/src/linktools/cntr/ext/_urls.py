@@ -5,56 +5,50 @@ from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
 
 from linktools import utils
-from linktools.runtime import lazy_load
+from linktools.core import ConfigLazy
 
 if TYPE_CHECKING:
-    from linktools.core import ConfigValue
-    from linktools.runtime import Proxy
+    from linktools.core import Config, ConfigValue
     from linktools.types import ConfigKeyType, QueryType
-    from ..container import BaseContainer
-    from ._base import Integration
-    from ._nginx import Nginx
+    from ._nginx_site import ResolvedSite
 
 
-def load_config_url(container: "BaseContainer", key: "ConfigKeyType",
-                    *path: str, queries: "QueryType | ConfigValue | None" = None) -> "Proxy":
-    def make_url() -> str:
-        url = container.get_config(key, type=str, default=None)
+def load_config_url(key: "ConfigKeyType",
+                    *path: str, queries: "QueryType | ConfigValue | None" = None) -> "ConfigLazy":
+    def make_url(config: "Config") -> str:
+        url = config.get(key, type=str, default=None)
         if url:
-            return utils.join_url(url, *path, queries=container.env_config.resolve(queries))
+            return utils.join_url(url, *path, queries=config.resolve(queries))
         return ""
 
-    return lazy_load(make_url)
+    return ConfigLazy(make_url)
 
 
-def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
+def load_port_url(key: "ConfigKeyType",
                   *path: str, queries: "QueryType | ConfigValue | None" = None,
-                  https: bool = True) -> "Proxy":
-    def make_url() -> str:
-        port = container.get_config(key, type=int, default=0)
+                  https: bool = True) -> "ConfigLazy":
+    def make_url(config: "Config") -> str:
+        port = config.get(key, type=int, default=0)
         if 0 < port <= 65535:
             return utils.make_url(
                 "https" if https else "http",
-                container.host,
+                config.get("HOST", type=str),
                 port,
                 *path,
-                queries=container.env_config.resolve(queries))
+                queries=config.resolve(queries))
         return ""
 
-    return lazy_load(make_url)
+    return ConfigLazy(make_url)
 
 
-def load_nginx_url(container: "BaseContainer",
-                   reference: "Nginx | tuple[Integration, ...] | None" = None, *path: str,
-                   queries: "QueryType | ConfigValue | None" = None) -> "Proxy":
-    from ._nginx_site import ResolvedSite
-
-    def make_url() -> str:
-        site = ResolvedSite.find(container, reference)
+def load_nginx_url(reference: "ResolvedSite | ConfigValue", *path: str,
+                   queries: "QueryType | ConfigValue | None" = None) -> "ConfigLazy":
+    def make_url(config: "Config") -> str:
+        site = config.resolve(reference)
         url = site.get_url(default="")
-        return utils.join_url(url, *path, queries=container.env_config.resolve(queries)) if url else ""
+        return utils.join_url(url, *path, queries=config.resolve(queries)) if url else ""
 
-    return lazy_load(make_url)
+    return ConfigLazy(make_url)
 
 
 def is_complete_url(value: str) -> bool:

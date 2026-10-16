@@ -41,7 +41,7 @@ class Container(BaseContainer):
     def integrations(self) -> "Integrations":
         return [
             Flare.container("LDAP", "account", load_port_url(
-                self, "LLDAP_WEB_PORT",
+                "LLDAP_WEB_PORT",
                 https=False,
             )),
         ]

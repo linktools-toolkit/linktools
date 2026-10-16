@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Lazy declaration and URL contracts, independent of Docker and templates."""
+from linktools.core import ConfigLazy
+from linktools.cntr.ext import ResolvedSite
 from types import SimpleNamespace
 
 import pytest
 
 from linktools.cntr import ContainerError, ContainerManager, Integration
 from linktools.cntr.ext import Authelia, Flare, Nginx, load_nginx_url
-from linktools.cntr.ext import ResolvedSite, endpoint
+from linktools.cntr.ext import endpoint
 from linktools.core import Config, ConfigSchema
 from linktools.runtime import lazy_load
 
@@ -42,18 +44,18 @@ def fail():
 def test_url_only_resolves_required_values():
     producer = Producer(Nginx.site("app.example.com", proxy=lazy_load(fail),
                                  auth_headers=lazy_load(fail)))
-    assert str(load_nginx_url(producer)) == "https://app.example.com"
-    assert str(load_nginx_url(producer, None, "ui", queries={"a": "b"})) == "https://app.example.com/ui?a=b"
+    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)))) == "https://app.example.com"
+    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)), "ui", queries={"a": "b"})) == "https://app.example.com/ui?a=b"
 
 
 @pytest.mark.parametrize("installed,domain", [((), None), (("nginx",), "")])
 def test_disabled_sites_do_not_resolve_unrelated_fields(installed, domain):
     domain = lazy_load(fail) if domain is None else domain
     producer = Producer(Nginx.site(domain, proxy=lazy_load(fail), template=lazy_load(fail)), installed=installed)
-    assert str(load_nginx_url(producer)) == ""
+    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)))) == ""
     assert producer.site.resolve() is producer.site
     with pytest.raises(ContainerError, match="Expected one declared nginx site"):
-        str(load_nginx_url(producer, Nginx.site(lazy_load(fail))))
+        ResolvedSite.find(producer, Nginx.site(lazy_load(fail)))
 
 
 @pytest.mark.parametrize("field", ["https", "auth", "waf"])
@@ -101,9 +103,9 @@ def test_placeholder_domain_skips_navigation_without_oidc_coupling():
     producer = Producer(Nginx.site(
         "_", proxy="http://app",
     ))
-    link = Flare.public("App", "app", "Application", load_nginx_url(producer))
-    assert link.url is None
-    assert str(load_nginx_url(producer)) == ""
+    link = Flare.public("App", "app", "Application", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None))))
+    assert link.resolve_url(producer.env_config) is None
+    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)))) == ""
     assert producer.site.resolve() is producer.site
 
 
@@ -134,7 +136,7 @@ def test_render_variable_names_use_unique_snapshot_positions():
 def test_old_proxy_declaration_arguments_are_removed():
     producer = Producer(Nginx.site("a.test", proxy="http://app"))
     with pytest.raises(TypeError):
-        load_nginx_url(producer, None, proxy_url="http://app")
+        load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)), proxy_url="http://app")
     assert not hasattr(producer, "load_exist_nginx_url")
 
 
@@ -163,9 +165,10 @@ def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
     app = Counted()
     manager = manager_with({"app": app, "nginx": SimpleNamespace(name="nginx")}, ["app"])
     app.manager = manager
+    app.env_config = Config(None, ConfigSchema(), [])
     assert list(manager.iter_integrations("nginx")) == []
     assert tuple(manager.containers["nginx"].sites) == manager.integration_snapshot["app"]
-    assert str(load_nginx_url(app)) == ""
+    assert app.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(app, None)))) == ""
     assert app.calls == 1
 
 
@@ -498,7 +501,7 @@ def test_endpoint_references_remain_local_to_each_producer() -> None:
 def test_url_rejects_keys_and_non_declaration_references_without_resolving_fields(reference: object) -> None:
     producer = Producer(Nginx.site(lazy_load(fail)))
     with pytest.raises(ContainerError, match="Expected an original nginx site or endpoint declaration"):
-        str(load_nginx_url(producer, reference))
+        ResolvedSite.find(producer, reference)
 
 
 @pytest.mark.parametrize("reference", [(), (Flare.public("App", "web"),),
@@ -514,8 +517,8 @@ def test_equivalent_new_declarations_do_not_match_the_original_site() -> None:
     for reference in (Nginx.site("app.test", proxy="http://app"),
                       endpoint(producer, domain="app.test", proxy="http://app")):
         with pytest.raises(ContainerError, match="Expected one declared nginx site"):
-            str(load_nginx_url(producer, reference))
-    assert str(load_nginx_url(producer, producer.declaration)) == "https://app.test"
+            ResolvedSite.find(producer, reference)
+    assert producer.env_config.resolve(load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, producer.declaration)))) == "https://app.test"
 
 
 @pytest.mark.parametrize("domains", [("app.test", ""), ("", ""), ("app.test", "other.test")])
@@ -524,14 +527,14 @@ def test_omitted_reference_counts_declared_sites_not_enabled_sites(domains: tupl
     other = Nginx.site(domains[1])
     producer.manager.containers["nginx"].sites[other] = ResolvedSite(producer, other, 1)
     with pytest.raises(ContainerError, match="Expected one declared nginx site"):
-        str(load_nginx_url(producer))
+        ResolvedSite.find(producer, None)
 
 
 def test_omitted_reference_requires_a_declared_site() -> None:
     producer = Producer(Nginx.site(lazy_load(fail)))
     producer.manager.containers["nginx"].sites.clear()
     with pytest.raises(ContainerError, match="Expected one declared nginx site"):
-        str(load_nginx_url(producer))
+        ResolvedSite.find(producer, None)
 
 
 def test_site_resolution_does_not_special_case_producer_names():

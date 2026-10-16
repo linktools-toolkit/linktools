@@ -121,7 +121,7 @@ def test_portainer_callback_declaration_is_lazy_and_auth_independent(monkeypatch
     container.manager.containers = {"nginx": SimpleNamespace(sites={
         declarations[0]: ResolvedSite(container, declarations[0], 0),
     })}
-    assert declaration.redirect_uris == ("https://portainer.test",)
+    assert declaration.resolve_redirect_uris(container.env_config) == ("https://portainer.test",)
     assert calls == ["PORTAINER_DOMAIN", "NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
 
 

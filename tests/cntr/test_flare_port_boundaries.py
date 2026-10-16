@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Direct navigation preserves valid ports independently of optional sites."""
+from linktools.core import ConfigLazy
+from linktools.cntr.ext import ResolvedSite
 import pytest
 
 from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
@@ -13,18 +15,17 @@ def test_direct_port_boundary_survives_disabled_public_navigation(nginx: bool, p
     manager, reads = _site_navigation_manager(
         {"web": Nginx.site("")},
         lambda producer: [
-            Flare.public("Public", "web", url=load_nginx_url(producer)),
-            Flare.container("Direct", "web", load_port_url(producer, "PORT", "ui", https=False)),
+            Flare.public("Public", "web", url=load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, None)))),
+            Flare.container("Direct", "web", load_port_url("PORT", "ui", https=False)),
         ],
         nginx=nginx,
     )
     producer = manager.containers["app"]
-    producer.host = "host.test"
 
-    def get_config(key: str, **kwargs: object) -> int:
+    def get_config(key: str, **kwargs: object) -> "int | str":
         reads.append(key)
-        assert key == "PORT"
-        return port
+        assert key in ("PORT", "HOST")
+        return port if key == "PORT" else "host.test"
 
     producer.get_config = get_config
     producer.env_config.get = get_config
@@ -34,4 +35,4 @@ def test_direct_port_boundary_survives_disabled_public_navigation(nginx: bool, p
     expected = [{"name": "Direct", "icon": "web", "link": "http://host.test:65535/ui",
                  "category": "container"}] if port == 65535 else []
     assert result["bookmarks.yml"]["links"] == expected
-    assert reads == ["PORT"]
+    assert reads == (["PORT", "HOST"] if port == 65535 else ["PORT"])

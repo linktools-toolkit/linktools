@@ -36,7 +36,7 @@ class Container(BaseContainer):
                 Flare.links(
                     Flare.public(),
                     Flare.container(
-                        url=load_port_url(self, "PORTAINER_PORT", https=False),
+                        url=load_port_url("PORTAINER_PORT", https=False),
                     ),
                     name="Portainer",
                     icon="docker",

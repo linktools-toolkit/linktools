@@ -7,9 +7,9 @@ complete installed snapshot, even for partial operations. Unknown consumer names
 are errors; known optional consumers that are absent do not consume declarations.
 
 ```python
-from linktools.core import ConfigRef
+from linktools.core import ConfigLazy, ConfigRef
 from linktools.cntr import Integrations
-from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
+from linktools.cntr.ext import ResolvedSite, Flare, Nginx, load_nginx_url, load_port_url
 from linktools.decorator import cached_property
 
 
@@ -23,10 +23,10 @@ def integrations(self) -> "Integrations":
             auth_bypass=(r"^/public/",),
             waf_bypass=(),
         ),
-        Flare.public("App", "apps", "Application", load_nginx_url(self)),
+        Flare.public("App", "apps", "Application", load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self)))),
         Flare.container(
             "App direct", "apps",
-            load_port_url(self, "APP_PORT", https=False),
+            load_port_url("APP_PORT", https=False),
         ),
     ]
 ```
@@ -57,7 +57,7 @@ The generic `iter_integrations` yields `(producer, declaration)` for installed
 consumers. No dictionary key, generated filename or render ordinal is an author identity.
 
 Navigation is an independent `Flare` declaration. Pass
-`load_nginx_url(self)` to use the unique site's lazy URL.
+`load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self)))` to use the unique site's lazy URL.
 An explicit URL stays unchanged; `None`, `""`, or an omitted standalone URL skips the
 navigation entry. Within endpoint extensions, an omitted application URL inherits that site URL. No URL is inherited from a neighboring nginx declaration.
 The link's category is presentation metadata, not an authentication policy;
@@ -133,8 +133,8 @@ options, including templates, headers and capability inheritance, are forwarded
 without changing their semantics.
 
 ```python
-from linktools.cntr.ext import Authelia, Flare, endpoint, load_nginx_url, load_port_url
-from linktools.core import ConfigRef
+from linktools.cntr.ext import ResolvedSite, Authelia, Flare, endpoint, load_nginx_url, load_port_url
+from linktools.core import ConfigLazy, ConfigRef
 
 return endpoint(
     self,
@@ -143,12 +143,12 @@ return endpoint(
     extensions=[
         Flare.links(
             Flare.public(),
-            Flare.container(url=load_port_url(self, "APP_PORT", https=True)),
+            Flare.container(url=load_port_url("APP_PORT", https=True)),
             name="App", icon="apps", desc="Application",
         ),
         Authelia.access(policy="one_factor"),
         Authelia.oidc(
-            redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
+            redirect_uris=("{base_url}/sso/callback",),
         ),
     ],
 )
@@ -176,12 +176,12 @@ multiple uses copy declarations without modifying the original values.
 Extension URLs are declarative; `extensions` is a list/tuple, not a callback:
 
 ```python
-from linktools.cntr.ext import Authelia, Flare, load_nginx_url
-from linktools.core import ConfigRef
+from linktools.cntr.ext import ResolvedSite, Authelia, Flare, load_nginx_url
+from linktools.core import ConfigLazy, ConfigRef
 
 extensions=[
     Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
-        self, None, "ui", "metacubexd", "#", "setup",
+        ConfigLazy(lambda config: ResolvedSite.find(self)), "ui", "metacubexd", "#", "setup",
         queries={"hostname": ConfigRef("MIHOMO_DOMAIN")},
     )),
     Authelia.oidc(("{base_url}", "{base_url}/callback",
@@ -205,8 +205,8 @@ configuration fields are not formatted by this URL step.
 
 Values remain lazy until consumed. Use `load_nginx_url` for site-dependent URLs
 with query values: it checks the site's URL before resolving `queries`, so a
-disabled site leaves those values unread. The example omits the site reference
-with `None`, which requires exactly one declared site. A custom `ConfigLazy`
+disabled site leaves those values unread. The example delays `ResolvedSite.find(self)`, which requires exactly one declared
+site; an explicit original site/endpoint can be supplied to `find` for multi-site producers. A custom `ConfigLazy`
 that constructs a relative URL may resolve its query values before the endpoint
 discovers that its site is disabled. Relative URLs from a disabled site become
 empty; explicit absolute URLs remain independent. Flare None/empty URLs stay
@@ -229,7 +229,7 @@ def integrations(self):
 
 @cached_property
 def proxy_url(self):
-    return load_nginx_url(self, self.proxy_endpoint)
+    return load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self, self.proxy_endpoint)))
 ```
 
 Raw ext declarations can still be mixed with endpoint results and grouped links.
@@ -240,7 +240,7 @@ Use the core value declarations for fields that need the producer's configuratio
 
 ```python
 from linktools.core import ConfigFormat, ConfigLazy, ConfigRef
-from linktools.cntr.ext import Authelia, Flare, endpoint
+from linktools.cntr.ext import ResolvedSite, Authelia, Flare, endpoint
 
 app = endpoint(
     self,
@@ -365,32 +365,35 @@ APP_DOMAIN = ConfigField(provider=Nginx.domain(self))
 It keeps the shared nginx root-domain, wildcard and disabled-provider behavior.
 The former `BaseContainer.get_nginx_domain` method is removed.
 
-Import the URL factories from `linktools.cntr.ext` and pass the owning container:
+Import the URL factories from `linktools.cntr.ext`:
 
 ```python
-from linktools.cntr.ext import load_config_url, load_nginx_url, load_port_url
+from linktools.core import ConfigLazy
+from linktools.cntr.ext import ResolvedSite, load_config_url, load_nginx_url, load_port_url
 
-load_config_url(self, "APP_URL", "ui", queries={"mode": "compact"})
-load_port_url(self, "APP_PORT", "ui", https=False)
-load_nginx_url(self, None, "ui")
+load_config_url("APP_URL", "ui", queries={"mode": "compact"})
+load_port_url("APP_PORT", "ui", https=False)
+load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(self)), "ui")
 ```
 
-Each returns the existing lazy URL proxy. Config URLs and port URLs stay empty
-when disabled. Ports must satisfy `0 < port < 65535`; the host is not read until
-the port is valid. Original site/endpoint lookup waits until the proxy is read.
+Config and port URL factories return unbound `ConfigLazy` declarations. They
+resolve through the consuming Config and stay empty when disabled. Ports must
+satisfy `0 < port <= 65535`; `HOST` is not read until the port is valid. Nginx URL factories likewise return ConfigLazy and require an explicit ResolvedSite
+or ConfigValue resolving to one. Defer lookup with ConfigLazy when declarations
+are being constructed; do not eagerly call ResolvedSite.find during construction.
 Missing, foreign or ambiguous references fail; declared disabled sites or absent
 nginx resolve to an empty URL.
 Path joining, query encoding and literal template placeholders remain unchanged.
 The `queries` argument may contain ConfigValue declarations; they are resolved
-with the owning container's Config only after a nonempty URL or valid port is
-available. Query encoding still belongs to the URL utilities. The returned Proxy
-continues to cache its first successful result, including resolved query values.
+with the consuming Config only after a nonempty URL or valid port is available.
+Query encoding still belongs to the URL utilities. Config and port URL declarations
+do not bind a container or cache a value across Config contexts.
 These factories never register hooks or write configuration.
 
 `BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
 exposure mixin are removed; no URL mixin or resolver wrapper replaces them.
 General Compose/Dockerfile templates expose the public URL factories as `urls`,
-alongside `utils`, so they can use `urls.load_nginx_url(container)`. Native nginx
+alongside `utils`, so they can use `config.resolve(urls.load_nginx_url(urls.ResolvedSite.find(container)))`. Native nginx
 templates retain only the explicit context described below.
 
 ## Site values
@@ -423,10 +426,10 @@ templates retain only the explicit context described below.
 Declare callbacks independently of nginx sites:
 
 ```python
-from linktools.cntr.ext import Authelia, load_nginx_url
+from linktools.cntr.ext import ResolvedSite, Authelia, load_nginx_url
 
 Authelia.oidc(
-    redirect_uris=(load_nginx_url(self, None, "sso/callback"),),
+    redirect_uris=("{base_url}/sso/callback",),
 )
 ```
 

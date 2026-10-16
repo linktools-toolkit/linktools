@@ -51,7 +51,7 @@ class Container(BaseContainer):
                 Flare.links(
                     Flare.public(),
                     Flare.container(
-                        url=load_port_url(self, "SAFELINE_PORT", https=True),
+                        url=load_port_url("SAFELINE_PORT", https=True),
                     ),
                     name="Safeline",
                     icon="alienOutline",

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Config-dependent integration fields resolve only at their consumption boundary."""
+from linktools.core import ConfigLazy
+from linktools.cntr.ext import ResolvedSite
 from collections import UserDict
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -8,9 +10,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from linktools.cntr import ContainerError
-from linktools.cntr.ext import Nginx, ResolvedSite, endpoint, load_config_url, load_nginx_url, load_port_url
-from linktools.core import Config, ConfigField, ConfigFormat, ConfigLazy, ConfigRef, ConfigSchema, RuntimeOverrideSource
-from linktools.runtime import Proxy, lazy_load
+from linktools.cntr.ext import Nginx, endpoint, load_config_url, load_nginx_url, load_port_url
+from linktools.core import Config, ConfigField, ConfigFormat, ConfigRef, ConfigSchema, RuntimeOverrideSource
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
@@ -108,20 +109,20 @@ def test_config_values_site_retains_capability_type_validation(value: object) ->
         site.auth
 
 
-def test_config_values_endpoint_keeps_original_reference_and_legacy_url_proxy() -> None:
+def test_config_values_endpoint_keeps_original_reference_and_resolves_current_query() -> None:
     config = make_config(DOMAIN="app.test", NGINX_HTTP_PORT=80, QUERY="a b")
     producer = SimpleNamespace(name="app", env_config=config, get_config=config.get)
     declarations = endpoint(producer, domain=ConfigRef("DOMAIN"), proxy="http://app", https=False)
     site = ResolvedSite(producer, declarations[0], 0)
     producer.manager = SimpleNamespace(integration_snapshot={"nginx": ()},
                                       containers={"nginx": SimpleNamespace(sites={declarations[0]: site})})
-    url = load_nginx_url(producer, declarations, "ui", queries={"q": ConfigRef("QUERY")})
+    url = load_nginx_url(ConfigLazy(lambda config: ResolvedSite.find(producer, declarations)), "ui", queries={"q": ConfigRef("QUERY")})
     assert type(declarations) is tuple
-    assert type(url) is Proxy
+    assert type(url) is ConfigLazy
     assert ResolvedSite.find(producer, declarations) is site
-    assert str(url) == "http://app.test/ui?q=a+b"
+    assert config.resolve(url) == "http://app.test/ui?q=a+b"
     config.set("QUERY", "changed")
-    assert str(url) == "http://app.test/ui?q=a+b"
+    assert config.resolve(url) == "http://app.test/ui?q=changed"
     with pytest.raises(ContainerError, match="original endpoint"):
         ResolvedSite.find(producer, endpoint(producer, domain=ConfigRef("DOMAIN")))
 
@@ -129,24 +130,22 @@ def test_config_values_endpoint_keeps_original_reference_and_legacy_url_proxy() 
 @pytest.mark.parametrize("factory,key,disabled", [(load_config_url, "URL", ""), (load_port_url, "PORT", 0),
                                                   (load_port_url, "PORT", 65536)])
 def test_config_values_url_helpers_skip_query_for_empty_or_invalid_base(factory: object, key: str, disabled: object) -> None:
-    config = make_config(**{key: disabled})
-    producer = SimpleNamespace(env_config=config, get_config=config.get, host=lazy_load(lambda: fail(config)))
-    value = factory(producer, key, queries={"secret": ConfigLazy(fail)})
-    assert type(value) is Proxy and str(value) == ""
+    config = make_config(HOST=ConfigLazy(fail), **{key: disabled})
+    value = factory(key, queries={"secret": ConfigLazy(fail)})
+    assert type(value) is ConfigLazy and config.resolve(value) == ""
 
 
 @pytest.mark.parametrize("factory,key,value,expected", [
     (load_config_url, "URL", "https://app.test/#/setup", "https://app.test/#/setup?secret=a%2Bb+%26c"),
     (load_port_url, "PORT", 8443, "https://host.test:8443?secret=a%2Bb+%26c"),
 ])
-def test_config_values_url_helpers_encode_nested_query_and_cache_success(factory: object, key: str,
+def test_config_values_url_helpers_encode_nested_query_in_current_config(factory: object, key: str,
                                                                         value: object, expected: str) -> None:
-    config = make_config(SECRET="a+b &c", **{key: value})
-    producer = SimpleNamespace(env_config=config, get_config=config.get, host="host.test")
-    url = factory(producer, key, queries={"secret": ConfigRef("SECRET")})
-    assert str(url) == expected
+    config = make_config(HOST="host.test", SECRET="a+b &c", **{key: value})
+    url = factory(key, queries={"secret": ConfigRef("SECRET")})
+    assert config.resolve(url) == expected
     config.set("SECRET", "new")
-    assert str(url) == expected
+    assert config.resolve(url) == expected.replace("a%2Bb+%26c", "new")
 
 
 def test_config_values_compose_template_resolves_only_consumed_kwargs(fresh_manager: "ContainerManager", tmp_path: "Path") -> None:
@@ -297,3 +296,22 @@ def test_config_values_plain_template_kwargs_keep_their_native_types(
     source.write_text("{{ data | tojson }}|{{ items | tojson }}|{{ pair | tojson }}", encoding="utf-8")
     assert container.render_template(source, data={"enabled": False}, items=[1, 2], pair=(3, 4)) == (
         '{"enabled": false}|[1, 2]|[3, 4]')
+
+
+@pytest.mark.parametrize("factory,key,first,second,expected", [
+    (load_config_url, "URL", "https://one.test", "https://two.test", "https://two.test/ui?q=second"),
+    (load_port_url, "PORT", 8443, 65535, "https://two.test:65535/ui?q=second"),
+])
+def test_url_helpers_reuse_inline_fields_and_query_refs_across_configs(
+        factory: object, key: str, first: object, second: object, expected: str) -> None:
+    field = ConfigField(key, default=first)
+    query = ConfigRef(ConfigField("QUERY", default="first"))
+    value = factory(field, "ui", queries={"q": query})
+    one = make_config(HOST="one.test")
+    two = make_config(HOST="two.test", QUERY="second", **{key: second})
+    first_result = one.resolve(value)
+    assert "one.test" in first_result and first_result.endswith("?q=first")
+    assert two.resolve(value) == expected
+    assert one.resolve(value) == first_result
+    assert one.schema.get(key) is None and two.schema.get(key) is None
+    assert one.schema.get("QUERY") is None and two.schema.get("QUERY") is None
