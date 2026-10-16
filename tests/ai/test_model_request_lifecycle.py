@@ -1444,9 +1444,10 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
                 broker: runtime_event.LiveExecutionEventBroker,
                 *,
                 max_bytes: int = runtime_event._DEFAULT_BUFFER_BYTES,
+                shared: runtime_event.SharedStreamPublisher | None = None,
             ) -> None:
                 del max_bytes
-                original_init(broker, max_bytes=1)
+                original_init(broker, max_bytes=1, shared=shared)
 
             monkeypatch.setattr(
                 runtime_event.LiveExecutionEventBroker,
