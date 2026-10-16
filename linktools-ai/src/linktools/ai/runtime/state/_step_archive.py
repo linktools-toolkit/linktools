@@ -2185,6 +2185,7 @@ class StateStepArchive(AgentRunStore):
         producer_generation: int | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
+        prefetch_keys: Sequence[bytes] = (),
     ) -> bool:
         """Commit projection metadata and report whether its AgentRun was admitted."""
         self._ensure_open()
@@ -2212,6 +2213,7 @@ class StateStepArchive(AgentRunStore):
             transaction,
             run,
             include_projection=bool(checkpoints),
+            prefetch_keys=prefetch_keys,
         )
         if observation is not None:
             await self._history.commit_observation(transaction, observation)
@@ -2453,6 +2455,7 @@ class StateStepArchive(AgentRunStore):
         run: AgentRunRecord,
         *,
         include_projection: bool = False,
+        prefetch_keys: Sequence[bytes] = (),
     ) -> tuple[StoredRecord, bool]:
         owner = self._agent_run_key(run.agent_run_id)
         history_owner = (
@@ -2464,7 +2467,7 @@ class StateStepArchive(AgentRunStore):
         keys = (owner, head_key)
         if include_projection:
             keys += (self._history.projection_key(history_owner),)
-        records = await transaction.get_records(keys)
+        records = await transaction.get_records((*keys, *prefetch_keys))
         owner_record = records.get(owner)
         head_record = records.get(head_key)
         if owner_record is None:

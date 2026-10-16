@@ -430,6 +430,15 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             history_head_guard,
             producer_generation=producer_generation,
         )
+        # Invalid inputs retain the original validation/error ordering below.
+        prefetch_keys = (
+            tuple(self._interaction_key(value.agent_run_id, value.model_request_seq) for value in interactions)
+            if guard is not None and all(
+                isinstance(value, ModelInteractionRecord) and value.agent_run_id == run.agent_run_id
+                for value in interactions
+            )
+            else ()
+        )
         created = await super()._sync_projection_in_transaction(
             transaction,
             run,
@@ -440,6 +449,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             producer_generation=producer_generation,
             execution_id=execution_id,
             history_head_guard=guard,
+            prefetch_keys=prefetch_keys,
         )
         inserted = await self._sync_interactions_in_transaction(
             transaction,
