@@ -324,9 +324,9 @@ async def _wait_queue_empty(buffer: WriteCacheScope[Observation]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_metric_buffer_default_batch_reaches_128_before_three_seconds() -> None:
+async def test_metric_buffer_default_batch_reaches_128_before_one_minute() -> None:
     assert WriteCache().batch_size == 128
-    assert WriteCache().flush_interval_seconds == 3.0
+    assert WriteCache().flush_interval_seconds == 60.0
     store = _RecordingStore()
     store.release.set()
     buffer = WriteCache().open(
@@ -358,11 +358,11 @@ async def test_metric_buffer_window_stays_with_first_accepted_observation(
     try:
         assert await buffer.try_submit(_observation("first")) is True
         await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
-        clock[0] = 2.9
+        clock[0] = 59.9
         assert await buffer.try_submit(_observation("second")) is True
         await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
         assert not store.entered.is_set()
-        clock[0] = 3.0
+        clock[0] = 60.0
         assert await buffer.try_submit(_observation("third")) is True
         batch = await asyncio.wait_for(store.next_batch.get(), timeout=0.05)
         assert tuple(item.observation_id for item in batch) == ("first", "second", "third")
@@ -416,7 +416,7 @@ async def test_metric_buffer_expired_queued_batch_does_not_start_another_window(
         await asyncio.wait_for(store.next_batch.get(), timeout=1)
         clock[0] = 0.1
         assert await buffer.try_submit(_observation("queued")) is True
-        clock[0] = 3.1
+        clock[0] = 60.1
         store.release.set()
         batch = await asyncio.wait_for(store.next_batch.get(), timeout=0.05)
         assert tuple(item.observation_id for item in batch) == ("queued",)

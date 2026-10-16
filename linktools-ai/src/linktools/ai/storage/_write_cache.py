@@ -53,7 +53,7 @@ class WriteCache:
 
     queue_capacity: int = 1024
     batch_size: int = 128
-    flush_interval_seconds: float = 3.0
+    flush_interval_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         for value in (self.queue_capacity, self.batch_size):

@@ -232,7 +232,7 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
         write_cache=WriteCache(
             queue_capacity=1024,
             batch_size=128,
-            flush_interval_seconds=3.0,
+            flush_interval_seconds=60.0,
         ),
     )
 
@@ -242,7 +242,7 @@ WriteCache 仅保存不可变选项，无活跃队列、后台任务或 close。
 
 公共操作为：
 
-- WriteCache(queue_capacity=1024, batch_size=128, flush_interval_seconds=3.0)
+- WriteCache(queue_capacity=1024, batch_size=128, flush_interval_seconds=60.0)
 - WriteCache.open(write_batch: Callable[[tuple[Item, ...]], Awaitable[None]]) -> WriteCacheScope[Item]
 - scope.try_submit(item) -> bool，为异步接纳；scope.status()、await scope.flush(timeout_seconds=5.0)、await scope.close()
 - Metrics 的构造及既有工厂透传可选 write_cache；Metrics.recorder() 返回由调用者关闭的独立 MetricRecorder
@@ -254,7 +254,7 @@ bool 始终只表示接纳流程是否成功，不能当持久提交凭据。无
 
 queue_capacity 只限制排队项，单 writer 另外持有至多一个 batch_size 批次，不预取下一批；总未结算项至多 queue_capacity + batch_size，默认1152条。容量是条目数，不是字节预算；领域在接纳前校验大小并冻结内容。满载拒新，不逐出已接纳项。两个整数必须为正，无 batch_size 必须小于队列容量的限制；间隔为有限正数。
 
-128条或首条接纳后3秒先到即提交，后续入队不重置窗口。flush 和正常 close 主动唤醒不足一批的项。3秒只约束正常调度下的组批等待，不包括排队与 sink 时间。单 writer 保持顺序，不自动重试；幂等、事务、提交未知读回由 sink 的原有权威所有者负责。
+128条或首条接纳后60秒（1分钟）先到即提交，后续入队不重置窗口。flush 和正常 close 主动唤醒不足一批的项。60秒只约束正常调度下的组批等待，不包括排队与 sink 时间。单 writer 保持顺序，不自动重试；幂等、事务、提交未知读回由 sink 的原有权威所有者负责。
 
 Metrics recorder 将有效单批条数限制在现有强写 API 的 256 条上限内；配置的 batch_size 仍是最大值，共享配置对象不被修改。显式强写 API 与其 16 MiB 批内容预算保持不变，缓存接纳不保证任意载荷组合一定被 sink 接受。
 
@@ -278,7 +278,7 @@ close 的交付失败通过真实状态与安全日志可见，不冒充全部�
 
 普通指标错误 fail-open；外部取消继续传播，但不能重写已交接的成功事实，尤其不能将成功工具误记为效果未知。Task graph/node 投影同样采用 awaited 调用，不用原后台 task 继续隐藏无缓存 I/O；事实收集与记录分别遵守自己的生命周期。
 
-新增验证涵盖：无缓存实际等待且无隐藏队列、显式缓存接纳、128/3首条窗口、主动flush、前缀后接纳、直接并发、scope独立关闭、未知提交、组批/写入取消及成功业务交接后的指标取消。未执行前不将设计确认当作实现通过。
+新增验证涵盖：无缓存实际等待且无隐藏队列、显式缓存接纳、128/60首条窗口、主动flush、前缀后接纳、直接并发、scope独立关闭、未知提交、组批/写入取消及成功业务交接后的指标取消。未执行前不将设计确认当作实现通过。
 
 ## 9. 验证与阶段事实
 
