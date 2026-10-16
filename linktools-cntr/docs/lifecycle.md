@@ -1,8 +1,8 @@
 # Container operation lifecycle
 
-The public context is `OperationContext`. A container uses the existing
-`on_starting` and `on_check` callbacks; it does not implement a separate generated
-configuration lifecycle.
+The public context is `OperationContext`. A container uses `on_starting` for persistent initialization,
+`on_integrating(context) -> None` for derived integration files, and `on_check`
+for validation. A successful callback returns normally; failures raise exceptions.
 
 ## Operation context fields
 
@@ -45,15 +45,19 @@ inputs because those relationships require different restore actions.
 
 ## Ordering and responsibilities
 
-A named `up` or `restart` operation applies only the services belonging to the
-explicitly named containers. This boundary also controls preparation, image
-inspection, pull, build, callbacks, snapshots and recovery. Dependencies and
-integration consumers are not implicitly added. Required external services must
-already satisfy their runtime conditions; otherwise the operation explains which
-containers to include explicitly before refreshing images or stopping services.
-Successful one-shot dependencies satisfy `service_completed_successfully` without
-remaining running. Unselected services' pending configuration is not applied or
-recursively interpreted as a new prerequisite.
+A named `up` or `restart` prepares images and initializes only explicitly
+selected containers. It also generates candidates for related, already-running
+integration consumers. Current declarations and stored producer provenance both
+identify consumers, including removal of the final declaration. Stopped consumers
+are not initialized or started.
+
+Only consumers whose final generated mounts change join service application.
+Their previously applied service models are retained: pending environment, port,
+image and other Compose changes are not applied. Their actual running images are
+pinned, without extra pull or build. Missing applied snapshots or required image
+changes require an explicit joint selection. Unchanged consumers receive no
+before/check/after application callbacks. Required external services must already
+satisfy their runtime conditions.
 
 An operation without names still resolves the full project, its required
 providers and running declared consumers. Full-project generated-input metadata
@@ -83,18 +87,20 @@ reports the unresolved selection rather than guessing startup commands.
 
 The operation then runs:
 
-1. `on_starting`, container `BEFORE_START`, manager `BEFORE_START`: prepare build
-   inputs, persistent secrets and immutable configuration inputs for the selected
-   owners. Do not change a running service or another owner's lifecycle.
-2. Image preparation, using the resolved model and the existing image preparer.
-3. `on_check` and `CHECK`: validate the exact prepared inputs with the target
-   images. No service has been stopped or replaced at this point.
-4. Framework-managed service application in Compose dependency order, followed by
+1. Explicit targets' `on_starting` initializes persistent state and build inputs.
+2. Targets and related running consumers' `on_integrating(context)` generate
+   immutable files. This callback must not initialize secrets or mutate services.
+   The framework compares generated mounts against successful applied snapshots.
+3. Actual application targets' container `BEFORE_START`, then manager
+   `BEFORE_START` once. The final Compose model is read after these hooks.
+4. Explicit image preparation, then `on_check` and `CHECK` for application targets.
+   No service has been stopped or replaced at this point.
+5. Framework-managed service application in Compose dependency order, followed by
    readiness confirmation and per-service applied-model recording.
-5. `on_started` and `AFTER_START`: post-application notifications. A failure here
-   reports that services were applied; it does not trigger deployment rollback.
+6. `on_started` and `AFTER_START` for applied owners. A failure here reports that
+   services were applied; it does not trigger deployment rollback.
 
-`restart` performs its explicit stop only after step 3. Required providers that
+`restart` performs its explicit stop only after step 4. Required providers that
 were not explicitly selected are not included in the stop set. `down` uses the stop callbacks after loading preparation and performs no
 start preparation, build or native check.
 Status reads metadata and actual state without invoking preparation callbacks.
@@ -109,8 +115,8 @@ starts, `down`, and `compose` retain project-wide preparation. The standard
 `exec <name> up/restart` entry delegates preparation to the same named operation;
 other exec commands retain their existing preparation entry. Exceptions propagate
 before the requested runtime operation starts. Custom callbacks must tolerate
-repeated calls. Generated integration files belong in `on_starting(context)`,
-which runs later for the selected targets.
+repeated calls. Generated integration files belong in `on_integrating(context)`,
+which also runs for related running consumers without their initialization hooks.
 
 Metadata-only planning, status, doctor and config commands do not call
 `on_prepare()`. A hook that changes declarations can therefore change the actual
@@ -138,7 +144,7 @@ rollback artifacts and are not deleted if later validation or startup fails.
 ## Preparing files
 
 Use `context.write_files(self, files, mode=0o600, group=None)` once during
-`on_starting`. `files` maps relative names to UTF-8 text. The call returns an
+`on_integrating`. `files` maps relative names to UTF-8 text. The call returns an
 immutable host directory and does not publish it to running services. Generated
 files remain owner-only (`0600`) unless the producer explicitly supplies another
 mode. For a non-root reader, use `mode=0o640, group=<container group>` and make that
@@ -200,11 +206,19 @@ never claims to undo database or external-system changes.
 
 ## Built-in services
 
-LLDAP and Authelia prepare configuration and persistent secrets in `on_starting`.
+LLDAP retains its initialization in `on_starting`. Authelia initializes persistent
+secrets there and generates integration configuration in `on_integrating`. Nginx
+and Flare likewise separate initialization from generated integration files.
+Nginx rejects collateral integration changes needing a different certificate image
+revision; select nginx explicitly to prepare that image.
 Authelia validates with its target image. Its admin service mounts only the base
-configuration; ACL-only changes do not change that service's file mount.
+configuration; ACL-only changes do not change that service's file mount. If
+partial application leaves only the admin service needing new files, select
+Authelia explicitly so its service image can perform native validation.
 
-Flare prepares navigation files with its configured group access. Initial
+Flare prepares navigation files with its configured group access and checks that
+its effective numeric service user can read them. A pending user/group change
+that would make the files unreadable requires explicitly selecting Flare. Initial
 migration copies other legacy application assets to `runtime-app`, leaving the
 legacy directory available to an old Compose model. Application uses normal
 file mounts and service recreation, not migration callbacks around Compose.

@@ -347,6 +347,79 @@ def bind_prepared_files(context: "OperationContext", model: dict,
     return dict(model, services=services)
 
 
+def _service_support(model: dict, service: str) -> dict:
+    spec = model["services"][service]
+    support = {key: value for key, value in model.items()
+               if key not in ("services", "networks", "volumes", "secrets", "configs")}
+    for category in ("networks", "volumes", "secrets", "configs"):
+        definitions = model.get(category, {})
+        if category == "networks":
+            names = () if spec.get("network_mode") or spec.get("networks") == [] else (
+                spec.get("networks") or ("default",))
+        elif category == "volumes":
+            names = (item.get("source") for item in spec.get("volumes", ())
+                     if isinstance(item, dict) and item.get("type") == "volume")
+        else:
+            names = (item if isinstance(item, str) else item.get("source")
+                     for item in spec.get(category, ()))
+        support[category] = {name: definitions[name] for name in names if name in definitions}
+    return support
+
+
+def bind_consumer_files(context: "OperationContext", model: dict,
+                        models: "AppliedServiceModels", services: "Iterable[str]") -> dict:
+    """Rebind generated inputs without adopting a consumer's pending configuration."""
+    from copy import copy, deepcopy
+    from pathlib import Path
+
+    result = deepcopy(model)
+    services = tuple(dict.fromkeys(services))
+    roots = tuple(container.get_app_path("generated") for container in context.project_containers
+                  if container.name in context.prepared_dirs)
+    for service in services:
+        previous = models.previous_model(service)
+        if previous is None or service not in previous["services"]:
+            raise ContainerError("No applied Compose model for configuration consumer {}; "
+                                 "explicitly select its container".format(service))
+        for category, value in _service_support(previous, service).items():
+            if category in ("networks", "volumes", "secrets", "configs"):
+                if not value:
+                    continue
+                target = result.setdefault(category, {})
+                for name, definition in value.items():
+                    if name in target and target[name] != definition:
+                        raise ContainerError("Applied {} {!r} conflicts for configuration consumer {}; "
+                                             "explicitly select its container".format(category, name, service))
+                    target[name] = definition
+            elif category in result and result[category] != value:
+                raise ContainerError("Applied Compose {!r} conflicts for configuration consumer {}; "
+                                     "explicitly select its container".format(category, service))
+            else:
+                result[category] = value
+        spec = previous["services"][service]
+        for item in spec.get("volumes", ()):
+            if not isinstance(item, dict) or item.get("type") != "bind":
+                continue
+            source = Path(item["source"])
+            for root in roots:
+                try:
+                    relative = source.relative_to(root)
+                except ValueError:
+                    continue
+                if not relative.parts or ".." in relative.parts:
+                    continue
+                generation = relative.parts[0]
+                if generation != "current" and (len(generation) not in (32, 64) or
+                                                 any(char not in "0123456789abcdef" for char in generation)):
+                    continue
+                item["source"] = str(root.joinpath("current", *relative.parts[1:]))
+                break
+        result["services"][service] = spec
+    scoped = copy(context)
+    scoped.target_services = services
+    return bind_prepared_files(scoped, result, models)
+
+
 def _unapplied_running_services(context: "OperationContext", services: "Iterable[str]") -> "set[str]":
     unapplied = set(context.initial_runtime_state.running_services) - set(services)
     if context.is_full_project:
@@ -524,23 +597,7 @@ class AppliedServiceModels:
     @classmethod
     def _projection(cls, model: dict, service: str) -> str:
         spec = {key: value for key, value in model["services"][service].items() if key != "build"}
-        shared = {key: value for key, value in model.items()
-                  if key not in ("services", "networks", "volumes", "secrets", "configs")}
-        for category in ("networks", "volumes", "secrets", "configs"):
-            definitions = model.get(category, {})
-            if category == "networks":
-                if spec.get("network_mode") or spec.get("networks") == []:
-                    names = ()
-                else:
-                    names = spec.get("networks") or ("default",)
-            elif category == "volumes":
-                names = (item.get("source") for item in spec.get("volumes", ())
-                         if isinstance(item, dict) and item.get("type") == "volume")
-            else:
-                names = (item if isinstance(item, str) else item.get("source")
-                         for item in spec.get(category, ()))
-            shared[category] = {name: definitions[name] for name in names if name in definitions}
-        return cls._normalize(dict(shared, services={service: spec}))
+        return cls._normalize(dict(_service_support(model, service), services={service: spec}))
 
     @classmethod
     def _normalize(cls, model: dict) -> str:

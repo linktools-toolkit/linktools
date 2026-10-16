@@ -249,6 +249,13 @@ class BaseContainer(metaclass=AbstractMetaClass):
     def on_starting(self, context: "OperationContext") -> None:
         pass
 
+    def on_integrating(self, context: "OperationContext") -> None:
+        """Stage integration inputs for selected or additional running consumers.
+
+        Do not initialize persistent state or change running services here.
+        """
+        pass
+
     def on_started(self, context: "OperationContext") -> None:
         pass
 

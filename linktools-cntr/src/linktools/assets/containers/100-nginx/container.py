@@ -503,7 +503,6 @@ class Container(BaseContainer):
         import tarfile
         import tempfile
         from filelock import FileLock
-        from types import SimpleNamespace
         from linktools.cntr.artifacts import atomic_write_text_if_changed
 
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
@@ -544,6 +543,20 @@ class Container(BaseContainer):
                         os.unlink(temporary)
                         raise
                 os.replace(temporary, str(archive))
+
+    def on_integrating(self, context: "OperationContext") -> None:
+        from types import SimpleNamespace
+
+        if context.target_containers is not None and self not in context.target_containers:
+            actual = context.initial_runtime_state
+            instances = tuple(item for item in actual.service_instances("nginx")
+                              if item.state in ("running", "restarting")) if actual is not None else ()
+            if not instances or any(
+                    item.labels.get("io.linktools.nginx.certificate-revision") != self.cert_image_revision
+                    for item in instances):
+                raise ContainerError(
+                    "Nginx certificate image revision changed or is unavailable; "
+                    "explicitly select nginx to prepare and build its image.")
         files, waf = self._rendered_site_files
         result = dict(files)
         root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})

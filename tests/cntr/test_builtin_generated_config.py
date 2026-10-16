@@ -159,9 +159,11 @@ def test_authelia_prepares_new_password_without_overwriting_legacy(tmp_path, mon
     monkeypatch.setattr(container, "_create_secret_file", lambda path: None)
     monkeypatch.setattr(container, "_create_pem_file", lambda path: None)
     values = {}
-    context = SimpleNamespace(target_services=("authelia",),
+    context = SimpleNamespace(target_containers=[container], target_services=("authelia",),
                               write_files=lambda owner, files: values.update(files))
     container.on_starting(context)
+    assert values == {}
+    container.on_integrating(context)
     assert values["authentication_backend_ldap_password"] == "new password"
     assert legacy.read_text() == "old password"
     commands = []

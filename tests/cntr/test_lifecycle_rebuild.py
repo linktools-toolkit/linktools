@@ -58,6 +58,9 @@ class Owner:
     def on_starting(self, context):
         self.manager.events.append(("prepare", self.name))
 
+    def on_integrating(self, context: OperationContext) -> None:
+        pass
+
     def on_check(self, context):
         self.manager.events.append(("check-callback", self.name))
 

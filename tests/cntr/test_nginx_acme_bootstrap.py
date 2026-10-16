@@ -210,12 +210,14 @@ def test_build_account_uses_current_storage_without_migrating_old_files(fresh_ma
     monkeypatch.setattr(container.runtime, "chmod", lambda *args: None)
     monkeypatch.setattr(container, "_render_site_template", lambda *args: "configuration")
     context = SimpleNamespace(
+        target_containers=[container],
         initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(service="nginx", labels={
             "io.linktools.nginx.certificate-revision": running_revision,
         }),)),
         previous_compose_contents={"nginx": "original model"}, write_files=lambda *args: None,
     )
     container.on_starting(context)
+    container.on_integrating(context)
     with tarfile.open(str(container.get_app_path("acme-build-account.tar"))) as archive:
         if source == "empty":
             assert archive.getnames() == []

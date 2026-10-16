@@ -21,7 +21,11 @@ def test_authelia_https_check_only_for_configuration_consumers(services):
                             get_config=lambda key: reads.append(key) or False)
     context = OperationContext(target_services=services)
     selected = services is None or bool(set(services) & set(native._config_services))
-    if selected:
+    if selected and services is not None and "authelia" not in services:
+        with pytest.raises(ContainerError, match="explicitly select the authelia"):
+            native.on_check(owner, context)
+        assert reads == []
+    elif selected:
         with pytest.raises(ContainerError, match="Authelia requires HTTPS"):
             native.on_check(owner, context)
         assert reads == ["NGINX_HTTPS_ENABLE"]

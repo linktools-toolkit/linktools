@@ -42,12 +42,24 @@ class LifecycleDispatcher:
             self._invoke_callback(container.on_prepare)
 
     @classmethod
-    def _preparation_steps(cls, containers):
-        for container in containers:
-            yield LifecycleStep(container, callback="on_starting")
+    def _preparation_steps(cls, containers, prepare=True):
+        if prepare:
+            for callback in ("on_starting", "on_integrating"):
+                for container in containers:
+                    yield LifecycleStep(container, callback=callback)
         for container in containers:
             yield LifecycleStep(container, HookPhase.BEFORE_START)
         yield LifecycleStep(phase=HookPhase.BEFORE_START)
+
+    def prepare_start(self, context: "OperationContext",
+                      integrations: "Iterable[BaseContainer]" = ()) -> None:
+        """Prepare explicit owners, then integration candidates before scope selection."""
+        targets = tuple(context.target_containers)
+        consumers = tuple(dict.fromkeys((*targets, *integrations)))
+        self._dispatch_steps((LifecycleStep(container, callback="on_starting")
+                              for container in targets), context)
+        self._dispatch_steps((LifecycleStep(container, callback="on_integrating")
+                              for container in consumers), context)
 
     @classmethod
     def iter_steps(cls, action: str, containers: "Sequence[BaseContainer]",
@@ -94,9 +106,12 @@ class LifecycleDispatcher:
                               for container in tuple(context.target_containers)), context)
 
     @contextlib.contextmanager
-    def notify_start(self, context: "OperationContext") -> "Iterator[None]":
+    def notify_start(self, context: "OperationContext", *, prepare: bool = True) -> "Iterator[None]":
+        """Notify application targets; skip preparation after a prior prepare_start."""
         targets = tuple(context.target_containers)
-        self._dispatch_steps(self._preparation_steps(targets), context)
+        if prepare:
+            self.prepare_start(context)
+        self._dispatch_steps(self._preparation_steps(targets, prepare=False), context)
         yield
         try:
             self._dispatch_steps(self.iter_steps("up", targets, after=True), context)

@@ -175,6 +175,9 @@ class Container(BaseContainer):
     def on_check(self, context: "OperationContext") -> None:
         if context.target_services is not None and not set(context.target_services).intersection(self._config_services):
             return
+        if context.target_services is not None and "authelia" not in context.target_services:
+            raise ContainerError("Authelia configuration validation requires its service image; "
+                                 "explicitly select the authelia container.")
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
         command = ["authelia", "config", "validate"]
@@ -238,6 +241,12 @@ class Container(BaseContainer):
         for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
             self._create_secret_file(secret_path / name)
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
+
+    def on_integrating(self, context: "OperationContext") -> None:
+        if (context.target_containers is None or self in context.target_containers) and (
+                context.target_services is not None
+                and not set(context.target_services).intersection(self._config_services)):
+            return
         files = {name: self.render_template(self.get_source_path("templates", name)) for name in self.config_files}
         files["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
         context.write_files(self, files)

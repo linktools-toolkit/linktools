@@ -4,7 +4,7 @@ Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一�
 
 ### 指定容器的操作范围
 
-`ct-cntr up --pull safeline sublink omniroute` 只刷新、构建和启动这三个容器自身的服务，不自动拉取或构建 nginx、Authelia 等依赖。已有依赖只做就绪检查；缺少必要依赖时会在镜像操作和停止容器之前提示，把需要的容器显式加到命令中即可。`restart` 和 `exec <容器> up/restart` 遵循相同边界。
+`ct-cntr up --pull safeline sublink omniroute` 只刷新和构建这三个容器自身的服务，不自动拉取或构建 nginx、Authelia 等依赖。关联且正在运行的集成消费者会生成候选配置，仅生成挂载变化时随本次 up 重建；其已应用镜像和其他配置保持不变。未运行消费者不自动启动。已有依赖只做就绪检查；缺少必要依赖时会在镜像操作和停止容器之前提示，把需要的容器显式加到命令中即可。`restart` 和 `exec <容器> up/restart` 遵循相同边界。
 
 未指定容器的 `ct-cntr up` 仍处理完整项目。依赖关系不会从 Compose 模型删除；若共享服务作者、运行中的重启依赖或 namespace 绑定必须联合操作，会明确要求共同选择，不能静默扩大范围。
 
@@ -243,7 +243,7 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 
 共享上下文为 `OperationContext`。容器使用已有的准备与检查回调，不再实现一套生成配置生命周期。
 
-`up`：确定范围 → `on_starting / BEFORE_START` → 准备镜像 → `on_check / CHECK` → 框架应用服务并确认就绪 → `on_started / AFTER_START`。
+`up`：确定范围 → 显式目标 `on_starting` → 目标及关联运行消费者 `on_integrating` → 按生成配置变化确定应用范围 → `BEFORE_START` → 准备显式目标镜像 → `on_check / CHECK` → 框架应用服务并确认就绪 → `on_started / AFTER_START`。
 
 `restart` 在准备和检查全部通过后才停止显式目标；依赖方不进入显式停止集合。`down` 不准备启动配置或密钥。状态查询不调用有副作用的准备回调。
 
