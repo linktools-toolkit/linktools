@@ -316,6 +316,7 @@ class DefaultSessionService:
                 cursor_signer=self._cursor_signer, limit=limit,
                 reconcile=self._reconcile_terminal_admission,
                 transcript_store=self._transcript_store,
+                validate_active=self._validate_active_admitted_execution,
             )
             record = state.root
             active = self._active_execution_id(
