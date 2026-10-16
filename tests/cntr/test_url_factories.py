@@ -5,6 +5,7 @@ from linktools.core import ConfigLazy
 from linktools.cntr.ext import ResolvedSite
 from linktools.core import ConfigRef
 from types import SimpleNamespace
+from collections import UserList
 
 import pytest
 
@@ -177,15 +178,51 @@ def test_nginx_url_keyword_path_matches_positional_path(path):
         load_nginx_url(site, path, queries=query))
 
 
-@pytest.mark.parametrize("path", ["/ui", "", ConfigLazy(lambda config: "/ui")])
-def test_nginx_url_rejects_both_path_forms_at_construction(path):
+@pytest.mark.parametrize("factory", [load_config_url, load_port_url, load_nginx_url])
+def test_url_helpers_reject_multiple_positional_paths(factory):
     with pytest.raises(TypeError):
-        load_nginx_url(None, "first", path=path)
+        factory(None, "ui", "settings")
 
 
-def test_nginx_url_explicit_none_keyword_path_keeps_positional_paths():
-    producer = SimpleNamespace(name="app")
-    site = ResolvedSite(producer, Nginx.site("app.test"), 0)
+@pytest.mark.parametrize("factory", [load_config_url, load_port_url, load_nginx_url])
+@pytest.mark.parametrize("path,expected", [
+    ("settings", "/settings"),
+    (["ui", "settings"], "/ui/settings"),
+    (("ui", "settings"), "/ui/settings"),
+    (ConfigLazy(lambda config: "settings"), "/settings"),
+    (ConfigLazy(lambda config: ["ui", "settings"]), "/ui/settings"),
+    (ConfigLazy(lambda config: ("ui", "settings")), "/ui/settings"),
+    ([ConfigRef("PATH"), ConfigLazy(lambda config: "settings")], "/ui/settings"),
+    ((ConfigRef("PATH"), ConfigLazy(lambda config: "settings")), "/ui/settings"),
+    (ConfigRef("PATHS"), "/ui/settings"),
+    (UserList([ConfigRef("PATH"), "settings"]), "/ui/settings"),
+    (ConfigLazy(lambda config: UserList([ConfigRef("PATH"), "settings"])), "/ui/settings"),
+    (None, ""),
+    ("", ""),
+    ([], ""),
+    ((), ""),
+    (ConfigLazy(lambda config: None), ""),
+])
+def test_url_helpers_single_path_contract(factory, path, expected):
+    from linktools.core import DictSource
+    config = Config(None, ConfigSchema(), [DictSource({
+        "HOST": "app.test", "PATH": "ui", "PATHS": ["ui", "settings"],
+    })])
+    site = ResolvedSite(SimpleNamespace(name="app"), Nginx.site("app.test"), 0)
     site.get_url = lambda default="": "https://app.test"
-    config = Config(None, ConfigSchema(), [])
-    assert config.resolve(load_nginx_url(site, "ui", "settings", path=None)) == "https://app.test/ui/settings"
+    base = site if factory is load_nginx_url else 443 if factory is load_port_url else "https://app.test"
+    for helper in (factory(base, path, queries={"q": "a b"}),
+                   factory(base, path=path, queries={"q": "a b"})):
+        assert config.resolve(helper) == "https://app.test%s?q=a+b" % expected
+
+
+@pytest.mark.parametrize("factory", [load_config_url, load_port_url, load_nginx_url])
+def test_url_helpers_invalid_base_skips_whole_path(factory):
+    reads = []
+    path = ConfigLazy(lambda config: reads.append("path") or [ConfigRef("MISSING")])
+    query = ConfigLazy(lambda config: reads.append("query") or {"secret": ConfigRef("MISSING")})
+    site = ResolvedSite(SimpleNamespace(name="app"), Nginx.site(""), 0)
+    site.get_url = lambda default="": ""
+    base = site if factory is load_nginx_url else 0 if factory is load_port_url else ""
+    assert Config(None, ConfigSchema(), []).resolve(factory(base, path=path, queries=query)) == ""
+    assert reads == []

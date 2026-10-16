@@ -8,26 +8,37 @@ from linktools import utils
 from linktools.core import ConfigLazy, ConfigValue
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import Any, Sequence
     from linktools.core import Config
     from linktools.types import QueryType
     from ._nginx_site import ResolvedSite
 
 
+def _resolve_path(config: "Config", path: "str | Sequence[str | ConfigValue] | ConfigValue | None") -> "tuple[str, ...]":
+    value = config.resolve(path)
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(config.resolve(item) for item in value)
+
+
 def load_config_url(url: "str | ConfigValue | None",
-                    *path: "str | ConfigValue", queries: "QueryType | ConfigValue | None" = None) -> "ConfigLazy":
+                    path: "str | Sequence[str | ConfigValue] | ConfigValue | None" = None, *,
+                    queries: "QueryType | ConfigValue | None" = None) -> "ConfigValue":
     def make_url(config: "Config") -> str:
         resolved_url = config.resolve(url)
         if resolved_url:
-            return utils.join_url(resolved_url, *config.resolve(path), queries=config.resolve(queries))
+            return utils.join_url(resolved_url, *_resolve_path(config, path), queries=config.resolve(queries))
         return ""
 
     return ConfigLazy(make_url)
 
 
 def load_port_url(port: "int | ConfigValue",
-                  *path: "str | ConfigValue", queries: "QueryType | ConfigValue | None" = None,
-                  https: "bool | ConfigValue" = True) -> "ConfigLazy":
+                  path: "str | Sequence[str | ConfigValue] | ConfigValue | None" = None, *,
+                  queries: "QueryType | ConfigValue | None" = None,
+                  https: "bool | ConfigValue" = True) -> "ConfigValue":
     def make_url(config: "Config") -> str:
         resolved_port = config.resolve(port)
         if 0 < resolved_port <= 65535:
@@ -35,7 +46,7 @@ def load_port_url(port: "int | ConfigValue",
                 "https" if config.resolve(https) else "http",
                 config.get("HOST", type=str),
                 resolved_port,
-                *config.resolve(path),
+                *_resolve_path(config, path),
                 queries=config.resolve(queries))
         return ""
 
@@ -45,8 +56,9 @@ def load_port_url(port: "int | ConfigValue",
 class _EndpointURL(ConfigValue):
     """An endpoint-local URL awaiting the navigation declaration's site binding."""
 
-    def __init__(self, paths: "tuple[str | ConfigValue, ...]", queries: "QueryType | ConfigValue | None") -> None:
-        self.paths = paths
+    def __init__(self, path: "str | Sequence[str | ConfigValue] | ConfigValue | None",
+                 queries: "QueryType | ConfigValue | None") -> None:
+        self.path = path
         self.queries = queries
 
     def resolve(self, config: "Config") -> str:
@@ -57,25 +69,21 @@ class _EndpointURL(ConfigValue):
 def bind_url(value: "Any", base_url: "str | ConfigValue") -> "Any":
     """Bind only this module's endpoint-local URL declaration without consuming it."""
     if type(value) is _EndpointURL:
-        return load_config_url(base_url, *value.paths, queries=value.queries)
+        return load_config_url(base_url, path=value.path, queries=value.queries)
     return value
 
 
 def load_nginx_url(reference: "ResolvedSite | ConfigValue | None" = None,
-                   *paths: "str | ConfigValue", path: "str | ConfigValue | None" = None,
+                   path: "str | Sequence[str | ConfigValue] | ConfigValue | None" = None, *,
                    queries: "QueryType | ConfigValue | None" = None) -> "ConfigValue":
     """Declare a site URL, or an endpoint-local Flare URL when reference is omitted."""
-    if path is not None:
-        if paths:
-            raise TypeError("load_nginx_url accepts either positional paths or path, not both")
-        paths = (path,)
     if reference is None:
-        return _EndpointURL(paths, queries)
+        return _EndpointURL(path, queries)
 
     def make_url(config: "Config") -> str:
         site = config.resolve(reference)
         url = site.get_url(default="")
-        return utils.join_url(url, *config.resolve(paths), queries=config.resolve(queries)) if url else ""
+        return utils.join_url(url, *_resolve_path(config, path), queries=config.resolve(queries)) if url else ""
 
     return ConfigLazy(make_url)
 

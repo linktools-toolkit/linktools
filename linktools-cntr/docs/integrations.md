@@ -388,7 +388,11 @@ return unbound ConfigLazy values. A string URL is literal, never an implicit
 configuration key; use ConfigRef explicitly for configuration lookup and its
 cast/default. For example, `load_config_url("https://app.example/ui")` and
 `load_port_url(8080, https=False)` work without a URL/port configuration key.
-Path components accept strings or ConfigValue declarations; `https` accepts a
+All three helpers use one `path` parameter, accepted as the second positional
+argument or by keyword. It accepts a string, a list/tuple of path components,
+or a ConfigValue producing either; each component can also be a ConfigValue.
+Use `path=["ui", "settings"]` for multiple components. There is no variadic
+path compatibility. Strings are joined as one component, never as characters; `https` accepts a
 boolean or ConfigValue. Literal paths need no wrapping. These arguments and
 queries resolve only after the base URL or port is usable. Config/port values
 resolve through the consuming Config and stay empty when disabled. Ports must
@@ -397,9 +401,9 @@ be a ResolvedSite or ConfigValue resolving to one. For a Flare URL inside
 endpoint extensions, omit the reference and use `load_nginx_url(path="/ui", queries=...)`
 to bind that endpoint's own base URL. This shorthand does not infer a global or
 unique site and is not an OIDC callback template; use `{base_url}` for callbacks.
-An unbound reference-free declaration raises ConfigError. Existing positional
-path components remain supported; passing both positional paths and `path=`
-raises TypeError during construction. `ResolvedSite.find(producer, reference=None)`
+An unbound reference-free declaration raises ConfigError. All helpers use the same single `path` argument and keyword-only `queries`;
+only load_port_url additionally accepts keyword-only `https`. None means no
+path, and path values resolve only after a usable base has been obtained. `ResolvedSite.find(producer, reference=None)`
 is safe during declaration construction: it returns ConfigLazy without reading
 the snapshot. Each Config.resolve performs the lookup; no resolved site is cached
 in the reference. To read site properties immediately, use
