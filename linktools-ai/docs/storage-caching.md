@@ -263,3 +263,49 @@ reset and authoritative history are the safe recovery result.
 Preview cursor continuation applies to execution watch and its model observation
 projection. TaskGraph observation retains its durable event replay contract;
 configuring the backend does not add provisional TaskGraph cursor semantics.
+
+## Opt-in session display captures
+
+`runtime.sessions.refresh(session_id, principal=principal)` remains a strong
+refresh. An explicit `max_age=3` permits reuse of one complete `SessionDetail`
+for at most three seconds from the start of its original capture. `max_age` must
+be finite and non-negative; it is a caller-selected maximum, not a fixed SDK TTL.
+A shorter later maximum is respected, and a longer one never extends an existing
+entry's original expiry. The default zero does not read or publish display cache
+entries, including when a custom `SessionService` still has the earlier signature.
+
+The Runtime borrows its existing `RuntimeStorage.cache_backend`; no extra cache
+configuration or backend lifecycle is introduced. Standard assembly enables
+this optimization only when conversation and execution retention are both
+`DURABLE`. Entries are isolated by service lifetime, principal/tenant/kind,
+session, cursor, and page limit. The service-lifetime scope also separates data
+sources and monotonic clock domains: sharing the byte backend does not share
+these display captures across Runtime instances or process restarts.
+
+Every hit still reads the authorization header, runs the current policy outside
+the metadata transaction, and freshly checks the session, the referenced
+executions and their binding identities, and conversation history/head. An
+identity/ownership mismatch or missing resource cannot be revived by the cached page. Forks,
+ancestor cursors, custom repositories, and split metadata routes keep the
+original complete read path; this preserves ancestor deletion/ownership checks.
+Reads inside an existing state transaction bypass the display cache entirely.
+
+A hit returns the entire original display, without mixing fresh status or
+metadata with an older timeline/body. Status changes, new turns, and terminal
+admission reconciliation may therefore remain undisplayed until expiry or a
+strong refresh. Independently removed/corrupted transcript facts or object
+bodies may likewise be detected up to `max_age` later. Sending, cancelling,
+resuming, and all other control operations retain their authoritative reads.
+Root authorization and deletion are never cached. Signed input and output
+cursors are checked again and are not renewed by a cache hit.
+
+Cache serialization uses the existing domain leaf codec without adding durable
+record types. A private payload checksum detects cache byte corruption (it is
+not an authentication signature), and typed views are reconstructed per reader.
+Cache errors or malformed entries fall back to the source; source errors and
+cancellation propagate. All cache I/O is awaited outside metadata transactions,
+with no background refill, detached task, or borrowed-backend close. Runtime close
+rejects new calls and drains admitted display-cache reads before closing their
+sources. Cancelling a close waiter does not cancel that owned drain; a later
+close can await it. A custom backend that does not settle can delay close, rather
+than being reported closed while cache I/O is still in progress.

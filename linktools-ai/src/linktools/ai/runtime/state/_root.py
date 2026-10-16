@@ -239,6 +239,11 @@ class RuntimeStorage:
         )
 
     @property
+    def cache_backend(self) -> "CacheBackend | None":
+        """Borrowed byte cache; the host retains its lifecycle ownership."""
+        return self._cache_backend
+
+    @property
     def stream_backend(self) -> "StreamBackend | None":
         """Borrowed ordered preview backend; its connection remains host-owned."""
         return self._stream_backend

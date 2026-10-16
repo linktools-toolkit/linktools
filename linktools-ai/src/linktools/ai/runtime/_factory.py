@@ -338,8 +338,11 @@ def _runtime_close_actions(
     input_materializer: ExecutionInputMaterializer,
     metric_buffer: _RuntimeMetricRecorder | None,
     storage: RuntimeStorage,
+    session: DefaultSessionService | None = None,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+    if session is not None:
+        actions.append(("runtime.session.display", session.drain_display_reads))
     if graph_service is not None:
         actions.extend(
             (
@@ -615,6 +618,7 @@ async def _build_local_components(
             transient,
         )
 
+    session: DefaultSessionService | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
     graph_service: DefaultTaskGraphService | None = None
     coordinator: _RuntimeCloseCoordinator | None = None
@@ -677,6 +681,12 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
+            cache_backend=(
+                storage.cache_backend
+                if all(storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+                       for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION))
+                else None
+            ),
             transcript_store=storage.run_store,
             release_terminal=storage.retention.release_session,
             workspace_access=input_materializer.access,
@@ -799,6 +809,7 @@ async def _build_local_components(
             input_materializer=input_materializer,
             metric_buffer=metric_buffer,
             storage=storage,
+            session=session,
         )
         close_actions = (("runtime.evaluation", evaluation.close), *close_actions)
         coordinator = _RuntimeCloseCoordinator(
@@ -820,6 +831,7 @@ async def _build_local_components(
                 input_materializer=input_materializer,
                 metric_buffer=metric_buffer,
                 storage=storage,
+                session=session,
             )
         )
         await _run_cleanup_actions(abort_actions)
