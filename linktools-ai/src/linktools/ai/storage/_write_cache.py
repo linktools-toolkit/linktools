@@ -277,6 +277,9 @@ class WriteCacheScope(Generic[_Item]):
             # Retain callback ownership until its actual completion, so
             # cancellation cannot hide the final result or leave live I/O.
             write = asyncio.ensure_future(self._write_batch(batch))
+        except asyncio.CancelledError:
+            self._write_failed(len(batch), "WRITE_CANCELLED")
+            return
         except Exception:
             self._write_failed(len(batch), "WRITE_FAILED")
             return

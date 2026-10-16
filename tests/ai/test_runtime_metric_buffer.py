@@ -3,6 +3,7 @@
 """Shared write-cache backpressure, batching and lifecycle semantics."""
 
 import asyncio
+from collections.abc import Awaitable
 from datetime import datetime, timezone
 
 import pytest
@@ -547,21 +548,27 @@ async def test_write_cache_close_keeps_callback_owned_until_its_real_result(
 
 
 @pytest.mark.asyncio
-async def test_write_cache_callback_cancellation_does_not_strand_later_admissions() -> None:
-    calls = 0
-
-    async def sink(batch: tuple[str, ...]) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
+@pytest.mark.parametrize("synchronous", (False, True))
+async def test_write_cache_callback_cancellation_does_not_strand_later_admissions(
+    synchronous: bool,
+) -> None:
+    async def write(batch: tuple[str, ...]) -> None:
+        if batch == ("cancelled",):
             raise asyncio.CancelledError
         assert batch == ("next",)
+
+    def sink(batch: tuple[str, ...]) -> Awaitable[None]:
+        if synchronous and batch == ("cancelled",):
+            raise asyncio.CancelledError
+        return write(batch)
 
     scope = WriteCache(batch_size=1).open(sink)
     try:
         assert await scope.try_submit("cancelled")
         assert (await scope.flush()).completed
         assert scope.status().unconfirmed == 1
+        assert scope.status().write_failures == 1
+        assert scope.status().last_failure_code == "WRITE_CANCELLED"
         assert scope.status().accepting
         assert await scope.try_submit("next")
         assert (await scope.flush()).completed

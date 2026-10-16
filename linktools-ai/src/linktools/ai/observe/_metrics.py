@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -64,7 +65,10 @@ class Metrics:
         """Open an independently owned automatic-recording lifetime."""
         from ._recorder import _MetricRecorder
 
-        return _MetricRecorder(self, self._write_cache)
+        cache = self._write_cache
+        if cache is not None and cache.batch_size > _MAX_RECORD_BATCH:
+            cache = replace(cache, batch_size=_MAX_RECORD_BATCH)
+        return _MetricRecorder(self, cache)
 
     @property
     def namespace(self) -> str:

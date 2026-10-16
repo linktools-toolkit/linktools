@@ -36,6 +36,7 @@ from ..storage import (
     StorageRevision,
     StorageLocatedInfo,
     StorageWriteState,
+    StorageValueValidator,
 )
 from ..storage import ObjectRef, ObjectStore, read_object
 from ._domain import AssetBackend, AssetInfo, AssetKey, AssetVersionRef
@@ -108,6 +109,19 @@ class AssetContentCache:
         return value[32:]
 
 
+class _AssetValueValidator:
+    def __init__(
+        self, validator: StorageValueValidator[AssetKey, bytes, AssetInfo] | None,
+    ) -> None:
+        self._validator = validator
+
+    def validate_value(self, key: AssetKey, value: bytes, info: AssetInfo) -> None:
+        if len(value) != info.size or hashlib.sha256(value).hexdigest() != info.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._validator is not None:
+            self._validator.validate_value(key, value, info)
+
+
 @dataclass(slots=True)
 class _AssetVersionRead:
     task: asyncio.Task[bytes] | None = None
@@ -126,6 +140,8 @@ class AssetStore:
             raise TypeError("storage must be StorageOverlay")
         if any(not isinstance(backend, AssetBackend) for backend in storage.backends):
             raise TypeError("AssetStore backends must implement AssetBackend")
+        if not isinstance(storage.validator, _AssetValueValidator):
+            storage.validator = _AssetValueValidator(storage.validator)
         self._storage = storage
         self._version_flights: dict[tuple[int, AssetVersionRef], _AssetVersionRead] = {}
         self._version_reads: set[asyncio.Future[None]] = set()

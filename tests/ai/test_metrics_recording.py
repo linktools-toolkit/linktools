@@ -136,6 +136,68 @@ async def test_configured_cache_does_not_weaken_explicit_record_observations() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size", (128, 256, 257))
+async def test_cached_recorder_respects_metric_write_batch_limit(batch_size: int) -> None:
+    class Store(InMemoryMetricStore):
+        async def put_observations(
+            self, namespace: str, observations: tuple[Observation, ...],
+        ) -> None:
+            assert len(observations) <= min(batch_size, 256)
+            await super().put_observations(namespace, observations)
+
+    cache = WriteCache(batch_size=batch_size, flush_interval_seconds=60)
+    metrics = Metrics.from_store(Store(), write_cache=cache)
+    observations = tuple(_observation(f"batch-{index}") for index in range(257))
+    recorder = metrics.recorder()
+    try:
+        for observation in observations:
+            assert await recorder.try_record(observation)
+        flushed = await recorder.flush()
+        assert flushed.completed
+        assert flushed.status.persisted == flushed.status.accepted == len(observations)
+        assert flushed.status.pending == flushed.status.lost == flushed.status.write_failures == 0
+        for observation in observations:
+            assert await metrics.get_observation(observation.observation_id) == observation
+        assert cache.batch_size == batch_size
+        assert recorder.status().queue_capacity == cache.queue_capacity
+        with pytest.raises(AIError, match="REQUEST_FIELD_INVALID"):
+            await metrics.record_observations(observations)
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_cached_recorder_preserves_confirmed_batch_when_later_batch_fails() -> None:
+    class Store(InMemoryMetricStore):
+        async def put_observations(
+            self, namespace: str, observations: tuple[Observation, ...],
+        ) -> None:
+            if any(item.observation_id == "batch-256" for item in observations):
+                raise OSError("tail batch failed")
+            await super().put_observations(namespace, observations)
+
+    metrics = Metrics.from_store(
+        Store(), write_cache=WriteCache(batch_size=257, flush_interval_seconds=60),
+    )
+    observations = tuple(_observation(f"batch-{index}") for index in range(257))
+    recorder = metrics.recorder()
+    try:
+        for observation in observations:
+            assert await recorder.try_record(observation)
+        flushed = await recorder.flush()
+        assert flushed.completed
+        assert flushed.status.accepted == 257
+        assert flushed.status.persisted == 256
+        assert flushed.status.pending == 0
+        assert flushed.status.lost == flushed.status.write_failures == 1
+        for observation in observations[:256]:
+            assert await metrics.get_observation(observation.observation_id) == observation
+        assert await metrics.get_observation("batch-256") is None
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
 async def test_direct_recorder_fails_open_on_unconfirmed_storage() -> None:
     class FailingStore(InMemoryMetricStore):
         async def put_observations(

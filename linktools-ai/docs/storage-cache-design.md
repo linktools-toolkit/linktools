@@ -190,11 +190,11 @@ RuntimeStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，
 - 同一 owning loader 内的冷 miss 共享已有 flight；共享 CacheBackend 的不同 Runtime 实例不自动获得分布式 single-flight
 - completed flight 不作为新请求的缓存；权威 revision 仅允许源 I/O 开始前同批读共享，后到读必须新观察
 - 已知更新的 generation/修订不能被旧刷新覆盖；opaque SDK revision 不擅自排序，宿主可按自身版本合同处理
-- revision通知必须绑定实际writer的来源：现有Overlay允许非primary writer，而唯一revision_source在primary view。不能把其它层writer的head发布给primary提示源；实现按writer对应view选择source，无source则不误发，不禁止合法非primary writer，也不为此新增参数。该现存接线问题纳入实施必须修复项
+- revision通知必须绑定实际writer的来源：现有Overlay允许非primary writer，而唯一revision_source在primary view。不能把其它层writer的head发布给primary提示源；实现按writer对应view选择source，无source则不误发，不禁止合法非primary writer，也不为此新增参数。当前实现已按此归属通知
 - 取消一个共享读等待者不取消 producer；禁用缓存的原请求取消语义保持
 - close 先封闭新工作，完成已接纳的必要工作，再按所有权关闭；外部 cache/连接不由 Runtime 接管
 - archive/projection preflight 可以合法读取对象，必须先完成，再封闭 object router 并 drain
-- 字节缓存异常/损坏可回源；RevisionSource.head_revision异常按现有契约传播，适配器只有明确返回None时才进入源回退，不新增吞异常降级。refresh_metadata仍遵循来源策略，不是强制绕过提示的新接口；源失败、删除、授权失败不能伪装成缓存成功
+- 字节缓存异常/损坏可回源；RevisionSource.head_revision异常按现有契约传播，适配器只有明确返回None时才进入源回退，不新增吞异常降级。StorageOverlay.refresh 仍遵循来源策略，不是强制绕过提示的新接口；源失败、删除、授权失败不能伪装成缓存成功
 - transient/volatile 不因文件或共享缓存延长生命周期；缓存逐出不是物理安全删除保证
 
 提交结果未知与提示通知不构成同一事务：请求取消可能发生在数据库已提交而提示尚未更新的窗口。本方案保持已有请求取消/提交结果未知合同，不把关闭修复变成无条件屏蔽取消；提示仅承诺其来源定义的最终刷新行为，不承诺固定提交后新鲜度上界。需要强一致的调用继续权威读取/readback。若未来要求提示与提交原子联动，应单独设计持久通知机制，而不在缓存层偷偷加入可靠队列。
@@ -255,6 +255,8 @@ bool 始终只表示接纳流程是否成功，不能当持久提交凭据。无
 queue_capacity 只限制排队项，单 writer 另外持有至多一个 batch_size 批次，不预取下一批；总未结算项至多 queue_capacity + batch_size，默认1152条。容量是条目数，不是字节预算；领域在接纳前校验大小并冻结内容。满载拒新，不逐出已接纳项。两个整数必须为正，无 batch_size 必须小于队列容量的限制；间隔为有限正数。
 
 128条或首条接纳后3秒先到即提交，后续入队不重置窗口。flush 和正常 close 主动唤醒不足一批的项。3秒只约束正常调度下的组批等待，不包括排队与 sink 时间。单 writer 保持顺序，不自动重试；幂等、事务、提交未知读回由 sink 的原有权威所有者负责。
+
+Metrics recorder 将有效单批条数限制在现有强写 API 的 256 条上限内；配置的 batch_size 仍是最大值，共享配置对象不被修改。显式强写 API 与其 16 MiB 批内容预算保持不变，缓存接纳不保证任意载荷组合一定被 sink 接受。
 
 通用状态复用现有诊断，不扩展逐项 ledger：accepting、accepted、confirmed、unconfirmed、pending、rejected、queue_size、queue_capacity、high_watermark、write_failures、last_failure_code。始终满足 accepted = confirmed + unconfirmed + pending，rejected 不计入 accepted。confirmed 只说明整批回调正常返回；unconfirmed 包括已结算但未确认的失败、取消和未调用 sink 就停止的项，不能称为数据库确定丢失。
 

@@ -57,6 +57,13 @@ history, batch receipts, and snapshot manifests use the same `digest` field.
 Runtime bindings preserve it through the Asset version codec. Empty assets and
 non-normal entries use the SHA-256 of empty bytes.
 
+`AssetStore` binds its overlay's value validation to `AssetInfo.digest` and
+`size`, in addition to any supplied validator. This applies to cached values,
+origin reads and write results on that shared overlay. A self-consistent cache
+envelope is insufficient when its bytes do not match the selected metadata;
+invalid cached bytes are discarded, while an origin mismatch raises an integrity
+error before cache publication.
+
 Snapshot content keys bind to the asset digest; each manifest has its own
 digest and object reference computed from the complete manifest bytes. HTTP
 ETag validators are a separate transport concept.
@@ -89,6 +96,11 @@ An observer does not own a shared load. Cancelling one observer does not cancel
 other observers' source work. The owning storage lifecycle settles its work
 before closing its resources. Request-owned local work has a different
 cancellation contract and must not be moved into a shared background load.
+
+Overlay reads admitted before close finish before their source backends are
+closed. New reads are rejected once close starts, and concurrent close callers
+share the same cleanup. Cancelled readers still leave any shared cache or
+metadata loads owned by the overlay until those loads settle.
 
 `StorageOverlay.invalidate()` discards materialized metadata after an external
 mutation. It is not a global cache flush or a promise of cross-process
