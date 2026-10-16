@@ -7,7 +7,7 @@ complete installed snapshot, even for partial operations. Unknown consumer names
 are errors; known optional consumers that are absent do not consume declarations.
 
 ```python
-from linktools.core import ConfigLazy, ConfigRef
+from linktools.core import ConfigRef
 from linktools.cntr import Integrations
 from linktools.cntr.ext import ResolvedSite, Flare, Nginx, load_nginx_url, load_port_url
 from linktools.decorator import cached_property
@@ -133,8 +133,8 @@ options, including templates, headers and capability inheritance, are forwarded
 without changing their semantics.
 
 ```python
-from linktools.cntr.ext import ResolvedSite, Authelia, Flare, endpoint, load_nginx_url, load_port_url
-from linktools.core import ConfigLazy, ConfigRef
+from linktools.cntr.ext import Authelia, Flare, endpoint, load_port_url
+from linktools.core import ConfigRef
 
 return endpoint(
     self,
@@ -176,8 +176,8 @@ multiple uses copy declarations without modifying the original values.
 Extension URLs are declarative; `extensions` is a list/tuple, not a callback:
 
 ```python
-from linktools.cntr.ext import ResolvedSite, Authelia, Flare, load_nginx_url
-from linktools.core import ConfigLazy, ConfigRef
+from linktools.cntr.ext import Authelia, Flare, load_nginx_url
+from linktools.core import ConfigRef
 
 extensions=[
     Flare.public("Mihomo", "server", "Dashboard", url=load_nginx_url(
@@ -247,7 +247,7 @@ Use the core value declarations for fields that need the producer's configuratio
 
 ```python
 from linktools.core import ConfigFormat, ConfigLazy, ConfigRef
-from linktools.cntr.ext import ResolvedSite, Authelia, Flare, endpoint
+from linktools.cntr.ext import Authelia, Flare, endpoint
 
 app = endpoint(
     self,
@@ -388,36 +388,33 @@ return unbound ConfigLazy values. A string URL is literal, never an implicit
 configuration key; use ConfigRef explicitly for configuration lookup and its
 cast/default. For example, `load_config_url("https://app.example/ui")` and
 `load_port_url(8080, https=False)` work without a URL/port configuration key.
-All three helpers use one `path` parameter, accepted as the second positional
-argument or by keyword. It accepts a string, a list/tuple of path components,
-or a ConfigValue producing either; each component can also be a ConfigValue.
-Use `path=["ui", "settings"]` for multiple components. There is no variadic
-path compatibility. Strings are joined as one component, never as characters; `https` accepts a
-boolean or ConfigValue. Literal paths need no wrapping. These arguments and
-queries resolve only after the base URL or port is usable. Config/port values
-resolve through the consuming Config and stay empty when disabled. Ports must
-satisfy `0 < port <= 65535`; `HOST` is not read until the port is valid. Nginx URL factories return ConfigValue declarations. An explicit reference may
-be a ResolvedSite or ConfigValue resolving to one. For a Flare URL inside
-endpoint extensions, omit the reference and use `load_nginx_url(path="/ui", queries=...)`
-to bind that endpoint's own base URL. This shorthand does not infer a global or
-unique site and is not an OIDC callback template; use `{base_url}` for callbacks.
-An unbound reference-free declaration raises ConfigError. All helpers use the same single `path` argument and keyword-only `queries`;
-only load_port_url additionally accepts keyword-only `https`. None means no
-path, and path values resolve only after a usable base has been obtained. `ResolvedSite.find(producer, reference=None)`
-is safe during declaration construction: it returns ConfigLazy without reading
-the snapshot. Each Config.resolve performs the lookup; no resolved site is cached
-in the reference. To read site properties immediately, use
+All three helpers accept one optional `path` argument, positionally or by keyword,
+and keyword-only `queries`. A path is a string, a sequence of components, or a
+ConfigValue producing either; components may also be ConfigValue declarations.
+None means no path. Use `path=["ui", "settings"]` for multiple components; strings
+remain whole components. There is no variadic-path compatibility. Only
+`load_port_url` also accepts keyword-only `https`, a boolean or ConfigValue.
+
+Config and port values resolve through the consuming Config without binding a
+container or caching across Config contexts. Empty bases and invalid ports return
+an empty URL before resolving paths or queries. Ports must satisfy
+`0 < port <= 65535`; HOST and https are read only after the port is valid.
+Query encoding and path joining remain owned by the URL utilities.
+
+Nginx URL factories return ConfigValue declarations. An explicit reference is a
+ResolvedSite or ConfigValue resolving to one. Inside endpoint Flare extensions,
+`load_nginx_url(path="/ui", queries=...)` binds that exact endpoint's base without
+inferring a global or unique site. This shorthand is not an OIDC callback
+template; use `{base_url}` for callbacks. An unbound reference-free declaration
+raises ConfigError without reading paths or queries.
+
+`ResolvedSite.find(producer, reference=None)` returns ConfigLazy without reading
+the snapshot. Every Config.resolve performs the lookup; the reference does not
+cache a resolved site. For immediate site properties, use
 `config.resolve(ResolvedSite.find(producer)).get_url(default="")`.
-Lookup errors are raised at resolution time as ConfigError. The return value is
-a ConfigLazy declaration, not an immediately usable ResolvedSite; callers reading
-site properties must resolve it first. There is no separate synchronous alias.
-Missing, foreign or ambiguous references fail; declared disabled sites or absent
-nginx resolve to an empty URL.
-Path joining, query encoding and literal template placeholders remain unchanged.
-The `queries` argument may contain ConfigValue declarations; they are resolved
-with the consuming Config only after a nonempty URL or valid port is available.
-Query encoding still belongs to the URL utilities. Config and port URL declarations
-do not bind a container or cache a value across Config contexts.
+Missing, foreign or ambiguous references raise ConfigError at resolution time.
+Declared disabled sites or absent nginx produce an empty URL. There is no
+separate synchronous alias.
 These factories never register hooks or write configuration.
 
 `BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
@@ -453,13 +450,13 @@ templates retain only the explicit context described below.
 
 ## Authelia OIDC callbacks
 
-Declare callbacks independently of nginx sites:
+Declare a callback outside an endpoint with an explicit lazy site reference:
 
 ```python
 from linktools.cntr.ext import ResolvedSite, Authelia, load_nginx_url
 
 Authelia.oidc(
-    redirect_uris=("{base_url}/sso/callback",),
+    redirect_uris=(load_nginx_url(ResolvedSite.find(self), "sso/callback"),),
 )
 ```
 
