@@ -460,10 +460,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         for view in self._views:
             view.invalidate()
 
-    async def _get(self, key: KeyT, *, retried: bool) -> 'ValueT | None':
-        state = await self._state()
-        return await self._get_from_state(key, state, retried=retried)
-
     async def get_many(self, keys: 'Sequence[KeyT]') -> 'tuple[ValueT | None, ...]':
         with self._read_operation():
             if not keys:

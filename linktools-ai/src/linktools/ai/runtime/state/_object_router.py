@@ -56,7 +56,7 @@ class _RuntimeObjectRouter:
         """Read immutable bytes without making the cache a retention authority."""
         if self._closing:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        store = self.resolve_object(domain, reference)
+        store = self.object_store(domain)
         task = asyncio.create_task(self._read_accepted(domain, store, reference))
         self._pending_reads.add(task)
         task.add_done_callback(self._read_finished)
@@ -180,12 +180,6 @@ class _RuntimeObjectRouter:
         for store in self._stores.values():
             paths.extend(store.local_paths())
         return tuple(dict.fromkeys(paths))
-
-    def resolve_object(
-        self, domain: RuntimeDomain, reference: ObjectRef
-    ) -> ObjectStore:
-        """Resolve an object by its durable Runtime domain."""
-        return self.object_store(domain)
 
     def working_object_store(
         self, domain: RuntimeDomain, *, owner_scope: str

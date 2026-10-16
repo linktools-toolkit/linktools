@@ -163,9 +163,9 @@ class FilesystemCacheBackend:
         self.root = Path(root).resolve()
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
-        # Tuple values are intentionally replaced on writes. Identity lets an
-        # unlocked read detect that a newer entry replaced the one it observed.
-        self._entries: OrderedDict[str, tuple[int]] = OrderedDict()
+        # Tokens are replaced on writes so an unlocked read cannot change
+        # a newer entry's access order.
+        self._entries: OrderedDict[str, object] = OrderedDict()
         self._total = 0
         self._indexed = False
 
@@ -212,7 +212,7 @@ class FilesystemCacheBackend:
             self._evict(self.max_bytes - charge + previous, exclude=name)
             self._put_sync(key, content)
             self._entries.pop(name, None)
-            self._entries[name] = (charge,)
+            self._entries[name] = object()
             self._total += charge - previous
             self._write_control(dirty=False)
         except OSError:
@@ -281,7 +281,7 @@ class FilesystemCacheBackend:
         entries = OrderedDict(
             (name, entry) for name, entry in self._entries.items() if name in names
         )
-        entries.update((name, (0,)) for name in names if name not in entries)
+        entries.update((name, object()) for name in names if name not in entries)
         self._entries = entries
 
     def _begin_mutation(self) -> bool:
@@ -386,10 +386,8 @@ class FilesystemCacheBackend:
         # Reads started before this scan must not mutate its fresh accounting.
         ordered = tuple(name for name in self._entries if name in entries)
         ordered += tuple(name for name in entries if name not in self._entries)
-        self._entries = OrderedDict(
-            (name, (_content_charge(entries[name]),)) for name in ordered
-        )
-        self._total = sum(entry[0] for entry in self._entries.values())
+        self._entries = OrderedDict((name, object()) for name in ordered)
+        self._total = sum(_content_charge(size) for size in entries.values())
         return True
 
     def _scan_index(self) -> "tuple[tuple[str, int], ...]":
@@ -441,33 +439,17 @@ class TieredCacheBackend:
         self.l2 = l2
 
     async def get(self, key: ContentCacheKey) -> "bytes | None":
-        try:
-            value = await self.l1.get(key)
-        except Exception:  # noqa: BLE001
-            value = None
+        value = await read_cache(self.l1, key)
         if value is not None:
             return value
-        if self.l2 is None:
-            return None
-        try:
-            value = await self.l2.get(key)
-        except Exception:  # noqa: BLE001
-            return None
+        value = await read_cache(self.l2, key)
         if value is not None:
-            try:
-                await self.l1.put(key, value)
-            except Exception:  # noqa: BLE001, S110
-                pass
+            await write_cache(self.l1, key, value)
         return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
         for cache in (self.l1, self.l2):
-            if cache is None:
-                continue
-            try:
-                await cache.put(key, content)
-            except Exception:  # noqa: BLE001, S112
-                continue
+            await write_cache(cache, key, content)
 
     async def delete(self, key: ContentCacheKey) -> None:
         for cache in (self.l1, self.l2):
