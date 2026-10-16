@@ -252,7 +252,7 @@ def test_authelia_endpoint_expands_only_explicit_placeholder_after_config_values
 
 
 @pytest.mark.parametrize("url", ["https://app.test/callback#fragment",
-                                "https://app.test/{{callback}}", 42, None,
+                                42, None,
                                 ["https://nested.test/callback"]])
 def test_authelia_validates_callbacks_after_config_resolution(url: "Any") -> None:
     declaration = Authelia.oidc((ConfigLazy(lambda config: url),))

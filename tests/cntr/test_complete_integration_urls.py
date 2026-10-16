@@ -11,7 +11,7 @@ from test_config_values_navigation import _Config, _manager, _navigation, _fail
 
 @pytest.mark.parametrize("url", ["", "/relative", "{url}/callback", "//host.test/path", "https:///path",
                                 "https://:443/path", "https://user@/path", "https://host.test:bad/path",
-                                "https://host.test:65536/path", "https://host.test:0/path", "https://[invalid", "https://{url}/path", "custom:{url}"])
+                                "https://host.test:65536/path", "https://host.test:0/path", "https://[invalid"])
 def test_flare_omits_incomplete_resolved_urls_before_metadata(url: str) -> None:
     config = _Config(URL=url)
     link = Flare.public(ConfigLazy(_fail), ConfigLazy(_fail), url=ConfigRef("URL"))
@@ -60,7 +60,7 @@ def test_authelia_accepted_redirects_do_not_read_client_secret(fresh_manager, mo
 
 
 @pytest.mark.parametrize("url", ["https://:443/cb", "https://user@/cb", "https://host.test:bad/cb",
-                                "https://host.test:65536/cb", "https://host.test:0/cb", "custom:callback", "https://[invalid", "https://{url}/path", "custom:{url}"])
+                                "https://host.test:65536/cb", "https://host.test:0/cb", "custom:callback", "https://[invalid", "https://{url}/path"])
 def test_authelia_omits_incomplete_http_targets(url: str) -> None:
     config = _Config(URL=url)
     callbacks = Authelia.oidc((ConfigRef("URL"), "https://host.test:65535/cb", "custom://app.test/callback"))
@@ -76,3 +76,28 @@ def test_authelia_issuer_cannot_bypass_complete_url_filter(fresh_manager, monkey
     assert provider.oidc_redirects == ()
     with pytest.raises(ContainerError, match="concrete HTTPS"):
         _ = provider.oidc_client
+
+
+@pytest.mark.parametrize("value", ["https://app.test/{missing}", "https://app.test/{"])
+def test_url_format_errors_are_explicit(value):
+    config = _Config()
+    with pytest.raises((KeyError, ValueError)):
+        Authelia.oidc((value,)).resolve_redirect_uris(config)
+    with pytest.raises((KeyError, ValueError)):
+        Flare.public("App", "web", url=value).with_base_url("https://app.test").resolve_url(config)
+
+
+def test_url_formatting_supports_standard_fields_and_escaped_braces():
+    from linktools.core import ConfigFormat
+    config = _Config(PATH="return")
+    callbacks = Authelia.oidc((
+        "{url!s}/callback", "https://independent.test/return?from={url!s}",
+        "https://independent.test/{{literal}}", ConfigFormat("https://other.test/{path}", path=ConfigRef("PATH")),
+        "https://app:{{port}}/callback",
+    )).with_base_url("https://app.test:8443")
+    assert callbacks.resolve_redirect_uris(config) == (
+        "https://app.test:8443/callback", "https://independent.test/return?from=https://app.test:8443",
+        "https://independent.test/{literal}", "https://other.test/return",
+    )
+    link = Flare.public("App", "web", url="https://other.test/?from={url!s}").with_base_url("https://app.test")
+    assert link.resolve_url(config) == "https://other.test/?from=https://app.test"

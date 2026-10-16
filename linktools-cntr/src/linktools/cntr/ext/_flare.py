@@ -3,7 +3,6 @@
 """Flare application, bookmark, and category declarations."""
 from copy import copy
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 from linktools.decorator import cached_property
 from linktools.types import MISSING
@@ -84,12 +83,7 @@ class Flare(Integration):
             return None
         value = str(value)
         for base_url in self._base_urls:
-            try:
-                relative = not urlsplit(value).scheme
-            except ValueError:
-                return None
-            if value.startswith("{url}") or relative:
-                value = resolve_url_reference(value, config.resolve(base_url))
+            value = resolve_url_reference(value, lazy_load(config.resolve, base_url))
             if not value:
                 return None
         if not is_complete_url(value):

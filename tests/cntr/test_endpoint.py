@@ -276,7 +276,7 @@ def test_endpoint_rejects_extension_factories_but_accepts_callable_declaration()
     ("/ui/#/setup?a=b", "https://app.test/ui/#/setup?a=b"),
     ("//other.test/path", "https://other.test/path"),
     ("https://other.test/exact/?x=1#fragment", "https://other.test/exact/?x=1#fragment"),
-    ("https://other.test/{{port}}", "https://other.test/{{port}}"),
+    ("https://other.test/{{port}}", "https://other.test/{port}"),
     (None, None), ("", None),
 ])
 def test_endpoint_resolves_only_declared_url_fields(reference, expected):

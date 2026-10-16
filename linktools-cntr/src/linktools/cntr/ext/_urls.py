@@ -59,8 +59,6 @@ def load_nginx_url(container: "BaseContainer",
 
 def is_complete_url(value: str) -> bool:
     """Recognize complete URI targets without restricting independent schemes."""
-    if "{url}" in value:
-        return False
     try:
         parsed = urlsplit(value)
         if not parsed.scheme:
@@ -79,11 +77,11 @@ def resolve_url_reference(value: str, base_url: str) -> str:
     """Resolve one explicit URL reference without formatting unrelated data."""
     if not value:
         return ""
-    value = str(value)
-    if value.startswith("{url}"):
-        base = str(base_url)
-        return base + value[len("{url}"):] if base else ""
-    if urlsplit(value).scheme:
-        return value
+    value = str(value).format(url=base_url)
+    try:
+        if urlsplit(value).scheme:
+            return value
+    except ValueError:
+        return ""
     base = str(base_url)
     return urljoin(base, value) if base else ""

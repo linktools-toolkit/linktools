@@ -31,7 +31,7 @@ def test_oidc_has_no_enable_switch():
         Authelia.oidc(("https://app.test/callback",), enabled=False)
 
 
-@pytest.mark.parametrize("value", ["https://a.test/#bad", "https://app:{{port}}/callback"])
+@pytest.mark.parametrize("value", ["https://a.test/#bad"])
 def test_invalid_oidc_callbacks_fail_without_nginx(value):
     with pytest.raises(ContainerError, match="Authelia redirect URI"):
         Authelia.oidc((value,)).redirect_uris
