@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.asset import AssetContentCache, AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
-from linktools.ai.storage import ContentCache, InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StorageOverlay
+from linktools.ai.storage import ContentCache, InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StorageOverlay, InMemoryStreamBackend
 
 
 class CountingObjects(InMemoryObjectStore):
@@ -39,7 +39,7 @@ async def test_shared_cache_reuses_body_across_storage_lifetimes(tmp_path) -> No
     ref = await _put(objects, b"persisted body")
     for _ in range(2):
         storage = RuntimeStorage.sqlite(
-            tmp_path / "runtime.db", object_store=objects, cache_backend=cache,
+            tmp_path / "runtime.db", object_store=objects, cache=cache,
         )
         await storage.initialize(namespace="runtime", tenant_id="tenant")
         try:
@@ -60,7 +60,7 @@ async def test_warm_shared_cache_does_not_replace_another_origins_membership(tmp
     ref = await _put(present, b"persisted body")
     for source in (present, absent):
         storage = RuntimeStorage.sqlite(
-            tmp_path / "runtime.db", object_store=source, cache_backend=cache,
+            tmp_path / "runtime.db", object_store=source, cache=cache,
         )
         await storage.initialize(namespace="runtime", tenant_id="tenant")
         try:
@@ -94,7 +94,7 @@ async def test_domain_content_cache_and_runtime_borrow_same_backend(tmp_path) ->
     objects = CountingObjects()
     ref = await _put(objects, b"runtime body")
     storage = RuntimeStorage.sqlite(
-        tmp_path / "runtime.db", object_store=objects, cache_backend=cache_backend,
+        tmp_path / "runtime.db", object_store=objects, cache=cache_backend,
     )
     await asset_store.initialize()
     await storage.initialize(namespace="runtime", tenant_id="tenant")
@@ -113,3 +113,29 @@ async def test_domain_content_cache_and_runtime_borrow_same_backend(tmp_path) ->
         await storage.close()
     assert content_cache.backend is cache_backend
     assert cache_backend.closes == 0
+
+
+class WriteOnlyCache:
+    async def append(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("Runtime must not use write batches as content")
+
+    async def read_batch(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("Runtime must not use write batches as content")
+
+    async def ack(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("Runtime must not use write batches as content")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache", (WriteOnlyCache(), InMemoryStreamBackend(max_bytes=1024)))
+async def test_cache_without_key_value_capabilities_reads_objects_from_source(tmp_path, cache) -> None:
+    objects = CountingObjects()
+    reference = await _put(objects, b"source body")
+    storage = RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache)
+    await storage.initialize(namespace="runtime", tenant_id="tenant")
+    try:
+        for _ in range(2):
+            assert await storage.read_object(RuntimeDomain.EXECUTION, reference) == b"source body"
+        assert objects.reads == 2
+    finally:
+        await storage.close()

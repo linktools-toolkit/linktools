@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Optional stream backend assembly and borrowed lifetime."""
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -15,20 +17,21 @@ async def test_storage_constructors_preserve_borrowed_stream_backend(tmp_path) -
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'external.db'}")
     plan = RuntimeStoragePlan(execution=RuntimeStorageRoute.sqlite(tmp_path / "plan.db"))
     stores = (
-        RuntimeStorage(plan, stream_backend=backend),
-        RuntimeStorage.filesystem(tmp_path / "files", stream_backend=backend),
-        RuntimeStorage.sqlite(tmp_path / "state.db", stream_backend=backend),
-        RuntimeStorage.from_root(tmp_path / "root", stream_backend=backend),
-        RuntimeStorage.sql(engine, stream_backend=backend),
-        RuntimeStorage.from_plan(plan, stream_backend=backend),
+        RuntimeStorage(plan, cache=backend),
+        RuntimeStorage.in_memory(cache=backend),
+        RuntimeStorage.filesystem(tmp_path / "files", cache=backend),
+        RuntimeStorage.sqlite(tmp_path / "state.db", cache=backend),
+        RuntimeStorage.from_root(tmp_path / "root", cache=backend),
+        RuntimeStorage.sql(engine, cache=backend),
+        RuntimeStorage.from_plan(plan, cache=backend),
     )
     try:
         for storage in stores:
-            assert storage.stream_backend is backend
+            assert storage.cache is backend
             await storage.close()
-        writer = await backend.open(b"scope", b"producer")
+        writer = await backend.open_stream(b"scope", b"producer")
         await writer.append(1, b"still usable")
-        batch = await backend.read(b"scope", 0, limit=10, wait_seconds=0)
+        batch = await backend.read_stream(b"scope", 0, limit=10, wait_seconds=0)
         assert batch.records == ((1, b"still usable"),)
     finally:
         await engine.dispose()
@@ -37,23 +40,52 @@ async def test_storage_constructors_preserve_borrowed_stream_backend(tmp_path) -
 @pytest.mark.asyncio
 async def test_ready_storage_close_preserves_shared_stream_records(tmp_path) -> None:
     backend = InMemoryStreamBackend(max_bytes=1024)
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db", stream_backend=backend)
+    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=backend)
     await storage.initialize(namespace="runtime", tenant_id="tenant")
-    writer = await backend.open(b"scope", b"producer")
+    writer = await backend.open_stream(b"scope", b"producer")
     await writer.append(1, b"pending")
     await storage.close()
     await writer.seal(2, b"committed")
-    batch = await backend.read(b"scope", 0, limit=10, wait_seconds=0)
+    batch = await backend.read_stream(b"scope", 0, limit=10, wait_seconds=0)
     assert batch.records == ((1, b"pending"), (2, b"committed"))
     assert batch.sealed
 
 
 def test_default_storage_has_no_shared_stream_backend() -> None:
-    assert RuntimeStorage.in_memory().stream_backend is None
+    assert RuntimeStorage.in_memory().cache is None
 
 
 @pytest.mark.parametrize("route", (RuntimeStorageRoute.memory(), RuntimeStorageRoute.transient()))
-def test_nondurable_execution_rejects_shared_stream_backend(route) -> None:
+def test_nondurable_execution_accepts_unused_cache_capabilities(route) -> None:
     backend = InMemoryStreamBackend(max_bytes=1024)
-    with pytest.raises(ValueError, match="requires durable execution"):
-        RuntimeStorage.from_plan(RuntimeStoragePlan(execution=route), stream_backend=backend)
+    storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=route), cache=backend)
+    assert storage.cache is backend
+
+
+@pytest.mark.parametrize("methods", (
+    ("get", "put", "delete"),
+    ("append", "read_batch", "ack"),
+    ("open_stream", "read_stream"),
+))
+@pytest.mark.parametrize("invalid", (None, "not callable"))
+def test_partial_cache_capabilities_fail_at_storage_construction(
+    methods: tuple[str, ...], invalid: str | None,
+) -> None:
+    async def operation(*args: object, **kwargs: object) -> None:
+        raise AssertionError("construction must not call cache methods")
+
+    cache = SimpleNamespace(**{method: operation for method in methods})
+    setattr(cache, methods[-1], invalid)
+    with pytest.raises(TypeError, match="cache must implement all methods"):
+        RuntimeStorage.in_memory(cache=cache)
+
+
+@pytest.mark.parametrize("methods", (
+    ("get", "put", "delete"),
+    ("append", "read_batch", "ack"),
+    ("open_stream", "read_stream"),
+))
+def test_noncallable_cache_capabilities_are_rejected(methods: tuple[str, ...]) -> None:
+    cache = SimpleNamespace(**dict.fromkeys(methods, "not callable"))
+    with pytest.raises(TypeError, match="cache must implement all methods"):
+        RuntimeStorage.in_memory(cache=cache)

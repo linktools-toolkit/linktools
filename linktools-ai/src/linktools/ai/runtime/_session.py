@@ -165,7 +165,7 @@ class DefaultSessionService:
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
         workspace_access: _InputFileSource | None = None,
-        cache_backend: CacheBackend | None = None,
+        cache: object | None = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -176,7 +176,7 @@ class DefaultSessionService:
         self._transcript_store = transcript_store
         self._release_terminal = release_terminal or _no_release_terminal
         self._workspace_access = workspace_access
-        self._cache_backend = cache_backend
+        self._cache = cache if isinstance(cache, CacheBackend) else None
         # Monotonic timestamps and source identity belong to this service lifetime.
         self._display_cache_scope = uuid.uuid4().hex
         self._display_reads: set[asyncio.Future[None]] = set()
@@ -334,7 +334,7 @@ class DefaultSessionService:
         cache_key = None
         async with self._session_consumer(
             session_id, principal.tenant_id,
-            display_read=max_age > 0 and self._cache_backend is not None,
+            display_read=max_age > 0 and self._cache is not None,
         ):
             header = await self._conversation.sessions.get_header(
                 session_id, tenant_id=principal.tenant_id,
@@ -398,7 +398,7 @@ class DefaultSessionService:
         sessions = self._conversation.sessions
         histories = self._conversation.histories
         executions = self._executions
-        if (self._cache_backend is None
+        if (self._cache is None
                 or type(sessions) is not SessionRepositoryImpl
                 or type(histories) is not ConversationHistoryRepositoryImpl
                 or type(executions) is not ExecutionRepositoryImpl
@@ -481,7 +481,7 @@ class DefaultSessionService:
         *, cursor: str | None, max_age: float,
     ) -> SessionDetail | None:
         try:
-            raw = await self._cache_backend.get(key)
+            raw = await self._cache.get(key)
             if raw is None:
                 return None
             envelope = json.loads(raw)
@@ -581,7 +581,7 @@ class DefaultSessionService:
             }
             payload = encode_domain(entry)
             envelope = {"payload": payload, "digest": canonical_sha256(payload)}
-            await self._cache_backend.put(key, json.dumps(envelope, separators=(",", ":")).encode())
+            await self._cache.put(key, json.dumps(envelope, separators=(",", ":")).encode())
         except Exception:  # noqa: BLE001 -- best-effort serialization/publication only
             return
 

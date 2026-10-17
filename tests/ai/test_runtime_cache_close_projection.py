@@ -35,7 +35,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 60.0)
     cache = Cache(max_bytes=1024 * 1024)
     root = tmp_path / "state"
-    storage = RuntimeStorage.filesystem(root, cache_backend=cache)
+    storage = RuntimeStorage.filesystem(root, cache=cache)
     await storage.initialize(namespace="close-projection", tenant_id="tenant")
     message = ModelRequest(parts=[UserPromptPart("external transcript " * 4096)])
     try:
@@ -80,7 +80,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     finally:
         await storage.close()
 
-    reopened = RuntimeStorage.filesystem(root, cache_backend=cache)
+    reopened = RuntimeStorage.filesystem(root, cache=cache)
     await reopened.initialize(namespace="close-projection", tenant_id="tenant", read_only=True)
     try:
         archive = reopened.run_store.read_store(RuntimeDomain.EXECUTION)

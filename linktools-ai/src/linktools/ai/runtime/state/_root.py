@@ -17,7 +17,7 @@ from ...core import (
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
-from ...storage import CacheBackend, FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, StreamBackend, read_object
+from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, read_object
 from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
 from ._input_capture import input_capture_expiry_key, input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
@@ -81,6 +81,19 @@ if TYPE_CHECKING:
     from ._steps import RuntimeAgentRunStore
 
 
+def _validate_cache(cache: object | None) -> None:
+    if cache is None:
+        return
+    for methods in (
+        ("get", "put", "delete"),
+        ("append", "read_batch", "ack"),
+        ("open_stream", "read_stream"),
+    ):
+        available = tuple(getattr(cache, method, None) for method in methods)
+        if any(method is not None for method in available) and not all(map(callable, available)):
+            raise TypeError(f"cache must implement all methods in {', '.join(methods)}")
+
+
 class _RuntimeStorageLifecycle(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
@@ -99,19 +112,13 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cache: object | None = None,
     ) -> None:
         _validate_storage_configuration(plan, object_store)
-        if (
-            stream_backend is not None
-            and plan.route(RuntimeDomain.EXECUTION).retention is not RuntimeRetentionMode.DURABLE
-        ):
-            raise ValueError("stream_backend requires durable execution storage")
+        _validate_cache(cache)
         self._plan = plan
         self._external_object_store = object_store
-        self._cache_backend = cache_backend
-        self._stream_backend = stream_backend
+        self._cache = cache
         self._lifecycle = _RuntimeStorageLifecycle.NEW
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -134,10 +141,9 @@ class RuntimeStorage:
 
     @classmethod
     def in_memory(
-        cls, *, cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cls, *, cache: object | None = None,
     ) -> "RuntimeStorage":
-        return cls(RuntimeStoragePlan(), cache_backend=cache_backend, stream_backend=stream_backend)
+        return cls(RuntimeStoragePlan(), cache=cache)
 
     @classmethod
     def filesystem(
@@ -145,8 +151,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cache: object | None = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(path)
         return cls(
@@ -161,8 +166,7 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            cache_backend=cache_backend,
-            stream_backend=stream_backend,
+            cache=cache,
         )
 
     @classmethod
@@ -171,8 +175,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cache: object | None = None,
     ) -> "RuntimeStorage":
         route = RuntimeStorageRoute.sqlite(path)
         return cls(
@@ -184,21 +187,18 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            cache_backend=cache_backend,
-            stream_backend=stream_backend,
+            cache=cache,
         )
 
     @classmethod
     def from_root(
-        cls, root: "str | Path", *, cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cls, root: "str | Path", *, cache: object | None = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(root)
         return cls.sqlite(
             base / "runtime.db",
             object_store=FilesystemObjectStore(base / "objects"),
-            cache_backend=cache_backend,
-            stream_backend=stream_backend,
+            cache=cache,
         )
 
     @classmethod
@@ -207,8 +207,7 @@ class RuntimeStorage:
         engine: "AsyncEngine",
         *,
         object_store: "ObjectStore | None" = None,
-        cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cache: object | None = None,
     ) -> "RuntimeStorage":
         route = RuntimeStorageRoute.sql(engine)
         return cls(
@@ -220,8 +219,7 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            cache_backend=cache_backend,
-            stream_backend=stream_backend,
+            cache=cache,
         )
 
     @classmethod
@@ -230,23 +228,16 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        cache_backend: "CacheBackend | None" = None,
-        stream_backend: "StreamBackend | None" = None,
+        cache: object | None = None,
     ) -> "RuntimeStorage":
         return cls(
-            plan, object_store=object_store, cache_backend=cache_backend,
-            stream_backend=stream_backend,
+            plan, object_store=object_store, cache=cache,
         )
 
     @property
-    def cache_backend(self) -> "CacheBackend | None":
-        """Borrowed byte cache; the host retains its lifecycle ownership."""
-        return self._cache_backend
-
-    @property
-    def stream_backend(self) -> "StreamBackend | None":
-        """Borrowed ordered preview backend; its connection remains host-owned."""
-        return self._stream_backend
+    def cache(self) -> object | None:
+        """Borrowed optional cache capabilities; the host owns their lifecycle."""
+        return self._cache
 
     @property
     def plan(self) -> RuntimeStoragePlan:
@@ -337,7 +328,7 @@ class RuntimeStorage:
                     namespace=namespace,
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
-                    cache_backend=self._cache_backend,
+                    cache=self._cache,
                     read_only=read_only,
                 )
                 self._assign_materialized(

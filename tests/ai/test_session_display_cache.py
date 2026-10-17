@@ -16,11 +16,12 @@ from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStorage
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_refresh import _admit
 from .test_session_timeline import _materialize_conversation, _session
+from .test_runtime_content_cache_integration import WriteOnlyCache
 
 pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
@@ -54,7 +55,7 @@ def _service(state, cache, authorization=None):
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("display", b"display-test-key"), history_reader=object(),
-        transcript_store=state.run_store, cache_backend=cache,
+        transcript_store=state.run_store, cache=cache,
     )
 
 
@@ -744,8 +745,8 @@ async def test_display_cache_concurrent_misses_keep_original_capture_deadline(mo
 
 async def test_storage_exposes_borrowed_cache_without_closing_it():
     cache = _Cache()
-    state = RuntimeStorage.in_memory(cache_backend=cache)
-    assert state.cache_backend is cache
+    state = RuntimeStorage.in_memory(cache=cache)
+    assert state.cache is cache
     await state.close()
     await cache.put("still-borrowed", b"content")
     assert await cache.get("still-borrowed") == b"content"
@@ -760,11 +761,11 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
 
     cache = _Cache()
     if retention == "durable":
-        storage = RuntimeStorage.sqlite(tmp_path / "factory.db", cache_backend=cache)
+        storage = RuntimeStorage.sqlite(tmp_path / "factory.db", cache=cache)
     elif retention == "volatile":
-        storage = RuntimeStorage.in_memory(cache_backend=cache)
+        storage = RuntimeStorage.in_memory(cache=cache)
     else:
-        storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache_backend=cache)
+        storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache)
     group = CapabilityGroup[None]("display")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
@@ -802,7 +803,7 @@ async def test_display_cache_custom_repository_keeps_original_read_path():
         service = DefaultSessionService(
             replace(state.conversation, sessions=custom), state.execution.executions,
             TenantAuthorizationPolicy(), object(), HmacCursorSigner("display", b"display-test-key"),
-            history_reader=object(), transcript_store=state.run_store, cache_backend=cache,
+            history_reader=object(), transcript_store=state.run_store, cache=cache,
         )
         await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         await _change_metadata(state, "changed")
@@ -859,7 +860,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
     from ._runtime_test_helpers import _Models
 
     cache = _Cache()
-    storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache_backend=cache)
+    storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache=cache)
     group = CapabilityGroup[None]("display")
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -935,4 +936,18 @@ async def test_session_display_drain_rejects_new_reads_and_preserves_original_er
         await service.drain_display_reads()
     finally:
         release.set()
+        await state.close()
+
+
+@pytest.mark.parametrize("cache", (WriteOnlyCache(), InMemoryStreamBackend(max_bytes=1024)))
+async def test_display_refresh_without_key_value_cache_keeps_fresh_source(cache: object) -> None:
+    state = RuntimeStorage.in_memory(cache=cache)
+    await _prepare(state)
+    try:
+        service = _service(state, cache)
+        await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+        await _change_execution_display(state, "changed")
+        fresh = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+        assert fresh.timeline.items[0].safe_error_details == {"value": "changed"}
+    finally:
         await state.close()

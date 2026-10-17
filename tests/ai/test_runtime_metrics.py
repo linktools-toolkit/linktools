@@ -23,7 +23,7 @@ from linktools.ai.runtime._agent_executor import AgentExecutor, AgentExecutionRe
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import CancelExecutionRequest
-from linktools.ai.storage import WriteCache
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskEvent,
@@ -371,7 +371,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
 async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open() -> None:
     store = _BlockingMetricStore()
     buffer = runtime_metrics._RuntimeMetricRecorder(
-        Metrics.from_store(store, namespace="buffer", write_cache=WriteCache(queue_capacity=1)).recorder()  # type: ignore[arg-type]
+        Metrics.from_store(store, namespace="buffer", cache=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2)).recorder()  # type: ignore[arg-type]
     )
 
     assert await buffer.try_record(_observation("first")) is True
@@ -390,7 +390,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open() -> None
 async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
     buffer = runtime_metrics._RuntimeMetricRecorder(
-        Metrics.from_store(store, namespace="buffer-retry", write_cache=WriteCache()).recorder()  # type: ignore[arg-type]
+        Metrics.from_store(store, namespace="buffer-retry", cache=InMemoryCacheBackend(max_bytes=1024 * 1024)).recorder()  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
 

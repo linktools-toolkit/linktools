@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Generic best-effort caches for immutable versioned content.
+"""Optional hot-content and buffered-write capabilities.
 
-The cache key is a stable domain-identity string (e.g.
-``domain:{key}:{version}:{digest}``); filesystem cache file names are its SHA-256.
-All caches are best-effort: any read/write error is swallowed and treated as a
-miss/failed write, never propagated as the origin's result.
-
-``contains_many`` answers whether keys already exist WITHOUT reading content --
-preload uses it to avoid reading whole files just to decide a cache miss."""
+Hot reads and writes are best-effort; their helpers treat errors as misses.
+Buffered admission and acknowledgement have explicit outcomes instead: accepted
+entries remain non-evictable until their owner settles and acknowledges them.
+Content keys are domain identity strings; pending keys use the source's key type.
+"""
 
 
 import asyncio
@@ -20,9 +18,9 @@ import re
 import stat
 import tempfile
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
-from typing import Protocol, TypeAlias
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from ._files import sync_directory
 from ._lock import FilesystemMutationLock
@@ -35,17 +33,20 @@ def _content_charge(size: int) -> int:
     return max(1, size)
 
 
+@runtime_checkable
 class CacheBackend(Protocol):
+    """Optional hot-content capability of an injected cache.
+
+    A cache may instead, or also, implement append/read_batch/ack for buffered
+    writes and open_stream/read_stream for preview streams. Consumers select
+    complete groups only; no inheritance or placeholder methods are required.
+    """
     async def get(self, key: ContentCacheKey) -> "bytes | None": ...
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None: ...
 
     async def delete(self, key: ContentCacheKey) -> None: ...
 
-    async def contains_many(
-        self,
-        keys: "Sequence[ContentCacheKey]",
-    ) -> "frozenset[ContentCacheKey]": ...
 
 
 async def read_cache(cache: "CacheBackend | None", key: ContentCacheKey) -> "bytes | None":
@@ -78,30 +79,39 @@ async def contains_many(
     if cache is None or not keys:
         return frozenset()
     try:
-        return await cache.contains_many(keys)
+        probe = getattr(cache, "contains_many", None)
+        return frozenset() if probe is None else await probe(keys)
     except Exception:  # noqa: BLE001
         return frozenset()
 
 
 class InMemoryCacheBackend:
-    """Bounded LRU content cache.
+    """Bounded hot content and owner-scoped pending writes.
 
     ``max_bytes`` is a payload budget with a one-byte minimum charge per entry,
     so zero-length values cannot grow the key table without bound. ``max_size``
     remains an optional stricter item-count limit. ``contains_many`` checks all
-    keys under one lock and does not touch LRU order.
+    keys under one lock and does not touch LRU order. Pending entries share
+    these same limits, including in-flight batches, and cannot be evicted.
+    Hot entries yield capacity to admitted pending writes.
     """
 
     def __init__(self, *, max_bytes: int, max_size: "int | None" = None) -> None:
-        if max_bytes < 0:
-            raise ValueError("max_bytes must be non-negative")
-        if max_size is not None and max_size < 0:
-            raise ValueError("max_size must be non-negative")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+            raise ValueError("max_bytes must be a non-negative integer")
+        if max_size is not None and (
+            isinstance(max_size, bool) or not isinstance(max_size, int) or max_size < 0
+        ):
+            raise ValueError("max_size must be a non-negative integer")
         self.max_bytes = max_bytes
         self.max_size = max_size
         self._items: OrderedDict[ContentCacheKey, bytes] = OrderedDict()
         self._size = 0
         self._lock = asyncio.Lock()
+        self._changed = asyncio.Condition(self._lock)
+        self._pending: dict[str, OrderedDict[str, tuple[Hashable, bytes | None]]] = {}
+        self._pending_size = 0
+        self._pending_count = 0
 
     async def get(self, key: ContentCacheKey) -> "bytes | None":
         async with self._lock:
@@ -121,8 +131,9 @@ class InMemoryCacheBackend:
             self._items[key] = content
             self._size += charge
             while (
-                self._size > self.max_bytes
-                or (self.max_size is not None and len(self._items) > self.max_size)
+                self._size + self._pending_size > self.max_bytes
+                or (self.max_size is not None
+                    and len(self._items) + self._pending_count > self.max_size)
             ) and self._items:
                 _, removed = self._items.popitem(last=False)
                 self._size -= _content_charge(len(removed))
@@ -132,6 +143,7 @@ class InMemoryCacheBackend:
             previous = self._items.pop(key, None)
             if previous is not None:
                 self._size -= _content_charge(len(previous))
+                self._changed.notify_all()
 
     async def contains_many(
         self,
@@ -141,6 +153,82 @@ class InMemoryCacheBackend:
             return frozenset()
         async with self._lock:
             return frozenset(key for key in keys if key in self._items)
+
+
+    async def append(
+        self, scope: str, id: str, key: Hashable, content: "bytes | None", *, wait: bool,
+    ) -> bool:
+        """Admit an immutable write, retaining it until exact-ID acknowledgement.
+
+        Capacity includes in-flight entries and shares the hot-content budget.
+        False means definitely not admitted. Cancellation before admission is
+        safe; after admission this method returns True without another await.
+        Same scope/ID retries must carry the identical key and content.
+        """
+        hash(key)
+        if content is not None and not isinstance(content, bytes):
+            raise TypeError("buffer content must be immutable bytes or None")
+        charge = _content_charge(0 if content is None else len(content))
+        if charge > self.max_bytes or self.max_size == 0:
+            return False
+        async with self._changed:
+            while True:
+                entries = self._pending.get(scope)
+                if entries is not None and id in entries:
+                    if entries[id] != (key, content):
+                        raise ValueError("buffer entry ID reused with different content or key")
+                    return True
+                while self._items and (
+                    self._size + self._pending_size + charge > self.max_bytes
+                    or (self.max_size is not None
+                        and len(self._items) + self._pending_count + 1 > self.max_size)
+                ):
+                    _, removed = self._items.popitem(last=False)
+                    self._size -= _content_charge(len(removed))
+                if (
+                    self._pending_size + charge <= self.max_bytes
+                    and (self.max_size is None or self._pending_count < self.max_size)
+                ):
+                    self._pending.setdefault(scope, OrderedDict())[id] = (key, content)
+                    self._pending_size += charge
+                    self._pending_count += 1
+                    return True
+                if not wait:
+                    return False
+                await self._changed.wait()
+
+    async def read_batch(
+        self, scope: str, *, limit: int,
+    ) -> "tuple[tuple[str, Hashable, bytes | None], ...]":
+        """Read the ordered unacknowledged prefix without consuming it."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("batch limit must be a positive integer")
+        async with self._lock:
+            entries = self._pending.get(scope)
+            if entries is None:
+                return ()
+            result = []
+            for id, (key, content) in entries.items():
+                result.append((id, key, content))
+                if len(result) == limit:
+                    break
+            return tuple(result)
+
+    async def ack(self, scope: str, ids: "Sequence[str]") -> None:
+        """Release only the listed entries; repeating an acknowledgement is safe."""
+        async with self._changed:
+            entries = self._pending.get(scope)
+            if entries is None:
+                return
+            for id in ids:
+                entry = entries.pop(id, None)
+                if entry is not None:
+                    content = entry[1]
+                    self._pending_size -= _content_charge(0 if content is None else len(content))
+                    self._pending_count -= 1
+            if not entries:
+                self._pending.pop(scope, None)
+            self._changed.notify_all()
 
 
 class FilesystemCacheBackend:

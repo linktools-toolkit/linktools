@@ -38,14 +38,14 @@ class _RuntimeObjectRouter:
         stores: Mapping[RuntimeDomain, ObjectStore],
         *,
         close_guard_stores: Sequence[ObjectStore],
-        cache_backend: CacheBackend | None = None,
+        cache: object | None = None,
         cache_domains: Sequence[RuntimeDomain] = (),
         namespace: str = "",
         tenant_id: str = "",
     ) -> None:
         self._stores = dict(stores)
         self._close_guard_stores = tuple(close_guard_stores)
-        self._cache_backend = cache_backend
+        self._cache = cache if isinstance(cache, CacheBackend) else None
         self._cache_domains = frozenset(cache_domains)
         self._cache_scope = (namespace, tenant_id)
         self._closing = False
@@ -60,7 +60,7 @@ class _RuntimeObjectRouter:
         task = asyncio.create_task(self._read_accepted(domain, store, reference))
         self._pending_reads.add(task)
         task.add_done_callback(self._read_finished)
-        if self._cache_backend is None or domain not in self._cache_domains:
+        if self._cache is None or domain not in self._cache_domains:
             # Unshared reads retain request-owned cancellation and stream close.
             return await task
         return await asyncio.shield(task)
@@ -68,7 +68,7 @@ class _RuntimeObjectRouter:
     async def _read_accepted(
         self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef
     ) -> bytes:
-        if self._cache_backend is None or domain not in self._cache_domains:
+        if self._cache is None or domain not in self._cache_domains:
             return await self._read_origin(store, reference)
         identity = (domain, reference)
         task = self._inflight.get(identity)
@@ -87,7 +87,7 @@ class _RuntimeObjectRouter:
     async def _read_cached(
         self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef
     ) -> bytes:
-        cache = self._cache_backend
+        cache = self._cache
         assert cache is not None
         key = self._cache_key(domain, reference)
         try:
@@ -234,7 +234,7 @@ def build_runtime_object_router(
     stores: Mapping[RuntimeDomain, object],
     contexts: Mapping[RuntimeDomain, SqlStorageContext],
     *,
-    cache_backend: CacheBackend | None = None,
+    cache: object | None = None,
     namespace: str = "",
     tenant_id: str = "",
 ) -> _RuntimeObjectRouter:
@@ -278,7 +278,7 @@ def build_runtime_object_router(
     return _RuntimeObjectRouter(
         values,
         close_guard_stores=close_guard_stores,
-        cache_backend=cache_backend,
+        cache=cache,
         cache_domains=tuple(
             domain for domain in values
             if plan.route(domain).retention is RuntimeRetentionMode.DURABLE

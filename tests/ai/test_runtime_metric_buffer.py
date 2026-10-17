@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 
 import pytest
 from linktools.ai.core import Page
-from linktools.ai.observe import Metrics, Observation
-from linktools.ai.storage import WriteCache, WriteCacheScope
+from linktools.ai.observe import MetricRecorder, Metrics, Observation
+from linktools.ai.storage import InMemoryCacheBackend, WriteCacheScope
 from linktools.ai.storage import _write_cache as write_cache
 
 
@@ -80,19 +80,20 @@ async def test_metric_buffer_reports_backpressure_without_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _BlockingStore()
-    buffer = WriteCache(queue_capacity=1).open(
-        Metrics.from_store(store, namespace="backpressure").record_observations  # type: ignore[arg-type]
-    )
+    buffer = Metrics.from_store(
+        store, namespace="backpressure",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2),
+    ).recorder()
 
-    assert await buffer.try_submit(_observation("first")) is True
+    assert await buffer.try_record(_observation("first")) is True
     await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
-    assert await buffer.try_submit(_observation("second")) is True
-    assert await buffer.try_submit(_observation("third")) is False
+    assert await buffer.try_record(_observation("second")) is True
+    assert await buffer.try_record(_observation("third")) is False
 
     status = buffer.status()
-    assert status.queue_size == 1
-    assert status.queue_capacity == 1
+    assert status.queue_size == 2
+    assert status.queue_capacity is None
     assert status.last_failure_code == "QUEUE_FULL"
     assert status.rejected == 1
 
@@ -103,23 +104,24 @@ async def test_metric_buffer_reports_backpressure_without_raising(
 @pytest.mark.asyncio
 async def test_metric_buffer_flush_waits_for_accepted_observations() -> None:
     store = _BlockingStore()
-    buffer = WriteCache().open(
-        Metrics.from_store(store, namespace="flush").record_observations  # type: ignore[arg-type]
-    )
-    assert await buffer.try_submit(_observation("accepted")) is True
+    buffer = Metrics.from_store(
+        store, namespace="flush",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
+    assert await buffer.try_record(_observation("accepted")) is True
     await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
     pending = await buffer.flush(timeout_seconds=0)
     assert pending.completed is False
     assert pending.status.accepted == 1
-    assert pending.status.confirmed == 0
+    assert pending.status.persisted == 0
     assert pending.status.pending == 1
 
     store.release.set()
     flushed = await buffer.flush(timeout_seconds=1)
     assert flushed.completed is True
-    assert flushed.status.confirmed == 1
+    assert flushed.status.persisted == 1
     assert flushed.status.pending == 0
     await buffer.close()
 
@@ -131,10 +133,11 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
     monkeypatch.setattr(write_cache, "_WRITE_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.05)
     store = _BlockingStore()
-    buffer = WriteCache().open(
-        Metrics.from_store(store, namespace="close").record_observations  # type: ignore[arg-type]
-    )
-    assert await buffer.try_submit(_observation("blocked")) is True
+    buffer = Metrics.from_store(
+        store, namespace="close",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
+    assert await buffer.try_record(_observation("blocked")) is True
     await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
@@ -142,7 +145,7 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
     status = buffer.status()
     assert status.accepting is False
     assert status.pending == 0
-    assert status.unconfirmed == 1
+    assert status.lost == 1
     assert status.last_failure_code == "CLOSE_TIMEOUT"
 
 
@@ -151,22 +154,23 @@ async def test_metric_buffer_cancelled_batch_settles_owned_observations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _BlockingStore()
-    buffer = WriteCache(flush_interval_seconds=60.0).open(
-        Metrics.from_store(store, namespace="batch-cancel").record_observations  # type: ignore[arg-type]
-    )
-    assert await buffer.try_submit(_observation("batched")) is True
+    buffer = Metrics.from_store(
+        store, namespace="batch-cancel",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
+    assert await buffer.try_record(_observation("batched")) is True
     await asyncio.sleep(0)
-    assert buffer.status().queue_size == 0
+    assert buffer.status().queue_size == 1
     assert not store.entered.is_set()
 
-    assert buffer._writer is not None
-    buffer._writer.cancel()
-    await asyncio.gather(buffer._writer, return_exceptions=True)
+    assert buffer._scope._writer is not None
+    buffer._scope._writer.cancel()
+    await asyncio.gather(buffer._scope._writer, return_exceptions=True)
     await buffer.close()
 
     status = buffer.status()
-    assert status.accepted == status.unconfirmed == 1
-    assert status.confirmed == status.pending == status.queue_size == 0
+    assert status.accepted == status.lost == 1
+    assert status.persisted == status.pending == status.queue_size == 0
     assert not store.entered.is_set()
     assert (await buffer.flush(timeout_seconds=0)).completed is True
     await buffer.close()
@@ -181,13 +185,15 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
 ) -> None:
     monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
     store = _BlockingStore()
-    buffer = WriteCache(batch_size=1).open(
-        Metrics.from_store(store, namespace="close-completion").record_observations  # type: ignore[arg-type]
-    )
-    assert await buffer.try_submit(_observation("completing")) is True
+    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 1)
+    buffer = Metrics.from_store(
+        store, namespace="close-completion",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
+    assert await buffer.try_record(_observation("completing")) is True
     await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
-    request_stop = buffer._request_stop
+    request_stop = buffer._scope._request_stop
 
     def stop_at_write_completion(code: str) -> None:
         # Coordinate the real callback with the stop request without replacing
@@ -195,7 +201,7 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
         asyncio.get_running_loop().call_soon(store.release.set)
         request_stop(code)
 
-    monkeypatch.setattr(buffer, "_request_stop", stop_at_write_completion)
+    monkeypatch.setattr(buffer._scope, "_request_stop", stop_at_write_completion)
     close = asyncio.create_task(buffer.close())
     try:
         await asyncio.sleep(0)
@@ -213,8 +219,8 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
         await asyncio.wait_for(buffer.close(), timeout=1)
 
     status = buffer.status()
-    assert status.confirmed == int(store.written.is_set())
-    assert status.accepted == status.confirmed + status.unconfirmed == 1
+    assert status.persisted == int(store.written.is_set())
+    assert status.accepted == status.persisted + status.lost == 1
     assert status.pending == 0
     assert status.queue_size == 0
 
@@ -222,10 +228,11 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
 @pytest.mark.asyncio
 async def test_metric_buffer_flush_cancellation_preserves_accepted_observations() -> None:
     store = _BlockingStore()
-    buffer = WriteCache().open(
-        Metrics.from_store(store, namespace="flush-cancel").record_observations  # type: ignore[arg-type]
-    )
-    assert await buffer.try_submit(_observation("accepted")) is True
+    buffer = Metrics.from_store(
+        store, namespace="flush-cancel",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
+    assert await buffer.try_record(_observation("accepted")) is True
     await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
 
@@ -235,14 +242,14 @@ async def test_metric_buffer_flush_cancellation_preserves_accepted_observations(
     with pytest.raises(asyncio.CancelledError):
         await flush
     assert buffer.status().pending == 1
-    assert buffer.status().unconfirmed == 0
+    assert buffer.status().lost == 0
 
     store.release.set()
     await asyncio.gather(buffer.close(), buffer.close())
     status = buffer.status()
-    assert status.confirmed == 1
+    assert status.persisted == 1
     assert status.pending == 0
-    assert status.unconfirmed == 0
+    assert status.lost == 0
 
 
 class _CancellingStore(_BlockingStore):
@@ -273,16 +280,18 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
     monkeypatch.setattr(write_cache, "_WRITE_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
     store = _CancellingStore()
-    buffer = WriteCache(batch_size=1).open(
-        Metrics.from_store(store, namespace="close-order").record_observations  # type: ignore[arg-type]
-    )
+    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 1)
+    buffer = Metrics.from_store(
+        store, namespace="close-order",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     first = _observation("inflight")
-    assert await buffer.try_submit(first) is True
+    assert await buffer.try_record(first) is True
     await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
     flush = asyncio.create_task(buffer.flush(timeout_seconds=1))
     await asyncio.sleep(0)
-    assert await buffer.try_submit(_observation("queued")) is True
+    assert await buffer.try_record(_observation("queued")) is True
     close = asyncio.create_task(buffer.close())
     try:
         await asyncio.wait_for(store.cancelling.wait(), timeout=1)
@@ -290,14 +299,14 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
         assert not close.done()
         assert not flush.done()
         assert buffer.status().pending == 2
-        assert buffer.status().unconfirmed == 0
+        assert buffer.status().lost == 0
     finally:
         store.finalize.set()
         await asyncio.wait_for(asyncio.gather(close, flush), timeout=1)
 
     assert flush.result().completed is True
     assert store.observations == [first]
-    assert buffer.status().unconfirmed == 2
+    assert buffer.status().lost == 2
     assert buffer.status().pending == 0
     assert buffer.status().queue_size == 0
 
@@ -318,26 +327,25 @@ class _RecordingStore(_BlockingStore):
         await super().put_observations(namespace, observations)
 
 
-async def _wait_queue_empty(buffer: WriteCacheScope[Observation]) -> None:
-    while buffer.status().queue_size:
-        await asyncio.sleep(0)
+async def _settle_admission(buffer: MetricRecorder) -> None:
+    assert buffer.status().pending > 0
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
 async def test_metric_buffer_default_batch_reaches_128_before_one_minute() -> None:
-    assert WriteCache().batch_size == 128
-    assert WriteCache().flush_interval_seconds == 60.0
     store = _RecordingStore()
     store.release.set()
-    buffer = WriteCache().open(
-        Metrics.from_store(store, namespace="batch-size").record_observations  # type: ignore[arg-type]
-    )
+    buffer = Metrics.from_store(
+        store, namespace="batch-size",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
         for index in range(127):
-            assert await buffer.try_submit(_observation(str(index))) is True
-        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+            assert await buffer.try_record(_observation(str(index))) is True
+        await asyncio.wait_for(_settle_admission(buffer), timeout=1)
         assert not store.entered.is_set()
-        assert await buffer.try_submit(_observation("127")) is True
+        assert await buffer.try_record(_observation("127")) is True
         batch = await asyncio.wait_for(store.next_batch.get(), timeout=1)
         assert len(batch) == 128
     finally:
@@ -352,18 +360,19 @@ async def test_metric_buffer_window_stays_with_first_accepted_observation(
     monkeypatch.setattr(write_cache, "monotonic", lambda: clock[0])
     store = _RecordingStore()
     store.release.set()
-    buffer = WriteCache().open(
-        Metrics.from_store(store, namespace="batch-window").record_observations  # type: ignore[arg-type]
-    )
+    buffer = Metrics.from_store(
+        store, namespace="batch-window",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
-        assert await buffer.try_submit(_observation("first")) is True
-        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        assert await buffer.try_record(_observation("first")) is True
+        await asyncio.wait_for(_settle_admission(buffer), timeout=1)
         clock[0] = 59.9
-        assert await buffer.try_submit(_observation("second")) is True
-        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        assert await buffer.try_record(_observation("second")) is True
+        await asyncio.wait_for(_settle_admission(buffer), timeout=1)
         assert not store.entered.is_set()
         clock[0] = 60.0
-        assert await buffer.try_submit(_observation("third")) is True
+        assert await buffer.try_record(_observation("third")) is True
         batch = await asyncio.wait_for(store.next_batch.get(), timeout=0.05)
         assert tuple(item.observation_id for item in batch) == ("first", "second", "third")
     finally:
@@ -378,12 +387,13 @@ async def test_metric_buffer_explicit_drain_wakes_partial_batch(
 ) -> None:
     store = _RecordingStore()
     store.release.set()
-    buffer = WriteCache(flush_interval_seconds=60.0).open(
-        Metrics.from_store(store, namespace="explicit-drain").record_observations  # type: ignore[arg-type]
-    )
+    buffer = Metrics.from_store(
+        store, namespace="explicit-drain",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
-        assert await buffer.try_submit(_observation("partial")) is True
-        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
+        assert await buffer.try_record(_observation("partial")) is True
+        await asyncio.wait_for(_settle_admission(buffer), timeout=1)
         if operation == "flush":
             result = await buffer.flush(timeout_seconds=0.05)
             assert result.completed is True
@@ -394,7 +404,7 @@ async def test_metric_buffer_explicit_drain_wakes_partial_batch(
                 closing.cancel()
                 await closing
             assert closing in done
-        assert buffer.status().confirmed == 1
+        assert buffer.status().persisted == 1
         assert buffer.status().pending == 0
     finally:
         await buffer.close()
@@ -407,15 +417,17 @@ async def test_metric_buffer_expired_queued_batch_does_not_start_another_window(
     clock = [0.0]
     monkeypatch.setattr(write_cache, "monotonic", lambda: clock[0])
     store = _RecordingStore()
-    buffer = WriteCache(batch_size=2).open(
-        Metrics.from_store(store, namespace="queued-window").record_observations  # type: ignore[arg-type]
-    )
+    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 2)
+    buffer = Metrics.from_store(
+        store, namespace="queued-window",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
-        assert await buffer.try_submit(_observation("first")) is True
-        assert await buffer.try_submit(_observation("second")) is True
+        assert await buffer.try_record(_observation("first")) is True
+        assert await buffer.try_record(_observation("second")) is True
         await asyncio.wait_for(store.next_batch.get(), timeout=1)
         clock[0] = 0.1
-        assert await buffer.try_submit(_observation("queued")) is True
+        assert await buffer.try_record(_observation("queued")) is True
         clock[0] = 60.1
         store.release.set()
         batch = await asyncio.wait_for(store.next_batch.get(), timeout=0.05)
@@ -430,19 +442,21 @@ async def test_metric_buffer_flush_wakes_prefix_queued_behind_inflight_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _RecordingStore()
-    buffer = WriteCache(batch_size=2, flush_interval_seconds=60.0).open(
-        Metrics.from_store(store, namespace="inflight-flush").record_observations  # type: ignore[arg-type]
-    )
+    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 2)
+    buffer = Metrics.from_store(
+        store, namespace="inflight-flush",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
-        assert await buffer.try_submit(_observation("first")) is True
-        assert await buffer.try_submit(_observation("second")) is True
+        assert await buffer.try_record(_observation("first")) is True
+        assert await buffer.try_record(_observation("second")) is True
         await asyncio.wait_for(store.next_batch.get(), timeout=1)
-        assert await buffer.try_submit(_observation("queued")) is True
+        assert await buffer.try_record(_observation("queued")) is True
         flushing = asyncio.create_task(buffer.flush(timeout_seconds=0.05))
         await asyncio.sleep(0)
         store.release.set()
         assert (await flushing).completed is True
-        assert buffer.status().confirmed == 3
+        assert buffer.status().persisted == 3
         assert len(store.batches) == 2
     finally:
         store.release.set()
@@ -455,36 +469,39 @@ async def test_metric_buffer_timer_writes_without_another_observation(
 ) -> None:
     store = _RecordingStore()
     store.release.set()
-    buffer = WriteCache(flush_interval_seconds=0.01).open(
-        Metrics.from_store(store, namespace="idle-window").record_observations  # type: ignore[arg-type]
-    )
+    monkeypatch.setattr(write_cache, "_FLUSH_INTERVAL_SECONDS", 0.01)
+    buffer = Metrics.from_store(
+        store, namespace="idle-window",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
-        assert await buffer.try_submit(_observation("alone")) is True
+        assert await buffer.try_record(_observation("alone")) is True
         batch = await asyncio.wait_for(store.next_batch.get(), timeout=1)
         assert tuple(item.observation_id for item in batch) == ("alone",)
     finally:
         await buffer.close()
-    assert buffer.status().confirmed == 1
+    assert buffer.status().persisted == 1
 
 
 @pytest.mark.asyncio
 async def test_metric_buffer_completed_flush_does_not_bypass_later_batch_window() -> None:
     store = _RecordingStore()
     store.release.set()
-    buffer = WriteCache().open(
-        Metrics.from_store(store, namespace="flush-prefix").record_observations  # type: ignore[arg-type]
-    )
+    buffer = Metrics.from_store(
+        store, namespace="flush-prefix",  # type: ignore[arg-type]
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+    ).recorder()
     try:
-        assert await buffer.try_submit(_observation("prefix")) is True
+        assert await buffer.try_record(_observation("prefix")) is True
         assert (await buffer.flush(timeout_seconds=0.05)).completed is True
-        assert await buffer.try_submit(_observation("later")) is True
-        await asyncio.wait_for(_wait_queue_empty(buffer), timeout=1)
-        assert buffer.status().confirmed == 1
+        assert await buffer.try_record(_observation("later")) is True
+        await asyncio.wait_for(_settle_admission(buffer), timeout=1)
+        assert buffer.status().persisted == 1
         assert buffer.status().pending == 1
         assert len(store.batches) == 1
     finally:
         await buffer.close()
-    assert buffer.status().confirmed == 2
+    assert buffer.status().persisted == 2
 
 
 @pytest.mark.asyncio
@@ -498,8 +515,8 @@ async def test_write_cache_close_keeps_callback_owned_until_its_real_result(
     release = asyncio.Event()
     returned = asyncio.Event()
 
-    async def sink(batch: tuple[str, ...]) -> None:
-        assert batch == ("head",)
+    async def sink(batch: tuple[tuple[str, object, bytes | None], ...]) -> None:
+        assert tuple(item[1] for item in batch) == ("head",)
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -508,10 +525,11 @@ async def test_write_cache_close_keeps_callback_owned_until_its_real_result(
             await release.wait()
         returned.set()
 
-    scope = WriteCache(batch_size=1).open(sink)
-    assert await scope.try_submit("head")
+    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
+    assert await scope.try_submit("head", b"head")
+    await scope.flush(timeout_seconds=0)
     await asyncio.wait_for(entered.wait(), 1)
-    assert await scope.try_submit("tail")
+    assert await scope.try_submit("tail", b"tail")
     closing = asyncio.create_task(scope.close())
     second = None
     try:
@@ -541,7 +559,7 @@ async def test_write_cache_close_keeps_callback_owned_until_its_real_result(
     assert status.confirmed == status.unconfirmed == 1
     assert status.pending == 0
     assert status.last_failure_code == "CLOSE_TIMEOUT"
-    await asyncio.wait_for(scope._queue.join(), 1)
+    assert status.queue_size == 0
     assert (await scope.flush()).completed
     await scope.close()
     assert scope.status() == status
@@ -552,25 +570,25 @@ async def test_write_cache_close_keeps_callback_owned_until_its_real_result(
 async def test_write_cache_callback_cancellation_does_not_strand_later_admissions(
     synchronous: bool,
 ) -> None:
-    async def write(batch: tuple[str, ...]) -> None:
-        if batch == ("cancelled",):
+    async def write(batch: tuple[tuple[str, object, bytes | None], ...]) -> None:
+        if tuple(item[1] for item in batch) == ("cancelled",):
             raise asyncio.CancelledError
-        assert batch == ("next",)
+        assert tuple(item[1] for item in batch) == ("next",)
 
-    def sink(batch: tuple[str, ...]) -> Awaitable[None]:
-        if synchronous and batch == ("cancelled",):
+    def sink(batch: tuple[tuple[str, object, bytes | None], ...]) -> Awaitable[None]:
+        if synchronous and tuple(item[1] for item in batch) == ("cancelled",):
             raise asyncio.CancelledError
         return write(batch)
 
-    scope = WriteCache(batch_size=1).open(sink)
+    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
     try:
-        assert await scope.try_submit("cancelled")
+        assert await scope.try_submit("cancelled", b"cancelled")
         assert (await scope.flush()).completed
         assert scope.status().unconfirmed == 1
         assert scope.status().write_failures == 1
         assert scope.status().last_failure_code == "WRITE_CANCELLED"
         assert scope.status().accepting
-        assert await scope.try_submit("next")
+        assert await scope.try_submit("next", b"next")
         assert (await scope.flush()).completed
         assert scope.status().confirmed == 1
     finally:
@@ -578,28 +596,29 @@ async def test_write_cache_callback_cancellation_does_not_strand_later_admission
 
 
 @pytest.mark.asyncio
-async def test_write_cache_can_form_a_batch_larger_than_its_queue() -> None:
+async def test_write_cache_capacity_includes_inflight_and_releases_after_ack() -> None:
     batches: list[tuple[int, ...]] = []
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def sink(batch: tuple[int, ...]) -> None:
-        batches.append(batch)
+    async def sink(batch: tuple[tuple[str, object, bytes | None], ...]) -> None:
+        batches.append(tuple(item[1] for item in batch))
         entered.set()
         await release.wait()
 
-    scope = WriteCache(queue_capacity=1, batch_size=3).open(sink)
+    cache = InMemoryCacheBackend(max_bytes=1024, max_size=3)
+    scope = WriteCacheScope(cache, sink)
     try:
         for item in range(3):
-            assert await scope.try_submit(item)
-            while scope.status().queue_size:
-                await asyncio.sleep(0)
+            assert await scope.try_submit(item, str(item).encode())
+        await scope.flush(timeout_seconds=0)
         await asyncio.wait_for(entered.wait(), 1)
-        assert await scope.try_submit(3)
-        assert not await scope.try_submit(4)
-        assert scope.status().pending == 4
-        assert scope.status().queue_size == scope.status().high_watermark == 1
+        assert not await scope.try_submit(3, b"3")
+        assert scope.status().pending == 3
+        assert scope.status().queue_size == scope.status().high_watermark == 3
         release.set()
+        assert (await scope.flush()).completed
+        assert await scope.try_submit(3, b"3")
         assert (await scope.flush()).completed
         assert batches == [(0, 1, 2), (3,)]
     finally:
@@ -611,12 +630,12 @@ async def test_write_cache_can_form_a_batch_larger_than_its_queue() -> None:
 async def test_write_cache_callback_unknown_outcome_is_not_confirmed() -> None:
     visible: list[str] = []
 
-    async def sink(batch: tuple[str, ...]) -> None:
-        visible.extend(batch)
+    async def sink(batch: tuple[tuple[str, object, bytes | None], ...]) -> None:
+        visible.extend(item[1] for item in batch)
         raise OSError("reply unavailable after write")
 
-    scope = WriteCache().open(sink)
-    assert await scope.try_submit("visible")
+    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
+    assert await scope.try_submit("visible", b"visible")
     await scope.close()
     status = scope.status()
     assert visible == ["visible"]
@@ -633,21 +652,21 @@ async def test_write_cache_write_timeout_does_not_stop_following_batches(
     monkeypatch.setattr(write_cache, "_WRITE_TIMEOUT_SECONDS", 0.01)
     calls = 0
 
-    async def sink(batch: tuple[str, ...]) -> None:
+    async def sink(batch: tuple[tuple[str, object, bytes | None], ...]) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             await asyncio.Event().wait()
         else:
-            assert batch == ("next",)
+            assert tuple(item[1] for item in batch) == ("next",)
 
-    scope = WriteCache(batch_size=1).open(sink)
+    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
     try:
-        assert await scope.try_submit("timeout")
+        assert await scope.try_submit("timeout", b"timeout")
         assert (await scope.flush()).completed
         assert scope.status().last_failure_code == "WRITE_TIMEOUT"
         assert scope.status().unconfirmed == 1
-        assert await scope.try_submit("next")
+        assert await scope.try_submit("next", b"next")
         assert (await scope.flush()).completed
         assert scope.status().confirmed == 1
     finally:
@@ -655,11 +674,9 @@ async def test_write_cache_write_timeout_does_not_stop_following_batches(
 
 
 @pytest.mark.parametrize("options", (
-    {"queue_capacity": 0}, {"queue_capacity": True}, {"batch_size": -1},
-    {"batch_size": 1.5}, {"flush_interval_seconds": 0},
-    {"flush_interval_seconds": float("nan")},
-    {"flush_interval_seconds": float("inf")},
+    {"max_bytes": -1}, {"max_bytes": True}, {"max_bytes": 1.5},
+    {"max_bytes": 1, "max_size": -1}, {"max_bytes": 1, "max_size": True},
 ))
-def test_write_cache_rejects_invalid_configuration(options: dict[str, object]) -> None:
+def test_metric_cache_rejects_invalid_capacity(options: dict[str, object]) -> None:
     with pytest.raises(ValueError):
-        WriteCache(**options)  # type: ignore[arg-type]
+        InMemoryCacheBackend(**options)  # type: ignore[arg-type]

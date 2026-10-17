@@ -5,7 +5,7 @@ storage package separates content, revision discovery, and metadata projection.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage(..., cache_backend=...)` |
+| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage(..., cache=...)` |
 | `ContentCache[KeyT, ValueT, InfoT]` | Bind a borrowed backend to domain keys and value encoding | Supply `StorageOverlay(content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
@@ -41,12 +41,85 @@ same protocol with its own key and codec. The cache backend is never closed by
 the content cache or overlay. Shared loads retain encoded bytes so each reader
 can decode its own mutable value; readers do not share a mutable decoded object.
 
-`CacheBackend` implementations provide `get`, `put`, `delete`, and
-`contains_many`. `InMemoryCacheBackend`, `FilesystemCacheBackend`, and
+`CacheBackend` implementations provide `get`, `put`, and `delete`;
+`contains_many` is an optional batch membership optimization. `InMemoryCacheBackend`, `FilesystemCacheBackend`, and
 `TieredCacheBackend` implement that contract. Empty content is a valid hit, not a
 miss; it consumes at least one byte of the built-in capacity budget. These
 capacity limits do not define domain retention or promise TTL expiration; the
 owning domain remains responsible for its retention rules.
+
+## One cache instance, optional method groups
+
+Pass one `cache` to `RuntimeStorage`, `Metrics`, or `StorageBuffer`. An adapter
+provides only the complete method groups it needs: `get`/`put`/`delete` for hot
+content, `append`/`read_batch`/`ack` for pending writes, and
+`open_stream`/`read_stream` for live previews. Each consumer checks the groups it uses. A missing group leaves it on its
+existing source/local path; a partial required group is a configuration error. No new all-capabilities wrapper or inheritance is required.
+
+`InMemoryCacheBackend(max_bytes=..., max_size=...)` provides hot content and
+buffered writes with one shared capacity budget, including in-flight writes.
+Hot entries may be evicted to admit work; accepted pending entries stay until
+acknowledged. `InMemoryStreamBackend` is a stream-only adapter.
+`FilesystemCacheBackend` and `TieredCacheBackend` provide hot content only. A
+host can expose any complete combination on its existing client instance.
+The framework borrows it and never closes its host connection.
+
+The buffer group uses existing identities and immutable bytes:
+
+- `append(scope, id, key, content, *, wait)` returns whether admission succeeded
+- `read_batch(scope, *, limit)` returns ordered `(id, key, content)` tuples without removing them
+- `ack(scope, ids)` removes only those accepted IDs
+
+`content=None` is a queued deletion; hot-content absence remains separate.
+Adapters preserve same-ID retry identity and exact-ID acknowledgement.
+`False` means definitely not admitted. An entry that can never fit returns
+`False` immediately even with `wait=True`; only temporary fullness waits.
+`StorageBuffer.enqueue` reports this definite rejection as a capacity error
+without disabling later valid admissions. Cancellation before admission
+publishes nothing; once admitted, the actual admission must settle before
+cancellation or close can release ownership. An append error can mean unknown
+admission, so it must not be reported as a definite capacity rejection or
+silently redirected into a local queue.
+
+## Automatic Metrics buffering
+
+```python
+from linktools.ai.observe import Metrics
+from linktools.ai.storage import InMemoryCacheBackend
+
+cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
+metrics = Metrics.sqlite("metrics.sqlite3", cache=cache)
+recorder = metrics.recorder()
+try:
+    accepted = await recorder.try_record(observation)
+    result = await recorder.flush()
+finally:
+    await recorder.close()
+```
+
+All Metrics constructors and factories accept `cache`. Only automatic recorders
+use its complete buffer group; otherwise they await the source in the caller,
+without a hidden local queue. `record`, `record_observations`, and queries keep
+their strong source semantics. Queries never add pending observations.
+
+Automatic batches flush at 128 entries or 60 seconds after the first admission,
+whichever comes first; explicit flush and close wake partial batches. These
+are batching defaults, not query TTLs. The cache contains the encoded pending
+bytes using the existing Observation codec. Independent recorders own separate
+scopes and close only their own work; shared cache capacity remains shared.
+
+Admission is best effort, not a durability receipt. A full cache rejects new
+automatic observations; failed/cancelled writes remain visible in status.
+`queue_size` includes unacknowledged in-flight entries; `queue_capacity` is
+`None` because capacity belongs to the adapter and has no common query contract;
+it does not mean unbounded storage. A successful sink is never
+called again merely because acknowledgement failed; an unresolved cleanup
+failure is exposed by flush/close. Caller cancellation does not abandon
+close-owned I/O, and neither recorder close nor Runtime close closes the cache.
+`pending` counts source outcomes not yet settled; `queue_size` counts entries
+not yet acknowledged in the cache. A successful sink followed by an ack failure
+can therefore have `persisted=1`, `pending=0`, and `queue_size=1`; flush/close
+report that cleanup failure without claiming the source write failed.
 
 ## Asset content digests
 
@@ -124,7 +197,7 @@ content caching from the asset-store configuration above.
 
 ## Runtime content
 
-Runtime storage accepts a borrowed `cache_backend` independently of asset
+Runtime storage accepts a borrowed `cache` independently of asset
 storage. The ordinary history and session APIs continue to own authorization,
 retention and reference selection; their external object reads use the storage
 router. Inline payloads do not enter the object cache. Runtime already owns its
@@ -135,8 +208,8 @@ there is no separate Runtime content adapter to construct.
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend
 
-cache_backend = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
-storage = RuntimeStorage.from_root("./runtime", cache_backend=cache_backend)
+cache = InMemoryCacheBackend(max_bytes=16 * 1024 * 1024)
+storage = RuntimeStorage.from_root("./runtime", cache=cache)
 ```
 
 The host can retain the cache across successive storage lifetimes. Different
@@ -207,17 +280,18 @@ remain in use.
 
 ## Ordered live streams
 
-`RuntimeStorage(..., stream_backend=...)` borrows an optional `StreamBackend`
-for ordered, disposable live previews. `object_store` still owns authoritative
-payloads and `cache_backend` still caches reproducible content. A live preview
+`RuntimeStorage(..., cache=cache)` uses the optional `open_stream`/`read_stream`
+methods on that same borrowed instance for ordered, disposable live previews.
+`object_store` still owns authoritative payloads; `get`/`put`/`delete` on the
+cache instance, when available, cache reproducible content. A live preview
 is not a successful durable commit. Configure shared authoritative execution
 storage as well as a shared stream backend to observe another Runtime's live
 output. Execution routes must have `DURABLE` retention; temporary execution
 storage cannot supply the authoritative history and recovery boundary.
 
-With `stream_backend=None`, Runtime keeps its existing local streaming path.
+Without a complete stream method group, Runtime keeps its existing local streaming path.
 The SDK does not construct Redis clients or require Redis. An adapter implements
-`StreamBackend.open/read` and the returned `StreamWriter.append/seal` operations.
+`StreamBackend.open_stream/read_stream` and the returned `StreamWriter.append/seal` operations.
 Runtime supplies keys, producer identities, sequence numbers and encoded frames;
 application run/watch/cancel callers do not construct them.
 
@@ -274,7 +348,7 @@ A shorter later maximum is respected, and a longer one never extends an existing
 entry's original expiry. The default zero does not read or publish display cache
 entries, including when a custom `SessionService` still has the earlier signature.
 
-The Runtime borrows its existing `RuntimeStorage.cache_backend`; no extra cache
+The Runtime borrows its existing `RuntimeStorage.cache`; no extra cache
 configuration or backend lifecycle is introduced. Standard assembly enables
 this optimization only when conversation and execution retention are both
 `DURABLE`. Entries are isolated by service lifetime, principal/tenant/kind,
@@ -324,11 +398,11 @@ contract. The chosen store must support its batch operation. In particular,
 cannot create a capability missing from the source.
 
 ```python
-from linktools.ai.storage import StorageBuffer, WriteCache
+from linktools.ai.storage import InMemoryCacheBackend, StorageBuffer
 
 buffer = StorageBuffer(
     assets,
-    write_cache=WriteCache(),
+    cache=InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024),
     read_pending=True,
 )
 await buffer.enqueue(key, b"first")
@@ -338,7 +412,9 @@ await buffer.flush()
 await buffer.close()
 ```
 
-`enqueue` waits for admission capacity and returns only after acceptance. It
+Without a buffer-capable `cache`, `enqueue` directly awaits the existing source
+write; no private queue is created. With buffering enabled, `enqueue` waits for
+admission capacity and returns only after acceptance. It
 does not return a durable receipt. `enqueue_delete` accepts a deletion in the
 same order. Closing or a failed buffer rejects new writes explicitly rather
 than returning an easily ignored boolean. Cancellation while waiting for
@@ -377,9 +453,9 @@ The buffer borrows its store and does not close it. Close stops admission and
 drains accepted reads and real sink work. Cancelling a close waiter does not
 abandon owned work; wait for close to finish before closing the borrowed store.
 An uncooperative sink cannot be reported quiescent merely because a timeout or
-cancellation was requested. Queue capacity remains an entry-count bound plus
-one in-flight batch, not a byte-hard memory limit; pending views reference the
-same immutable bytes rather than copying them into another payload cache.
+cancellation was requested. The injected cache owns pending bytes and its capacity includes in-flight work;
+pending views reference those immutable values rather than introducing a second
+payload queue. A logical byte budget does not promise an RSS or physical-disk limit.
 
 Committed reads retain the store's existing `ContentCache`, metadata and
 source-validation behavior. This buffer can reduce repeated writes and serve

@@ -23,7 +23,7 @@ from linktools.ai.storage import (
     StorageOverlay,
     StoragePutResult,
     StorageRevision,
-    WriteCache,
+    InMemoryCacheBackend,
 )
 from linktools.ai.storage import _write_cache as write_cache_module
 
@@ -82,7 +82,7 @@ class _Store:
 async def test_storage_buffer_fixed_read_view_and_final_value_batch(read_pending: bool) -> None:
     store = _Store()
     store.values["key"] = b"durable"
-    buffer = StorageBuffer(store, read_pending=read_pending)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024), read_pending=read_pending)
     assert await buffer.enqueue("key", b"first") is None
     assert await buffer.enqueue("other", b"other") is None
     await buffer.enqueue_delete("key")
@@ -105,7 +105,7 @@ async def test_storage_buffer_fixed_read_view_and_final_value_batch(read_pending
 @pytest.mark.asyncio
 async def test_storage_buffer_accepts_hashable_keys_and_only_immutable_bytes() -> None:
     store = _Store()
-    buffer = StorageBuffer(store, read_pending=True)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024), read_pending=True)
     key = ("resource", 42)
     await buffer.enqueue(key, b"value")
     assert await buffer.get(key) == b"value"
@@ -119,10 +119,11 @@ async def test_storage_buffer_accepts_hashable_keys_and_only_immutable_bytes() -
 
 
 @pytest.mark.asyncio
-async def test_storage_buffer_full_queue_waits_and_cancelled_admission_writes_nothing() -> None:
+async def test_storage_buffer_full_queue_waits_and_cancelled_admission_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(write_cache_module, "_BATCH_SIZE", 1)
     store = _Store()
     store.write_release.clear()
-    buffer = StorageBuffer(store, write_cache=WriteCache(queue_capacity=1, batch_size=1))
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024, max_size=2))
     await buffer.enqueue("first", b"1")
     await asyncio.wait_for(store.write_started.wait(), 1)
     await buffer.enqueue("second", b"2")
@@ -143,10 +144,11 @@ async def test_storage_buffer_full_queue_waits_and_cancelled_admission_writes_no
 
 
 @pytest.mark.asyncio
-async def test_storage_buffer_close_wakes_admission_waiter_and_drains_admitted_tail() -> None:
+async def test_storage_buffer_close_wakes_admission_waiter_and_drains_admitted_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(write_cache_module, "_BATCH_SIZE", 1)
     store = _Store()
     store.write_release.clear()
-    buffer = StorageBuffer(store, write_cache=WriteCache(queue_capacity=1, batch_size=1))
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024, max_size=2))
     await buffer.enqueue("first", b"1")
     await asyncio.wait_for(store.write_started.wait(), 1)
     await buffer.enqueue("second", b"2")
@@ -169,7 +171,7 @@ async def test_storage_buffer_pending_view_revalidates_while_committed_view_keep
     store = _Store()
     store.values["key"] = b"old"
     store.read_release.clear()
-    buffer = StorageBuffer(store, read_pending=read_pending)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024), read_pending=read_pending)
     read = asyncio.create_task(buffer.get("key"))
     await asyncio.wait_for(store.read_started.wait(), 1)
     await buffer.enqueue("key", b"new")
@@ -180,10 +182,11 @@ async def test_storage_buffer_pending_view_revalidates_while_committed_view_keep
 
 
 @pytest.mark.asyncio
-async def test_storage_buffer_older_batch_settlement_keeps_newer_pending_value() -> None:
+async def test_storage_buffer_older_batch_settlement_keeps_newer_pending_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(write_cache_module, "_BATCH_SIZE", 1)
     store = _Store()
     store.write_release.clear()
-    buffer = StorageBuffer(store, read_pending=True, write_cache=WriteCache(batch_size=1))
+    buffer = StorageBuffer(store, read_pending=True, cache=InMemoryCacheBackend(max_bytes=1024))
     await buffer.enqueue("key", b"first")
     await asyncio.wait_for(store.write_started.wait(), 1)
     await buffer.enqueue("key", b"latest")
@@ -201,13 +204,14 @@ async def test_storage_buffer_older_batch_settlement_keeps_newer_pending_value()
     AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN),
     StorageBatchPartialError(StorageBatchFailure(1, "write failed", StorageRevision("partial"), ())),
 ])
-async def test_storage_buffer_failed_or_unknown_batch_fails_closed_and_reads_source(failure: Exception) -> None:
+async def test_storage_buffer_failed_or_unknown_batch_fails_closed_and_reads_source(failure: Exception, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(write_cache_module, "_BATCH_SIZE", 1)
     store = _Store()
     store.values["key"] = b"old"
     store.write_release.clear()
     store.failure = failure
     store.fail_after_apply = True
-    buffer = StorageBuffer(store, read_pending=True, write_cache=WriteCache(queue_capacity=1, batch_size=1))
+    buffer = StorageBuffer(store, read_pending=True, cache=InMemoryCacheBackend(max_bytes=1024, max_size=2))
     await buffer.enqueue("key", b"possibly committed")
     await asyncio.wait_for(store.write_started.wait(), 1)
     await buffer.enqueue("tail", b"never dispatched")
@@ -232,7 +236,7 @@ async def test_storage_buffer_failed_or_unknown_batch_fails_closed_and_reads_sou
 async def test_storage_buffer_cancelled_flush_does_not_cancel_owned_sink() -> None:
     store = _Store()
     store.write_release.clear()
-    buffer = StorageBuffer(store)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024))
     await buffer.enqueue("key", b"value")
     flush = asyncio.create_task(buffer.flush())
     await asyncio.wait_for(store.write_started.wait(), 1)
@@ -249,7 +253,7 @@ async def test_storage_buffer_cancelled_flush_does_not_cancel_owned_sink() -> No
 async def test_storage_buffer_cancelled_close_keeps_sink_owned_for_later_join() -> None:
     store = _Store()
     store.write_release.clear()
-    buffer = StorageBuffer(store)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024))
     await buffer.enqueue("key", b"value")
     close = asyncio.create_task(buffer.close())
     await asyncio.wait_for(store.write_started.wait(), 1)
@@ -277,7 +281,7 @@ async def test_storage_buffer_close_drains_cancelled_admitted_read() -> None:
 
     store = UncooperativeStore()
     store.read_release.clear()
-    buffer = StorageBuffer(store)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024))
     read = asyncio.create_task(buffer.get("key"))
     await asyncio.wait_for(store.read_started.wait(), 1)
     read.cancel()
@@ -311,7 +315,7 @@ async def test_storage_buffer_timeout_retains_uncooperative_sink_until_resolutio
             return await super().apply_batch(changes)
 
     store = UncooperativeStore()
-    buffer = StorageBuffer(store)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024))
     await buffer.enqueue("key", b"value")
     flush = asyncio.create_task(buffer.flush())
     await asyncio.wait_for(cancelled.wait(), 1)
@@ -333,7 +337,7 @@ async def test_storage_buffer_failed_cancelled_source_does_not_acknowledge_flush
     monkeypatch.setattr(write_cache_module, "_WRITE_TIMEOUT_SECONDS", 0.01)
     store = _Store()
     store.write_release.clear()
-    buffer = StorageBuffer(store)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024))
     await buffer.enqueue("key", b"value")
     with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
         await asyncio.wait_for(buffer.flush(), 1)
@@ -346,7 +350,7 @@ async def test_storage_buffer_failed_cancelled_source_does_not_acknowledge_flush
 @pytest.mark.asyncio
 async def test_storage_buffer_reclaims_settled_keys_after_readers_exit() -> None:
     store = _Store()
-    buffer = StorageBuffer(store, read_pending=True, write_cache=WriteCache(batch_size=4))
+    buffer = StorageBuffer(store, read_pending=True, cache=InMemoryCacheBackend(max_bytes=1024))
     for number in range(12):
         await buffer.enqueue(number, b"value")
     await buffer.flush()
@@ -379,7 +383,7 @@ async def test_storage_buffer_preserves_caller_cancel_after_owned_failure(operat
             await release.wait()
             raise RuntimeError("source failed")
 
-    buffer = StorageBuffer(FailingStore())
+    buffer = StorageBuffer(FailingStore(), cache=InMemoryCacheBackend(max_bytes=1024))
     if operation == "close":
         await buffer.enqueue("key", b"value")
     task = asyncio.create_task(buffer.get("key") if operation == "read" else buffer.close())
@@ -402,7 +406,7 @@ async def test_storage_buffer_revalidates_pending_read_after_unknown_commit() ->
     store.read_release.clear()
     store.failure = AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
     store.fail_after_apply = True
-    buffer = StorageBuffer(store, read_pending=True)
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=1024), read_pending=True)
     read = asyncio.create_task(buffer.get("key"))
     await asyncio.wait_for(store.read_started.wait(), 1)
     await buffer.enqueue("key", b"committed")
@@ -415,7 +419,8 @@ async def test_storage_buffer_revalidates_pending_read_after_unknown_commit() ->
 
 
 @pytest.mark.asyncio
-async def test_storage_buffer_partial_batch_preserves_source_truth_and_completed_details() -> None:
+async def test_storage_buffer_partial_batch_preserves_source_truth_and_completed_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(write_cache_module, "_BATCH_SIZE", 2)
     class PartialStore(_Store):
         async def apply_batch(
             self, changes: Sequence[StorageChange[Hashable, bytes]],
@@ -427,7 +432,7 @@ async def test_storage_buffer_partial_batch_preserves_source_truth_and_completed
 
     store = PartialStore()
     store.write_release.clear()
-    buffer = StorageBuffer(store, read_pending=True, write_cache=WriteCache(batch_size=2))
+    buffer = StorageBuffer(store, read_pending=True, cache=InMemoryCacheBackend(max_bytes=1024))
     await buffer.enqueue("first", b"committed")
     await buffer.enqueue("second", b"not committed")
     await asyncio.wait_for(store.write_started.wait(), 1)
@@ -470,7 +475,7 @@ async def test_storage_buffer_existing_sources_need_no_adapter(kind: str, tmp_pa
 
     source = CustomSource() if kind == "custom" else store
     key = AssetKey("resource", "test")
-    buffer = StorageBuffer(source, read_pending=True)
+    buffer = StorageBuffer(source, cache=InMemoryCacheBackend(max_bytes=1024), read_pending=True)
     try:
         await buffer.enqueue(key, b"first")
         await buffer.enqueue(key, b"last")
@@ -491,3 +496,219 @@ async def test_storage_buffer_existing_sources_need_no_adapter(kind: str, tmp_pa
         await store.close()
         if engine is not None:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_storage_buffer_without_cache_flush_waits_for_direct_write() -> None:
+    store = _Store()
+    store.write_release.clear()
+    buffer = StorageBuffer(store, read_pending=True)
+    write = asyncio.create_task(buffer.enqueue("key", b"value"))
+    await store.write_started.wait()
+    flush = asyncio.create_task(buffer.flush())
+    await asyncio.sleep(0)
+    assert not write.done()
+    assert not flush.done()
+    assert await buffer.get("key") is None
+    store.write_release.set()
+    await asyncio.gather(write, flush)
+    assert await buffer.get("key") == b"value"
+    await buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_buffer_cache_failure_invalidates_pending_view() -> None:
+    class FailedRead(InMemoryCacheBackend):
+        fail_read = True
+
+        async def read_batch(self, scope: str, *, limit: int) -> tuple:
+            if self.fail_read:
+                self.fail_read = False
+                raise OSError("cache read failed")
+            return await super().read_batch(scope, limit=limit)
+
+    cache = FailedRead(max_bytes=1024)
+    store = _Store()
+    store.values["key"] = b"durable"
+    buffer = StorageBuffer(store, cache=cache, read_pending=True)
+    await buffer.enqueue("key", b"pending")
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await buffer.flush()
+    assert await buffer.get("key") == b"durable"
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await buffer.close()
+    assert not store.batches
+    # Failed-owner cleanup cannot strand non-evictable capacity.
+    assert await cache.append("next-owner", "id", "key", b"x" * 1024, wait=False)
+    await cache.ack("next-owner", ("id",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+async def test_storage_buffer_unknown_admission_fails_closed_and_releases_scope(
+    published: bool, error_type: type[Exception],
+) -> None:
+    class LostReply(InMemoryCacheBackend):
+        async def append(self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool) -> bool:
+            if key == "unknown":
+                if published:
+                    await super().append(scope, id, key, content, wait=wait)
+                raise error_type("unknown response")
+            return await super().append(scope, id, key, content, wait=wait)
+
+    cache = LostReply(max_bytes=4, max_size=1)
+    store = _Store()
+    buffer = StorageBuffer(store, cache=cache, read_pending=True)
+    with pytest.raises(error_type, match="unknown response"):
+        await buffer.enqueue("unknown", b"lost")
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await buffer.enqueue("later", b"real")
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await buffer.flush()
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await buffer.close()
+    assert not store.batches
+    assert await cache.append("other-owner", "id", "key", b"full", wait=False)
+    await cache.ack("other-owner", ("id",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permanent", [False, True])
+async def test_storage_buffer_ack_failure_never_replays_successful_sink(
+    permanent: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(write_cache_module, "_WRITE_TIMEOUT_SECONDS", 0 if permanent else 1)
+
+    class FailedAck(InMemoryCacheBackend):
+        calls = 0
+        fail = True
+
+        async def ack(self, scope: str, ids: Sequence[str]) -> None:
+            self.calls += 1
+            if self.fail and (permanent or self.calls == 1):
+                raise OSError("ack response lost")
+            await super().ack(scope, ids)
+
+    cache = FailedAck(max_bytes=1024)
+    store = _Store()
+    buffer = StorageBuffer(store, cache=cache)
+    await buffer.enqueue("key", b"value")
+    if permanent:
+        with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+            await buffer.flush()
+        status = buffer._scope.status()
+        assert (status.confirmed, status.pending, status.queue_size) == (1, 0, 1)
+        cache.fail = False
+        with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+            await buffer.close()
+    else:
+        await buffer.flush()
+        await buffer.close()
+    assert store.values == {"key": b"value"}
+    assert len(store.batches) == 1
+    assert cache.calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_storage_buffer_cancelled_append_registers_actual_admission_before_propagating() -> None:
+    class DelayedReply(InMemoryCacheBackend):
+        entered = asyncio.Event()
+
+        async def append(self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool) -> bool:
+            accepted = await super().append(scope, id, key, content, wait=wait)
+            self.entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return accepted
+
+    store = _Store()
+    store.values["key"] = b"durable"
+    cache = DelayedReply(max_bytes=1024)
+    buffer = StorageBuffer(store, cache=cache, read_pending=True)
+    write = asyncio.create_task(buffer.enqueue("key", b"accepted"))
+    await cache.entered.wait()
+    assert await buffer.get("key") == b"durable"
+    assert not store.batches
+    write.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await write
+    assert await buffer.get("key") == b"accepted"
+    await buffer.flush()
+    assert store.values == {"key": b"accepted"}
+    await buffer.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_cache_hot_content_and_unacknowledged_entries_share_budget() -> None:
+    cache = InMemoryCacheBackend(max_bytes=4, max_size=2)
+    await cache.put("hot", b"1234")
+    assert await cache.append("owner", "first", "key", b"123", wait=False)
+    assert await cache.get("hot") is None
+    assert await cache.read_batch("owner", limit=1) == (("first", "key", b"123"),)
+    # Reading a batch does not release its in-flight capacity.
+    assert not await cache.append("other", "too-large", "key", b"12", wait=False)
+    await cache.put("cannot-evict-pending", b"12")
+    assert await cache.get("cannot-evict-pending") is None
+    assert await cache.append("owner", "second", "key", None, wait=False)
+    await cache.ack("owner", ("first", "first"))
+    assert await cache.read_batch("owner", limit=2) == (("second", "key", None),)
+    await cache.put("hot", b"123")
+    assert await cache.get("hot") == b"123"
+    await cache.ack("owner", ("second",))
+
+
+@pytest.mark.asyncio
+async def test_memory_buffer_exact_entry_retry_and_oversize_wait_are_bounded() -> None:
+    cache = InMemoryCacheBackend(max_bytes=2)
+    assert await cache.append("owner", "id", ("resource", 1), b"12", wait=False)
+    assert await cache.append("owner", "id", ("resource", 1), b"12", wait=False)
+    with pytest.raises(ValueError, match="different content or key"):
+        await cache.append("owner", "id", ("resource", 2), b"12", wait=False)
+    assert not await asyncio.wait_for(
+        cache.append("owner", "large", "key", b"123", wait=True), 1,
+    )
+    await cache.ack("owner", ("id",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["read", "ack"])
+@pytest.mark.parametrize("permanent", [False, True])
+async def test_storage_buffer_cancelled_cache_operation_reports_unknown_instead_of_hanging(operation: str, permanent: bool) -> None:
+    class CancelledCache(InMemoryCacheBackend):
+        failed = False
+
+        async def read_batch(self, scope: str, *, limit: int) -> tuple:
+            if operation == "read" and (permanent or not self.failed):
+                self.failed = True
+                raise asyncio.CancelledError
+            return await super().read_batch(scope, limit=limit)
+
+        async def ack(self, scope: str, ids: Sequence[str]) -> None:
+            if operation == "ack" and (permanent or not self.failed):
+                self.failed = True
+                raise asyncio.CancelledError
+            await super().ack(scope, ids)
+
+    store = _Store()
+    buffer = StorageBuffer(store, cache=CancelledCache(max_bytes=1024), read_pending=True)
+    await buffer.enqueue("key", b"value")
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await asyncio.wait_for(buffer.flush(), 1)
+    assert await buffer.get("key") == (b"value" if operation == "ack" else None)
+    with pytest.raises(AIError, match=ErrorCode.STORAGE_COMMIT_UNKNOWN.value):
+        await buffer.close()
+    assert len(store.batches) == (1 if operation == "ack" else 0)
+
+
+@pytest.mark.asyncio
+async def test_storage_buffer_oversize_rejection_keeps_owner_available() -> None:
+    store = _Store()
+    buffer = StorageBuffer(store, cache=InMemoryCacheBackend(max_bytes=2))
+    with pytest.raises(ValueError, match="rejected"):
+        await asyncio.wait_for(buffer.enqueue("oversize", b"123"), 1)
+    await buffer.enqueue("fits", b"12")
+    await buffer.flush()
+    assert store.values == {"fits": b"12"}
+    await buffer.close()

@@ -576,7 +576,7 @@ class MetricBufferStatus:
     lost: int
     write_failures: int
     queue_size: int = 0
-    queue_capacity: int = 0
+    queue_capacity: int | None = None
     high_watermark: int = 0
     last_failure_code: str | None = None
 

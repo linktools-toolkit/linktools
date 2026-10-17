@@ -5,17 +5,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from time import monotonic
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
+from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import WriteCache
+from ..storage import WriteCacheScope
+from ._codec import decode_observation_envelope, observation_envelope
 from ._model import MetricBufferStatus, MetricFlushResult, Observation
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
+
     from ._metrics import Metrics
 
 _logger = environ.get_logger("ai.observe.recorder")
@@ -23,9 +28,9 @@ _WARNING_INTERVAL_SECONDS = 30.0
 
 
 class _MetricRecorder:
-    def __init__(self, metrics: Metrics, cache: WriteCache | None) -> None:
+    def __init__(self, metrics: Metrics, cache: object | None) -> None:
         self._metrics = metrics
-        self._scope = None if cache is None else cache.open(metrics.record_observations)
+        self._scope = None if cache is None else WriteCacheScope(cache, self._write_batch)
         self._accepting = True
         self._accepted = 0
         self._persisted = 0
@@ -49,7 +54,20 @@ class _MetricRecorder:
             self._fail("RECORDER_CLOSED")
             return False
         if self._scope is not None:
-            return await self._scope.try_submit(observation)
+            try:
+                content = canonical_json_bytes(observation_envelope(self._metrics.namespace, observation))
+            except Exception:
+                self._rejected += 1
+                self._fail("INVALID_OBSERVATION")
+                return False
+            try:
+                return await self._scope.try_submit(observation.observation_id, content)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._write_failures += 1
+                self._fail("CACHE_OPERATION_FAILED")
+                return False
 
         self._active += 1
         self._idle.clear()
@@ -86,15 +104,34 @@ class _MetricRecorder:
                 True, self._accepting and status.accepting,
                 status.accepted, status.confirmed, status.pending,
                 status.rejected + self._rejected, status.unconfirmed,
-                status.write_failures, status.queue_size, status.queue_capacity,
+                status.write_failures + self._write_failures, status.queue_size, status.queue_capacity,
                 status.high_watermark,
                 self._last_failure_code or status.last_failure_code,
             )
         return MetricBufferStatus(
             True, self._accepting, self._accepted, self._persisted, 0,
             self._rejected, self._lost, self._write_failures,
-            last_failure_code=self._last_failure_code,
+            queue_capacity=0, last_failure_code=self._last_failure_code,
         )
+
+    async def _write_batch(
+        self, batch: tuple[tuple[str, Hashable, bytes | None], ...],
+    ) -> None:
+        observations = []
+        for _, key, content in batch:
+            if content is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError, UnicodeDecodeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            observation = decode_observation_envelope(
+                payload, expected_namespace=self._metrics.namespace,
+            )
+            if key != observation.observation_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            observations.append(observation)
+        await self._metrics.record_observations(tuple(observations))
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult:
         if self._scope is not None:

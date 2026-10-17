@@ -175,9 +175,9 @@ async def test_runtime_recorder_reports_later_source_failure_after_enrichment_fa
 
 @pytest.mark.asyncio
 async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> None:
-    from linktools.ai.storage import WriteCache
+    from linktools.ai.storage import InMemoryCacheBackend
 
-    metrics = Metrics.in_memory(write_cache=WriteCache())
+    metrics = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
     async with Runtime.open(
         "first", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), metrics=metrics,
     ) as first:
@@ -206,7 +206,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
     import asyncio
 
     from linktools.ai.observe._memory import InMemoryMetricStore
-    from linktools.ai.storage import WriteCache
+    from linktools.ai.storage import InMemoryCacheBackend
     from linktools.ai.storage import _write_cache as write_cache
 
     monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
@@ -229,7 +229,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             await super().put_observations(namespace, observations)
             returned.set()
 
-    metrics = Metrics.from_store(CancellingStore(), write_cache=WriteCache(batch_size=1))
+    metrics = Metrics.from_store(CancellingStore(), cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
     storage = RuntimeStorage.in_memory()
     original_close = storage.close
 
@@ -249,6 +249,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             correlation={}, dimensions={}, measurements=(),
         )
         assert await runtime._metric_control.try_record(observation)
+        await runtime.metrics.flush(timeout_seconds=0)
         await asyncio.wait_for(entered.wait(), 1)
         closing = asyncio.create_task(runtime.close())
         try:
@@ -259,7 +260,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             assert not returned.is_set()
             assert not storage_closed.is_set()
             assert runtime.metrics.status().pending == 1
-            assert runtime.metrics.status().queue_size == 0
+            assert runtime.metrics.status().queue_size == 1
         finally:
             release.set()
             await asyncio.wait_for(runtime.close(), 1)

@@ -125,7 +125,7 @@ class _Producer:
     async def run(self) -> None:
         try:
             # Admission owns this sole attempt. Unknown creation is never retried.
-            writer = await self.invoke(self.backend.open(self.key, uuid.uuid4().bytes))
+            writer = await self.invoke(self.backend.open_stream(self.key, uuid.uuid4().bytes))
             sequence = 0
             while True:
                 if not self.queue:

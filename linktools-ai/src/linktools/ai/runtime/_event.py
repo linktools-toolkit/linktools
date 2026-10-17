@@ -1070,7 +1070,7 @@ class DefaultEventService:
                     remaining = backoff
                 try:
                     batch = await asyncio.wait_for(
-                        shared.backend.read(key, position, limit=100, wait_seconds=remaining),
+                        shared.backend.read_stream(key, position, limit=100, wait_seconds=remaining),
                         timeout=remaining + 0.05,
                     )
                 except asyncio.CancelledError:

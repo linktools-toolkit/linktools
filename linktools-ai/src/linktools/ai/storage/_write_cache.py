@@ -10,19 +10,22 @@ from collections.abc import Awaitable, Callable, Hashable, Sequence
 from dataclasses import dataclass
 from time import monotonic
 from typing import Generic, Protocol, TypeVar, runtime_checkable
+from uuid import uuid4
 
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._contracts import StorageBatchResult, StorageChange, StorageOperation
 
-_Item = TypeVar("_Item")
 _Key = TypeVar("_Key", bound=Hashable)
 _Info = TypeVar("_Info")
 _logger = environ.get_logger("ai.storage.write_cache")
 _WRITE_TIMEOUT_SECONDS = 5.0
 _CLOSE_DEADLINE_SECONDS = 10.0
 _WARNING_INTERVAL_SECONDS = 30.0
+_BATCH_SIZE = 128
+_FLUSH_INTERVAL_SECONDS = 60.0
+_Entry = tuple[str, Hashable, bytes | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +39,7 @@ class WriteCacheStatus:
     pending: int
     rejected: int
     queue_size: int
-    queue_capacity: int
+    queue_capacity: int | None
     high_watermark: int
     write_failures: int
     last_failure_code: str | None
@@ -50,54 +53,47 @@ class WriteCacheFlushResult:
     status: WriteCacheStatus
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class WriteCache:
-    """Reusable options; each open call owns an independent pending queue."""
+@runtime_checkable
+class _WriteBuffer(Protocol):
+    async def append(
+        self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool,
+    ) -> bool: ...
 
-    queue_capacity: int = 1024
-    batch_size: int = 128
-    flush_interval_seconds: float = 60.0
+    async def read_batch(self, scope: str, *, limit: int) -> tuple[_Entry, ...]: ...
 
-    def __post_init__(self) -> None:
-        for value in (self.queue_capacity, self.batch_size):
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError("write cache capacities must be positive integers")
-        interval = self.flush_interval_seconds
-        if (
-            isinstance(interval, bool)
-            or not isinstance(interval, (int, float))
-            or not math.isfinite(interval)
-            or interval <= 0
-        ):
-            raise ValueError("flush interval must be finite and positive")
-
-    def open(
-        self,
-        write_batch: Callable[[tuple[_Item, ...]], Awaitable[None]],
-    ) -> WriteCacheScope[_Item]:
-        if not callable(write_batch):
-            raise TypeError("write_batch must be callable")
-        return WriteCacheScope(self, write_batch)
+    async def ack(self, scope: str, ids: Sequence[str]) -> None: ...
 
 
-class WriteCacheScope(Generic[_Item]):
-    """A single writer whose queued capacity excludes its one owned batch."""
+class WriteCacheScope:
+    """One owner schedules encoded writes held by a borrowed cache.
+
+    The cache owns the queue index, payloads and capacity, including in-flight
+    entries. Its append/read_batch/ack capability must retain an ordered,
+    non-destructive prefix for this single consumer. IDs are owner-local;
+    distributed claiming and crash recovery are not implied.
+    """
 
     def __init__(
-        self,
-        cache: WriteCache,
-        write_batch: Callable[[tuple[_Item, ...]], Awaitable[None]],
+        self, cache: object,
+        write_batch: Callable[[tuple[_Entry, ...]], Awaitable[None]],
     ) -> None:
+        if not isinstance(cache, _WriteBuffer) or not all(
+            callable(getattr(cache, name, None)) for name in ("append", "read_batch", "ack")
+        ):
+            raise TypeError("cache must provide append, read_batch and ack")
+        if not callable(write_batch):
+            raise TypeError("write_batch must be callable")
         self._cache = cache
+        self._scope = uuid4().hex
         self._write_batch = write_batch
-        self._queue: asyncio.Queue[tuple[_Item, float] | None] = asyncio.Queue(
-            maxsize=cache.queue_capacity
-        )
+        self._batch_size = _BATCH_SIZE
+        self._flush_interval = _FLUSH_INTERVAL_SECONDS
         self._accepting = True
         self._stop_requested = False
         self._accepted = 0
         self._confirmed = 0
         self._unconfirmed = 0
+        self._settled = 0
         self._rejected = 0
         self._write_failures = 0
         self._high_watermark = 0
@@ -106,196 +102,323 @@ class WriteCacheScope(Generic[_Item]):
         self._writer: asyncio.Task[None] | None = None
         self._resolution_event = asyncio.Event()
         self._batch_ready = asyncio.Event()
-        self._capacity_available = asyncio.Event()
-        self._capacity_available.set()
         self._flush_target = 0
+        self._first_pending_at: float | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._writer_cancel_requested = False
-        self._sentinel_queued = False
+        self._admission_lock = asyncio.Lock()
+        self._admissions: set[asyncio.Task[bool]] = set()
+        self._closed_admissions: set[asyncio.Task[bool]] = set()
+        self._cancelled_admissions: set[asyncio.Task[bool]] = set()
+        self._active_admissions = 0
+        self._admissions_done = asyncio.Event()
+        self._admissions_done.set()
+        self._backend_failure: BaseException | None = None
+        self._unknown_ids: set[str] = set()
 
     def status(self) -> WriteCacheStatus:
         return WriteCacheStatus(
-            accepting=self._accepting,
-            accepted=self._accepted,
-            confirmed=self._confirmed,
-            unconfirmed=self._unconfirmed,
-            pending=self._accepted - self._resolved,
-            rejected=self._rejected,
-            queue_size=self._queue.qsize() - int(self._sentinel_queued),
-            queue_capacity=self._queue.maxsize,
-            high_watermark=self._high_watermark,
-            write_failures=self._write_failures,
+            accepting=self._accepting, accepted=self._accepted,
+            confirmed=self._confirmed, unconfirmed=self._unconfirmed,
+            pending=self._accepted - self._confirmed - self._unconfirmed, rejected=self._rejected,
+            queue_size=self._accepted - self._resolved, queue_capacity=None,
+            high_watermark=self._high_watermark, write_failures=self._write_failures,
             last_failure_code=self._last_failure_code,
         )
 
     @property
     def _resolved(self) -> int:
-        return self._confirmed + self._unconfirmed
+        return self._settled
 
-    async def try_submit(self, item: _Item) -> bool:
-        """Accept an immutable item without waiting for the bound sink."""
-        if not self._accepting:
-            self._reject("write cache closed", "CACHE_CLOSED")
-            return False
-        if self._writer is None:
-            self._writer = asyncio.get_running_loop().create_task(
-                self._run(), name="linktools-write-cache"
-            )
+    async def try_submit(self, key: Hashable, content: bytes | None) -> bool:
+        """Try admission; True is not a receipt for source persistence."""
+        return await self._submit(key, content, wait=False) is not None
+
+    async def submit(self, key: Hashable, content: bytes | None) -> str:
+        """Wait for capacity, returning the accepted entry's owner-local ID."""
+        result = await self._submit(key, content, wait=True)
+        assert result is not None
+        return result
+
+    async def _submit(
+        self, key: Hashable, content: bytes | None, *, wait: bool = True,
+        on_admitted: Callable[[str], None] | None = None,
+    ) -> str | None:
+        hash(key)
+        if content is not None and not isinstance(content, bytes):
+            raise TypeError("buffer content must be immutable bytes or None")
+        self._active_admissions += 1
+        self._admissions_done.clear()
         try:
-            self._queue.put_nowait((item, monotonic()))
-        except asyncio.QueueFull:
-            self._reject("write cache queue full", "QUEUE_FULL")
-            return False
-        self._accepted += 1
-        self._batch_ready.set()
-        self._high_watermark = max(self._high_watermark, self._queue.qsize())
-        return True
+            async with self._admission_lock:
+                if not self._accepting:
+                    if wait:
+                        self._raise_backend_failure()
+                        raise AIError(ErrorCode.STORAGE_CLOSED)
+                    self._reject("write cache closed", "CACHE_CLOSED")
+                    return None
+                id = uuid4().hex
+                operation = asyncio.create_task(
+                    self._cache.append(self._scope, id, key, content, wait=wait)
+                )
+                self._admissions.add(operation)
+                cancelled = False
+                try:
+                    try:
+                        await asyncio.shield(operation)
+                    except asyncio.CancelledError:
+                        cancelled = operation not in self._closed_admissions
+                        if not operation.done() and operation not in self._cancelled_admissions:
+                            self._cancelled_admissions.add(operation)
+                            operation.cancel()
+                    except Exception:
+                        pass
+                    while not operation.done():
+                        try:
+                            await asyncio.shield(operation)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                        except BaseException:
+                            break
+                    try:
+                        admitted = operation.result()
+                    except asyncio.CancelledError:
+                        if cancelled:
+                            raise
+                        raise AIError(ErrorCode.STORAGE_CLOSED) from None
+                    except BaseException as error:
+                        self._unknown_ids.add(id)
+                        self._backend_failed(error)
+                        if cancelled:
+                            raise asyncio.CancelledError from None
+                        raise
+                    if not isinstance(admitted, bool):
+                        error = TypeError("cache append must return bool")
+                        self._unknown_ids.add(id)
+                        self._backend_failed(error)
+                        raise error
+                    if admitted:
+                        self._accepted += 1
+                        if self._first_pending_at is None:
+                            self._first_pending_at = monotonic()
+                        if on_admitted is not None:
+                            on_admitted(id)
+                        self._high_watermark = max(
+                            self._high_watermark, self._accepted - self._resolved,
+                        )
+                        if self._writer is None:
+                            self._writer = asyncio.create_task(self._run(), name="linktools-write-cache")
+                            self._writer.add_done_callback(self._writer_finished)
+                        self._batch_ready.set()
+                    else:
+                        self._reject("write cache capacity exhausted", "QUEUE_FULL")
+                    if cancelled:
+                        raise asyncio.CancelledError
+                    if not admitted and wait:
+                        raise ValueError("cache rejected a waiting buffer admission")
+                    return id if admitted else None
+                finally:
+                    self._admissions.discard(operation)
+                    self._closed_admissions.discard(operation)
+                    self._cancelled_admissions.discard(operation)
+        finally:
+            self._active_admissions -= 1
+            if not self._active_admissions:
+                self._admissions_done.set()
 
-    async def _submit(self, item: _Item) -> None:
-        while True:
-            if not self._accepting:
-                raise AIError(ErrorCode.STORAGE_CLOSED)
-            if not self._queue.full():
-                if await self.try_submit(item):
-                    return
-                continue
-            self._capacity_available.clear()
-            await self._capacity_available.wait()
+    def _writer_finished(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException as error:
+            self._backend_failed(error)
+        self._resolution_event.set()
 
     def _stop_accepting(self) -> None:
         self._accepting = False
-        self._capacity_available.set()
+        for operation in tuple(self._admissions):
+            if not operation.done() and operation not in self._cancelled_admissions:
+                self._closed_admissions.add(operation)
+                self._cancelled_admissions.add(operation)
+                operation.cancel()
         self._batch_ready.set()
+
+    def _backend_failed(self, error: BaseException) -> None:
+        if self._backend_failure is None:
+            self._backend_failure = error
+        self._last_failure_code = "CACHE_OPERATION_FAILED"
+        self._stop_requested = True
+        self._stop_accepting()
+        self._resolution_event.set()
+
+    def _raise_backend_failure(self) -> None:
+        if self._backend_failure is not None:
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from self._backend_failure
 
     async def _wait_resolved(self, target: int) -> None:
         self._flush_target = max(self._flush_target, target)
         self._batch_ready.set()
         while self._resolved < target:
+            self._raise_backend_failure()
             self._resolution_event.clear()
             if self._resolved >= target:
-                return
+                break
             await self._resolution_event.wait()
+        self._raise_backend_failure()
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> WriteCacheFlushResult:
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
-            or not math.isfinite(timeout_seconds)
-            or timeout_seconds < 0
+            or not math.isfinite(timeout_seconds) or timeout_seconds < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        target = self._accepted
-        if self._resolved >= target:
+        if self._resolved >= self._accepted:
+            self._raise_backend_failure()
             return WriteCacheFlushResult(True, self.status())
-        self._flush_target = max(self._flush_target, target)
+        self._flush_target = max(self._flush_target, self._accepted)
         self._batch_ready.set()
         try:
-            await asyncio.wait_for(self._wait_resolved(target), float(timeout_seconds))
+            await asyncio.wait_for(self._wait_resolved(self._accepted), float(timeout_seconds))
         except asyncio.TimeoutError:
             return WriteCacheFlushResult(False, self.status())
         return WriteCacheFlushResult(True, self.status())
 
     async def close(self) -> None:
-        """Share one teardown owner; interrupted waiters cannot abandon live I/O."""
+        """Drain owned operations without closing the borrowed cache or source."""
         self._stop_accepting()
         if self._close_task is None:
-            self._close_task = asyncio.create_task(
-                self._close_owned(), name="linktools-write-cache-close"
-            )
+            self._close_task = asyncio.create_task(self._close_owned(), name="linktools-write-cache-close")
             self._close_task.add_done_callback(self._consume_close_result)
         await asyncio.shield(self._close_task)
 
     def _consume_close_result(self, task: asyncio.Task[None]) -> None:
         try:
-            task.result()
-        except BaseException:
-            self._last_failure_code = "CLOSE_FAILED"
-            self._warn("write cache teardown failed")
+            task.exception()
+        except asyncio.CancelledError:
+            pass
 
     def _request_stop(self, code: str) -> None:
         self._stop_requested = True
-        if self._last_failure_code != "CLOSE_TIMEOUT":
-            self._last_failure_code = code
+        self._last_failure_code = code
         writer = self._writer
         if writer is not None and not writer.done() and not self._writer_cancel_requested:
             self._writer_cancel_requested = True
             writer.cancel()
 
     async def _close_owned(self) -> None:
+        await self._admissions_done.wait()
         writer = self._writer
-        if writer is None:
-            self._log_close()
-            return
-        # Wake an idle writer. A full queue already provides work; the writer
-        # exits at its next empty boundary once admission has closed.
+        if writer is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(writer), _CLOSE_DEADLINE_SECONDS)
+            except asyncio.TimeoutError:
+                self._request_stop("CLOSE_TIMEOUT")
+            except BaseException:
+                pass
+            while not writer.done():
+                try:
+                    await asyncio.shield(writer)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+        # Release only this owner's undispatched tail. A failed or unknown
+        # source write remains unconfirmed even when its queue entry is freed.
         try:
-            self._queue.put_nowait(None)
-            self._sentinel_queued = True
-        except asyncio.QueueFull:
-            pass
-        try:
-            await asyncio.wait_for(asyncio.shield(writer), timeout=_CLOSE_DEADLINE_SECONDS)
-        except asyncio.TimeoutError:
-            self._request_stop("CLOSE_TIMEOUT")
-        except BaseException:
-            self._request_stop("CLOSE_FAILED")
-        await self._consume_cancelled_writer(writer)
-        self._discard_remaining("write cache close cleanup")
-        self._log_close()
+            while self._accepted or self._unknown_ids:
+                batch = await self._cache.read_batch(self._scope, limit=self._batch_size)
+                if not batch:
+                    break
+                await self._ack(batch)
+                unknown = self._unknown_ids.intersection(entry[0] for entry in batch)
+                self._accepted += len(unknown)
+                self._unconfirmed += len(unknown)
+                self._unknown_ids.difference_update(unknown)
+        except BaseException as error:
+            self._backend_failed(error)
+            self._raise_backend_failure()
+        remaining = self._accepted - self._confirmed - self._unconfirmed
+        self._unconfirmed += max(0, remaining)
+        self._settled = self._accepted
+        self._resolution_event.set()
+        self._raise_backend_failure()
+        if self._rejected or self._unconfirmed or self._write_failures:
+            self._warn("write cache closed with unconfirmed delivery")
 
     async def _run(self) -> None:
         while not self._stop_requested:
-            if not self._accepting and self._queue.empty():
-                return
-            first = await self._queue.get()
-            self._capacity_available.set()
-            if first is None:
-                self._sentinel_queued = False
-                self._queue.task_done()
-                return
-            item, accepted_at = first
-            batch = [item]
+            pending = self._accepted - self._resolved
+            if not pending:
+                self._first_pending_at = None
+                if not self._accepting:
+                    return
+                self._batch_ready.clear()
+                await self._batch_ready.wait()
+                continue
+            self._batch_ready.clear()
+            accepted_at = monotonic() if self._first_pending_at is None else self._first_pending_at
+            remaining = accepted_at + self._flush_interval - monotonic()
+            if (
+                pending < self._batch_size and self._accepting
+                and self._resolved >= self._flush_target and remaining > 0
+            ):
+                try:
+                    await asyncio.wait_for(self._batch_ready.wait(), remaining)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            # An append may already have published its tail while its reply is
+            # still pending. Only the confirmed admission prefix may be consumed.
             try:
-                stop_after_batch = False
-                deadline = accepted_at + self._cache.flush_interval_seconds
-                while len(batch) < self._cache.batch_size and not self._stop_requested:
-                    self._batch_ready.clear()
-                    try:
-                        queued = self._queue.get_nowait()
-                        self._capacity_available.set()
-                    except asyncio.QueueEmpty:
-                        remaining = deadline - monotonic()
-                        if (
-                            remaining <= 0
-                            or not self._accepting
-                            or self._resolved < self._flush_target
-                        ):
-                            break
-                        try:
-                            await asyncio.wait_for(self._batch_ready.wait(), timeout=remaining)
-                        except asyncio.TimeoutError:
-                            break
-                        continue
-                    if queued is None:
-                        self._sentinel_queued = False
-                        self._queue.task_done()
-                        stop_after_batch = True
-                        break
-                    batch.append(queued[0])
-                if self._stop_requested:
-                    raise asyncio.CancelledError
-                await self._write(tuple(batch))
-            except BaseException:
-                self._unconfirmed += len(batch)
-                self._resolution_event.set()
+                batch = await self._cache.read_batch(self._scope, limit=min(pending, self._batch_size))
+            except asyncio.CancelledError as error:
+                if not self._stop_requested:
+                    self._backend_failed(error)
                 raise
-            finally:
-                for _ in batch:
-                    self._queue.task_done()
-            if stop_after_batch:
+            if not batch or len(batch) > min(pending, self._batch_size):
+                raise ValueError("cache lost or exceeded the admitted buffer prefix")
+            if self._stop_requested:
                 return
+            await self._write(batch)
+            # Source success is never replayed because acknowledgement failed.
+            await self._ack(batch)
+            self._settled += len(batch)
+            self._resolution_event.set()
 
-    async def _write(self, batch: tuple[_Item, ...]) -> None:
+    async def _ack(self, batch: tuple[_Entry, ...]) -> None:
+        ids = tuple(entry[0] for entry in batch)
+        deadline = monotonic() + _WRITE_TIMEOUT_SECONDS
+        while True:
+            operation = asyncio.create_task(self._cache.ack(self._scope, ids))
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                if not operation.done():
+                    operation.cancel()
+                while not operation.done():
+                    try:
+                        await asyncio.shield(operation)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                try:
+                    operation.result()
+                except asyncio.CancelledError as error:
+                    if not self._stop_requested:
+                        self._backend_failed(error)
+                    raise
+                raise
+            except Exception:
+                if monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(min(0.01, max(0, deadline - monotonic())))
+                continue
+            return
+
+    async def _write(self, batch: tuple[_Entry, ...]) -> None:
         try:
             # Retain callback ownership until its actual completion, so
             # cancellation cannot hide the final result or leave live I/O.
@@ -357,24 +480,6 @@ class WriteCacheScope(Generic[_Item]):
         self._last_failure_code = code
         self._warn(message)
 
-    def _discard_remaining(self, message: str) -> None:
-        discarded = 0
-        while True:
-            try:
-                item = self._queue.get_nowait()
-                self._capacity_available.set()
-            except asyncio.QueueEmpty:
-                break
-            self._queue.task_done()
-            if item is not None:
-                discarded += 1
-            else:
-                self._sentinel_queued = False
-        if discarded:
-            self._unconfirmed += discarded
-            self._resolution_event.set()
-            self._warn(message)
-
     def _warn(self, message: str) -> None:
         now = monotonic()
         if now - self._last_warning_at < _WARNING_INTERVAL_SECONDS:
@@ -390,24 +495,6 @@ class WriteCacheScope(Generic[_Item]):
         if self._rejected or self._unconfirmed or self._write_failures:
             self._warn("write cache closed with unconfirmed delivery")
 
-    async def _consume_cancelled_writer(self, writer: asyncio.Task[None]) -> None:
-        while not writer.done():
-            try:
-                await asyncio.shield(writer)
-            except asyncio.CancelledError:
-                continue
-            except BaseException:
-                break
-        try:
-            writer.result()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:
-            self._write_failures += 1
-            if self._last_failure_code not in {"CLOSE_TIMEOUT", "CLOSE_FAILED"}:
-                self._last_failure_code = "WRITER_FAILED"
-            self._warn("write cache writer failed")
-
 
 @runtime_checkable
 class _BufferStore(Protocol[_Key, _Info]):
@@ -422,6 +509,7 @@ class _BufferStore(Protocol[_Key, _Info]):
 class _BufferedChange(Generic[_Key]):
     key: _Key
     value: bytes | None
+    id: str = ""
 
 
 @dataclass(slots=True)
@@ -437,7 +525,8 @@ class StorageBuffer(Generic[_Key, _Info]):
     Enqueue confirms admission, not persistence. Same-key intentions within a
     dispatched batch coalesce; flush confirms their final values, not a
     transactional prefix snapshot. Use one buffer for all writes to its keys.
-    Capacity bounds queued entries plus one in-flight batch, not payload bytes.
+    The injected cache owns capacity, including in-flight entries. Without its
+    write capability, enqueue waits for the source instead of retaining a queue.
     The source retains its own initialization, authorization and close lifetime.
     """
 
@@ -446,17 +535,21 @@ class StorageBuffer(Generic[_Key, _Info]):
         store: _BufferStore[_Key, _Info],
         *,
         read_pending: bool = False,
-        write_cache: WriteCache | None = None,
+        cache: object | None = None,
     ) -> None:
         if not isinstance(store, _BufferStore):
             raise TypeError("store must provide get and apply_batch")
         if not isinstance(read_pending, bool):
             raise TypeError("read_pending must be bool")
-        if write_cache is not None and not isinstance(write_cache, WriteCache):
-            raise TypeError("write_cache must be WriteCache")
+        methods = tuple(callable(getattr(cache, name, None)) for name in ("append", "read_batch", "ack"))
+        if any(methods) and not all(methods):
+            raise TypeError("cache must provide the complete append/read_batch/ack capability")
         self._store = store
         self._read_pending = read_pending
-        self._scope = (write_cache or WriteCache()).open(self._consume_batch)
+        self._scope = WriteCacheScope(cache, self._consume_batch) if all(methods) else None
+        self._direct_active = 0
+        self._direct_done = asyncio.Event()
+        self._direct_done.set()
         self._keys: dict[_Key, _BufferKey[_Key]] = {}
         self._failure: BaseException | None = None
         self._closing = False
@@ -480,14 +573,27 @@ class StorageBuffer(Generic[_Key, _Info]):
         self._raise_failure()
         if self._closing:
             raise AIError(ErrorCode.STORAGE_CLOSED)
+        if self._scope is None:
+            self._direct_active += 1
+            self._direct_done.clear()
+            try:
+                await self._consume_batch(((uuid4().hex, change.key, change.value),))
+            finally:
+                self._direct_active -= 1
+                if not self._direct_active:
+                    self._direct_done.set()
+            return
+
+        def admitted(id: str) -> None:
+            state = self._keys.setdefault(change.key, _BufferKey())
+            state.mutation += 1
+            state.pending = _BufferedChange(change.key, change.value, id)
+
         try:
-            await self._scope._submit(change)
+            await self._scope._submit(change.key, change.value, on_admitted=admitted)
         except AIError:
             self._raise_failure()
             raise
-        state = self._keys.setdefault(change.key, _BufferKey())
-        state.mutation += 1
-        state.pending = change
 
     async def get(self, key: _Key) -> bytes | None:
         """Read the fixed view; failed buffers always use the authoritative source."""
@@ -509,6 +615,8 @@ class StorageBuffer(Generic[_Key, _Info]):
 
     async def _get_owned(self, key: _Key, state: _BufferKey[_Key]) -> bytes | None:
         while True:
+            if self._scope is not None and self._scope._backend_failure is not None:
+                self._fail(AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN))
             if self._failure is None and self._read_pending and state.pending is not None:
                 return state.pending.value
             mutation = state.mutation
@@ -538,13 +646,21 @@ class StorageBuffer(Generic[_Key, _Info]):
         Cancellation stops only this wait. Failed or unknown source outcomes
         reject new admission and are reported instead of acknowledged as durable.
         """
-        await self._scope._wait_resolved(self._scope._accepted)
+        if self._scope is not None:
+            try:
+                await self._scope._wait_resolved(self._scope._accepted)
+            except Exception as error:
+                self._fail(error)
+                raise
+        else:
+            await self._direct_done.wait()
         self._check_settlement()
 
     async def close(self) -> None:
         """Drain admitted reads and actual sink work without closing the source."""
         self._closing = True
-        self._scope._stop_accepting()
+        if self._scope is not None:
+            self._scope._stop_accepting()
         if self._close_task is None:
             self._close_task = asyncio.create_task(
                 self._close_owned(), name="linktools-storage-buffer-close"
@@ -554,7 +670,9 @@ class StorageBuffer(Generic[_Key, _Info]):
 
     async def _close_owned(self) -> None:
         try:
-            await self._scope.close()
+            if self._scope is not None:
+                await self._scope.close()
+            await self._direct_done.wait()
         finally:
             # Queue cleanup may settle work without calling the batch consumer.
             # Reclaim those payloads only after the writer has actually stopped.
@@ -566,9 +684,10 @@ class StorageBuffer(Generic[_Key, _Info]):
             await self._reads_done.wait()
         self._check_settlement()
 
-    async def _consume_batch(self, batch: tuple[_BufferedChange[_Key], ...]) -> None:
+    async def _consume_batch(self, batch: tuple[_Entry, ...]) -> None:
         latest: dict[_Key, _BufferedChange[_Key]] = {}
-        for change in batch:
+        for id, key, value in batch:
+            change = _BufferedChange(key, value, id)
             latest.pop(change.key, None)
             latest[change.key] = change
         changes = tuple(
@@ -591,7 +710,7 @@ class StorageBuffer(Generic[_Key, _Info]):
                 state = self._keys.get(change.key)
                 if state is not None:
                     state.mutation += 1
-                    if state.pending is change:
+                    if state.pending is not None and state.pending.id == change.id:
                         state.pending = None
                     self._release_key(change.key, state)
 
@@ -602,13 +721,14 @@ class StorageBuffer(Generic[_Key, _Info]):
     def _fail(self, error: BaseException) -> None:
         if self._failure is None:
             self._failure = error
-            self._scope._stop_accepting()
+            if self._scope is not None:
+                self._scope._stop_accepting()
             for state in self._keys.values():
                 state.mutation += 1
 
     def _check_settlement(self) -> None:
-        status = self._scope.status()
-        if status.unconfirmed and self._failure is None:
+        status = None if self._scope is None else self._scope.status()
+        if status is not None and status.unconfirmed and self._failure is None:
             self._fail(AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN))
         self._raise_failure()
 
@@ -623,5 +743,5 @@ class StorageBuffer(Generic[_Key, _Info]):
 
 
 __all__ = [
-    "WriteCache", "WriteCacheScope", "WriteCacheStatus", "WriteCacheFlushResult", "StorageBuffer",
+    "WriteCacheScope", "WriteCacheStatus", "WriteCacheFlushResult", "StorageBuffer",
 ]

@@ -3,13 +3,15 @@
 """Optional transport joins real execution owners without changing durable truth."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import CapabilityGroup
+from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.storage import InMemoryStreamBackend
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models
 
 
@@ -19,13 +21,32 @@ class _CountingStreamBackend(InMemoryStreamBackend):
         self.open_keys = []
         self.read_entered = asyncio.Event()
 
-    async def open(self, key, producer):
+    async def open_stream(self, key, producer):
         self.open_keys.append(key)
-        return await super().open(key, producer)
+        return await super().open_stream(key, producer)
 
-    async def read(self, key, after, *, limit, wait_seconds):
+    async def read_stream(self, key, after, *, limit, wait_seconds):
         self.read_entered.set()
-        return await super().read(key, after, limit=limit, wait_seconds=wait_seconds)
+        return await super().read_stream(key, after, limit=limit, wait_seconds=wait_seconds)
+
+
+class _CombinedCache:
+    def __init__(self) -> None:
+        content = InMemoryCacheBackend(max_bytes=1024 * 1024)
+        streams = _CountingStreamBackend()
+        self.get = content.get
+        self.put = content.put
+        self.delete = content.delete
+        self.append = content.append
+        self.read_batch = content.read_batch
+        self.ack = content.ack
+        self.open_stream = streams.open_stream
+        self.read_stream = streams.read_stream
+        self.open_keys = streams.open_keys
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.asyncio
@@ -41,17 +62,38 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
 
     group = CapabilityGroup[None]("shared-preview")
     group.agent("default", model="default", allow_tools=())
-    backend = InMemoryStreamBackend(max_bytes=1024 * 1024)
+    from linktools.ai.runtime import RuntimeDomain
+    from .test_runtime_content_cache_integration import CountingObjects, _put
+
+    backend = _CombinedCache()
+    metrics = Metrics.in_memory(cache=backend)
+    start = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    async def assert_persisted_metrics(expected: int) -> None:
+        window = MetricWindow.between(start, datetime.now(timezone.utc) + timedelta(seconds=1))
+        for name in (
+            "linktools.model.request.count", "linktools.agent.run.count", "linktools.execution.count",
+        ):
+            result = await metrics.query(MetricQuery(name, window))
+            assert sum(point.value for point in result.points) == expected
+
+    objects = CountingObjects()
+    reference = await _put(objects, b"shared cached body")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "runtime.db"
+    owner_storage = RuntimeStorage.sqlite(path, object_store=objects, cache=backend)
+    reader_storage = RuntimeStorage.sqlite(path, object_store=objects, cache=backend)
     async with Runtime.open(
         "shared-preview", models=models, capabilities=(group,),
-        storage=RuntimeStorage.sqlite(path, stream_backend=backend),
+        storage=owner_storage, metrics=metrics,
     ) as producer:
         async with Runtime.open(
             "shared-preview", models=models, capabilities=(group,),
-            storage=RuntimeStorage.sqlite(path, stream_backend=backend),
+            storage=reader_storage, metrics=metrics,
         ) as reader:
+            assert await owner_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
+            assert await reader_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
+            assert objects.reads == 1
             execution = await producer.agents.get().start("question")
             await asyncio.wait_for(entered.wait(), 5)
             remote = await reader.executions.get(execution.execution_id)
@@ -74,6 +116,19 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
             finally:
                 release.set()
                 await observed.aclose()
+            await assert_persisted_metrics(0)
+            await producer.close()
+            await assert_persisted_metrics(1)
+            assert not backend.closed
+            assert await reader_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
+            second = await reader.agents.get().run("another question", timeout_seconds=5)
+            assert second.result.output == {"text": "hello world"}
+            await assert_persisted_metrics(1)
+    await assert_persisted_metrics(2)
+    assert backend.open_keys
+    assert not backend.closed
+    await backend.put("host-owned", b"after close")
+    assert await backend.get("host-owned") == b"after close"
 
 
 @pytest.mark.asyncio
@@ -91,9 +146,9 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
     async with Runtime.open("reconnect", models=models, capabilities=(group,),
-                            storage=RuntimeStorage.sqlite(path, stream_backend=backend)) as owner:
+                            storage=RuntimeStorage.sqlite(path, cache=backend)) as owner:
         async with Runtime.open("reconnect", models=models, capabilities=(group,),
-                                storage=RuntimeStorage.sqlite(path, stream_backend=backend)) as other:
+                                storage=RuntimeStorage.sqlite(path, cache=backend)) as other:
             execution = await owner.agents.get().start("question")
             remote = await other.executions.get(execution.execution_id)
             stream = remote.watch(include_content=True)
@@ -111,7 +166,7 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
                 await stream.aclose()
             assert not release.is_set()
             async with Runtime.open("reconnect", models=models, capabilities=(group,),
-                                    storage=RuntimeStorage.sqlite(path, stream_backend=backend)) as reconnected:
+                                    storage=RuntimeStorage.sqlite(path, cache=backend)) as reconnected:
                 remote = await reconnected.executions.get(execution.execution_id)
                 resumed = remote.watch(include_content=True, cursor=cursor)
                 backend.read_entered.clear()
@@ -177,7 +232,7 @@ async def test_commit_marker_cursor_only_advances_after_entire_durable_range() -
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key, shared_stream_positions
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes({"kind": "event", "durable": 3}))
     service, _, _ = _event_service(backend)
     first = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
@@ -198,7 +253,7 @@ async def test_durable_only_cursor_does_not_replay_already_committed_preview() -
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes({"kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "old"}))
     service, _, _ = _event_service(backend)
     values = await _collect(service._stream_shared("execution", principal=_principal(), after_event_seq=3))
@@ -222,7 +277,7 @@ async def test_buffered_batch_cannot_postpone_terminal_authority_check() -> None
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     for sequence in (1, 2):
         await writer.append(sequence, canonical_json_bytes({"kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": str(sequence)}))
     service, executions, _ = _event_service(backend, durable_count=0)
@@ -242,7 +297,7 @@ async def test_unknown_open_not_retried_and_completed_owners_are_released() -> N
     class BrokenBackend:
         opens = 0
 
-        async def open(self, key, producer):
+        async def open_stream(self, key, producer):
             self.opens += 1
             raise OSError("unknown open outcome")
 
@@ -291,7 +346,7 @@ async def test_adjacent_preview_chunks_coalesce_and_handoff_releases_owner() -> 
     task = publisher.producers["execution"].task
     await task
     await asyncio.sleep(0)
-    batch = await backend.read(stream_key("scope", "tenant", "execution", 1, "claim"), 0,
+    batch = await backend.read_stream(stream_key("scope", "tenant", "execution", 1, "claim"), 0,
                                limit=1000, wait_seconds=0)
     records = [decode_stream_record(payload) for _, payload in batch.records]
     assert all(record["kind"] != "gap" for record in records)
@@ -315,7 +370,7 @@ async def test_corrupt_transport_frame_resets_to_authoritative_events(record) ->
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes(record))
     service, _, _ = _event_service(backend)
     values = await _collect(service._stream_shared("execution", principal=_principal(), after_event_seq=0))
@@ -328,7 +383,7 @@ async def test_missing_marker_tail_stops_later_preview_in_same_batch() -> None:
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     await writer.append(1, canonical_json_bytes({"kind": "event", "durable": 4}))
     await writer.append(2, canonical_json_bytes({"kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "stale"}))
     service, _, _ = _event_service(backend)
@@ -351,7 +406,7 @@ async def test_local_semantic_overflow_seals_shared_preview_with_gap() -> None:
     publisher.delta("execution", "ASSISTANT_TEXT_DELTA", "must not continue", False)
     await task
     await publisher.close()
-    batch = await backend.read(stream_key("scope", "tenant", "execution", 1, "claim"), 0,
+    batch = await backend.read_stream(stream_key("scope", "tenant", "execution", 1, "claim"), 0,
                                limit=100, wait_seconds=0)
     assert [decode_stream_record(payload)["kind"] for _, payload in batch.records] == ["gap"]
     assert batch.sealed
@@ -369,7 +424,7 @@ async def test_uncooperative_open_remains_owned_until_settled(monkeypatch) -> No
             self.release = asyncio.Event()
             self.closed = False
 
-        async def open(self, *args):
+        async def open_stream(self, *args):
             self.entered.set()
             while not self.release.is_set():
                 try:
@@ -404,7 +459,7 @@ async def test_preview_chunk_count_does_not_scale_authority_reads(chunks) -> Non
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     for sequence in range(1, chunks + 1):
         await writer.append(sequence, canonical_json_bytes({
             "kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "x",
@@ -437,7 +492,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     capabilities = (CapabilityGroup("workspace", workspace=workspace), application)
     backend = _CountingStreamBackend()
     path = tmp_path / "resume.db"
-    state = RuntimeStorage.sqlite(path, stream_backend=backend)
+    state = RuntimeStorage.sqlite(path, cache=backend)
     async with Runtime.open("resume-preview", models=_ToolModels(), storage=state,
                             capabilities=capabilities) as owner:
         execution = await owner.agents.get().start("read a file")
@@ -458,7 +513,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
         )
     assert len(backend.open_keys) == 1
     async with Runtime.open("resume-preview", models=_ToolModels(),
-                            storage=RuntimeStorage.sqlite(path, stream_backend=backend),
+                            storage=RuntimeStorage.sqlite(path, cache=backend),
                             capabilities=capabilities) as resumed:
         result = await resumed.executions.wait(execution.execution_id,
                                                principal=resumed.default_principal, timeout_seconds=10)
@@ -483,7 +538,7 @@ async def _marker_batch_stream(records, *, durable_count=3):
     from linktools.ai.runtime._shared_stream import stream_key
 
     backend = InMemoryStreamBackend(max_bytes=10000)
-    writer = await backend.open(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 1, "claim"), b"owner")
     for sequence, record in enumerate(records, 1):
         await writer.append(sequence, canonical_json_bytes(record))
     service, executions, events = _event_service(backend, durable_count=durable_count)
@@ -616,3 +671,29 @@ async def test_marker_batch_terminal_does_not_deliver_prefetched_suffix() -> Non
         assert events.reads == 1
     finally:
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retention", ("volatile", "transient"))
+async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_stream(retention: str) -> None:
+    from pydantic_ai.models.test import TestModel
+    from linktools.ai.runtime import RuntimeStoragePlan, RuntimeStorageRoute
+
+    cache = _CombinedCache()
+    storage = (
+        RuntimeStorage.in_memory(cache=cache)
+        if retention == "volatile"
+        else RuntimeStorage.from_plan(
+            RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache,
+        )
+    )
+    group = CapabilityGroup[None]("local-preview")
+    group.agent("default", model="default", allow_tools=())
+    async with Runtime.open(
+        "local-preview", storage=storage, models=_Models(TestModel()), capabilities=(group,),
+    ) as runtime:
+        execution = await runtime.agents.get().run("hello", timeout_seconds=5)
+        assert execution.result is not None
+        assert storage.cache is cache
+    assert cache.open_keys == []
+    assert not cache.closed

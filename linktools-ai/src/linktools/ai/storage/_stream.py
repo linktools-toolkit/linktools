@@ -8,7 +8,7 @@ import asyncio
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ..errors import AIError, ErrorCode
 
@@ -39,6 +39,7 @@ class StreamWriter(Protocol):
     async def seal(self, sequence: int, payload: bytes) -> None: ...
 
 
+@runtime_checkable
 class StreamBackend(Protocol):
     """Independent fan-out reads of bounded streams, without business authority.
 
@@ -48,9 +49,9 @@ class StreamBackend(Protocol):
     Backend clients are borrowed; consumers own and cancel their pending reads.
     """
 
-    async def open(self, key: bytes, producer: bytes) -> StreamWriter: ...
+    async def open_stream(self, key: bytes, producer: bytes) -> StreamWriter: ...
 
-    async def read(
+    async def read_stream(
         self, key: bytes, after: int, *, limit: int, wait_seconds: float,
     ) -> StreamBatch: ...
 
@@ -93,7 +94,7 @@ class InMemoryStreamBackend:
         self._size = 0
         self._lock = asyncio.Lock()
 
-    async def open(self, key: bytes, producer: bytes) -> StreamWriter:
+    async def open_stream(self, key: bytes, producer: bytes) -> StreamWriter:
         _require_bytes(key)
         _require_bytes(producer)
         async with self._lock:
@@ -109,7 +110,7 @@ class InMemoryStreamBackend:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return _MemoryStreamWriter(self, key, stream.token)
 
-    async def read(
+    async def read_stream(
         self, key: bytes, after: int, *, limit: int, wait_seconds: float,
     ) -> StreamBatch:
         _require_bytes(key)

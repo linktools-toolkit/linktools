@@ -6,14 +6,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
-from ..storage import WriteCache
 from ._codec import (
     same_definition_contract,
     observation_envelope,
@@ -53,22 +51,20 @@ class Metrics:
 
     def __init__(
         self, store: MetricStore, *, namespace: str = "default",
-        write_cache: WriteCache | None = None,
+        cache: object | None = None,
     ) -> None:
-        if write_cache is not None and not isinstance(write_cache, WriteCache):
-            raise TypeError("write_cache must be WriteCache")
+        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
+        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
+            raise TypeError("cache must implement append, read_batch and ack together")
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
-        self._write_cache = write_cache
+        self._cache = cache if all(callable(method) for method in methods) else None
 
     def recorder(self) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
         from ._recorder import _MetricRecorder
 
-        cache = self._write_cache
-        if cache is not None and cache.batch_size > _MAX_RECORD_BATCH:
-            cache = replace(cache, batch_size=_MAX_RECORD_BATCH)
-        return _MetricRecorder(self, cache)
+        return _MetricRecorder(self, self._cache)
 
     @property
     def namespace(self) -> str:
@@ -76,32 +72,32 @@ class Metrics:
 
     @classmethod
     def in_memory(
-        cls, *, namespace: str = "default", write_cache: WriteCache | None = None,
+        cls, *, namespace: str = "default", cache: object | None = None,
     ) -> Metrics:
-        return cls(InMemoryMetricStore(), namespace=namespace, write_cache=write_cache)
+        return cls(InMemoryMetricStore(), namespace=namespace, cache=cache)
 
     @classmethod
     def sqlite(
         cls, path: str | Path, *, namespace: str = "default",
-        write_cache: WriteCache | None = None,
+        cache: object | None = None,
     ) -> Metrics:
-        return cls(SQLiteMetricStore(path), namespace=namespace, write_cache=write_cache)
+        return cls(SQLiteMetricStore(path), namespace=namespace, cache=cache)
 
     @classmethod
     def sql(
         cls, engine: AsyncEngine, *, namespace: str = "default",
-        write_cache: WriteCache | None = None,
+        cache: object | None = None,
     ) -> Metrics:
         from ._sql import SqlMetricStore
 
-        return cls(SqlMetricStore(engine), namespace=namespace, write_cache=write_cache)
+        return cls(SqlMetricStore(engine), namespace=namespace, cache=cache)
 
     @classmethod
     def from_store(
         cls, store: MetricStore, *, namespace: str = "default",
-        write_cache: WriteCache | None = None,
+        cache: object | None = None,
     ) -> Metrics:
-        return cls(store, namespace=namespace, write_cache=write_cache)
+        return cls(store, namespace=namespace, cache=cache)
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):

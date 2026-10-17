@@ -38,7 +38,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import ObjectStore, PayloadPolicy
+from ..storage import ObjectStore, PayloadPolicy, StreamBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -532,9 +532,15 @@ async def _build_local_components(
         metric_buffer = None if metrics is None else _RuntimeMetricRecorder(metrics.recorder())
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
+        stream_cache = (
+            storage.cache
+            if isinstance(storage.cache, StreamBackend)
+            and storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE
+            else None
+        )
         live_broker = LiveExecutionEventBroker(shared=(
-            None if storage.stream_backend is None else SharedStreamPublisher(
-                storage.stream_backend, namespace, tenant_id,
+            None if stream_cache is None else SharedStreamPublisher(
+                stream_cache, namespace, tenant_id,
             )
         ))
         history_service = DefaultExecutionHistoryService(
@@ -681,8 +687,8 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
-            cache_backend=(
-                storage.cache_backend
+            cache=(
+                storage.cache
                 if all(storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
                        for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION))
                 else None
