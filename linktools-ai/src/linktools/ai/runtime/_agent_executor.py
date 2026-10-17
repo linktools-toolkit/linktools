@@ -244,7 +244,7 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
-        middleware: Sequence[AbstractCapability[AgentContext[object]]] = (),
+        runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]] = (),
         asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
         sandbox: Sandbox | None = None,
@@ -253,7 +253,7 @@ class AgentExecutor:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
-        self._middleware = tuple(middleware)
+        self._runtime_capabilities = tuple(runtime_capabilities)
         self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
         self._sandbox = sandbox
@@ -638,16 +638,16 @@ class AgentExecutor:
                         )
                     primary_error: BaseException | None = None
                     try:
-                        if self._middleware:
+                        if self._runtime_capabilities:
                             existing_ids: set[str | None] = set()
-                            middleware_ids: set[str | None] = set()
+                            runtime_ids: set[str | None] = set()
                             for capability in capabilities:
                                 capability.apply(lambda value: existing_ids.add(value.id))
-                            for capability in self._middleware:
-                                capability.apply(lambda value: middleware_ids.add(value.id))
-                            if (existing_ids & middleware_ids) - {None}:
+                            for capability in self._runtime_capabilities:
+                                capability.apply(lambda value: runtime_ids.add(value.id))
+                            if (existing_ids & runtime_ids) - {None}:
                                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-                            capabilities = (*capabilities, *self._middleware)
+                            capabilities = (*capabilities, *self._runtime_capabilities)
                         final_result = await agent.run(
                             user_prompt,
                             deps=scope.context,

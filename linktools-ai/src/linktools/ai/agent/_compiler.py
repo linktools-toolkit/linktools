@@ -51,6 +51,7 @@ class AgentCompiler:
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        candidates = tuple(item for item in candidates if item.scope == "agent")
         generic = tuple(item for item in candidates if item.kind == "capability")
         declarations = tuple(
             sorted(
@@ -129,6 +130,7 @@ class AgentCompiler:
         The optional synchronous filter runs before Agent selectors are resolved.
         It is not an authorization policy or a durable callback. Agent candidates
         are delegation targets; the root Agent declaration is never filtered.
+        Runtime-scoped host policies are not Agent candidates and bypass this filter.
         """
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
@@ -143,7 +145,7 @@ class AgentCompiler:
             if identity in identities:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             identities.add(identity)
-            if item.kind == "agent" and item.id == spec.id:
+            if item.scope == "runtime" or (item.kind == "agent" and item.id == spec.id):
                 continue
             if capability_filter is not None:
                 included = capability_filter(spec, item)

@@ -193,8 +193,15 @@ class CapabilityGroup(Generic[AppT]):
         id: "str | None" = None,
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
+        scope: Literal["agent", "runtime"] = "agent",
     ) -> "AbstractCapability[AgentContext[AppT]]":
-        """Register one Agent-selectable Pydantic runtime behavior capability."""
+        """Register native behavior selected by an Agent or applied Runtime-wide.
+
+        Runtime-scoped capabilities bypass Agent selection and are current host
+        policy, outside durable Agent bindings. They must not defer loading.
+        """
+        if not isinstance(capability, AbstractCapability):
+            raise TypeError("capability must be an AbstractCapability")
         _validate_revision(revision)
         capability_id = _capability_registration_id(capability, id)
         _validate_external_capability_id(capability_id)
@@ -205,6 +212,7 @@ class CapabilityGroup(Generic[AppT]):
                 capability,
                 revision=revision,
                 config=config,
+                scope=scope,
             )
         )
         return capability

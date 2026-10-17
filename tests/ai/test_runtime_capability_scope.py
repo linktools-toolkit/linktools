@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Host middleware shares native capability hooks across Runtime agent runs."""
+"""Runtime-scoped group capabilities share native hooks across Agent runs."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
-from linktools.ai.errors import ErrorCode
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._openai import _RetryingModel
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
@@ -67,15 +67,15 @@ class _Backend:
         await asyncio.wait_for(wait(), 3)
 
 
-class _Middleware(AbstractCapability[AgentContext[None]]):
-    id = "host.middleware"
+class _GlobalPolicy(AbstractCapability[AgentContext[None]]):
+    id = "host.runtime_capability"
 
     def __init__(self, backend: _Backend) -> None:
         self.backend = backend
 
-    async def for_run(self, ctx: RunContext[AgentContext[None]]) -> _Middleware:
+    async def for_run(self, ctx: RunContext[AgentContext[None]]) -> _GlobalPolicy:
         self.backend.runs.append(ctx.deps)
-        instance = _Middleware(self.backend)
+        instance = _GlobalPolicy(self.backend)
         instance.id = self.id
         return instance
 
@@ -110,11 +110,18 @@ def _group() -> CapabilityGroup[None]:
     return group
 
 
+def _policies(*capabilities: AbstractCapability[AgentContext[None]]) -> CapabilityGroup[None]:
+    group: CapabilityGroup[None] = CapabilityGroup("policies")
+    for index, capability in enumerate(capabilities):
+        group.capability(capability, id=getattr(capability, "id", None) or f"host.policy.{index}", scope="runtime")
+    return group
+
+
 async def _immediate(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart("done")])
 
 
-async def test_middleware_shares_backend_across_agents_and_agent_tasks_without_selection() -> None:
+async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_without_selection() -> None:
     backend = _Backend()
     finish, streamed, ordinary_ran = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -128,18 +135,20 @@ async def test_middleware_shares_backend_across_agents_and_agent_tasks_without_s
         ordinary_ran.set()
         return "ordinary"
 
-    middleware = [_Middleware(backend)]
+    policies = _policies(_GlobalPolicy(backend))
     async with Runtime.open(
-        "middleware", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(),),
-        middleware=middleware, capability_filter=lambda _agent, item: item.kind != "capability",
+        "runtime_capability", models=_Models(FunctionModel(stream_function=chunks)),
+        storage=RuntimeStorage.in_memory(), capabilities=(_group(), policies),
+        capability_filter=lambda _agent, item: item.kind != "capability",
     ) as runtime:
-        middleware.clear()
+        late = _Unselected()
+        late.id = "host.late"
+        policies.capability(late, scope="runtime")
         first = await runtime.agents.get().start("first")
         await asyncio.wait_for(streamed.wait(), 3)
         agent_task = runtime.tasks.from_agent("test.worker", runtime.agents.get("worker"))
         plain_task = Task("test.ordinary", ordinary, effect_policy="none")
-        graph = TaskGraph("middleware-graph", (
+        graph = TaskGraph("runtime_capability-graph", (
             TaskNode("worker", task=agent_task, input=AgentTaskInput("second")),
             TaskNode("ordinary", task=plain_task),
         ))
@@ -174,8 +183,8 @@ async def test_stream_permit_spans_consumption_and_releases_on_every_exit(outcom
             closed.set()
 
     async with Runtime.open(
-        "middleware-stream", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(),), middleware=(_Middleware(backend),),
+        "runtime_capability-stream", models=_Models(FunctionModel(stream_function=chunks)),
+        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(_GlobalPolicy(backend))),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         await asyncio.wait_for(streamed.wait(), 3)
@@ -204,8 +213,8 @@ async def test_queued_cancellation_does_not_release_another_executions_permit() 
         yield "last"
 
     async with Runtime.open(
-        "middleware-queue", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(),), middleware=(_Middleware(backend),),
+        "runtime_capability-queue", models=_Models(FunctionModel(stream_function=chunks)),
+        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(_GlobalPolicy(backend))),
     ) as runtime:
         first = await runtime.agents.get().start("first")
         await backend.requested(1)
@@ -221,7 +230,7 @@ async def test_queued_cancellation_does_not_release_another_executions_permit() 
 
 async def test_shared_host_backend_spans_runtime_instances() -> None:
     backend = _Backend()
-    middleware = _Middleware(backend)
+    runtime_capability = _GlobalPolicy(backend)
     finish = asyncio.Event()
 
     async def blocked(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
@@ -230,10 +239,10 @@ async def test_shared_host_backend_spans_runtime_instances() -> None:
 
     async with Runtime.open(
         "first", models=_Models(_UsageFunctionModel(blocked)), storage=RuntimeStorage.in_memory(),
-        capabilities=(_group(),), middleware=(middleware,),
+        capabilities=(_group(), _policies(runtime_capability)),
     ) as first_runtime, Runtime.open(
         "second", models=_Models(_UsageFunctionModel(_immediate)), storage=RuntimeStorage.in_memory(),
-        capabilities=(_group(),), middleware=(middleware,),
+        capabilities=(_group(), _policies(runtime_capability)),
     ) as second_runtime:
         first = await first_runtime.agents.get().start("first")
         await backend.requested(1)
@@ -247,7 +256,7 @@ async def test_shared_host_backend_spans_runtime_instances() -> None:
         assert backend.peak == 1 and backend.entered == backend.released
 
 
-async def test_middleware_sees_logical_model_call_not_each_transport_retry() -> None:
+async def test_runtime_capability_sees_logical_model_call_not_each_transport_retry() -> None:
     backend = _Backend()
     attempts = 0
 
@@ -260,8 +269,8 @@ async def test_middleware_sees_logical_model_call_not_each_transport_retry() -> 
 
     model = _RetryingModel(_UsageFunctionModel(transient), max_retries=2, retry_delay=0)
     async with Runtime.open(
-        "middleware-retry", models=_Models(model), storage=RuntimeStorage.in_memory(),
-        capabilities=(_group(),), middleware=(_Middleware(backend),),
+        "runtime_capability-retry", models=_Models(model), storage=RuntimeStorage.in_memory(),
+        capabilities=(_group(), _policies(_GlobalPolicy(backend))),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -269,7 +278,7 @@ async def test_middleware_sees_logical_model_call_not_each_transport_retry() -> 
         assert backend.entered == backend.released == [execution.execution_id]
 
 
-async def test_middleware_covers_delegated_agents_and_tool_hooks() -> None:
+async def test_runtime_capability_covers_delegated_agents_and_tool_hooks() -> None:
     backend = _Backend()
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -287,8 +296,8 @@ async def test_middleware_covers_delegated_agents_and_tool_hooks() -> None:
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=("ping",), allow_skills=(), allow_subagents=())
     async with Runtime.open(
-        "middleware-delegation", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,), middleware=(_Middleware(backend),),
+        "runtime_capability-delegation", models=_Models(_UsageFunctionModel(model)),
+        storage=RuntimeStorage.in_memory(), capabilities=(group, _policies(_GlobalPolicy(backend))),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -298,74 +307,73 @@ async def test_middleware_covers_delegated_agents_and_tool_hooks() -> None:
 
 
 @pytest.mark.parametrize("kind", ("not_capability", "deferred", "reserved", "duplicate", "combined", "container_id"))
-async def test_middleware_rejects_invalid_or_not_always_on_entries(kind: str) -> None:
-    middleware: object = _Middleware(_Backend())
+async def test_runtime_capability_rejects_invalid_or_not_always_on_entries(kind: str) -> None:
+    runtime_capability: object = _GlobalPolicy(_Backend())
     if kind == "not_capability":
-        middleware = object()
+        runtime_capability = object()
     elif kind == "deferred":
-        middleware.defer_loading = True
+        runtime_capability.defer_loading = True
     elif kind == "reserved":
-        middleware.id = "linktools.ai.model-observation"
+        runtime_capability.id = "linktools.ai.model-observation"
     elif kind == "combined":
-        middleware.defer_loading = True
-        middleware = CombinedCapability([middleware])
+        runtime_capability.defer_loading = True
+        runtime_capability = CombinedCapability([runtime_capability])
     elif kind == "container_id":
-        middleware = CombinedCapability([middleware], id="linktools.reserved")
-    entries = (middleware, middleware) if kind == "duplicate" else (middleware,)
-    with pytest.raises((TypeError, ValueError), match="middleware (must|ids)"):
-        Runtime.open(
-            "middleware-invalid", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), capabilities=(_group(),), middleware=entries,
-        )
+        runtime_capability = CombinedCapability([runtime_capability], id="linktools.reserved")
+    entries = (runtime_capability, runtime_capability) if kind == "duplicate" else (runtime_capability,)
+    with pytest.raises((TypeError, AIError)):
+        async with Runtime.open(
+            "runtime-policy-invalid", models=_Models(_UsageFunctionModel(_immediate)),
+            storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(*entries)),
+        ):
+            raise AssertionError("invalid runtime capability was accepted")
 
 
-async def test_selected_capability_cannot_silently_replace_middleware_with_the_same_id() -> None:
+async def test_selected_capability_cannot_silently_replace_runtime_capability_with_the_same_id() -> None:
     backend = _Backend()
     group: CapabilityGroup[None] = CapabilityGroup("collision")
-    group.capability(_Middleware(_Backend()))
+    group.capability(_GlobalPolicy(_Backend()))
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
-                allow_subagents=(), allow_capabilities=("host.middleware",))
-    async with Runtime.open(
-        "middleware-collision", models=_Models(_UsageFunctionModel(_immediate)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,), middleware=(_Middleware(backend),),
-    ) as runtime:
-        execution = await runtime.agents.get().start("go")
-        result = (await execution.wait(timeout_seconds=5)).result
-        assert result.status is ExecutionStatus.FAILED
-        assert result.error_code == ErrorCode.CAPABILITY_CONFLICT.value
-        assert backend.requests == []
+                allow_subagents=(), allow_capabilities=("host.runtime_capability",))
+    with pytest.raises(AIError) as raised:
+        async with Runtime.open(
+            "runtime-policy-collision", models=_Models(_UsageFunctionModel(_immediate)),
+            storage=RuntimeStorage.in_memory(), capabilities=(group, _policies(_GlobalPolicy(backend))),
+        ):
+            raise AssertionError("conflicting runtime capability was accepted")
+    assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
+    assert backend.requests == []
 
 
-async def test_anonymous_native_capabilities_remain_distinct_in_combined_middleware() -> None:
+async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime_capability() -> None:
     first_backend, second_backend = _Backend(), _Backend()
-    first, second = _Middleware(first_backend), _Middleware(second_backend)
+    first, second = _GlobalPolicy(first_backend), _GlobalPolicy(second_backend)
     first.id = second.id = None
     async with Runtime.open(
-        "middleware-anonymous", models=_Models(_UsageFunctionModel(_immediate)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(),),
-        middleware=(CombinedCapability([first, second]),),
+        "runtime_capability-anonymous", models=_Models(_UsageFunctionModel(_immediate)),
+        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(CombinedCapability([first, second]))),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert first_backend.entered == second_backend.entered == [execution.execution_id]
 
 
-async def test_reopened_session_and_historical_retry_use_current_host_middleware(tmp_path: Path) -> None:
+async def test_reopened_session_and_historical_retry_use_current_host_runtime_capability(tmp_path: Path) -> None:
     first_backend, next_backend = _Backend(), _Backend()
     models = _Models(_UsageFunctionModel(_immediate))
     async with Runtime.open(
-        "middleware-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(_group(),), middleware=(_Middleware(first_backend),),
+        "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
+        capabilities=(_group(), _policies(_GlobalPolicy(first_backend))),
     ) as runtime:
         first = await runtime.agents.get().start("standalone")
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         session_first = await runtime.agents.get().session("conversation").start("first")
         assert (await session_first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-    current = _Middleware(next_backend)
+    current = _GlobalPolicy(next_backend)
     current.id = "host.replacement"
     async with Runtime.open(
-        "middleware-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(_group(),), middleware=(current,),
+        "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
+        capabilities=(_group(), _policies(current)),
     ) as runtime:
         historical = await runtime.executions.get(first.execution_id)
         retry = await historical.retry("retry")
@@ -377,7 +385,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_middleware
         assert next_backend.entered == next_backend.released
 
 
-async def test_middleware_acquisition_failure_does_not_call_provider() -> None:
+async def test_runtime_capability_acquisition_failure_does_not_call_provider() -> None:
     provider_calls = 0
 
     async def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
@@ -393,9 +401,51 @@ async def test_middleware_acquisition_failure_does_not_call_provider() -> None:
             raise RuntimeError("host backend unavailable")
 
     async with Runtime.open(
-        "middleware-unavailable", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(),), middleware=(Unavailable(),),
+        "runtime_capability-unavailable", models=_Models(_UsageFunctionModel(model)),
+        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(Unavailable())),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.FAILED
         assert provider_calls == 0
+
+
+async def test_nested_native_id_conflict_cannot_replace_selected_capability() -> None:
+    backend = _Backend()
+    group = _group()
+    group.capability(_GlobalPolicy(_Backend()))
+    group.agent("selected", allow_tools=(), allow_skills=(), allow_subagents=(),
+                allow_capabilities=("host.runtime_capability",))
+    policies = _policies(CombinedCapability([_GlobalPolicy(backend)]))
+    async with Runtime.open(
+        "runtime-policy-nested-collision", models=_Models(_UsageFunctionModel(_immediate)),
+        storage=RuntimeStorage.in_memory(), capabilities=(group, policies),
+    ) as runtime:
+        execution = await runtime.agents.get("selected").start("go")
+        result = (await execution.wait(timeout_seconds=5)).result
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error_code == ErrorCode.CAPABILITY_CONFLICT.value
+        assert backend.requests == []
+
+
+async def test_runtime_native_ids_are_unique_across_named_combined_registrations() -> None:
+    policies = CapabilityGroup("policies")
+    for name in ("first", "second"):
+        policies.capability(
+            CombinedCapability([_GlobalPolicy(_Backend())]), id=name, scope="runtime",
+        )
+    with pytest.raises(AIError) as raised:
+        async with Runtime.open(
+            "runtime-policy-native-duplicates", models=_Models(_UsageFunctionModel(_immediate)),
+            storage=RuntimeStorage.in_memory(), capabilities=(_group(), policies),
+        ):
+            raise AssertionError("duplicate native runtime IDs were accepted")
+    assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
+
+
+@pytest.mark.parametrize("native_id", ("", " ", 7))
+async def test_runtime_combined_capability_rejects_malformed_native_leaf_ids(native_id: object) -> None:
+    policy = _GlobalPolicy(_Backend())
+    policy.id = native_id
+    with pytest.raises(AIError) as raised:
+        _policies(CombinedCapability([policy]))
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

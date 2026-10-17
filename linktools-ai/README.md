@@ -83,97 +83,25 @@ counts, observed tokens, and an admission deadline across the execution tree.
 See [shared run budgets](docs/run-budgets.md) for concurrency, unknown usage,
 continuation, and durable recovery guarantees.
 
-## Runtime middleware
+## Runtime-wide capabilities
 
-`Runtime.open(..., middleware=...)` accepts a sequence of native Pydantic AI
-`AbstractCapability[AgentContext[AppT]]` instances. They participate in every
-Runtime-owned agent run, including delegated agents, Agent-backed Tasks and
-recovery, independently of `allow_capabilities` and `capability_filter`.
-`capabilities=` still supplies Agent-selectable `CapabilityGroup` declarations.
-
-For example, an application can share a model concurrency gate without changing
-its ModelRegistry:
+Register native Pydantic AI behavior through the same `CapabilityGroup` used for
+Agent declarations. The default `scope="agent"` keeps normal Agent selection;
+`scope="runtime"` applies host policy to every Runtime-owned Agent run,
+independently of `allow_capabilities` and `capability_filter`:
 
 ```python
-import asyncio
-
-from pydantic_ai import RunContext
-from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
-from pydantic_ai.models import ModelRequestContext, ModelResponse
-
-from linktools.ai.capability import AgentContext
-from linktools.ai.runtime import Runtime
-
-
-class ModelGate(AbstractCapability[AgentContext[None]]):
-    def __init__(self, gate: asyncio.Semaphore) -> None:
-        self.gate = gate
-
-    async def wrap_model_request(
-        self,
-        ctx: RunContext[AgentContext[None]],
-        *,
-        request_context: ModelRequestContext,
-        handler: WrapModelRequestHandler,
-    ) -> ModelResponse:
-        async with self.gate:
-            return await handler(request_context)
-
-
-gate = ModelGate(asyncio.Semaphore(4))
+group.capability(global_rate_limit, id="host.rate-limit", scope="runtime")
 async with Runtime.open(
     "application", models=models, storage=storage, capabilities=(group,),
-    middleware=(gate,),
 ) as runtime:
     ...
 ```
 
-This example limits concurrent logical model requests in one event loop; it is
-not an RPS or TPM limiter. Applications own rate-limit algorithms, token
-estimation/usage settlement, queue deadlines, backend failures and any shared
-Redis/database service. Share the same backend across middleware instances to
-coordinate multiple Runtimes; cross-process quotas require a shared backend.
-`ctx.deps` exposes the principal, namespace, execution/session IDs, application
-context and correlation data. The request context identifies the model.
-
-- Native `wrap_model_request` holds its context through stream consumption and
-  closure, including cancellation and exceptions. Release acquired permits in
-  `finally`/an async context manager; cancelling a queued acquisition must not
-  release someone else's permit. Waiting remains cancellable by Runtime
-  cancellation/deadlines. A caller's `wait(timeout_seconds=...)` alone is an
-  observation timeout, not an execution cancellation.
-- This hook covers logical agent requests. LinkTools model transport retries
-  and provider-internal retries happen below it. Compaction's separate summary
-  model call also bypasses the agent hook chain. A strict provider-attempt RPS
-  limit therefore needs provider/transport-level integration. Call each native
-  handler once; do not implement retries by repeatedly calling the same handler.
-- `wrap_tool_execute` is available on the same capability. It covers logical
-  tool execution, not necessarily a new external effect or cache miss. Do not
-  hold a shared model permit for a whole run or a delegating tool while its child
-  waits for that same permit; use separate pools or limit the actual leaf work.
-  Ordinary Python Task bodies and SDK calls made outside Runtime agent runs do
-  not pass through these hooks.
-- Native hook ordering, `for_agent` and `for_run` remain in effect. Instances are
-  shared by default; a `for_run` copy should retain the shared backend while
-  isolating per-run state. Acquire owned resources in `wrap_run`, not `for_run`.
-  Runtime does not own or close an externally supplied shared backend.
-- Middleware must not defer loading. Explicit IDs must be unique and may not
-  use the reserved `linktools.` prefix or collide with selected capabilities.
-  Anonymous capabilities remain supported. Host lifecycle replacements must
-  preserve those constraints. The sequence is captured when `Runtime.open` is
-  called; do not mutate capability configuration while Runtime is open.
-
-Middleware is trusted host Python, just like other native capabilities, not an
-authorization or sandbox boundary. Native capabilities can contribute tools and
-instructions; register managed tools/MCP through `CapabilityGroup` when they need
-LinkTools selection, effect tracking and sandbox lifecycle. Existing managed tool
-authorization remains in force. Middleware is operational host configuration,
-not serialized Agent behavior: reopening/recovery uses the newly supplied
-middleware, while historical Agent bindings retain their existing identity.
-Put model-visible, versioned Agent behavior in `CapabilityGroup`.
-
-See Pydantic AI's [custom capabilities](https://ai.pydantic.dev/capabilities/custom/)
-for native hook signatures, composition and lifecycle semantics.
+A host can define its own `GlobalRateLimit` using native model/tool hooks, shared
+state and request/usage metadata. See [Runtime-wide capabilities](docs/runtime-capabilities.md)
+for a runnable RPM/TPM example, streaming/cancellation behavior, quota accounting
+and provider retry boundaries.
 
 ## Evaluation
 
