@@ -16,6 +16,7 @@ from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import ContainerTemplateError
+from linktools.cntr.runtime.images import ImagePreparer
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -267,7 +268,7 @@ class Container(BaseContainer):
             instances = tuple(item for item in actual.service_instances("nginx")
                               if item.state in ("running", "restarting")) if actual is not None else ()
             if not instances or any(
-                    item.labels.get("io.linktools.nginx.certificate-revision") != self.cert_image_revision
+                    item.labels.get(ImagePreparer.BUILD_LABEL) != self.cert_image_revision
                     for item in instances):
                 raise ContainerError(
                     "Nginx certificate image revision changed or is unavailable; "
@@ -535,7 +536,7 @@ class Container(BaseContainer):
             lock_path = self.get_app_path("certs", ".acme.lock")
             with FileLock(str(lock_path)):
                 self.runtime.chmod(lock_path, 0o600)
-                previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
+                previous_revision = next((item.labels.get(ImagePreparer.BUILD_LABEL)
                                           for item in context.initial_runtime_state.services
                                           if item.service == "nginx"), None)
                 account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")

@@ -107,8 +107,9 @@ def test_builtin_nginx_build_uses_native_certificate_identity(fresh_manager, htt
     revision = container.cert_image_revision
     assert spec["image"] == container.get_service_name("nginx") + ":" + revision
     assert "args" not in spec["build"]
+    assert spec["build"]["labels"] == {"io.linktools.cntr.build-revision": revision}
+    assert "LABEL " not in dockerfile
     if https:
-        assert 'certificate-revision="' + revision + '"' in dockerfile
         issuance = dockerfile.split("RUN --mount=type=secret,id=cntr_acme_account", 1)[1].split("\nRUN ", 1)[0]
         assert "--issue --force" in issuance
         assert revision in issuance
@@ -221,7 +222,7 @@ def test_new_revision_does_not_modify_older_certificate(certificate_case):
     assert (base / "fedcba0987654321/live").is_symlink()
 
 
-@pytest.mark.parametrize("source", ["target", "running", "seed", "empty"])
+@pytest.mark.parametrize("source", ["target", "running", "seed", "empty", "old-label"])
 def test_build_account_uses_current_storage_without_migrating_old_files(fresh_manager, monkeypatch, source):
     container = fresh_manager.containers["nginx"]
     fresh_manager.config.set("NGINX_HTTPS_ENABLE", True)
@@ -233,7 +234,7 @@ def test_build_account_uses_current_storage_without_migrating_old_files(fresh_ma
         "seed": container.get_app_path("acme"),
     }
     available = {"target": ("target", "running", "seed"), "running": ("running", "seed"),
-                 "seed": ("seed",), "empty": ()}
+                 "seed": ("seed",), "empty": (), "old-label": ("running", "seed")}
     for name in available[source]:
         if name in accounts:
             accounts[name].mkdir(parents=True, exist_ok=True)
@@ -250,10 +251,11 @@ def test_build_account_uses_current_storage_without_migrating_old_files(fresh_ma
     monkeypatch.setattr(container.runtime, "create_docker_process", fail_process)
     monkeypatch.setattr(container.runtime, "chmod", lambda *args: None)
     monkeypatch.setattr(container, "_render_site_template", lambda *args: "configuration")
+    label = "io.linktools.nginx.certificate-revision" if source == "old-label" else "io.linktools.cntr.build-revision"
     context = SimpleNamespace(
         target_containers=[container],
         initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(service="nginx", labels={
-            "io.linktools.nginx.certificate-revision": running_revision,
+            label: running_revision,
         }),)),
         previous_compose_contents={"nginx": "original model"},
     )
@@ -263,7 +265,9 @@ def test_build_account_uses_current_storage_without_migrating_old_files(fresh_ma
         if source == "empty":
             assert archive.getnames() == []
         else:
-            assert archive.extractfile("account.conf").read().decode() == source
+            assert archive.extractfile("account.conf").read().decode() == ("seed" if source == "old-label" else source)
+    if source == "old-label":
+        assert (accounts["running"] / "account.conf").read_text() == "running"
     assert context.previous_compose_contents == {"nginx": "original model"}
     assert all(path.read_text() == "old layout" for path in old_files)
     assert list(container.get_app_path().glob("migration-backup-*")) == [old_files[1].parent]

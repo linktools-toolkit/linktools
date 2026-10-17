@@ -17,6 +17,9 @@
       "build": {
         "context": "<ASSETS>/100-nginx",
         "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
+        "labels": {
+          "io.linktools.cntr.build-revision": "34e4962d8e31b174"
+        },
         "secrets": [
           "cntr_acme_account",
           "cntr_acme_dns"
@@ -50,7 +53,7 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx:159b09f71d904bc3",
+      "image": "aio-nginx:34e4962d8e31b174",
       "logging": {
         "driver": "json-file",
         "options": {

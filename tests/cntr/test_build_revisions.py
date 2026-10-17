@@ -155,6 +155,23 @@ def test_plain_build_context_keeps_existing_image_rule(tmp_path):
     assert "labels" not in result["services"]["app"]["build"]
 
 
+@pytest.mark.parametrize("actual", [None, "different", "explicit-inputs"])
+def test_plain_build_context_honors_explicit_build_label(tmp_path, actual):
+    prep = ImagePreparer(SimpleNamespace())
+    owner = SimpleNamespace(services={"app": {}})
+    build = {"context": str(tmp_path), "labels": {prep.BUILD_LABEL: "explicit-inputs"}}
+    model = {"services": {"app": {"image": "app:fixed", "build": build}}}
+    result = prep.with_build_revisions(model, (owner,), ("app",))
+    assert result["services"]["app"]["build"]["labels"] == build["labels"]
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture", actual) for image in images}
+    assert bool(prep.plan(result).build) == (actual != "explicit-inputs")
+    if actual == "explicit-inputs":
+        prep.verify_builds(result, ("app",))
+    else:
+        with pytest.raises(ImagePreparationError, match="revision mismatch"):
+            prep.verify_builds(result, ("app",))
+
+
 def test_external_dockerfile_change_changes_identity(tmp_path):
     prep, model = case(tmp_path)
     owner = Owner(tmp_path / "source")

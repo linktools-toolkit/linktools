@@ -3,6 +3,8 @@ services:
     image: '{{ container.get_service_name("nginx") }}:{{ container.cert_image_revision }}'
     build:
       context: '{{ container.get_docker_context_path() }}'
+      labels:
+        io.linktools.cntr.build-revision: '{{ container.cert_image_revision }}'
       dockerfile: '{{ container.get_docker_file_destination() }}'
 #   {% if NGINX_HTTPS_ENABLE %}
       secrets:

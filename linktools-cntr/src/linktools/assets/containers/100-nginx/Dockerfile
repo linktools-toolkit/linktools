@@ -10,7 +10,6 @@ RUN curl -fsSL https://github.com/acmesh-official/acme.sh/archive/master.tar.gz 
     test -x /opt/acme/acme.sh && \
     cd / && rm -rf /tmp/acme.sh-master /tmp/acme.tar.gz
 COPY nginx-certificates nginx-acme /usr/local/bin/
-LABEL io.linktools.nginx.certificate-revision="{{ container.cert_image_revision }}"
 RUN printf '%s\n' {% for api in container.dnsapi.values() %}{% for key in api.get("env", {}) %}{{ container.shell_quote(key) }} {% endfor %}{% endfor %}| sort -u > /opt/acme/dns-keys
 RUN chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-acme && \
     ln -s /opt/acme/acme.sh /usr/bin/acme.sh

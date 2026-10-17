@@ -207,10 +207,13 @@ by itself rebuild its image or request a new certificate.
 Build identity comes from the final Compose inputs. For a local `SourceContainer`
 snapshot, the image preparer fingerprints its resolved versioned context, the
 pending generated Dockerfile (or native Dockerfile/inline content), build options
-and platform. Container authors do not implement `get_build_revision`. Nginx
-uses its certificate revision in the native image tag.
+and platform. Container authors do not implement `get_build_revision`. Containers
+without a managed source snapshot can declare `io.linktools.cntr.build-revision`
+in native Compose `build.labels`; image planning and verification honor that value.
+Nginx uses its certificate revision in this label and its native image tag.
 
-Ordinary `up` reuses an existing image when no local source snapshot is present;
+Ordinary `up` reuses an existing image when neither a local source snapshot nor
+an explicit build revision is present;
 computing identity neither downloads source nor forces a build in that case.
 A retained local snapshot built with the previous fingerprint scheme may require
 one rebuild to acquire the current label. Subsequent unchanged runs reuse it.

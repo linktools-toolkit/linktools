@@ -42,11 +42,11 @@ def _context(container, explicit=False, services=("app",), state=None):
     return context, container._prepared
 
 
-def _state(*revisions, oneoff_revisions=()):
+def _state(*revisions, oneoff_revisions=(), label="io.linktools.cntr.build-revision"):
     instances = []
     for oneoff, values in ((False, revisions), (True, oneoff_revisions)):
         for revision in values:
-            labels = {} if revision is None else {"io.linktools.nginx.certificate-revision": revision}
+            labels = {} if revision is None else {label: revision}
             if oneoff:
                 labels["com.docker.compose.oneoff"] = "True"
             instances.append(ServiceRuntimeState(
@@ -82,6 +82,7 @@ def test_nginx_consumer_renders_without_dns_credentials_or_account_preparation(m
 @pytest.mark.parametrize("state", [
     None, _state(), _state(None), _state(OLD_REVISION), _state(REVISION, OLD_REVISION),
     _state(oneoff_revisions=(REVISION,)),
+    _state(REVISION, label="io.linktools.nginx.certificate-revision"),
 ])
 def test_nginx_consumer_requires_explicit_selection_for_unverified_certificate_revision(monkeypatch, state):
     container = _container("100-nginx", monkeypatch)
