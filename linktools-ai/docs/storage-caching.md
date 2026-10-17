@@ -3,6 +3,13 @@
 Caching accelerates reads; the source storage still owns durable facts. The
 storage package separates content, revision discovery, and metadata projection.
 
+`RuntimeStorage` composes resources and owns their acquired lifetimes. Stores
+such as `AssetStore`, `ObjectStore`, and `MetricStore` expose their respective
+data contracts; repositories own domain records and state transitions. Backends
+provide replaceable source or transport capabilities. These roles are not
+determined by whether a type is a protocol or a concrete implementation, and a
+store does not necessarily imply durable retention.
+
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
 | `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage(..., cache=...)` |
@@ -56,6 +63,12 @@ content, `append`/`read_batch`/`ack` for pending writes, and
 `open_stream`/`read_stream` for live previews. Each consumer checks the groups it uses. A missing group leaves it on its
 existing source/local path; a partial required group is a configuration error. No new all-capabilities wrapper or inheritance is required.
 
+`CacheBackend` names only the hot-content protocol, not an interface requiring
+all three groups. A stream-only or pending-only adapter can therefore be a valid
+`cache` without implementing `CacheBackend`. Pending bytes await settlement;
+they must not inherit hot-entry eviction rules. Preview streams have their own
+gap and retention semantics and do not replace durable execution history.
+
 `InMemoryCacheBackend(max_bytes=..., max_size=...)` provides hot content and
 buffered writes with one shared capacity budget, including in-flight writes.
 Hot entries may be evicted to admit work; accepted pending entries stay until
@@ -101,6 +114,23 @@ All Metrics constructors and factories accept `cache`. Only automatic recorders
 use its complete buffer group; otherwise they await the source in the caller,
 without a hidden local queue. `record`, `record_observations`, and queries keep
 their strong source semantics. Queries never add pending observations.
+
+`MetricRecorder.status()` returns `MetricRecorderStatus` in both direct and
+buffered modes. `persisted` counts confirmed source writes; `unconfirmed`
+counts settled attempts without that confirmation, including cancellation or
+an unknown outcome after the source may already have committed. It does not
+mean those observations were definitely lost. `MetricFlushResult.completed`
+reports prefix settlement, not that every observation persisted.
+
+`BatchWriteScope` is the lower-level scheduling and settlement extension for
+custom encoded batch sinks. The injected cache owns pending bytes and capacity;
+the scope owns dispatch and its lifetime. Its `BatchWriteStatus.confirmed`
+means only that the sink returned successfully. Metrics maps that count to
+`persisted` because its sink confirms authoritative writes.
+Its `BatchWriteFlushResult` reports settlement of the captured admission prefix,
+with `unconfirmed` preserving failed or unknown source outcomes.
+`StorageBuffer` separately provides final-value reads and writes over a source;
+it reuses the same scheduler rather than defining another pending queue.
 
 Automatic batches flush at 128 entries or 60 seconds after the first admission,
 whichever comes first; explicit flush and close wake partial batches. These
@@ -288,6 +318,15 @@ is not a successful durable commit. Configure shared authoritative execution
 storage as well as a shared stream backend to observe another Runtime's live
 output. Execution routes must have `DURABLE` retention; temporary execution
 storage cannot supply the authoritative history and recovery boundary.
+
+Local producers keep their in-process subscriptions even when a shared backend is
+configured; a shared preview outage does not remove their live text. Shared
+publication remains available to remote observers. A remote preview cursor moved
+to a local producer emits `STREAM_RESET` before replaying from its durable
+position, because transport positions cannot address the local preview buffer.
+Standalone execution watches are owned by their Runtime: close cancels and drains
+pending reads and paused iterators before releasing storage. Explicit iterator
+close remains supported and does not cancel the execution producer.
 
 Without a complete stream method group, Runtime keeps its existing local streaming path.
 The SDK does not construct Redis clients or require Redis. An adapter implements

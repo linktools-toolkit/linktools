@@ -94,7 +94,7 @@ from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
-from ..observe import MetricBufferStatus, MetricFlushResult
+from ..observe import MetricRecorderStatus, MetricFlushResult
 from ._metrics import _disabled_metric_status
 from .service_api import (
     ExecutionView,
@@ -228,7 +228,7 @@ class _TaskNodeRuntimePort(Protocol):
 
 
 class _MetricControl(Protocol):
-    def status(self) -> MetricBufferStatus: ...
+    def status(self) -> MetricRecorderStatus: ...
 
     async def flush(
         self,
@@ -530,7 +530,7 @@ class Runtime(Generic[AppT]):
     def correlation(self) -> CorrelationData:
         return self._context.correlation
 
-    def _metric_status(self) -> MetricBufferStatus:
+    def _metric_status(self) -> MetricRecorderStatus:
         control = self._metric_control
         return _disabled_metric_status() if control is None else control.status()
 

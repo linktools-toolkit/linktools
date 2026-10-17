@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared write-cache backpressure, batching and lifecycle semantics."""
+"""Shared batch-write backpressure, batching and lifecycle semantics."""
 
 import asyncio
 from collections.abc import Awaitable
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.core import Page
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
-from linktools.ai.storage import InMemoryCacheBackend, WriteCacheScope
+from linktools.ai.storage import InMemoryCacheBackend, BatchWriteScope
 from linktools.ai.storage import _write_cache as write_cache
 
 
@@ -145,7 +145,7 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
     status = buffer.status()
     assert status.accepting is False
     assert status.pending == 0
-    assert status.lost == 1
+    assert status.unconfirmed == 1
     assert status.last_failure_code == "CLOSE_TIMEOUT"
 
 
@@ -169,7 +169,7 @@ async def test_metric_buffer_cancelled_batch_settles_owned_observations(
     await buffer.close()
 
     status = buffer.status()
-    assert status.accepted == status.lost == 1
+    assert status.accepted == status.unconfirmed == 1
     assert status.persisted == status.pending == status.queue_size == 0
     assert not store.entered.is_set()
     assert (await buffer.flush(timeout_seconds=0)).completed is True
@@ -220,7 +220,7 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
 
     status = buffer.status()
     assert status.persisted == int(store.written.is_set())
-    assert status.accepted == status.persisted + status.lost == 1
+    assert status.accepted == status.persisted + status.unconfirmed == 1
     assert status.pending == 0
     assert status.queue_size == 0
 
@@ -242,14 +242,14 @@ async def test_metric_buffer_flush_cancellation_preserves_accepted_observations(
     with pytest.raises(asyncio.CancelledError):
         await flush
     assert buffer.status().pending == 1
-    assert buffer.status().lost == 0
+    assert buffer.status().unconfirmed == 0
 
     store.release.set()
     await asyncio.gather(buffer.close(), buffer.close())
     status = buffer.status()
     assert status.persisted == 1
     assert status.pending == 0
-    assert status.lost == 0
+    assert status.unconfirmed == 0
 
 
 class _CancellingStore(_BlockingStore):
@@ -299,14 +299,14 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
         assert not close.done()
         assert not flush.done()
         assert buffer.status().pending == 2
-        assert buffer.status().lost == 0
+        assert buffer.status().unconfirmed == 0
     finally:
         store.finalize.set()
         await asyncio.wait_for(asyncio.gather(close, flush), timeout=1)
 
     assert flush.result().completed is True
     assert store.observations == [first]
-    assert buffer.status().lost == 2
+    assert buffer.status().unconfirmed == 2
     assert buffer.status().pending == 0
     assert buffer.status().queue_size == 0
 
@@ -525,7 +525,7 @@ async def test_write_cache_close_keeps_callback_owned_until_its_real_result(
             await release.wait()
         returned.set()
 
-    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
+    scope = BatchWriteScope(InMemoryCacheBackend(max_bytes=1024), sink)
     assert await scope.try_submit("head", b"head")
     await scope.flush(timeout_seconds=0)
     await asyncio.wait_for(entered.wait(), 1)
@@ -580,7 +580,7 @@ async def test_write_cache_callback_cancellation_does_not_strand_later_admission
             raise asyncio.CancelledError
         return write(batch)
 
-    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
+    scope = BatchWriteScope(InMemoryCacheBackend(max_bytes=1024), sink)
     try:
         assert await scope.try_submit("cancelled", b"cancelled")
         assert (await scope.flush()).completed
@@ -607,7 +607,7 @@ async def test_write_cache_capacity_includes_inflight_and_releases_after_ack() -
         await release.wait()
 
     cache = InMemoryCacheBackend(max_bytes=1024, max_size=3)
-    scope = WriteCacheScope(cache, sink)
+    scope = BatchWriteScope(cache, sink)
     try:
         for item in range(3):
             assert await scope.try_submit(item, str(item).encode())
@@ -634,7 +634,7 @@ async def test_write_cache_callback_unknown_outcome_is_not_confirmed() -> None:
         visible.extend(item[1] for item in batch)
         raise OSError("reply unavailable after write")
 
-    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
+    scope = BatchWriteScope(InMemoryCacheBackend(max_bytes=1024), sink)
     assert await scope.try_submit("visible", b"visible")
     await scope.close()
     status = scope.status()
@@ -660,7 +660,7 @@ async def test_write_cache_write_timeout_does_not_stop_following_batches(
         else:
             assert tuple(item[1] for item in batch) == ("next",)
 
-    scope = WriteCacheScope(InMemoryCacheBackend(max_bytes=1024), sink)
+    scope = BatchWriteScope(InMemoryCacheBackend(max_bytes=1024), sink)
     try:
         assert await scope.try_submit("timeout", b"timeout")
         assert (await scope.flush()).completed

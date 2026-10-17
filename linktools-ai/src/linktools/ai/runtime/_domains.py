@@ -56,7 +56,7 @@ from .service_api import (
 if TYPE_CHECKING:
     from pydantic import BaseModel
     from ._agent import Agent, Execution, Session
-    from ..observe import MetricBufferStatus, MetricFlushResult
+    from ..observe import MetricRecorderStatus, MetricFlushResult
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -328,13 +328,13 @@ class RuntimeSessions(Generic[AppT]):
 class RuntimeMetrics:
     def __init__(
         self,
-        status: Callable[[], "MetricBufferStatus"],
+        status: Callable[[], "MetricRecorderStatus"],
         flush: Callable[..., Awaitable["MetricFlushResult"]],
     ) -> None:
         self._status = status
         self._flush = flush
 
-    def status(self) -> "MetricBufferStatus":
+    def status(self) -> "MetricRecorderStatus":
         return self._status()
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> "MetricFlushResult":

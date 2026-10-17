@@ -14,7 +14,7 @@ from linktools.core import environ
 from ..core import CorrelationData, UsageMetrics, normalize_correlation
 from ..errors import AIError, ErrorCode
 from ..observe import (
-    MetricBufferStatus, MetricFlushResult, MetricMeasurement, MetricRecorder, Observation,
+    MetricRecorderStatus, MetricFlushResult, MetricMeasurement, MetricRecorder, Observation,
 )
 from ._metric_id import _stable_observation_id
 from .state._contracts import ExecutionTerminalCommitResult
@@ -38,8 +38,8 @@ _FRAMEWORK_CORRELATION_KEYS = frozenset(
 )
 
 
-def _disabled_metric_status() -> MetricBufferStatus:
-    return MetricBufferStatus(False, False, 0, 0, 0, 0, 0, 0)
+def _disabled_metric_status() -> MetricRecorderStatus:
+    return MetricRecorderStatus(False, False, 0, 0, 0, 0, 0, 0)
 
 
 def _metric_correlation(
@@ -113,10 +113,10 @@ class _RuntimeMetricRecorder:
         self._recording_started = True
         return await self._recorder.try_record(captured)
 
-    def status(self) -> MetricBufferStatus:
+    def status(self) -> MetricRecorderStatus:
         status = self._recorder.status()
         if self._failure_baseline != (
-            status.rejected, status.lost, status.write_failures, status.last_failure_code,
+            status.rejected, status.unconfirmed, status.write_failures, status.last_failure_code,
         ):
             self._last_failure_code = None
         return replace(
@@ -138,7 +138,7 @@ class _RuntimeMetricRecorder:
         self._last_failure_code = code
         status = self._recorder.status()
         self._failure_baseline = (
-            status.rejected, status.lost, status.write_failures, status.last_failure_code,
+            status.rejected, status.unconfirmed, status.write_failures, status.last_failure_code,
         )
         now = monotonic()
         if now - self._last_warning_at >= _WARNING_INTERVAL_SECONDS:

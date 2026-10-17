@@ -82,8 +82,37 @@ async def test_direct_recording_preserves_caller_cancellation() -> None:
         await writing
     assert store.cancelled
     status = recorder.status()
-    assert status.accepted == status.lost == 1
+    assert status.accepted == status.unconfirmed == 1
     assert status.persisted == status.pending == 0
+    await recorder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("buffered", [False, True])
+async def test_unconfirmed_recording_can_already_exist_in_source(buffered: bool) -> None:
+    class CommittedThenCancelledStore(InMemoryMetricStore):
+        async def put_observations(
+            self, namespace: str, observations: tuple[Observation, ...],
+        ) -> None:
+            await super().put_observations(namespace, observations)
+            raise asyncio.CancelledError
+
+    metrics = Metrics.from_store(
+        CommittedThenCancelledStore(),
+        cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if buffered else None,
+    )
+    recorder = metrics.recorder()
+    observation = _observation("committed-without-confirmation")
+    if buffered:
+        assert await recorder.try_record(observation)
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await recorder.try_record(observation)
+    result = await recorder.flush()
+    assert result.completed
+    assert result.status.accepted == result.status.unconfirmed == 1
+    assert result.status.persisted == result.status.pending == 0
+    assert await metrics.get_observation(observation.observation_id) == observation
     await recorder.close()
 
 
@@ -156,7 +185,7 @@ async def test_cached_recorder_respects_metric_write_batch_limit() -> None:
         flushed = await recorder.flush()
         assert flushed.completed
         assert flushed.status.persisted == flushed.status.accepted == len(observations)
-        assert flushed.status.pending == flushed.status.lost == flushed.status.write_failures == 0
+        assert flushed.status.pending == flushed.status.unconfirmed == flushed.status.write_failures == 0
         for observation in observations:
             assert await metrics.get_observation(observation.observation_id) == observation
         assert recorder.status().queue_capacity is None
@@ -189,7 +218,7 @@ async def test_cached_recorder_preserves_confirmed_batch_when_later_batch_fails(
         assert flushed.status.accepted == 257
         assert flushed.status.persisted == 256
         assert flushed.status.pending == 0
-        assert flushed.status.lost == flushed.status.write_failures == 1
+        assert flushed.status.unconfirmed == flushed.status.write_failures == 1
         for observation in observations[:256]:
             assert await metrics.get_observation(observation.observation_id) == observation
         assert await metrics.get_observation("batch-256") is None
@@ -209,7 +238,7 @@ async def test_direct_recorder_fails_open_on_unconfirmed_storage() -> None:
     metrics = Metrics.from_store(FailingStore())
     recorder = metrics.recorder()
     assert not await recorder.try_record(_observation("unknown"))
-    assert recorder.status().lost == 1
+    assert recorder.status().unconfirmed == 1
     assert recorder.status().persisted == 0
     assert await metrics.get_observation("unknown") is not None
     await recorder.close()
@@ -387,4 +416,4 @@ async def test_corrupt_buffer_content_cannot_become_a_committed_observation() ->
     assert await recorder.try_record(_observation("corrupt"))
     await recorder.close()
     assert await metrics.get_observation("corrupt") is None
-    assert recorder.status().lost == recorder.status().write_failures == 1
+    assert recorder.status().unconfirmed == recorder.status().write_failures == 1

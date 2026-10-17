@@ -566,14 +566,16 @@ class MetricQueryResult:
 
 
 @dataclass(frozen=True, slots=True)
-class MetricBufferStatus:
+class MetricRecorderStatus:
+    """Direct or buffered delivery counts; unconfirmed may already be stored."""
+
     enabled: bool
     accepting: bool
     accepted: int
     persisted: int
     pending: int
     rejected: int
-    lost: int
+    unconfirmed: int
     write_failures: int
     queue_size: int = 0
     queue_capacity: int | None = None
@@ -583,8 +585,10 @@ class MetricBufferStatus:
 
 @dataclass(frozen=True, slots=True)
 class MetricFlushResult:
+    """Admission-prefix settlement, not a receipt that every item persisted."""
+
     completed: bool
-    status: MetricBufferStatus
+    status: MetricRecorderStatus
 
 
 class MetricRecorder(Protocol):
@@ -592,7 +596,7 @@ class MetricRecorder(Protocol):
         """Return admission success, never a durable business receipt."""
         ...
 
-    def status(self) -> MetricBufferStatus: ...
+    def status(self) -> MetricRecorderStatus: ...
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult: ...
 
@@ -600,7 +604,7 @@ class MetricRecorder(Protocol):
 
 
 __all__ = [
-    "MetricBufferStatus",
+    "MetricRecorderStatus",
     "MetricFlushResult",
     "MetricAggregation",
     "MetricDefinition",

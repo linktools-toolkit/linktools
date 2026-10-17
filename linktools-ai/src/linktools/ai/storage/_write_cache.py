@@ -29,7 +29,7 @@ _Entry = tuple[str, Hashable, bytes | None]
 
 
 @dataclass(frozen=True, slots=True)
-class WriteCacheStatus:
+class BatchWriteStatus:
     """Lifetime counts; unconfirmed does not imply the sink wrote nothing."""
 
     accepting: bool
@@ -46,11 +46,11 @@ class WriteCacheStatus:
 
 
 @dataclass(frozen=True, slots=True)
-class WriteCacheFlushResult:
+class BatchWriteFlushResult:
     """Prefix settlement and a lifetime snapshot, not a durability receipt."""
 
     completed: bool
-    status: WriteCacheStatus
+    status: BatchWriteStatus
 
 
 @runtime_checkable
@@ -64,8 +64,8 @@ class _WriteBuffer(Protocol):
     async def ack(self, scope: str, ids: Sequence[str]) -> None: ...
 
 
-class WriteCacheScope:
-    """One owner schedules encoded writes held by a borrowed cache.
+class BatchWriteScope:
+    """One owner's batch scheduling and settlement over a borrowed cache.
 
     The cache owns the queue index, payloads and capacity, including in-flight
     entries. Its append/read_batch/ack capability must retain an ordered,
@@ -116,8 +116,8 @@ class WriteCacheScope:
         self._backend_failure: BaseException | None = None
         self._unknown_ids: set[str] = set()
 
-    def status(self) -> WriteCacheStatus:
-        return WriteCacheStatus(
+    def status(self) -> BatchWriteStatus:
+        return BatchWriteStatus(
             accepting=self._accepting, accepted=self._accepted,
             confirmed=self._confirmed, unconfirmed=self._unconfirmed,
             pending=self._accepted - self._confirmed - self._unconfirmed, rejected=self._rejected,
@@ -267,7 +267,7 @@ class WriteCacheScope:
             await self._resolution_event.wait()
         self._raise_backend_failure()
 
-    async def flush(self, *, timeout_seconds: float = 5.0) -> WriteCacheFlushResult:
+    async def flush(self, *, timeout_seconds: float = 5.0) -> BatchWriteFlushResult:
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -276,14 +276,14 @@ class WriteCacheScope:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._resolved >= self._accepted:
             self._raise_backend_failure()
-            return WriteCacheFlushResult(True, self.status())
+            return BatchWriteFlushResult(True, self.status())
         self._flush_target = max(self._flush_target, self._accepted)
         self._batch_ready.set()
         try:
             await asyncio.wait_for(self._wait_resolved(self._accepted), float(timeout_seconds))
         except asyncio.TimeoutError:
-            return WriteCacheFlushResult(False, self.status())
-        return WriteCacheFlushResult(True, self.status())
+            return BatchWriteFlushResult(False, self.status())
+        return BatchWriteFlushResult(True, self.status())
 
     async def close(self) -> None:
         """Drain owned operations without closing the borrowed cache or source."""
@@ -546,7 +546,7 @@ class StorageBuffer(Generic[_Key, _Info]):
             raise TypeError("cache must provide the complete append/read_batch/ack capability")
         self._store = store
         self._read_pending = read_pending
-        self._scope = WriteCacheScope(cache, self._consume_batch) if all(methods) else None
+        self._scope = BatchWriteScope(cache, self._consume_batch) if all(methods) else None
         self._direct_active = 0
         self._direct_done = asyncio.Event()
         self._direct_done.set()
@@ -743,5 +743,5 @@ class StorageBuffer(Generic[_Key, _Info]):
 
 
 __all__ = [
-    "WriteCacheScope", "WriteCacheStatus", "WriteCacheFlushResult", "StorageBuffer",
+    "BatchWriteScope", "BatchWriteStatus", "BatchWriteFlushResult", "StorageBuffer",
 ]

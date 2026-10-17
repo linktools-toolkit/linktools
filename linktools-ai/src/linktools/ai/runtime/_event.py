@@ -741,8 +741,7 @@ class DefaultEventService:
     ) -> AsyncIterator[ExecutionStreamEvent]:
         await self._authorize_read(execution_id, principal)
         try:
-            live = (self._live.claim_local_producer(execution_id)
-                    if self._live.shared is None or not shared_stream_requested() else None)
+            live = self._live.claim_local_producer(execution_id)
         except AIError:
             raise
         except Exception as error:
@@ -769,19 +768,19 @@ class DefaultEventService:
     ) -> AsyncIterator[ExecutionStreamEvent]:
         if not authorized:
             await self._authorize_read(execution_id, principal)
-        if self._live.shared is not None and shared_stream_requested():
-            async with aclosing(self._stream_shared(
-                execution_id, principal=principal, after_event_seq=after_event_seq,
-            )) as shared_stream:
-                async for event in shared_stream:
-                    yield event
-            return
         try:
             is_local_producer = self._live.is_local_producer(execution_id)
         except AIError:
             raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
+        if not is_local_producer and self._live.shared is not None and shared_stream_requested():
+            async with aclosing(self._stream_shared(
+                execution_id, principal=principal, after_event_seq=after_event_seq,
+            )) as shared_stream:
+                async for event in shared_stream:
+                    yield event
+            return
         if not is_local_producer:
             async with aclosing(self._stream_durable(
                 execution_id,
@@ -811,6 +810,11 @@ class DefaultEventService:
         cursor = after_event_seq
         stream_error: BaseException | None = None
         try:
+            if shared_stream_position(execution_id) is not None:
+                # Transport positions cannot address the local preview buffer.
+                yield SharedStreamEvent(
+                    execution_id, None, "STREAM_RESET", {"stream_truncated": True}, ("", 0),
+                )
             while cursor < base_event_seq:
                 page = await self._read_durable(
                     execution_id,

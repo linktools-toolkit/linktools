@@ -14,9 +14,9 @@ from linktools.core import environ
 
 from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import WriteCacheScope
+from ..storage import BatchWriteScope
 from ._codec import decode_observation_envelope, observation_envelope
-from ._model import MetricBufferStatus, MetricFlushResult, Observation
+from ._model import MetricRecorderStatus, MetricFlushResult, Observation
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
@@ -30,11 +30,11 @@ _WARNING_INTERVAL_SECONDS = 30.0
 class _MetricRecorder:
     def __init__(self, metrics: Metrics, cache: object | None) -> None:
         self._metrics = metrics
-        self._scope = None if cache is None else WriteCacheScope(cache, self._write_batch)
+        self._scope = None if cache is None else BatchWriteScope(cache, self._write_batch)
         self._accepting = True
         self._accepted = 0
         self._persisted = 0
-        self._lost = 0
+        self._unconfirmed = 0
         self._rejected = 0
         self._write_failures = 0
         self._last_failure_code: str | None = None
@@ -75,11 +75,11 @@ class _MetricRecorder:
             # The requesting task owns this I/O: no queue, task or timeout bridge.
             await self._metrics.record_observations((observation,))
         except asyncio.CancelledError:
-            self._lost += 1
+            self._unconfirmed += 1
             self._last_failure_code = "WRITE_CANCELLED"
             raise
         except Exception:
-            self._lost += 1
+            self._unconfirmed += 1
             self._write_failures += 1
             self._fail("WRITE_FAILED")
             return False
@@ -93,14 +93,14 @@ class _MetricRecorder:
             if self._active == 0:
                 self._idle.set()
 
-    def status(self) -> MetricBufferStatus:
+    def status(self) -> MetricRecorderStatus:
         if self._scope is not None:
             status = self._scope.status()
             if self._failure_baseline != (
                 status.rejected, status.unconfirmed, status.write_failures, status.last_failure_code,
             ):
                 self._last_failure_code = None
-            return MetricBufferStatus(
+            return MetricRecorderStatus(
                 True, self._accepting and status.accepting,
                 status.accepted, status.confirmed, status.pending,
                 status.rejected + self._rejected, status.unconfirmed,
@@ -108,9 +108,9 @@ class _MetricRecorder:
                 status.high_watermark,
                 self._last_failure_code or status.last_failure_code,
             )
-        return MetricBufferStatus(
+        return MetricRecorderStatus(
             True, self._accepting, self._accepted, self._persisted, 0,
-            self._rejected, self._lost, self._write_failures,
+            self._rejected, self._unconfirmed, self._write_failures,
             queue_capacity=0, last_failure_code=self._last_failure_code,
         )
 

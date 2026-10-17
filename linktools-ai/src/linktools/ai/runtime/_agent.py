@@ -187,7 +187,12 @@ class Execution(Generic[AppT]):
                 finalizing=finalizing,
                 register=self._runtime._register_observation, release=self._runtime._release_observation,
             )
-        return self._watch_prepared(cursor, include_content, None)
+        return _owned_watch(
+            self._watch_prepared(cursor, include_content, None),
+            scope="execution", resource_id=self.execution_id, cursor=cursor,
+            finalizing=asyncio.Event(),
+            register=self._runtime._register_observation, release=self._runtime._release_observation,
+        )
 
     def _watch_models(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,

@@ -41,7 +41,7 @@ ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺�
 | Runtime 内容注入 | cache | 保留 Runtime 的引用、租户和来源验证 |
 | 内容摘要 | digest | SHA-256 内容完整性 |
 | 物理记录修订 | storage_revision / expected_storage_revision | 与业务 revision 区分 |
-| 写缓存 | cache 的 append/read_batch/ack；既有 WriteCacheScope 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
+| 写缓存 | cache 的 append/read_batch/ack；既有 BatchWriteScope 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
 
 其他名称只有真实职责歧义时才调整，不为了字面整齐改变公开接口。本轮不同时推行另一组未实施的路径、metadata或revision方法改名。
 
@@ -221,7 +221,7 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 ## 8. 同一 cache 实例上的缓冲批写
 
-本节接口以本次确认的单一 cache 参数为准。普通用户只提供已有实例；不再配置独立 WriteCache。自动观测指标接受 best-effort 延迟和进程退出时的丢失风险；审计、恢复、控制、检查点及显式强写保持原有持久保证。数据库原生批量 API、原子事务和业务既有强 staging 不因此移除。
+本节接口以本次确认的单一 cache 参数为准。普通用户只提供已有实例；不另行配置独立写缓存管理器。自动观测指标接受 best-effort 延迟和进程退出时的丢失风险；审计、恢复、控制、检查点及显式强写保持原有持久保证。数据库原生批量 API、原子事务和业务既有强 staging 不因此移除。
 
 ### 单一装配入口
 
@@ -238,7 +238,7 @@ Metrics 的构造与 in_memory/sqlite/sql/from_store 工厂均接收 cache。Run
 
 Metrics.record、record_observations 与 MetricStore.put_observations 保留确认写入合同；仅自动 recorder 走批写接纳。Metrics.query/get_observation 读取权威已提交数据，不混入 pending，不因注入缓存增加查询 TTL。
 
-Metrics.recorder() 返回独立 MetricRecorder。每个 recorder 内部复用既有 WriteCacheScope，借用注入实例的 append/read_batch/ack 存取待写字节；领域使用现有 Observation codec 编解码及 observation_id 识别内容。不新建 DTO、公共 Policy/Protocol 或管理层。scope 的身份与接纳顺序由框架生成，普通业务不用拼 key 或 ID。
+Metrics.recorder() 返回独立 MetricRecorder。每个 recorder 内部复用既有 BatchWriteScope，借用注入实例的 append/read_batch/ack 存取待写字节；领域使用现有 Observation codec 编解码及 observation_id 识别内容。不新建 DTO、公共 Policy/Protocol 或管理层。scope 的身份与接纳顺序由框架生成，普通业务不用拼 key 或 ID。
 
 cache 的批写组接收 scope、唯一条目 ID、领域 key 与 bytes/删除值；append 异常可能已经接纳，必须暴露未知结果，不能计作确定满额拒绝或另放隐藏队列。read_batch 非破坏性返回有序未 ack 前缀，ack 只移除指定 ID。缓存不得用热点逐出语义丢弃已接纳 pending。回调成功之后 ack 失败只能重试 ack，不再次调用已成功的 sink；未能清理的 pending 必须通过 flush/close 明确暴露。
 
@@ -248,7 +248,7 @@ InMemoryCacheBackend 的 max_bytes 与可选 max_size 是同一实例的共同�
 
 自动 recorder 使用固定默认 128 条或首条接纳后 60 秒先到提交，后续接纳不重置首条窗口。flush 和正常 close 主动唤醒不足一批的项。60 秒是正常调度下的组批窗口，不是查询 TTL，也不包括排队和 sink 耗时。每 scope 单 writer 保序；幂等、事务与提交未知读回仍由 sink 原有领域 owner 负责。显式强写的 256 条和 16 MiB 上限保持不变。
 
-通用状态沿用 accepting、accepted、confirmed、unconfirmed、pending、rejected、queue_size、queue_capacity、high_watermark、write_failures、last_failure_code。queue_size 包含全部未 ack 条目；容量归后端且没有统一容量查询契约，queue_capacity 为 None，不表示无界，也不能虚报独立本地额度。rejected 不计入 accepted；confirmed 只说明 sink 回调成功，不把缓存写入本身说成持久成功。指标薄映射将 confirmed/unconfirmed 对应 persisted/lost。无 buffer 方法组的直接模式 queue_size 与 queue_capacity 为 0。pending 统计尚未结算的源结果，queue_size 统计尚未 ack 的缓存项；sink 成功后 ack 失败可以 confirmed=1、pending=0、queue_size=1，flush/close 报清理失败，不能说源未写。
+通用状态沿用 accepting、accepted、confirmed、unconfirmed、pending、rejected、queue_size、queue_capacity、high_watermark、write_failures、last_failure_code。queue_size 包含全部未 ack 条目；容量归后端且没有统一容量查询契约，queue_capacity 为 None，不表示无界，也不能虚报独立本地额度。rejected 不计入 accepted；confirmed 只说明 sink 回调成功，不把缓存写入本身说成持久成功。指标状态 MetricRecorderStatus 将 confirmed 映射为 persisted，因为指标 sink 已确认权威提交；unconfirmed 保持未确认含义，不等于确定丢失。无 buffer 方法组的直接模式 queue_size 与 queue_capacity 为 0。pending 统计尚未结算的源结果，queue_size 统计尚未 ack 的缓存项；sink 成功后 ack 失败可以 confirmed=1、pending=0、queue_size=1，flush/close 报清理失败，不能说源未写。
 
 ### flush、关闭和取消
 
@@ -337,14 +337,14 @@ MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭�
 | 合同 | 可读暂存路径 | 仅已提交可读路径 |
 |---|---|---|
 | 写入接纳 | 先进入有界 pending，返回接纳结果 | 同样先进入有界 pending，返回接纳结果 |
-| 批写 | 同一个 WriteCacheScope 调度与 sink 合同 | 同一个 WriteCacheScope 调度与 sink 合同 |
+| 批写 | 同一个 BatchWriteScope 调度与 sink 合同 | 同一个 BatchWriteScope 调度与 sink 合同 |
 | 未结算读取 | 当前 owner 可读最新暂存事实；不承诺跨实例可见 | 只读权威已提交数据或其合规缓存，不返回 pending |
 | sink 成功 | 确认该批次；按领域合同交接到已提交视图 | 写入方确认该批次后，才主动发布已提交缓存或推进可见 revision |
 | sink 失败或结果未知 | 记录异常状态，移除已结算的暂存投影，回到权威读取；可能回退到旧值 | 不将该 pending 发布成已提交；按权威读及既有未知提交合同处理 |
 | 等待 flush 超时或等待者取消 | 只结束等待，不等于 sink 已结算，不撤销仍执行的暂存项 | 同样不决定持久结果；读端仍只看已提交事实 |
 | 进程崩溃 | 内存中的待写项可能丢失 | 同样可能丢失；只读已提交不等于待写可靠交付 |
 
-第二条路径不承诺“所有写入最终成功”，也不强制同步逐条写库。如果另有“接纳后即使崩溃也必须完成”的合同，必须沿用具有 durable pending/恢复所有权的领域机制；不能仅靠 CacheBackend 或内存 WriteCacheScope 宣称保证。这里不新增可靠队列或持久后台服务。
+第二条路径不承诺“所有写入最终成功”，也不强制同步逐条写库。如果另有“接纳后即使崩溃也必须完成”的合同，必须沿用具有 durable pending/恢复所有权的领域机制；不能仅靠 CacheBackend 或内存 BatchWriteScope 宣称保证。这里不新增可靠队列或持久后台服务。
 
 “已提交可读”不等于“调用方已收到成功响应才可读”。数据库可能已经提交而响应丢失，写调用报告结果未知时，权威读取仍可能看到新值。不能把异常当成未提交，也不能假定所有 Store 都会自动读回确认；保留各 owner 的 receipt/readback 与错误传播合同。
 
@@ -361,7 +361,7 @@ pending 与 committed 内容分别由暂存/队列和权威 reader/CacheBackend 
 - 缓存失效和更新继续遵循已有 revision/存在性/保留期合同；本方案不把既有最终一致提示暗改为全系统线性一致
 - 这里的持久成功由所选权威 sink 的合同定义。把字节放入内存/可逐出文件缓存，或仅收到共享缓存写入响应，均不能自动冒充数据库已提交
 
-WriteCacheScope.confirmed 只表示回调成功返回。用于已提交读视图的 sink 必须保证成功返回已覆盖权威提交或提交结果验证；任意回调返回成功、写入另一个待写队列或可丢缓存，并不自动满足这个条件。
+BatchWriteScope.confirmed 只表示回调成功返回。用于已提交读视图的 sink 必须保证成功返回已覆盖权威提交或提交结果验证；任意回调返回成功、写入另一个待写队列或可丢缓存，并不自动满足这个条件。
 
 所有暂存读取仍需由对应领域先完成租户、身份和动态授权检查。共享一个 key-value 容器不能替代授权；缓存命中不能跳过原边界。
 
@@ -369,14 +369,14 @@ WriteCacheScope.confirmed 只表示回调成功返回。用于已提交读视图
 
 | 场景 | 当前合同与读取 owner | 两条路径如何落位 |
 |---|---|---|
-| 自动观测指标 | 现有异步 best-effort 写入；Metrics 查询通过 MetricStore | 对应“可缓冲写、只读已提交”。首批提炼 WriteCacheScope 不把 pending 自动加入聚合查询 |
+| 自动观测指标 | 现有异步 best-effort 写入；Metrics 查询通过 MetricStore | 对应“可缓冲写、只读已提交”。首批提炼 BatchWriteScope 不把 pending 自动加入聚合查询 |
 | 活跃执行 transcript / interaction / payload | StagingAgentRunStore / AgentRunStore 持有同 owner 未落库事实；projection 按捕获高水位交接 | 已有领域可读暂存路径；保持其更强的恢复/终态合同，不降级成失败可丢 |
 | 独立 DURABLE RuntimeHistory | archive / 权威对象 reader | 只读已提交；不保证看到另一实例尚未落库的 staging |
 | revision 提示与能力元数据 | 已提交 head、RevisionSource、Capability reader | 读缓存/失效问题，不是需要批量写库的 pending 事实；继续单飞与生命周期修复 |
 | 已提交正文 | ObjectStore + CacheBackend | 可丢读副本，不能混入未确认正文来提高命中率 |
 | 显式允许失败的按 key 最终值读写 | StorageBuffer 复用源 get/apply_batch，内部封装 pending 与 committed 交接 | 第14节的单一视图负责接纳、覆盖、源读竞态与失败回源，不要求普通消费者拼接队列 |
 
-因此，“两条路径”不需要两个 WriteCacheScope 或可靠/不可靠 mode，也不能以提供 pending_items 就声称通用可读路径已完成。框架必须封装使用方所需的读取语义；原有领域 staging 可以直接复用，不能为覆盖名义新增没有实际消费者的万能 KV 存储。
+因此，“两条路径”不需要两个 BatchWriteScope 或可靠/不可靠 mode，也不能以提供 pending_items 就声称通用可读路径已完成。框架必须封装使用方所需的读取语义；原有领域 staging 可以直接复用，不能为覆盖名义新增没有实际消费者的万能 KV 存储。
 
 ### 并发、原子性和读取合并必须满足的条件
 
@@ -390,7 +390,7 @@ append/聚合查询则不能套按 key 覆盖：inflight 与持久结果可能�
 
 ### 当前公开接口结论与设计状态
 
-第8节 WriteCacheScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
+第8节 BatchWriteScope 保留 append 接纳、批写和结算合同。通用按 key 最终值视图由第14节 StorageBuffer 提供，复用同一调度机制；两种读取模式在构造时选择，不暴露 pending_items 让消费者自行合并。既有强 staging 继续由领域 owner 持有，不能以通用可丢缓冲替代。
 
 两种读取可见性都支持共同批写机制，仅已提交可读不要求同步逐项写入。第14节的最终值缓存和第8节的 append 缓冲保持不同的数据语义。验收必须覆盖：pending 不污染 committed cache、提交结果未知但源可见、旧批结算遇新写、源读跨完整接纳/结算窗口、删除暂存、聚合去重/交接、不拆业务原子批与两种路径的取消/关闭行为。
 
