@@ -1553,24 +1553,58 @@ class StateStepArchive(AgentRunStore):
         )
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        relocated, _records = await self._relocate_run_checkpoint(run, checkpoint)
+        return relocated
+
+    async def prepare_run_checkpoint(
+        self,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+    ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch]:
+        """Relocate and prepare a cumulative checkpoint in its run-owned archive."""
+        self._ensure_open()
+        require_no_run_history_lock("StateStepArchive.prepare_run_checkpoint")
+        if (
+            type(self).relocate_run_checkpoint is not StateStepArchive.relocate_run_checkpoint
+            or type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
+        ):
+            relocated = await self.relocate_run_checkpoint(run, checkpoint)
+            return relocated, await self.prepare_checkpoints(run, (relocated,))
+        if self._runtime_domain is RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        relocated, records = await self._relocate_run_checkpoint(run, checkpoint)
+        # Prefix verification reads object bodies outside the metadata scope. Only
+        # an empty prefix permits reuse before preparation starts its own body I/O.
+        return relocated, await self._prepare_explicit_checkpoints(
+            run,
+            (relocated,),
+            observed_records=records if relocated.transcript_message_count_before == 0 else None,
+        )
+
+    async def _relocate_run_checkpoint(
+        self,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+    ) -> tuple[AgentRunCheckpoint, Mapping[bytes, StoredRecord]]:
         async def capture_metadata(
             transaction: StateTransaction,
-        ) -> tuple[int, TranscriptHeadRecord | None]:
+        ) -> Mapping[bytes, StoredRecord]:
             run_key = self._agent_run_key(run.agent_run_id)
             head_key = self._history.head_key(run.agent_run_id)
-            records = await transaction.get_records((run_key, head_key))
-            existing_run = records.get(run_key)
-            if existing_run is None:
-                return 0, None
+            return await transaction.get_records((run_key, head_key))
+
+        records = await self._store.read(capture_metadata)
+        existing_run = records.get(self._agent_run_key(run.agent_run_id))
+        before, head = 0, None
+        if existing_run is not None:
             if _decode_step(existing_run.data) != run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            head_record = records.get(head_key)
+            head_record = records.get(self._history.head_key(run.agent_run_id))
             if head_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head = self._history.decode_head(head_record)
-            return head.message_count, head
+            before = head.message_count
 
-        before, head = await self._store.read(capture_metadata)
         source_messages = tuple(checkpoint.messages)
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1591,7 +1625,7 @@ class StateStepArchive(AgentRunStore):
         return replace(
             checkpoint,
             transcript_message_count_before=before,
-        )
+        ), records
 
     async def prepare_checkpoints(
         self,
@@ -1785,25 +1819,26 @@ class StateStepArchive(AgentRunStore):
         checkpoints: Sequence[AgentRunCheckpoint],
         *,
         observed_message_count: int | None = None,
+        observed_records: Mapping[bytes, StoredRecord] | None = None,
     ) -> PreparedAgentRunCheckpointBatch:
         owner_id = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
             else run.agent_run_id
         )
-        async def capture_head(transaction: StateTransaction) -> TranscriptHeadRecord:
-            head_key = self._history.head_key(owner_id)
-            run_key = self._agent_run_key(run.agent_run_id)
-            records = await transaction.get_records((head_key, run_key))
-            head_record = records.get(head_key)
-            if head_record is not None:
-                return self._history.decode_head(head_record)
+        head_key = self._history.head_key(owner_id)
+        run_key = self._agent_run_key(run.agent_run_id)
+        records = observed_records
+        if records is None:
+            records = await self._store.read(lambda transaction: transaction.get_records((head_key, run_key)))
+        head_record = records.get(head_key)
+        if head_record is not None:
+            head = self._history.decode_head(head_record)
+        else:
             run_record = records.get(run_key)
             if run_record is not None and _decode_step(run_record.data) is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return self._history.empty_head(owner_id)
-
-        head = await self._store.read(capture_head)
+            head = self._history.empty_head(owner_id)
 
         if observed_message_count is not None:
             if observed_message_count < head.message_count:

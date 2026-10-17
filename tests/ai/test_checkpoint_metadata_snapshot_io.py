@@ -94,8 +94,9 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 @pytest.mark.parametrize("failure", ("different_run", "missing_head", "short_prefix", "changed_prefix"))
+@pytest.mark.parametrize("composed", (False, True))
 async def test_checkpoint_relocation_keeps_integrity_failures(
-    tmp_path: Path, backend: str, failure: str,
+    tmp_path: Path, backend: str, failure: str, composed: bool,
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
@@ -115,7 +116,10 @@ async def test_checkpoint_relocation_keeps_integrity_failures(
         else:
             checkpoint = replace(checkpoint, messages=[ModelRequest(parts=[UserPromptPart("different")])])
         with pytest.raises(AIError) as raised:
-            await archive.relocate_run_checkpoint(run, checkpoint)
+            if composed:
+                await archive.prepare_run_checkpoint(run, checkpoint)
+            else:
+                await archive.relocate_run_checkpoint(run, checkpoint)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         if failure == "missing_head":
             with pytest.raises(AIError) as raised:
@@ -127,8 +131,9 @@ async def test_checkpoint_relocation_keeps_integrity_failures(
 
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("composed", (False, True))
 async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_stale_append(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, composed: bool,
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
@@ -145,9 +150,13 @@ async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_s
 
         with monkeypatch.context() as patch:
             patch.setattr(archive.transcript_repository, "load_message_span", append_during_body_read)
-            relocated = await archive.relocate_run_checkpoint(run, _checkpoint(3))
-        assert relocated.transcript_message_count_before == 1
-        prepared, = (await archive.prepare_checkpoints(run, (relocated,))).checkpoints
+            if composed:
+                prepared, = (await archive.prepare_run_checkpoint(run, _checkpoint(3)))[1].checkpoints
+            else:
+                relocated = await archive.relocate_run_checkpoint(run, _checkpoint(3))
+        if not composed:
+            assert relocated.transcript_message_count_before == 1
+            prepared, = (await archive.prepare_checkpoints(run, (relocated,))).checkpoints
         assert prepared.chunks[0].first_message_index == 2
         await archive.materialize_checkpoint(run, _checkpoint(4))
         with pytest.raises(AIError) as raised:

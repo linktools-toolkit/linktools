@@ -468,8 +468,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         checkpoint: AgentRunCheckpoint,
         captured_interactions: Sequence[StagedModelInteraction] | None = None,
     ) -> tuple[PreparedAgentRunCheckpoint, tuple[ModelInteractionRecord, ...], int]:
-        checkpoint = await archive.relocate_run_checkpoint(run, checkpoint)
-        batch = await archive.prepare_checkpoints(run, (checkpoint,))
+        checkpoint, batch = await archive.prepare_run_checkpoint(run, checkpoint)
         prepared = batch.checkpoints[0]
         sequence, high_water = await archive.capture_checkpoint_progress(
             agent_run_id=run.agent_run_id, checkpoint=prepared,

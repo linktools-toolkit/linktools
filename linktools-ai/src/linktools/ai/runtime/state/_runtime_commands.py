@@ -1786,13 +1786,9 @@ class RuntimeStateCommands:
             and recovery_run is not None
             and recovery_agent_run_checkpoint is not None
         ):
-            recovery_agent_run_checkpoint = await self._recovery_run_store.relocate_run_checkpoint(
+            recovery_agent_run_checkpoint, prepared_recovery = await self._recovery_run_store.prepare_run_checkpoint(
                 recovery_run,
                 recovery_agent_run_checkpoint,
-            )
-            prepared_recovery = await self._recovery_run_store.prepare_checkpoints(
-                recovery_run,
-                (recovery_agent_run_checkpoint,),
             )
         prepared_execution: PreparedAgentRunCheckpointBatch | tuple[()] = ()
         if (
