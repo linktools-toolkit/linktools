@@ -21,7 +21,7 @@ from ._container import template as _template
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
-    from typing import Any
+    from typing import Any, Mapping
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .ext import Integrations
@@ -215,6 +215,30 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Register a BEFORE_START hook once per key (idempotent re-render)."""
         from .lifecycle.hooks import HookPhase
         self.hooks.register(HookPhase.BEFORE_START, hook, key=key, **kwargs)
+
+    def prepare_files(self, files: "Mapping[str, str]", *, revision: "str | None" = None,
+                      mode: int = 0o600, group: "int | None" = None) -> "Path":
+        """Freeze generated inputs and register their immutable tree for BEFORE_START."""
+        from types import MappingProxyType
+        from .artifacts import prepared_files_path
+        from .lifecycle.hooks import HookPhase
+
+        files = MappingProxyType(dict(files))
+        root = self.get_app_path("generated")
+        path = prepared_files_path(root, files, revision=revision, mode=mode, group=group)
+        identity = str(path if revision is None else prepared_files_path(root, files, mode=mode, group=group))
+        key = ("generated-config", str(path))
+        previous = self.hooks.get(HookPhase.BEFORE_START, key)
+        if previous is not None and previous.metadata.get("identity") != identity:
+            raise ContainerError("Prepared file revision conflicts with an existing declaration")
+
+        def write(context: "OperationContext") -> None:
+            context.write_files(self, files, revision=revision, mode=mode, group=group)
+
+        self.add_start_hook(key, write,
+                            name="prepare generated files", order=100, source="generated-config",
+                            metadata={"path": str(path), "files": sorted(files), "identity": identity})
+        return path
 
     def add_stop_hook(self, key: "tuple", hook: "Callable[[], Any]", **kwargs: "Any") -> None:
         """Register an AFTER_STOP hook once per key (idempotent re-render)."""

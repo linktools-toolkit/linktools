@@ -26,11 +26,10 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 def _record(manager, monkeypatch, fail=False):
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
-    from linktools.cntr.artifacts import prepare_files
     for name in ("nginx", "lldap", "authelia", "flare"):
         container = manager.containers[name]
         monkeypatch.setitem(container.__dict__, "config_path",
-                            prepare_files(container, {"config.yml": "routing fixture"}))
+                            container.prepare_files({"config.yml": "routing fixture"}))
     _ready_dependencies(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:

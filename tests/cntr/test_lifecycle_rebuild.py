@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from linktools.cntr import OperationContext
+from linktools.cntr import BaseContainer, OperationContext
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.artifacts import AppliedServiceModels
 from linktools.cntr.errors import ContainerError
@@ -42,6 +42,8 @@ class Index:
 
 
 class Owner:
+    prepare_files = BaseContainer.prepare_files
+
     def __init__(self, name, services, manager):
         self.name, self.services, self.manager = name, services, manager
         self.dependencies = ()

@@ -159,7 +159,7 @@ def test_authelia_prepares_new_password_without_overwriting_legacy(tmp_path, mon
     monkeypatch.setattr(container, "_create_secret_file", lambda path: None)
     monkeypatch.setattr(container, "_create_pem_file", lambda path: None)
     values = {}
-    monkeypatch.setattr(builtin("102-authelia"), "prepare_files", lambda owner, files:
+    monkeypatch.setattr(container, "prepare_files", lambda files:
                         values.update(files) or tmp_path / "candidate")
     context = SimpleNamespace(target_containers=[container], target_services=("authelia",))
     container.on_starting(context)
@@ -193,7 +193,7 @@ def test_lldap_prepares_without_modifying_persistent_inputs(tmp_path, monkeypatc
     monkeypatch.setattr(container, "render_template", lambda path: "rendered " + path.name)
     monkeypatch.setattr(container, "get_config", lambda key: "new-password")
     files = {}
-    monkeypatch.setattr(builtin("101-lldap"), "prepare_files", lambda owner, output:
+    monkeypatch.setattr(container, "prepare_files", lambda output:
                         files.update(output) or tmp_path / "candidate")
     context = SimpleNamespace()
     container.on_starting(context)

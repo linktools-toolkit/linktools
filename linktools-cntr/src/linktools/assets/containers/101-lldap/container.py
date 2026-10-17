@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.ext import Flare, load_port_url
 from linktools.core import ConfigRef, ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
@@ -73,7 +72,7 @@ class Container(BaseContainer):
 
     @cached_property
     def config_path(self) -> "Path":
-        return prepare_files(self, {
+        return self.prepare_files({
             "lldap_config.toml": self.render_template(self.get_source_path("templates", "lldap_config.toml")),
             "ldap_user_pass": str(self.get_config("LLDAP_ADMIN_PASSWORD")),
         })

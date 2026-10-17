@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from linktools.cntr.artifacts import prepare_files, prepared_hooks, stage_files
+from linktools.cntr.artifacts import prepared_hooks, stage_files
 from linktools.cntr.errors import ContainerError
 from test_prepared_files import context, owner
 
@@ -16,7 +16,7 @@ def test_pure_destination_preserves_existing_stage_hash(owner):
     files = {"nested/file": "value", "config": "secret"}
     payload = json.dumps([0o640, None, 0o755, sorted(files.items())], ensure_ascii=True, separators=(",", ":"))
     expected = owner.get_app_path("generated") / hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    declared = prepare_files(owner, files, mode=0o640)
+    declared = owner.prepare_files(files, mode=0o640)
     assert declared == expected
     assert not declared.exists()
     prepared_hooks(owner)[0].callback(context(owner))
@@ -27,7 +27,7 @@ def test_pure_destination_preserves_existing_stage_hash(owner):
 @pytest.mark.parametrize("name", ["", "../escape", "/absolute", "nested/../../escape", "a\\b"])
 def test_prepare_rejects_escaping_paths_before_registration(owner, name):
     with pytest.raises(ContainerError, match="within its tree"):
-        prepare_files(owner, {name: "secret"})
+        owner.prepare_files({name: "secret"})
     assert prepared_hooks(owner) == ()
     assert not owner.get_app_path("generated").exists()
 

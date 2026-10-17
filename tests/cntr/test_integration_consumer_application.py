@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr import OperationContext, ContainerError
-from linktools.cntr.artifacts import AppliedServiceModels, prepare_files, prepared_hooks
+from linktools.cntr.artifacts import AppliedServiceModels, prepared_hooks
 from test_lifecycle_rebuild import setup_case
 
 
@@ -27,7 +27,7 @@ def consumer_case(tmp_path, running=True, changed=True, historical=False):
         AppliedServiceModels(manager, deepcopy(manager.model)).record(("consumer",))
     if historical:
         manager.integration_snapshot["app"] = ()
-    owner.config_path = prepare_files(owner, {"config.yml": "new" if changed else "old"})
+    owner.config_path = owner.prepare_files({"config.yml": "new" if changed else "old"})
     owner.old_config_path = old_path
     manager.model["services"]["consumer"]["volumes"][0]["source"] = str(owner.config_path)
     owner.on_starting = lambda ctx: pytest.fail("collateral consumer initialization")
@@ -280,7 +280,7 @@ def test_partial_failure_does_not_roll_back_successful_service_without_shared_in
         "type": "bind", "source": str(old_path), "target": "/generated", "read_only": True}]
     AppliedServiceModels(manager, deepcopy(manager.model)).record(("auth", "admin"))
     before = AppliedServiceModels(manager, manager.model).previous["admin"]
-    new_path = prepare_files(owner, {"config.yml": "new"})
+    new_path = owner.prepare_files({"config.yml": "new"})
     manager.model["services"]["auth"]["volumes"][0]["source"] = str(new_path)
     manager.compose_runner.fail = "admin"
     with pytest.raises(ContainerError, match="apply failed admin"):
@@ -393,7 +393,7 @@ def test_running_sidecar_without_generated_mount_does_not_write_or_start_its_own
         ("authelia", {name: {"image": name + ":new"} for name in ("authelia", "authelia-admin", "authelia-redis")}),
     ], running=("authelia-redis",))
     owner = manager.containers["authelia"]
-    owner.config_path = prepare_files(owner, {"config.yml": "new"})
+    owner.config_path = owner.prepare_files({"config.yml": "new"})
     for name in ("authelia", "authelia-admin"):
         manager.model["services"][name]["volumes"] = [{
             "type": "bind", "source": str(owner.config_path), "target": "/generated", "read_only": True}]
@@ -448,7 +448,7 @@ def test_repeated_generated_updates_keep_declared_image_and_build_in_saved_model
         if paths:
             for hook in prepared_hooks(owner):
                 owner.hooks.unregister(HookPhase.BEFORE_START, hook.key)
-            owner.config_path = prepare_files(owner, {"config.yml": content})
+            owner.config_path = owner.prepare_files({"config.yml": content})
             manager.model["services"]["consumer"]["volumes"][0]["source"] = str(owner.config_path)
         manager.events.clear()
         manager.compose_operations.up(["app"], pull=True)

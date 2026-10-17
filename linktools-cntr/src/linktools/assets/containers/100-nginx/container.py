@@ -13,7 +13,6 @@ from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined,
 
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import ContainerTemplateError
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
@@ -539,4 +538,4 @@ class Container(BaseContainer):
         root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
-        return prepare_files(self, result)
+        return self.prepare_files(result)
