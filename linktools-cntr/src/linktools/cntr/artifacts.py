@@ -389,10 +389,7 @@ def _indexed_sources(manager: "ContainerManager") -> "dict[str, tuple[str, str, 
     return sources
 
 
-def validate_consumer_config(context: "OperationContext", model: dict,
-                             models: "AppliedServiceModels", services: "Iterable[str]") -> "tuple[str, ...]":
-    """Permit only exact, declared generated-tree source updates for extra consumers."""
-    from copy import deepcopy
+def _declared_sources(context: "OperationContext") -> "dict[str, set[tuple[str, str]]]":
     from pathlib import Path
 
     declared = {}
@@ -403,7 +400,13 @@ def validate_consumer_config(context: "OperationContext", model: dict,
             for name in hook.metadata.get("files", ()):
                 path = root / name
                 declared.setdefault(str(path), set()).add((container.name, path.relative_to(root).as_posix()))
-    indexed = _indexed_sources(models.manager)
+    return declared
+
+
+def consumer_config_changes(context: "OperationContext", model: dict,
+                            models: "AppliedServiceModels", services: "Iterable[str]") -> "tuple[str, ...]":
+    """Select generated-source changes before inspecting unrelated consumer build inputs."""
+    declared = _declared_sources(context)
     changed = []
     for service in dict.fromkeys(services):
         if service not in model["services"]:
@@ -419,11 +422,27 @@ def validate_consumer_config(context: "OperationContext", model: dict,
         if previous is None or service not in previous["services"]:
             raise ContainerError("No applied Compose model for configuration consumer {}; "
                                  "explicitly select its container".format(service))
-        old = previous["services"][service]
-        old_mounts = old.get("volumes", ())
+        old_mounts = previous["services"][service].get("volumes", ())
         if all(position < len(old_mounts) and isinstance(old_mounts[position], dict) and
                old_mounts[position].get("source") == mount["source"] for position, mount in generated):
             continue
+        changed.append(service)
+    return tuple(changed)
+
+
+def validate_consumer_config(context: "OperationContext", model: dict,
+                             models: "AppliedServiceModels", services: "Iterable[str]") -> "tuple[str, ...]":
+    """Permit only exact, declared generated-tree source updates for extra consumers."""
+    from copy import deepcopy
+
+    declared = _declared_sources(context)
+    indexed = _indexed_sources(models.manager)
+    changed = []
+    for service in consumer_config_changes(context, model, models, services):
+        current = model["services"][service]
+        previous = models.previous_model(service)
+        old = previous["services"][service]
+        old_mounts = old.get("volumes", ())
         candidate = deepcopy(current)
         new_mounts = candidate.get("volumes", ())
         updated = False

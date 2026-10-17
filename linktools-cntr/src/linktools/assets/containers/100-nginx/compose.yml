@@ -1,8 +1,6 @@
 services:
   nginx:
-    image: '{{ container.get_service_name("nginx") }}'
     build:
-      context: '{{ container.get_docker_context_path() }}'
       args:
         NGINX_TAG: '{{ NGINX_TAG }}'
 #     {% if NGINX_HTTPS_ENABLE %}
@@ -13,7 +11,6 @@ services:
         ACME_ACCOUNT_EMAIL: {{ config.get('ACME_ACCOUNT_EMAIL') | tojson }}
         ACME_DNS_CREDENTIALS_DIGEST: '{{ utils.get_hash(container.acme_dns_environment, "sha256") }}'
 #     {% endif %}
-      dockerfile: '{{ container.get_docker_file_destination() }}'
 #   {% if NGINX_HTTPS_ENABLE %}
       secrets:
         - cntr_acme_account
@@ -22,7 +19,6 @@ services:
     volumes:
       - '{{ container.config_path }}:/etc/nginx/managed:ro'
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
-      - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
 #   {% if NGINX_HTTPS_ENABLE %}
       - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
 #   {% endif %}

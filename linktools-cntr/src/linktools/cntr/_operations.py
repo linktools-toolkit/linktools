@@ -227,7 +227,8 @@ class ComposeOperations:
 
     def _start(self, names, pull, report, restart):
         import os
-        from .artifacts import (AppliedServiceModels, collect_candidates,
+        from copy import copy
+        from .artifacts import (AppliedServiceModels, collect_candidates, consumer_config_changes,
                                 validate_consumer_config, prune_prepared_files)
 
         manager = self.manager
@@ -274,13 +275,17 @@ class ComposeOperations:
             raise ContainerError("Lifecycle callbacks cannot change the resolved operation targets")
         extra_services = tuple(service for consumer in consumers
                                for service in consumer.services if service in initial)
-        candidate = runner.final_model(context) if extra_services else None
+        if extra_services:
+            candidate_context = copy(context)
+            candidate_context.target_services = selection.services + extra_services
+            candidate = runner.final_model(candidate_context)
+            candidate_store = AppliedServiceModels(manager, candidate, retained_services=initial)
+            extra_services = consumer_config_changes(context, candidate, candidate_store, extra_services)
         if extra_services:
             candidate = manager.image_preparer.with_build_revisions(candidate, selection.project_containers, extra_services)
-            authors = service_owners(selection.project_containers)
-            candidate_store = AppliedServiceModels(manager, candidate, retained_services=initial)
             extra_services = validate_consumer_config(context, candidate, candidate_store, extra_services)
         if extra_services:
+            authors = service_owners(selection.project_containers)
             prepared_owners = set(selection.target_containers) | set(consumers)
             shared = {owner.name for service in extra_services for owner in authors[service]
                       if owner not in prepared_owners}
@@ -625,7 +630,6 @@ class ComposeOperations:
                 raise
         # Configuration-only containers have no Docker instance to observe.
         # Record their application only after publication and lifecycle callbacks succeed.
-        from copy import copy
         applied = copy(context)
         applied.target_containers = [container for container in selection.target_containers
                                      if not container.services]

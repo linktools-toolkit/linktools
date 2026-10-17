@@ -159,6 +159,88 @@ def test_pending_consumer_changes_require_explicit_selection_only_for_generated_
     assert AppliedServiceModels(manager, manager.model).previous["consumer"] == before
 
 
+@pytest.mark.parametrize("action", ["up", "restart"])
+def test_unchanged_consumer_does_not_inspect_pending_build_inputs(tmp_path, action):
+    from linktools.cntr.runtime.images import ImagePreparer
+
+    manager = consumer_case(tmp_path, changed=False)
+    manager.model["services"]["consumer"]["build"] = {"context": str(tmp_path / "missing-build")}
+    manager.image_preparer.with_build_revisions = ImagePreparer(manager).with_build_revisions
+    getattr(manager.compose_operations, action)(["app"])
+    assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
+    assert ("check-callback", "consumer") not in manager.events
+    assert ("after-callback", "consumer") not in manager.events
+
+
+@pytest.mark.parametrize("build_changed", [False, True])
+def test_changed_consumer_still_validates_automatic_build_identity(tmp_path, build_changed):
+    from linktools.cntr.runtime.images import ImagePreparer
+
+    manager = consumer_case(tmp_path)
+    prepare = ImagePreparer(manager).with_build_revisions
+    manager.image_preparer.with_build_revisions = prepare
+    owner = manager.containers["consumer"]
+    spec = manager.model["services"]["consumer"]
+    spec["build"] = {"context": str(tmp_path), "dockerfile_inline": "FROM scratch"}
+    previous = AppliedServiceModels(manager, manager.model).previous_model("consumer")
+    previous["services"]["consumer"]["build"] = dict(spec["build"])
+    previous = prepare(previous, (owner,), ("consumer",))
+    AppliedServiceModels(manager, previous).record(("consumer",))
+    if build_changed:
+        spec["build"]["dockerfile_inline"] = "FROM alpine"
+        with pytest.raises(ContainerError, match="outside.*explicitly select"):
+            manager.compose_operations.up(["app"])
+        assert_no_application(manager)
+    else:
+        manager.compose_operations.up(["app"])
+        assert {event[1] for event in manager.events if event[0] == "apply"} == {"app", "consumer"}
+        assert [event[1] for event in manager.events if event[0] == "images"] == [("app",)]
+        saved = AppliedServiceModels(manager, manager.model).previous_model("consumer")
+        assert saved["services"]["consumer"]["build"] == previous["services"]["consumer"]["build"]
+
+
+@pytest.mark.parametrize("action", ["up", "restart"])
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("changed", [False, True])
+def test_running_profiled_consumer_is_resolved_before_config_comparison(tmp_path, action, running, changed):
+    from contextlib import nullcontext
+    from linktools.cntr.runtime.compose import ComposeRunner
+    from linktools.cntr.runtime.images import ImagePreparer
+
+    manager = consumer_case(tmp_path, running=running, changed=changed)
+    manager.containers["consumer"].services["consumer"]["profiles"] = ["optional"]
+    manager.model["services"]["consumer"]["profiles"] = ["optional"]
+    if running:
+        previous = AppliedServiceModels(manager, manager.model).previous_model("consumer")
+        previous["services"]["consumer"]["profiles"] = ["optional"]
+        AppliedServiceModels(manager, previous).record(("consumer",))
+    manager.runtime = SimpleNamespace(create_docker_process=lambda *args, **kwargs: args)
+    native = ComposeRunner(manager)
+    native._saved_compose_args = lambda *args: nullcontext(["compose"])
+    scopes = []
+
+    def resolve(args):
+        scope = args[args.index("json") + 1:]
+        scopes.append(scope)
+        model = deepcopy(manager.model)
+        if "--no-interpolate" not in scope and "consumer" not in scope:
+            model["services"].pop("consumer")
+        return model
+
+    native._resolved_model = resolve
+    manager.compose_runner.final_model = native.final_model
+    manager.image_preparer.with_build_revisions = ImagePreparer(manager).with_build_revisions
+    getattr(manager.compose_operations, action)(["app"], pull=True)
+    assert scopes[0] == ("app",)
+    assert any("consumer" in scope for scope in scopes) is running
+    assert {event[1] for event in manager.events if event[0] == "apply"} == (
+        {"app", "consumer"} if running and changed else {"app"})
+    assert [event[1] for event in manager.events if event[0] == "images"] == [("app",)]
+    assert all("consumer" not in event[1] for event in manager.events if event[0] == "stop")
+    assert (("check-callback", "consumer") in manager.events) is (running and changed)
+    assert (("after-callback", "consumer") in manager.events) is (running and changed)
+
+
 def test_changed_consumer_keeps_dependency_order_for_validation_and_notifications(tmp_path):
     manager = consumer_case(tmp_path)
     manager.model["services"]["app"]["depends_on"] = {"consumer": {"condition": "service_started"}}

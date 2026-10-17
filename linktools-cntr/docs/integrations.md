@@ -688,9 +688,10 @@ attachment. The tool does not automatically tear down shared networks.
 for an explicitly selected container. A different running service selected only
 for configuration reconciliation follows its own Compose service dependencies,
 without automatically starting the other dependencies of its owning container.
-An enabled nginx site also needs its installed nginx runtime provider when the
-producer is explicitly selected. Flare navigation is optional and never creates
-a startup dependency. Explicitly selecting Flare still starts it.
+Runtime requirements follow declared container dependencies and native Compose
+service edges; an nginx site declaration adds no global provider gate. Flare
+navigation is optional and creates no startup dependency. Explicitly selecting
+Flare still starts it.
 
 ## Operation lifecycle
 

@@ -172,6 +172,38 @@ def test_builtin_nginx_build_uses_native_arguments(fresh_manager, https):
 
 
 
+@pytest.mark.parametrize("https", [False, True])
+def test_nginx_native_defaults_match_explicit_build_fields(fresh_manager, monkeypatch, https):
+    import yaml
+    container = fresh_manager.containers["nginx"]
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", https)
+    fresh_manager.config.set("ACME_DNS_API", "dns_cf")
+    container.__dict__["sites"] = {}
+    implicit = container.docker_compose
+    original_render = container.render_template
+
+    def explicit_render(source, *args, **kwargs):
+        text = original_render(source, *args, **kwargs)
+        if Path(source).name == "compose.yml":
+            model = yaml.safe_load(text)
+            spec = model["services"]["nginx"]
+            spec["image"] = container.get_service_name("nginx")
+            spec["build"]["context"] = str(container.get_docker_context_path())
+            spec["build"]["dockerfile"] = str(container.get_docker_file_destination())
+            return yaml.safe_dump(model)
+        return text
+
+    monkeypatch.setattr(container, "render_template", explicit_render)
+    container.__dict__.pop("docker_compose", None)
+    explicit = container.docker_compose
+    assert implicit == explicit
+    prep = fresh_manager.image_preparer
+    assert prep.with_build_revisions(implicit, [container], ["nginx"]) == (
+        prep.with_build_revisions(explicit, [container], ["nginx"]))
+    assert not any("/root/.acme.sh" in mount for mount in implicit["services"]["nginx"]["volumes"])
+
+
 def test_dns_credential_digest_tracks_only_dns_payload(fresh_manager, monkeypatch):
     from linktools.cntr.runtime.images import ImagePreparer, LocalImage
     container = fresh_manager.containers["nginx"]
@@ -241,11 +273,8 @@ def test_http_build_does_not_resolve_dns_credentials(fresh_manager, monkeypatch)
     assert "ACME_DNS_CREDENTIALS_DIGEST" not in container.docker_file
 
 
-@pytest.mark.parametrize("script,delimiter", [
-    ("nginx-certificates", "NGINX_CERTIFICATES_SCRIPT"),
-    ("nginx-acme", "NGINX_ACME_SCRIPT"),
-])
-def test_builtin_script_changes_rebuild_same_nginx_image(fresh_manager, tmp_path, monkeypatch, script, delimiter):
+@pytest.mark.parametrize("script", ["nginx-certificates", "nginx-acme"])
+def test_builtin_script_changes_require_explicit_build(fresh_manager, tmp_path, monkeypatch, script):
     from linktools.cntr.runtime.images import ImagePreparer, LocalImage
     container = fresh_manager.containers["nginx"]
     fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
@@ -260,11 +289,7 @@ def test_builtin_script_changes_rebuild_same_nginx_image(fresh_manager, tmp_path
     spec = original["services"]["nginx"]
     revision = spec["build"]["labels"][ImagePreparer.BUILD_LABEL]
     content = (source / script).read_text()
-    assert "{{" not in content and "{%" not in content
-    assert delimiter not in content.splitlines()
-    header = "COPY <<'%s' /usr/local/bin/%s\n" % (delimiter, script)
-    embedded = container.docker_file.split(header, 1)[1].split("\n" + delimiter, 1)[0] + "\n"
-    assert embedded == content
+    assert "COPY nginx-certificates nginx-acme /usr/local/bin/" in container.docker_file
     assert "chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-acme" in container.docker_file
     prep.inspect_images = lambda images: {image: LocalImage("sha256:old", revision) for image in images}
     assert prep.plan(original).build == ()
@@ -273,8 +298,9 @@ def test_builtin_script_changes_rebuild_same_nginx_image(fresh_manager, tmp_path
     changed = prep.with_build_revisions(container.docker_compose, [container], ["nginx"])
     assert changed["services"]["nginx"]["image"] == spec["image"]
     assert changed["services"]["nginx"]["build"]["args"] == spec["build"]["args"]
-    assert changed["services"]["nginx"]["build"]["labels"][ImagePreparer.BUILD_LABEL] != revision
-    assert prep.plan(changed).build == ("nginx",)
+    assert changed["services"]["nginx"]["build"]["labels"][ImagePreparer.BUILD_LABEL] == revision
+    assert prep.plan(changed).build == ()
+    assert prep.plan(changed, force_pull=True).build == ("nginx",)
 
 
 def test_offline_install_preserves_baked_cert_and_account(certificate_case):

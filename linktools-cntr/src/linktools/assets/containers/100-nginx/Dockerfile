@@ -10,12 +10,7 @@ RUN curl -fsSL https://github.com/acmesh-official/acme.sh/archive/master.tar.gz 
     sh acme.sh --install --home /opt/acme --config-home /root/.acme.sh --nocron --noprofile && \
     test -x /opt/acme/acme.sh && \
     cd / && rm -rf /tmp/acme.sh-master /tmp/acme.tar.gz
-COPY <<'NGINX_CERTIFICATES_SCRIPT' /usr/local/bin/nginx-certificates
-{% include 'nginx-certificates' %}
-NGINX_CERTIFICATES_SCRIPT
-COPY <<'NGINX_ACME_SCRIPT' /usr/local/bin/nginx-acme
-{% include 'nginx-acme' %}
-NGINX_ACME_SCRIPT
+COPY nginx-certificates nginx-acme /usr/local/bin/
 RUN printf '%s\n' {% for api in container.dnsapi.values() %}{% for key in api.get("env", {}) %}{{ container.shell_quote(key) }} {% endfor %}{% endfor %}| sort -u > /opt/acme/dns-keys
 RUN chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-acme && \
     ln -s /opt/acme/acme.sh /usr/bin/acme.sh

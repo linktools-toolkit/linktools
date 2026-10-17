@@ -42,10 +42,9 @@ class LifecycleDispatcher:
             self._invoke_callback(container.on_prepare)
 
     @classmethod
-    def _preparation_steps(cls, containers, prepare=True):
-        if prepare:
-            for container in containers:
-                yield LifecycleStep(container, callback="on_starting")
+    def _preparation_steps(cls, containers):
+        for container in containers:
+            yield LifecycleStep(container, callback="on_starting")
         for container in containers:
             yield LifecycleStep(container, HookPhase.BEFORE_START)
         yield LifecycleStep(phase=HookPhase.BEFORE_START)

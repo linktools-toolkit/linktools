@@ -212,6 +212,9 @@ Dockerfile/inline content. An unreadable local Dockerfile fails preparation; pen
 generated Dockerfiles need not already exist on disk. Remote contexts use their
 URL and visible build data without network access. This is an input fingerprint, not a recursive
 hash of arbitrary context files or a remote branch freshness check.
+Changes that should automatically rebuild an image must be expressed through
+`build.args` or another declared input included in this fingerprint. COPY sources
+are not implicitly scanned or injected into templates to manufacture dependencies.
 
 For a local `SourceContainer` snapshot, its resolved versioned context identifies
 the immutable archive, including native Dockerfiles in that archive. A missing
@@ -323,10 +326,10 @@ Older revision directories and unrecognized flat layouts are not imported or
 deleted. Back up old container-local certificate and account data before upgrading;
 restoring that data is a manual operation. A host `nginx/acme` account remains a
 build input when the active generation has no account state. The builtin certificate
-and ACME scripts are embedded with native COPY heredocs in the rendered Dockerfile,
-so edits to either script change the build fingerprint. Changes to arbitrary
-COPY sources are not a recursive build fingerprint input; use an explicit image
-refresh when only those sources change. Docker retains its native layer caching.
+and ACME scripts use ordinary Dockerfile COPY instructions. Changes to these scripts
+or other COPY sources do not trigger framework automatic builds; request an explicit
+image refresh (`up --pull`) when only those sources change. Docker retains its native
+layer caching.
 
 The existing certificate script owns all TLS pointer changes and renewal reloads,
 under the shared certificate lock. Renewal verifies the served certificate and

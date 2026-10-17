@@ -111,6 +111,8 @@ def test_plan_restart_includes_stop_and_up(fresh_manager):
     assert plan.commands[0].phase == "stop"
     assert all(c.phase == "up" for c in plan.commands[1:])
     assert plan.commands[0].args[-2:] == ("stop", "portainer")
+    assert any("related running consumers may apply changed generated mounts" in warning
+               for warning in plan.warnings)
 
 
 def test_plan_down_includes_down_command(fresh_manager):
