@@ -243,14 +243,27 @@ async def _capture_timeline_state(
     limit: int,
     refresh_phase: Literal["initial", "final"] | None = None,
     transcript_store: SessionTimelineTranscriptStore | None = None,
+    validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None] | None = None,
 ) -> SessionTimelineCapture:
+    shared_native_scope = (
+        type(conversation.sessions) is SessionRepositoryImpl
+        and type(executions) is ExecutionRepositoryImpl
+        and conversation.sessions.state_store.storage_group
+        is executions.state_store.storage_group
+    )
+
     async def read_blocks() -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
         root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
         if root is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if refresh_phase == "initial" and root.active_execution_id is not None:
-            # Admission coordination must leave this scope before validation or I/O.
-            raise _ActiveSessionAdmission(root)
+            if not shared_native_scope or validate_active is None:
+                raise _ActiveSessionAdmission(root)
+            active = await executions.get(root.active_execution_id, tenant_id=tenant_id)
+            if validate_active(root, active) is None:
+                # Terminal admission cleanup precedes page validation and must
+                # leave the snapshot before attempting any mutation.
+                raise _ActiveSessionAdmission(root)
         if refresh_phase is not None and transcript_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         page_limit = validate_page_limit(limit)
@@ -331,13 +344,15 @@ async def capture_session_refresh(
     limit: int,
     reconcile: Callable[[SessionRecord], Awaitable[SessionRecord]],
     transcript_store: SessionTimelineTranscriptStore | None,
+    validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None],
 ) -> SessionTimelineCapture:
-    """Capture authorized metadata, reconciling admission once outside read scopes."""
+    """Capture authorized metadata, reconciling terminal admission outside read scopes."""
     try:
         return await _capture_timeline_state(
             conversation, executions, session_id, tenant_id=tenant_id,
             cursor=cursor, cursor_signer=cursor_signer, limit=limit,
             refresh_phase="initial", transcript_store=transcript_store,
+            validate_active=validate_active,
         )
     except _ActiveSessionAdmission as admission:
         await reconcile(admission.record)

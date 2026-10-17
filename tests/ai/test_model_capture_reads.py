@@ -496,7 +496,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
         await _seed(state)
         repository = state.execution.executions
         archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
-        get, get_run, rows = repository.get, archive.get_agent_run, archive.list_model_interactions
+        get, rows = repository.get, archive.read_model_interactions_with_run
         scopes = []
         authorized = False
         class Authorization:
@@ -508,9 +508,6 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
             if authorized:
                 scopes.append(active_state_scope())
             return await get(*args, **kwargs)
-        async def tracked_run(*args, **kwargs):
-            scopes.append(active_state_scope())
-            return await get_run(*args, **kwargs)
         async def tracked_rows(*args, **kwargs):
             scopes.append(active_state_scope())
             return await rows(*args, **kwargs)
@@ -519,8 +516,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
         def unexpected_object(*args, **kwargs):
             raise AssertionError("metadata rows must not open object bodies")
         monkeypatch.setattr(repository, "get", tracked_get)
-        monkeypatch.setattr(archive, "get_agent_run", tracked_run)
-        monkeypatch.setattr(archive, "list_model_interactions", tracked_rows)
+        monkeypatch.setattr(archive, "read_model_interactions_with_run", tracked_rows)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
         monkeypatch.setattr(state.object_store(RuntimeDomain.EXECUTION), "open", unexpected_object)
         values = await _metadata(_service(state, authorization=Authorization()))
@@ -680,15 +676,20 @@ async def test_metadata_preserves_independent_owner_reads(
         monkeypatch.setattr(other.execution.executions, "get_header", unexpected_header)
         archive = other.run_store.read_store(RuntimeDomain.EXECUTION)
         get_run, rows = archive.get_agent_run, archive.list_model_interactions
+        combined = archive.read_model_interactions_with_run
         async def checked_run(*args, **kwargs):
             assert active_state_scope() is None
             return await get_run(*args, **kwargs)
         async def checked_rows(*args, **kwargs):
             assert active_state_scope() is None
             return await rows(*args, **kwargs)
+        async def checked_combined(*args, **kwargs):
+            assert active_state_scope() is None
+            return await combined(*args, **kwargs)
         class Archive:
             get_agent_run = staticmethod(checked_run)
             list_model_interactions = staticmethod(checked_rows)
+        monkeypatch.setattr(archive, "read_model_interactions_with_run", checked_combined)
         monkeypatch.setattr(archive, "get_agent_run", checked_run)
         monkeypatch.setattr(archive, "list_model_interactions", checked_rows)
         reader = _reader(
@@ -713,14 +714,14 @@ async def test_metadata_cancellation_releases_shared_read_scope(
     try:
         await _seed(state)
         archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
-        rows = archive.list_model_interactions
+        rows = archive.read_model_interactions_with_run
         entered, blocked = asyncio.Event(), asyncio.Event()
         async def blocked_rows(*args, **kwargs):
             assert active_state_scope() is not None
             entered.set()
             await blocked.wait()
             return await rows(*args, **kwargs)
-        monkeypatch.setattr(archive, "list_model_interactions", blocked_rows)
+        monkeypatch.setattr(archive, "read_model_interactions_with_run", blocked_rows)
         service = _service(state)
         pending = asyncio.create_task(_metadata(service))
         await asyncio.wait_for(entered.wait(), timeout=5)
@@ -728,7 +729,7 @@ async def test_metadata_cancellation_releases_shared_read_scope(
         with pytest.raises(asyncio.CancelledError):
             await pending
         assert active_state_scope() is None
-        monkeypatch.setattr(archive, "list_model_interactions", rows)
+        monkeypatch.setattr(archive, "read_model_interactions_with_run", rows)
         values = await _metadata(service)
         assert [value.model_request_seq for value in values] == [1]
     finally:
@@ -779,6 +780,7 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
         monkeypatch.setattr(repository, "get", get_after_auth)
         archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
         monkeypatch.setattr(archive, "get_agent_run", unexpected)
+        monkeypatch.setattr(archive, "read_model_interactions_with_run", unexpected)
         reader = _reader(state, executions=MissingReaderRepository() if phase == "reader_missing" else repository)
         with pytest.raises(AIError) as raised:
             if entrypoint == "service":
@@ -791,5 +793,120 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
                 )
         assert raised.value.code is expected
         assert active_state_scope() is None
+    finally:
+        await state.close()
+
+
+async def test_metadata_batches_run_and_interaction_records_without_skipping_high_water(tmp_path: Path) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "metadata-batch.db")
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        run = await _seed(state)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        engine = archive.state_store.storage_group.context.engine.sync_engine
+        statements = []
+        def capture(_connection, _cursor, statement, _parameters, _context, _many):
+            statements.append(statement.lstrip().upper())
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            async def separate(transaction):
+                del transaction
+                return (await archive.get_agent_run(agent_run_id=run.agent_run_id),
+                        await archive.list_model_interactions(agent_run_id=run.agent_run_id, limit=1))
+            separate_page = await archive.state_store.read(separate)
+            separate_selects = sum(sql.startswith("SELECT") for sql in statements)
+            statements.clear()
+            combined_page = await archive.read_model_interactions_with_run(agent_run_id=run.agent_run_id, limit=1)
+            combined_selects = sum(sql.startswith("SELECT") for sql in statements)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        assert combined_page == separate_page
+        empty_run, empty_page = await archive.read_model_interactions_with_run(
+            agent_run_id=run.agent_run_id, after_model_request_seq=1, limit=1,
+        )
+        assert empty_run == run and empty_page == []
+        assert combined_selects < separate_selects
+        print("run/page SELECT separate, batched:", separate_selects, combined_selects)
+        # A row beyond the durable sequence boundary must not become visible.
+        await archive.state_store.mutate(lambda transaction: transaction.delete_sequence(archive._sequence(run.agent_run_id, "interaction")))
+        with pytest.raises(AIError) as raised:
+            await _metadata(_service(state))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("missing", ("run", "interaction"))
+async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backend: str, missing: str) -> None:
+    state = _storage(backend, tmp_path)
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        run = await _seed(state)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        key = archive._agent_run_key(run.agent_run_id) if missing == "run" else archive._interaction_key(run.agent_run_id, 1)
+        await archive.state_store.mutate(lambda transaction: transaction.delete_record(key))
+        with pytest.raises(AIError) as raised:
+            await _metadata(_service(state))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+async def test_metadata_batch_reads_legacy_fact_with_same_ownership_validation(tmp_path: Path) -> None:
+    from .test_model_interaction_lifecycle_paging import _terminal
+    from linktools.ai.runtime.state._step_archive import _encode_step, _step_subject
+    from linktools.ai.runtime.state._store import StoredFact
+
+    state = RuntimeStorage.sqlite(tmp_path / "legacy-metadata.db")
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        run = await _seed(state)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        value, = await archive.list_model_interactions(agent_run_id=run.agent_run_id)
+        terminal = _terminal(value)
+        fact = StoredFact(
+            archive._stream(run.agent_run_id, "interaction"), 1,
+            archive._agent_run_key(run.agent_run_id), "model_interaction",
+            _step_subject(terminal), terminal.status, _encode_step(terminal),
+        )
+        async def seed(transaction):
+            owner = await transaction.get_record(fact.owner_key_digest)
+            assert owner is not None
+            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.delete_record(archive._interaction_key(run.agent_run_id, 1))
+            await transaction.insert_fact(fact)
+        await archive.state_store.mutate(seed)
+        page = await _metadata(_service(state))
+        assert [(item.model_request_seq, item.status) for item in page] == [(1, "CANCELLED")]
+    finally:
+        await state.close()
+
+
+async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
+    from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
+
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        await _seed(state)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        calls = []
+        class CustomArchive(ModelInteractionStateStepArchive):
+            async def get_agent_run(self, *, agent_run_id):
+                calls.append("run")
+                return await super().get_agent_run(agent_run_id=agent_run_id)
+            async def list_model_interactions(self, **kwargs):
+                calls.append("interactions")
+                return await super().list_model_interactions(**kwargs)
+            async def read_model_interactions_with_run(self, **kwargs):
+                raise AssertionError("custom archive must retain its independent operations")
+        custom = CustomArchive(
+            archive.state_store, object_store=None, namespace=_NAMESPACE,
+            tenant_id="tenant", runtime_domain=RuntimeDomain.EXECUTION,
+        )
+        page = await _metadata(_service(state, reader=_reader(state, store=custom)))
+        assert [item.model_request_seq for item in page] == [1]
+        assert calls == ["run", "interactions"]
     finally:
         await state.close()

@@ -148,7 +148,7 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
             owner = facts[0].owner_key_digest
             record = await transaction.get_record(owner)
             assert record is not None
-            assert await transaction.guard_record(owner, expected_storage_version=record.storage_version) is not None
+            assert await transaction.guard_record(owner, expected_storage_revision=record.storage_revision) is not None
             if corruption == "missing_tail":
                 await transaction.delete_fact_streams(owner)
                 await transaction.insert_fact(facts[0])
@@ -468,7 +468,7 @@ async def test_batched_history_range_validates_descriptor_and_head(
             stored = await transaction.get_record(key)
             assert stored is not None
             if corruption in {"descriptor", "head"}:
-                assert await transaction.delete_record(key, expected_storage_version=stored.storage_version)
+                assert await transaction.delete_record(key, expected_storage_revision=stored.storage_revision)
             else:
                 head = repository.decode_head(stored)
                 head = (
@@ -477,8 +477,8 @@ async def test_batched_history_range_validates_descriptor_and_head(
                 )
                 changed = histories._stored("transcript_head", history_id, head)
                 assert await transaction.replace_record(
-                    replace(stored, data=changed.data, storage_version=stored.storage_version + 1),
-                    expected_storage_version=stored.storage_version,
+                    replace(stored, data=changed.data, storage_revision=stored.storage_revision + 1),
+                    expected_storage_revision=stored.storage_revision,
                 )
 
         if corruption != "tenant":
@@ -511,8 +511,8 @@ async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> No
             stored = await transaction.get_record(key)
             assert stored is not None
             assert await transaction.replace_record(
-                replace(stored, data={"invalid_hint": True}, storage_version=stored.storage_version + 1),
-                expected_storage_version=stored.storage_version,
+                replace(stored, data={"invalid_hint": True}, storage_revision=stored.storage_revision + 1),
+                expected_storage_revision=stored.storage_revision,
             )
 
         await repository._store.mutate(corrupt_hint)
@@ -560,7 +560,7 @@ async def test_history_batch_preserves_head_decode_error_priority() -> None:
             stored = await transaction.get_record(histories._key("transcript_head", session.history_id))
             assert stored is not None
             assert await transaction.delete_record(
-                stored.key_digest, expected_storage_version=stored.storage_version,
+                stored.key_digest, expected_storage_revision=stored.storage_revision,
             )
             await transaction.insert_record(replace(
                 stored, kind="other-kind", data={**stored.data, "v": 999},

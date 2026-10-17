@@ -4,6 +4,7 @@
 
 import asyncio
 import inspect
+import math
 import secrets
 from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -93,11 +94,8 @@ from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
-from ._metrics import (
-    MetricFlushResult,
-    MetricBufferStatus,
-    _disabled_metric_status,
-)
+from ..observe import MetricRecorderStatus, MetricFlushResult
+from ._metrics import _disabled_metric_status
 from .service_api import (
     ExecutionView,
     ApprovalService,
@@ -230,7 +228,7 @@ class _TaskNodeRuntimePort(Protocol):
 
 
 class _MetricControl(Protocol):
-    def status(self) -> MetricBufferStatus: ...
+    def status(self) -> MetricRecorderStatus: ...
 
     async def flush(
         self,
@@ -532,7 +530,7 @@ class Runtime(Generic[AppT]):
     def correlation(self) -> CorrelationData:
         return self._context.correlation
 
-    def _metric_status(self) -> MetricBufferStatus:
+    def _metric_status(self) -> MetricRecorderStatus:
         control = self._metric_control
         return _disabled_metric_status() if control is None else control.status()
 
@@ -545,6 +543,7 @@ class Runtime(Generic[AppT]):
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
             or timeout_seconds < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)

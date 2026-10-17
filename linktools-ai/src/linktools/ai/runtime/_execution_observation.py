@@ -15,7 +15,9 @@ from ._observation import (
     _await_stream_cleanup, _drain_stream_tasks, _is_observation_cleanup,
     _report_observation_error,
 )
+from ._shared_stream import SharedStreamEvent
 from ._watch_cursor import (
+    get_preview_positions, ExecutionWatchPositions,
     decode_execution_observation_cursor, encode_execution_observation_cursor,
     encode_execution_watch_cursor,
 )
@@ -38,20 +40,27 @@ class _ExecutionModelObservation:
         self.watch_tree = watch_tree
         self.include_content = include_content
         self.finalizing = finalizing
-        self.sequences = dict({} if cursor is None else decode_execution_observation_cursor(
+        positions = {} if cursor is None else decode_execution_observation_cursor(
             runtime.namespace, principal.tenant_id, execution_id, cursor,
             include_content=include_content,
-        ))
+        )
+        self.previews = get_preview_positions(positions)
+        self.sequences = ExecutionWatchPositions(positions, self.previews)
         self.cursor = cursor
         self.models = _GraphModelProjection(runtime.history, principal)
 
     def checkpoint(self) -> str:
         return encode_execution_observation_cursor(
             self.runtime.namespace, self.principal.tenant_id, self.execution_id,
-            include_content=self.include_content, event_seqs=self.sequences,
+            include_content=self.include_content, event_seqs=self.sequences, preview_positions=self.previews,
         )
 
     def tree_event(self, event: ExecutionTreeEvent) -> ExecutionObservationEvent:
+        if isinstance(event.event, SharedStreamEvent):
+            if event.event.position[0]:
+                self.previews[event.execution_id] = event.event.position
+            else:
+                self.previews.pop(event.execution_id, None)
         sequence = event.event.durable_seq
         if sequence is not None:
             if sequence <= self.sequences.get(event.execution_id, 0):
@@ -59,7 +68,7 @@ class _ExecutionModelObservation:
             self.sequences[event.execution_id] = sequence
         inner = replace(event, cursor=encode_execution_watch_cursor(
             self.runtime.namespace, self.principal.tenant_id, self.execution_id,
-            include_content=self.include_content, event_seqs=self.sequences,
+            include_content=self.include_content, event_seqs=self.sequences, preview_positions=self.previews,
         ))
         self.cursor = self.checkpoint()
         return ExecutionObservationEvent(inner, self.cursor)

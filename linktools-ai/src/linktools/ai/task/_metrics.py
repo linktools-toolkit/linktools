@@ -20,7 +20,6 @@ _logger = environ.get_logger("ai.task.metrics")
 _EVENT_PAGE_SIZE = 1000
 _MAX_PROJECTION_EVENTS = 100_000
 _PROJECTION_TIMEOUT_SECONDS = 5.0
-_DRAIN_TIMEOUT_SECONDS = 5.0
 _PROJECTED_CACHE_SIZE = 4096
 _TERMINAL = frozenset(
     {
@@ -73,6 +72,14 @@ class _Attempt:
     terminal: TaskEvent | None = None
 
 
+@dataclass(slots=True)
+class _Projection:
+    admission: TaskEvent
+    terminal: TaskEvent
+    attempts: dict[tuple[str, int], _Attempt]
+    correlation: CorrelationData
+
+
 class _TaskMetricProjector:
     def __init__(
         self,
@@ -86,80 +93,89 @@ class _TaskMetricProjector:
         self._recorder = recorder
         self._admissions = admissions
         self._source_namespace = source_namespace
-        self._tasks: dict[tuple[str, str], asyncio.Task[bool]] = {}
+        self._active: dict[tuple[str, str], asyncio.Event] = {}
         self._projected: dict[tuple[str, str], None] = {}
         self._accepting = True
 
-    def trigger(self, graph_id: str, *, tenant_id: str) -> None:
-        if not self._accepting:
-            return
+    async def trigger(self, graph_id: str, *, tenant_id: str) -> None:
         key = (tenant_id, graph_id)
-        if key in self._projected:
-            return
-        existing = self._tasks.get(key)
-        if existing is not None and not existing.done():
-            return
-        task = asyncio.create_task(
-            self._project_bounded(graph_id, tenant_id=tenant_id),
-            name=f"task-metric-project-{tenant_id}-{graph_id}",
-        )
-        self._tasks[key] = task
-
-        def consume(done: asyncio.Task[bool]) -> None:
+        while self._accepting and key not in self._projected:
+            active = self._active.get(key)
+            if active is not None:
+                await active.wait()
+                continue
+            completed = asyncio.Event()
+            self._active[key] = completed
             try:
-                if done.result():
+                if await self._project(graph_id, tenant_id=tenant_id):
                     self._projected[key] = None
                     while len(self._projected) > _PROJECTED_CACHE_SIZE:
                         self._projected.pop(next(iter(self._projected)))
-            except asyncio.CancelledError:
-                pass
-            except BaseException:  # noqa: BLE001
-                _logger.exception("task metric projection failed: graph=%s", graph_id)
+            except Exception as error:
+                _logger.warning(
+                    "task metric projection skipped: graph=%s error=%s",
+                    graph_id,
+                    type(error).__name__,
+                )
             finally:
-                if self._tasks.get(key) is done:
-                    self._tasks.pop(key, None)
-
-        task.add_done_callback(consume)
+                self._active.pop(key)
+                completed.set()
+            return
 
     async def close(self) -> None:
         self._accepting = False
-        pending = tuple(task for task in self._tasks.values() if not task.done())
-        if not pending:
-            await asyncio.sleep(0)
-            return
-        gather = asyncio.gather(*pending, return_exceptions=True)
-        try:
-            await asyncio.wait_for(asyncio.shield(gather), _DRAIN_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-        except asyncio.CancelledError:
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            raise
+        for completed in tuple(self._active.values()):
+            await completed.wait()
 
-    async def _project_bounded(self, graph_id: str, *, tenant_id: str) -> bool:
+    async def _project(self, graph_id: str, *, tenant_id: str) -> bool:
         try:
-            return await asyncio.wait_for(
-                self._project(graph_id, tenant_id=tenant_id),
+            projection = await asyncio.wait_for(
+                self._collect(graph_id, tenant_id=tenant_id),
                 _PROJECTION_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            _logger.warning("task metric projection timed out: graph=%s", graph_id)
-            return False
-        except Exception as error:
             _logger.warning(
-                "task metric projection skipped: graph=%s error=%s",
+                "task metric fact collection timed out: graph=%s",
                 graph_id,
-                type(error).__name__,
             )
             return False
+        if projection is None:
+            return False
+        retry_count = sum(
+            1
+            for attempt in projection.attempts.values()
+            if not attempt.invalid
+            and attempt.terminal is not None
+            and attempt.attempt_index > 1
+        )
+        # Source I/O has its own timeout; graph size must not consume a shared
+        # write deadline after durable facts have been collected.
+        accepted = await self._record_graph(
+            projection.admission,
+            projection.terminal,
+            retry_count=retry_count,
+            tenant_id=tenant_id,
+            correlation=projection.correlation,
+        )
+        for (node_id, fence), attempt in projection.attempts.items():
+            if attempt.invalid or attempt.terminal is None:
+                continue
+            accepted = (
+                await self._record_attempt(
+                    graph_id,
+                    node_id,
+                    fence,
+                    attempt,
+                    tenant_id=tenant_id,
+                    correlation=projection.correlation,
+                )
+                and accepted
+            )
+        return accepted
 
-    async def _project(self, graph_id: str, *, tenant_id: str) -> bool:
+    async def _collect(
+        self, graph_id: str, *, tenant_id: str,
+    ) -> _Projection | None:
         terminal = await self._repository.latest_event(
             graph_id,
             tenant_id=tenant_id,
@@ -170,13 +186,13 @@ class _TaskMetricProjector:
             or terminal.node_id is not None
             or terminal.status not in _TERMINAL
         ):
-            return False
+            return None
         correlation: CorrelationData = {}
         if self._admissions is not None:
             admitted = await self._admissions.get(graph_id, tenant_id=tenant_id)
             if admitted is None:
                 raise ValueError("task metric admission is missing")
-            correlation = admitted.correlation
+            correlation = dict(admitted.correlation)
 
         admission: TaskEvent | None = None
         attempts: dict[tuple[str, int], _Attempt] = {}
@@ -206,7 +222,7 @@ class _TaskMetricProjector:
                         graph_id,
                         event_count,
                     )
-                    return False
+                    return None
                 if event.event_seq == 1:
                     if (
                         event.event_type is not TaskEventType.GRAPH_ADMITTED
@@ -225,35 +241,7 @@ class _TaskMetricProjector:
 
         if admission is None:
             raise ValueError("task event admission is missing")
-        retry_count = sum(
-            1
-            for attempt in attempts.values()
-            if not attempt.invalid
-            and attempt.terminal is not None
-            and attempt.attempt_index > 1
-        )
-        accepted = self._record_graph(
-            admission,
-            terminal,
-            retry_count=retry_count,
-            tenant_id=tenant_id,
-            correlation=correlation,
-        )
-        for (node_id, fence), attempt in attempts.items():
-            if attempt.invalid or attempt.terminal is None:
-                continue
-            accepted = (
-                self._record_attempt(
-                    graph_id,
-                    node_id,
-                    fence,
-                    attempt,
-                    tenant_id=tenant_id,
-                    correlation=correlation,
-                )
-                and accepted
-            )
-        return accepted
+        return _Projection(admission, terminal, attempts, correlation)
 
     @staticmethod
     def _consume_node_event(
@@ -310,7 +298,7 @@ class _TaskMetricProjector:
             return
         attempt.terminal = event
 
-    def _record_graph(
+    async def _record_graph(
         self,
         admission: TaskEvent,
         terminal: TaskEvent,
@@ -323,7 +311,7 @@ class _TaskMetricProjector:
         latency = _duration_ns(admission.occurred_at, terminal.occurred_at)
         if latency is not None:
             measurements.insert(0, MetricMeasurement("latency_ns", 1, latency))
-        return self._safe_record(
+        return await self._safe_record(
             lambda: Observation(
                 version=1,
                 observation_id=canonical_sha256(
@@ -346,7 +334,7 @@ class _TaskMetricProjector:
             )
         )
 
-    def _record_attempt(
+    async def _record_attempt(
         self,
         graph_id: str,
         node_id: str,
@@ -381,7 +369,7 @@ class _TaskMetricProjector:
                 measurements.append(
                     MetricMeasurement("queue_wait_ns", 1, queue_wait)
                 )
-        return self._safe_record(
+        return await self._safe_record(
             lambda: Observation(
                 version=1,
                 observation_id=canonical_sha256(
@@ -406,11 +394,13 @@ class _TaskMetricProjector:
             )
         )
 
-    def _safe_record(self, factory: Callable[[], Observation]) -> bool:
+    async def _safe_record(self, factory: Callable[[], Observation]) -> bool:
         try:
-            return self._recorder.try_record(factory())
-        except Exception:
-            _logger.exception("task metric observation rejected")
+            return await self._recorder.try_record(factory())
+        except Exception as error:
+            _logger.warning(
+                "task metric observation rejected: error=%s", type(error).__name__,
+            )
             return False
 
 

@@ -310,13 +310,13 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     original_replace = _SqlTransaction.replace_record
 
-    async def project_before_cancel_replace(transaction, record, *, expected_storage_version):
+    async def project_before_cancel_replace(transaction, record, *, expected_storage_revision):
         if record.kind == "execution" and record.state == "CANCELLING" and not cancel_read.is_set():
             cancel_read.set()
             assert projection is not None
             await asyncio.wait_for(asyncio.shield(projection), 10)
         return await original_replace(
-            transaction, record, expected_storage_version=expected_storage_version,
+            transaction, record, expected_storage_revision=expected_storage_revision,
         )
 
     # Keep the batch pending until the cancel CAS, rather than race a timer.
@@ -353,7 +353,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             after = await repository.get(execution.execution_id, tenant_id=tenant)
             after_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
             assert before_stored is not None and after_stored is not None
-            assert after_stored.storage_version > before_stored.storage_version
+            assert after_stored.storage_revision > before_stored.storage_revision
             assert after_stored.data == before_stored.data
             assert before is not None and after is not None
             assert after.status is before.status is ExecutionStatus.STARTED

@@ -4,9 +4,12 @@
 
 import asyncio
 import json
+import math
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
@@ -30,14 +33,17 @@ from ..core import (
     SessionStatus,
     canonical_sha256,
     idempotency_key_digest,
+    normalize_json_value,
     validate_agent_id,
     validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import CacheBackend
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._handoff import HandoffGate, HandoffState
 from ._session_timeline import (
+    SessionTimelineCapture,
     capture_session_refresh,
     project_captured_session_timeline,
     project_session_timeline,
@@ -68,6 +74,14 @@ from .state._contracts import (
     ExecutionRepository,
     SessionRecord,
 )
+from .state._codec import decode_domain, encode_domain
+from .state._conversation_repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
+from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._model_interaction_store import ModelInteractionStateStepArchive
+from .state._plan import RuntimeDomain
+from .state._step_archive import StateStepArchive
+from .state._steps import RuntimeAgentRunStore
+from .state._store import StateGroupTransaction, active_state_scope
 from .state._views import project_session_history_message
 
 _SESSION_CURSOR_KIND = "SESSION"
@@ -151,6 +165,7 @@ class DefaultSessionService:
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
         workspace_access: _InputFileSource | None = None,
+        cache: object | None = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -161,6 +176,11 @@ class DefaultSessionService:
         self._transcript_store = transcript_store
         self._release_terminal = release_terminal or _no_release_terminal
         self._workspace_access = workspace_access
+        self._cache = cache if isinstance(cache, CacheBackend) else None
+        # Monotonic timestamps and source identity belong to this service lifetime.
+        self._display_cache_scope = uuid.uuid4().hex
+        self._display_reads: set[asyncio.Future[None]] = set()
+        self._display_close_started = False
         self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
@@ -299,9 +319,23 @@ class DefaultSessionService:
         principal: Principal,
         cursor: str | None = None,
         limit: int = 100,
+        max_age: float = 0,
     ) -> SessionDetail:
-        """Reconcile admission and capture the session with its timeline page."""
-        async with self._session_consumer(session_id, principal.tenant_id):
+        """Read a complete display snapshot; zero age retains strong refresh behavior.
+
+        Positive ages allow stale display and delayed detection of independently
+        removed or damaged bodies. Admission changes and terminal active executions
+        invalidate a cached display. Authorization and resource
+        existence are checked on every call. Control operations never use this cache.
+        """
+        if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not math.isfinite(max_age) or max_age < 0:
+            raise ValueError("max_age must be finite and non-negative")
+        started = time.monotonic()
+        cache_key = None
+        async with self._session_consumer(
+            session_id, principal.tenant_id,
+            display_read=max_age > 0 and self._cache is not None,
+        ):
             header = await self._conversation.sessions.get_header(
                 session_id, tenant_id=principal.tenant_id,
             )
@@ -310,14 +344,38 @@ class DefaultSessionService:
             await self._authorization.authorize(
                 principal, AuthorizationAction.SESSION_READ, header,
             )
+            cacheable_request = max_age > 0 and active_state_scope() is None and self._display_cache_supported()
+            if cacheable_request:
+                try:
+                    validate_page_limit(limit)
+                    if cursor is not None:
+                        coordinate = json.loads(self._cursor_signer.decode(cursor).position)
+                        cacheable_request = coordinate[0] == session_id
+                except (AIError, TypeError, ValueError, IndexError, KeyError):
+                    cacheable_request = False
+            if cacheable_request:
+                cache_key = "session-display:v1:" + canonical_sha256({
+                    "scope": self._display_cache_scope,
+                    "principal": [principal.tenant_id, principal.principal_id, principal.kind],
+                    "session_id": session_id, "cursor": cursor, "limit": limit,
+                })
+            if cache_key is not None:
+                cached = await self._cached_display(
+                    cache_key, header, principal, cursor=cursor, max_age=max_age,
+                )
+                if cached is not None:
+                    return cached
             state = await capture_session_refresh(
                 self._conversation, self._executions, session_id,
                 tenant_id=principal.tenant_id, cursor=cursor,
                 cursor_signer=self._cursor_signer, limit=limit,
                 reconcile=self._reconcile_terminal_admission,
                 transcript_store=self._transcript_store,
+                validate_active=self._validate_active_admitted_execution,
             )
             record = state.root
+            if cache_key is not None:
+                self._check_display_authority(record, header)
             active = self._active_execution_id(
                 record,
                 None if record.active_execution_id is None
@@ -331,7 +389,201 @@ class DefaultSessionService:
                 session_id=session_id, tenant_id=principal.tenant_id,
                 transcript_tenant_id=self._conversation.sessions.tenant_id,
             )
-            return SessionDetail(session, timeline)
+            detail = SessionDetail(session, timeline)
+            if cache_key is not None and record.timeline_parent_session_id is None:
+                await self._cache_display(cache_key, state, detail, started, max_age)
+            return detail
+
+    def _display_cache_supported(self) -> bool:
+        sessions = self._conversation.sessions
+        histories = self._conversation.histories
+        executions = self._executions
+        if (self._cache is None
+                or type(sessions) is not SessionRepositoryImpl
+                or type(histories) is not ConversationHistoryRepositoryImpl
+                or type(executions) is not ExecutionRepositoryImpl
+                or type(self._transcript_store) is not RuntimeAgentRunStore):
+            return False
+        archive = self._transcript_store.read_store(RuntimeDomain.CONVERSATION)
+        return (
+            type(archive) in (StateStepArchive, ModelInteractionStateStepArchive)
+            and archive.state_store is sessions.state_store
+            and histories.state_store is sessions.state_store
+            and sessions.state_store.storage_group is executions.state_store.storage_group
+        )
+
+    @staticmethod
+    def _display_session_identity(record: SessionRecord) -> tuple[object, ...]:
+        return (record.session_id, record.owner_principal_id, record.agent_id,
+                record.history_id, record.created_at)
+
+    @staticmethod
+    def _display_execution_identity(record: ExecutionRecord) -> tuple[object, ...]:
+        return (record.execution_id, record.session_id, record.parent_execution_id,
+                record.created_at, record.principal_id, record.principal_kind,
+                record.binding_digest)
+
+    @staticmethod
+    def _check_display_authority(record: SessionRecord, header: ResourceRef) -> None:
+        # An authorization callback may have deleted/recreated the resource.
+        if (header.kind is not ResourceKind.SESSION
+                or record.session_id != header.id
+                or record.owner_principal_id != header.owner_principal_id):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    @staticmethod
+    def _decode_display(value: object) -> SessionDetail:
+        # These public view dataclasses intentionally do not enforce wire types.
+        # Validate the disposable representation without registering durable types.
+        def text(value: object, *, optional: bool = False) -> None:
+            if not isinstance(value, str) and not (optional and value is None):
+                raise TypeError("invalid display text")
+
+        session, timeline = value["session"], value["timeline"]
+        for name in ("session_id", "agent_id"):
+            text(session[name])
+        for name in ("cwd", "active_execution_id"):
+            text(session[name], optional=True)
+        if (type(session["revision"]) is not int or session["revision"] < 0
+                or session["history_quality"] not in {"complete", "conservative"}
+                or not isinstance(session["metadata"], dict)):
+            raise ValueError("invalid session display")
+        view = SessionView(**{
+            **session, "status": SessionStatus(session["status"]),
+            "metadata": normalize_json_value(session["metadata"]),
+        })
+        text(timeline["next_cursor"], optional=True)
+        turns = []
+        for turn in timeline["items"]:
+            text(turn["execution_id"])
+            text(turn["error_code"], optional=True)
+            if (not all(isinstance(turn[key], datetime) for key in ("created_at", "updated_at"))
+                    or type(turn["conversation_committed"]) is not bool
+                    or not isinstance(turn["safe_error_details"], dict)):
+                raise ValueError("invalid turn display")
+            items = []
+            for item in turn["items"]:
+                if type(item["ordinal"]) is not int:
+                    raise TypeError("invalid item ordinal")
+                text(item["item_kind"])
+                text(item["tool_name"], optional=True)
+                text(item["tool_call_id"], optional=True)
+                items.append(SessionTurnItem(**{**item, "content": normalize_json_value(item["content"])}))
+            turns.append(SessionTurn(**{
+                **turn, "status": ExecutionStatus(turn["status"]), "items": tuple(items),
+                "user_input": normalize_json_value(turn["user_input"]),
+                "safe_error_details": normalize_json_value(turn["safe_error_details"]),
+            }))
+        return SessionDetail(view, Page(tuple(turns), timeline["next_cursor"]))
+
+    async def _cached_display(
+        self, key: str, header: ResourceRef, principal: Principal,
+        *, cursor: str | None, max_age: float,
+    ) -> SessionDetail | None:
+        try:
+            raw = await self._cache.get(key)
+            if raw is None:
+                return None
+            envelope = json.loads(raw)
+            if canonical_sha256(envelope["payload"]) != envelope["digest"]:
+                return None
+            entry = decode_domain(envelope["payload"], dict[str, object])
+            started, expires = entry["started"], entry["expires"]
+            if (entry["key"] != key or not isinstance(started, (float, int))
+                    or not isinstance(expires, (float, int))
+                    or not math.isfinite(started) or not math.isfinite(expires)
+                    or not started <= time.monotonic() < min(expires, started + max_age)):
+                return None
+            detail = self._decode_display(entry["detail"])
+            if detail.session.session_id != header.id:
+                return None
+            # The exact input token was validated when this entry was captured;
+            # decode it again for expiration/key rotation, without extending it.
+            for token in (cursor, detail.timeline.next_cursor):
+                if token is not None:
+                    self._cursor_signer.decode(token)
+            identities = entry["executions"]
+            if not isinstance(identities, dict) or not all(isinstance(key, str) for key in identities):
+                return None
+            if (detail.session.active_execution_id is not None and detail.session.active_execution_id not in identities
+                    or not all(turn.execution_id in identities for turn in detail.timeline.items)
+                    or detail.session.session_id != entry["root"][0]
+                    or detail.session.agent_id != entry["root"][2]):
+                return None
+            required_end = entry["message_end"]
+            if not isinstance(required_end, int) or required_end < 0:
+                return None
+        except Exception:  # noqa: BLE001 -- a disposable cache never replaces origin errors
+            return None
+
+        sessions = self._conversation.sessions
+        histories = self._conversation.histories
+        session_store = sessions.state_store
+        execution_store = self._executions.state_store
+
+        async def validate(group: StateGroupTransaction) -> bool:
+            record = await sessions.get(header.id, tenant_id=principal.tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            self._check_display_authority(record, header)
+            if (record.timeline_parent_session_id is not None
+                    or self._display_session_identity(record) != entry["root"]
+                    or record.revision != detail.session.revision):
+                return False
+            ids = tuple(identities)
+            if record.active_execution_id is not None and record.active_execution_id not in identities:
+                ids += (record.active_execution_id,)
+            records = await self._executions.get_many(ids, tenant_id=principal.tenant_id) if ids else {}
+            if len(records) != len(ids):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            active = self._validate_active_admitted_execution(
+                record, records.get(record.active_execution_id) if record.active_execution_id else None,
+            )
+            if (record.active_execution_id != detail.session.active_execution_id
+                    or record.active_execution_id is not None and active is None):
+                return False
+            if any(value.session_id != record.session_id or value.parent_execution_id is not None
+                   for value in records.values()):
+                return False
+            if any(self._display_execution_identity(records[key]) != identity
+                   for key, identity in identities.items()):
+                return False
+            if record.history_id is None:
+                return False
+            value = await histories.get_with_head_in_transaction(
+                group.transaction(session_store), record.history_id, tenant_id=principal.tenant_id,
+            )
+            if value is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            history, head = value
+            return (history.session_id == record.session_id and history.parent_history_id is None
+                    and head.message_count >= required_end)
+
+        valid = await session_store.storage_group.read_many((session_store, execution_store), validate)
+        if valid and time.monotonic() < min(expires, started + max_age):
+            return detail
+        return None
+
+    async def _cache_display(
+        self, key: str, state: SessionTimelineCapture, detail: SessionDetail,
+        started: float, max_age: float,
+    ) -> None:
+        if state.root.history_id is None or time.monotonic() >= started + max_age:
+            return
+        try:
+            entry = {
+                "key": key, "started": started, "expires": started + max_age,
+                "root": self._display_session_identity(state.root),
+                "executions": {key: self._display_execution_identity(value)
+                               for key, value in state.executions.items()},
+                "message_end": max((value.end_message_index for value in state.commits.values()), default=0),
+                "detail": asdict(detail),
+            }
+            payload = encode_domain(entry)
+            envelope = {"payload": payload, "digest": canonical_sha256(payload)}
+            await self._cache.put(key, json.dumps(envelope, separators=(",", ":")).encode())
+        except Exception:  # noqa: BLE001 -- best-effort serialization/publication only
+            return
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         await self._authorization.authorize(
@@ -955,16 +1207,35 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
             raise
 
+    async def drain_display_reads(self) -> None:
+        """Stop display-cache admission and settle requests before closing sources."""
+        self._display_close_started = True
+        while self._display_reads:
+            await asyncio.wait(tuple(self._display_reads))
+
     @asynccontextmanager
-    async def _session_consumer(self, session_id: str, tenant_id: str):
-        key = (tenant_id, session_id)
-        state = await self._handoff.enter(key)
+    async def _session_consumer(
+        self, session_id: str, tenant_id: str, *, display_read: bool = False,
+    ):
+        completed = None
+        if display_read:
+            if self._display_close_started:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
+            completed = asyncio.get_running_loop().create_future()
+            self._display_reads.add(completed)
         try:
-            yield state
+            key = (tenant_id, session_id)
+            state = await self._handoff.enter(key)
+            try:
+                yield state
+            finally:
+                owner = await self._handoff.leave(key, state)
+                if owner:
+                    await self._run_session_release(session_id, tenant_id, state)
         finally:
-            owner = await self._handoff.leave(key, state)
-            if owner:
-                await self._run_session_release(session_id, tenant_id, state)
+            if completed is not None:
+                completed.set_result(None)
+                self._display_reads.discard(completed)
 
     async def _request_session_release(
         self, session_id: str, tenant_id: str, continuation: ConversationCursor | None

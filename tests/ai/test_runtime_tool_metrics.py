@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -20,7 +21,7 @@ from linktools.ai.runtime._tool_metrics import (
     _ToolMetricContext,
 )
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
-from pydantic_ai.exceptions import SkipToolExecution
+from pydantic_ai.exceptions import CallDeferred, SkipToolExecution
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -32,7 +33,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.observations: list[Observation] = []
 
-    def try_record(self, observation: Observation) -> bool:
+    async def try_record(self, observation: Observation) -> bool:
         self.observations.append(observation)
         return True
 
@@ -63,6 +64,11 @@ class _Bridge:
     async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool:
         del decision, error
         self.calls.append("fail")
+        return False
+
+    async def defer(self, decision: ToolOperationDecision) -> bool:
+        del decision
+        self.calls.append("defer")
         return False
 
     async def unknown(
@@ -271,3 +277,138 @@ async def test_tool_metric_preserves_ai_error_and_defaults_other_errors() -> Non
         _tool_error_code(RuntimeError("failed"))
         == ErrorCode.TOOL_EXECUTION_FAILED.value
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "settlement", "status"),
+    (
+        (None, "complete", "SUCCEEDED"),
+        (ToolCallFailed("failure"), "fail", "FAILED"),
+        (CallDeferred(), "defer", "DEFERRED"),
+        (RuntimeError("unknown effect"), "unknown", "FAILED"),
+    ),
+)
+async def test_tool_metric_cancellation_preserves_settled_effect(
+    outcome: BaseException | None,
+    settlement: str,
+    status: str,
+) -> None:
+    entered = asyncio.Event()
+    attempted: list[Observation] = []
+
+    class BlockingRecorder(_Recorder):
+        async def try_record(self, observation: Observation) -> bool:
+            attempted.append(observation)
+            entered.set()
+            await asyncio.Event().wait()
+            return True
+
+    async def handler() -> object:
+        if outcome is not None:
+            raise outcome
+        return {"done": True}
+
+    boundary, bridge, context, tool = await _boundary(
+        ToolOperationDecision("operation", "owner", 1, True),
+        BlockingRecorder(),
+        handler,
+    )
+    task = asyncio.create_task(boundary.call_tool("tool", {}, context, tool))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert bridge.calls == ["begin", settlement]
+    assert attempted[0].status == status
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert bridge.calls == ["begin", settlement]
+
+
+async def test_tool_metric_failure_preserves_original_leaf_error() -> None:
+    class FailingRecorder(_Recorder):
+        async def try_record(self, observation: Observation) -> bool:
+            raise OSError("metric sink unavailable")
+
+    error = ToolCallFailed("original leaf failure")
+
+    async def handler() -> object:
+        raise error
+
+    boundary, bridge, context, tool = await _boundary(
+        ToolOperationDecision("operation", "owner", 1, True),
+        FailingRecorder(),
+        handler,
+    )
+    with pytest.raises(ToolCallFailed) as raised:
+        await boundary.call_tool("tool", {}, context, tool)
+    assert raised.value is error
+    assert bridge.calls == ["begin", "fail"]
+
+
+async def test_original_tool_cancellation_settles_before_interruptible_metric() -> None:
+    leaf_entered = asyncio.Event()
+    metric_entered = asyncio.Event()
+
+    class BlockingRecorder(_Recorder):
+        async def try_record(self, observation: Observation) -> bool:
+            assert observation.status == "CANCELLED"
+            metric_entered.set()
+            await asyncio.Event().wait()
+            return True
+
+    async def handler() -> object:
+        leaf_entered.set()
+        await asyncio.Event().wait()
+
+    boundary, bridge, context, tool = await _boundary(
+        ToolOperationDecision("operation", "owner", 1, True),
+        BlockingRecorder(),
+        handler,
+    )
+    task = asyncio.create_task(boundary.call_tool("tool", {}, context, tool))
+    await asyncio.wait_for(leaf_entered.wait(), timeout=1)
+    task.cancel()
+    await asyncio.wait_for(metric_entered.wait(), timeout=1)
+    assert bridge.calls == ["begin", "unknown"]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert bridge.calls == ["begin", "unknown"]
+
+
+async def test_tool_latency_excludes_durable_settlement_and_metric_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.runtime import _tool_metrics
+
+    now = 100
+    class Recorder(_Recorder):
+        async def try_record(self, observation: Observation) -> bool:
+            nonlocal now
+            now = 20_000
+            return await super().try_record(observation)
+
+    recorder = Recorder()
+
+    def monotonic_ns() -> int:
+        return now
+
+    monkeypatch.setattr(_tool_metrics, "monotonic_ns", monotonic_ns)
+
+    async def handler() -> object:
+        nonlocal now
+        now = 150
+        return "done"
+
+    boundary, bridge, context, tool = await _boundary(
+        ToolOperationDecision("operation", "owner", 1, True), recorder, handler,
+    )
+    original_complete = bridge.complete
+
+    async def complete(decision: ToolOperationDecision, result: object) -> bool:
+        nonlocal now
+        now = 10_000
+        return await original_complete(decision, result)
+
+    bridge.complete = complete
+    assert await boundary.call_tool("tool", {}, context, tool) == "done"
+    assert recorder.observations[0].measurements[0].value == 50

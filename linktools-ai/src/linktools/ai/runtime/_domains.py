@@ -56,7 +56,7 @@ from .service_api import (
 if TYPE_CHECKING:
     from pydantic import BaseModel
     from ._agent import Agent, Execution, Session
-    from ._metrics import MetricBufferStatus, MetricFlushResult
+    from ..observe import MetricRecorderStatus, MetricFlushResult
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -295,10 +295,13 @@ class RuntimeSessions(Generic[AppT]):
         self._ensure_open()
         return await self._service.reconcile(session_id, principal=principal)
 
-    async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> SessionDetail:
-        """Reconcile admission and refresh the session with its timeline page."""
+    async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100, max_age: float = 0) -> SessionDetail:
+        """Refresh a session; opt in to bounded stale display with positive max_age."""
         self._ensure_open()
-        return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit)
+        if max_age == 0 and not isinstance(max_age, bool):
+            # Keep the default call compatible with existing custom services.
+            return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit)
+        return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit, max_age=max_age)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         return await self._service.list(request)
@@ -325,13 +328,13 @@ class RuntimeSessions(Generic[AppT]):
 class RuntimeMetrics:
     def __init__(
         self,
-        status: Callable[[], "MetricBufferStatus"],
+        status: Callable[[], "MetricRecorderStatus"],
         flush: Callable[..., Awaitable["MetricFlushResult"]],
     ) -> None:
         self._status = status
         self._flush = flush
 
-    def status(self) -> "MetricBufferStatus":
+    def status(self) -> "MetricRecorderStatus":
         return self._status()
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> "MetricFlushResult":

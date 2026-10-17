@@ -554,6 +554,7 @@ async def test_live_stream_missing_base_sequence_is_authoritative(
 async def test_live_close_authoritative_error_overrides_optional_broker_error():
     cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     class Live:
+        shared = None
         def is_local_producer(self, execution_id):
             return True
         def base_event_seq(self, execution_id):
@@ -578,6 +579,7 @@ async def test_event_stream_close_awaits_owned_live_subscription():
     from linktools.ai.core import ExecutionDeltaType
     from linktools.ai.runtime._event import ExecutionDelta
     class Live:
+        shared = None
         closed = False
         def claim_local_producer(self, execution_id):
             return self

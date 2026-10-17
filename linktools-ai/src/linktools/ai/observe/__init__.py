@@ -5,6 +5,8 @@
 from ._metrics import Metrics
 from ._model import (
     MetricAggregation,
+    MetricRecorderStatus,
+    MetricFlushResult,
     MetricDefinition,
     MetricMeasurement,
     MetricPoint,
@@ -21,6 +23,8 @@ from ._sql import build_metrics_sql_metadata
 from ._store import MetricStore
 
 __all__ = [
+    "MetricRecorderStatus",
+    "MetricFlushResult",
     "MetricAggregation",
     "MetricDefinition",
     "MetricMeasurement",

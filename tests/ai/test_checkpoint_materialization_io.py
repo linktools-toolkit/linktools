@@ -159,25 +159,23 @@ async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
     )
     try:
         await archive.materialize_checkpoint(run, checkpoint)
-        get, count = archive.get_agent_run, archive.transcript_message_count_for_run
+        read = archive.state_store.read
         load = archive.transcript_repository.load_message_span
         scopes, bodies = [], []
 
-        async def tracked_get(*args, **kwargs):
-            scopes.append(active_state_scope())
-            return await get(*args, **kwargs)
-
-        async def tracked_count(*args, **kwargs):
-            scopes.append(active_state_scope())
-            return await count(*args, **kwargs)
+        async def tracked_read(callback):
+            async def capture(transaction):
+                if not bodies:
+                    scopes.append(active_state_scope())
+                return await callback(transaction)
+            return await read(capture)
 
         async def tracked_load(*args, **kwargs):
             assert active_state_scope() is None
             bodies.append(True)
             return await load(*args, **kwargs)
 
-        monkeypatch.setattr(archive, "get_agent_run", tracked_get)
-        monkeypatch.setattr(archive, "transcript_message_count_for_run", tracked_count)
+        monkeypatch.setattr(archive.state_store, "read", tracked_read)
         monkeypatch.setattr(archive.transcript_repository, "load_message_span", tracked_load)
         relocated = await archive.relocate_run_checkpoint(run, checkpoint)
         assert relocated.transcript_message_count_before == 1

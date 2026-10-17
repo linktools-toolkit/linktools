@@ -2,16 +2,19 @@
 # -*- coding: utf-8 -*-
 """Shared Asset mutation, replay, and immutable metadata contracts."""
 
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
-from linktools.ai.asset import AssetKey, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, SqlAssetBackend
+from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, FilesystemAssetBackend, InMemoryAssetBackend, SqlAssetBackend
+from linktools.ai.capability import CapabilityLoadContext, CapabilityLoadEntry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay
+from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StorageChange, StorageOperation, StorageOverlay, read_object
 
 
 @pytest_asyncio.fixture(params=("memory", "filesystem", "sqlite-inline", "sqlite-object"))
@@ -144,5 +147,65 @@ async def test_empty_asset_bytes_round_trip_through_versions_and_snapshot(asset_
         restored_versions = await restored.resolve_versions((key,))
         assert restored_versions[0].revision == info.revision
         assert await restored.read_versions(restored_versions) == (b"",)
+    finally:
+        await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_asset_digest_binds_metadata_receipts_versions_and_snapshot(asset_store: AssetStore) -> None:
+    key = AssetKey("resource", "digest-contract")
+    value = b"\x00asset-content\xff"
+    digest = hashlib.sha256(value).hexdigest()
+    result = await asset_store.apply_batch(
+        (StorageChange(StorageOperation.PUT, key, value, None),),
+        idempotency_key="digest-contract",
+    )
+    info = await asset_store.stat(key)
+    assert info is not None and info.digest == digest
+    receipt = await asset_store.batch_result("digest-contract")
+    assert receipt == result
+    assert receipt.results[0].info.digest == digest
+
+    ref = (await asset_store.resolve_versions((key,)))[0]
+    payload = {
+        "version": 1,
+        "kind": key.kind,
+        "id": key.id,
+        "layer_id": ref.layer_id,
+        "revision": info.revision.value,
+        "digest": digest,
+        "size": len(value),
+    }
+    assert ref.to_payload() == payload
+    assert AssetVersionRef.from_payload(payload) == ref
+    assert AssetVersionRef(
+        key=key, layer_id=ref.layer_id, revision=info.revision,
+        digest=digest, size=len(value),
+    ).matches_info(info)
+    context = await CapabilityLoadContext.capture("application", asset_store)
+    assert context.list() == (CapabilityLoadEntry(key=key, digest=digest, size=len(value)),)
+    assert await context.read(key) == value
+
+    objects = InMemoryObjectStore()
+    snapshot = await asset_store.snapshot((key,), object_store=objects)
+    manifest_bytes = await read_object(
+        objects, snapshot.key, expected_digest=snapshot.digest, expected_size=snapshot.size,
+    )
+    assert snapshot.digest == hashlib.sha256(manifest_bytes).hexdigest()
+    assert snapshot.key == f"v1/asset-snapshot/{snapshot.digest}"
+    manifest = json.loads(manifest_bytes)
+    entry = manifest["entries"][0]
+    assert entry["digest"] == digest
+    assert entry["content"]["digest"] == digest
+    assert entry["content"]["key"] == f"v1/asset-content/{digest}"
+
+    await asset_store.put(key, b"changed")
+    assert await asset_store.read_versions((ref,)) == (value,)
+    restored = AssetStore.from_snapshot(snapshot, object_store=objects)
+    await restored.initialize()
+    try:
+        restored_info = await restored.stat(key)
+        assert restored_info is not None and restored_info.digest == digest
+        assert await restored.get(key) == value
     finally:
         await restored.close()

@@ -13,7 +13,7 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
+from linktools.ai.runtime import RuntimeDomain, RuntimeHistory, RuntimeStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
@@ -26,7 +26,14 @@ pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("principal", "tenant", "service")
 
 
-def _service(state, *, repository=None, authorization=None, objects=None, release=None):
+def _service(state, *, repository=None, authorization=None, objects=None, release=None, history=False):
+    if history:
+        return RuntimeHistory(
+            SimpleNamespace(), tenant_id="tenant",
+            executions=repository or state.execution.executions,
+            authorization=authorization or TenantAuthorizationPolicy(),
+            execution_objects=objects or state.object_store(RuntimeDomain.EXECUTION),
+        )
     return DefaultExecutionService(
         replace(state.execution, executions=repository or state.execution.executions),
         objects or state.object_store(RuntimeDomain.EXECUTION),
@@ -47,9 +54,11 @@ async def _seed(state, *, output=None):
 
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
-@pytest.mark.parametrize("method", ("result", "result_payload_size", "wait"))
+@pytest.mark.parametrize("history,method", (
+    (False, "result"), (False, "result_payload_size"), (False, "wait"), (True, "result"),
+))
 async def test_terminal_result_queries_use_one_authorized_result_record(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, method: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, history: bool, method: str,
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="result-read", tenant_id="tenant")
@@ -74,20 +83,23 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
         if engine is not None:
             event.listen(engine, "before_cursor_execute", capture)
         try:
-            value = await getattr(_service(state), method)("execution", principal=_PRINCIPAL)
+            value = await getattr(_service(state, history=history), method)("execution", principal=_PRINCIPAL)
         finally:
             if engine is not None:
                 event.remove(engine, "before_cursor_execute", capture)
         assert value.output == {"text": "result"} if method in {"result", "wait"} else value == record.result.output.size
-        # Header authorization, its fresh payload, and post-body handoff authority.
-        assert reads <= 3
-        assert sum(item.lstrip().upper().startswith("SELECT") for item in statements) <= 3
+        # History needs the authorization header and fresh payload; live reads also fence handoff.
+        limit = 2 if history else 3
+        assert reads <= limit
+        assert sum(item.lstrip().upper().startswith("SELECT") for item in statements) <= limit
     finally:
         await state.close()
 
 
-@pytest.mark.parametrize("method", ("result", "result_payload_size", "wait"))
-async def test_result_metadata_is_read_after_awaited_authorization(method: str) -> None:
+@pytest.mark.parametrize("history,method", (
+    (False, "result"), (False, "result_payload_size"), (False, "wait"), (True, "result"),
+))
+async def test_result_metadata_is_read_after_awaited_authorization(history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
@@ -103,7 +115,7 @@ async def test_result_metadata_is_read_after_awaited_authorization(method: str) 
                                         result=replace(record.result, output=output)),
                 )
 
-        value = await getattr(_service(state, authorization=Authorization()), method)(
+        value = await getattr(_service(state, authorization=Authorization(), history=history), method)(
             "execution", principal=_PRINCIPAL,
         )
         assert value.output == {"text": "changed after authorization"} if method in {"result", "wait"} else value == output.size
@@ -112,8 +124,10 @@ async def test_result_metadata_is_read_after_awaited_authorization(method: str) 
 
 
 @pytest.mark.parametrize("adapter", ("independent", "subclass"))
-@pytest.mark.parametrize("method", ("result", "result_payload_size", "wait"))
-async def test_custom_result_repository_remains_authoritative(adapter: str, method: str) -> None:
+@pytest.mark.parametrize("history,method", (
+    (False, "result"), (False, "result_payload_size"), (False, "wait"), (True, "result"),
+))
+async def test_custom_result_repository_remains_authoritative(adapter: str, history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
@@ -136,7 +150,7 @@ async def test_custom_result_repository_remains_authoritative(adapter: str, meth
 
         selected = (Independent() if adapter == "independent" else
                     Derived(repository.state_store, namespace="result-read", tenant_id="tenant"))
-        value = await getattr(_service(state, repository=selected), method)("execution", principal=_PRINCIPAL)
+        value = await getattr(_service(state, repository=selected, history=history), method)("execution", principal=_PRINCIPAL)
         assert value.output == {"source": "custom result owner"} if method in {"result", "wait"} else value == output.size
         assert calls == [("execution", "tenant")]
     finally:
@@ -194,8 +208,8 @@ async def test_result_body_wait_preserves_fresh_handoff_and_consumer_cleanup(
         await state.close()
 
 
-@pytest.mark.parametrize("method", ("result", "wait"))
-async def test_denied_result_read_does_not_resolve_payload(method: str) -> None:
+@pytest.mark.parametrize("history,method", ((False, "result"), (False, "wait"), (True, "result")))
+async def test_denied_result_read_does_not_resolve_payload(history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
@@ -206,7 +220,54 @@ async def test_denied_result_read_does_not_resolve_payload(method: str) -> None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
         with pytest.raises(AIError) as caught:
-            await getattr(_service(state, authorization=Authorization()), method)("execution", principal=_PRINCIPAL)
+            await getattr(_service(state, authorization=Authorization(), history=history), method)("execution", principal=_PRINCIPAL)
         assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("status,missing_result", (
+    (ExecutionStatus.SUCCEEDED, True),
+    (ExecutionStatus.FAILED, False),
+    (ExecutionStatus.CANCELLED, False),
+    (ExecutionStatus.STARTED, False),
+))
+async def test_history_result_uses_fresh_terminal_state_after_authorization(
+    monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus, missing_result: bool,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    try:
+        record = await _seed(state)
+        code = (ErrorCode.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED
+                else ErrorCode.INTERNAL_ERROR)
+        current = record
+        get = state.execution.executions.get
+
+        class Authorization:
+            async def authorize(self, principal, action, resource):
+                nonlocal current
+                await asyncio.sleep(0)
+                current = replace(
+                    record, status=status,
+                    result=None if missing_result else replace(record.result, output=None),
+                    error_code=code.value if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} else None,
+                )
+
+        async def fresh_get(execution_id, *, tenant_id):
+            await get(execution_id, tenant_id=tenant_id)
+            return current
+
+        monkeypatch.setattr(state.execution.executions, "get", fresh_get)
+        service = _service(state, authorization=Authorization(), history=True)
+        if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            result = await service.result("execution", principal=_PRINCIPAL)
+            assert result.status is status and result.output is None
+            assert result.error_code == code.value
+        else:
+            with pytest.raises(AIError) as caught:
+                await service.result("execution", principal=_PRINCIPAL)
+            assert caught.value.code is (ErrorCode.STORAGE_INTEGRITY_ERROR if missing_result
+                                         else ErrorCode.EXECUTION_NOT_READY)
     finally:
         await state.close()

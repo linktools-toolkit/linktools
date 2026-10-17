@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.asset import (
-    AssetCacheAdapter,
+    AssetContentCache,
     AssetInfo,
     AssetKey,
     AssetRoot,
@@ -20,7 +20,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
-    InMemoryContentCache,
+    InMemoryCacheBackend,
     StorageChange,
     StorageEntryStatus,
     StorageEntryRevision,
@@ -103,12 +103,11 @@ def test_asset_get_many_and_cursor_preserve_order() -> None:
 def test_asset_storage_uses_file_cache() -> None:
     async def run() -> None:
         backend = CountingAssetBackend(AssetRoot("memory", "cache"))
-        cache = InMemoryContentCache(max_bytes=1024 * 1024)
+        cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
         storage = StorageOverlay(
             backend,
             writer=backend,
-            cache=cache,
-            cache_adapter=AssetCacheAdapter(),
+            content_cache=AssetContentCache(cache),
         )
         store = AssetStore(storage)
         await store.initialize()
@@ -306,3 +305,30 @@ async def test_asset_version_read_preserves_backend_failures(code: ErrorCode) ->
         assert raised.value is cause
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ("uninitialized", "closed"))
+@pytest.mark.parametrize("empty", (False, True))
+async def test_sql_asset_batch_reads_require_ready_backend(phase: str, empty: bool) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from linktools.ai.asset import SqlAssetBackend
+    from linktools.ai.migrate import provision_asset_database
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    await provision_asset_database(engine)
+    backend = SqlAssetBackend(engine, namespace="batch-read-lifecycle")
+    key = AssetKey("sample", "one")
+    try:
+        if phase == "closed":
+            await backend.initialize()
+            await backend.put(key, b"one")
+            assert await backend.get_many((key,)) == {key: b"one"}
+            await backend.close()
+        with pytest.raises(AIError) as error:
+            await backend.get_many(()) if empty else await backend.get_many((key,))
+        assert error.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+    finally:
+        await backend.close()
+        await engine.dispose()

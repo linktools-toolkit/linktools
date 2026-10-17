@@ -24,6 +24,7 @@ from ._model import (
     MetricMeasurement,
     MetricQuery,
     MetricQueryResult,
+    MetricRecorder,
     MetricSource,
     MetricSourceKind,
     MetricType,
@@ -48,31 +49,55 @@ _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 class Metrics:
     """Metrics dataset facade without a user-visible lifecycle."""
 
-    def __init__(self, store: MetricStore, *, namespace: str = "default") -> None:
+    def __init__(
+        self, store: MetricStore, *, namespace: str = "default",
+        cache: object | None = None,
+    ) -> None:
+        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
+        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
+            raise TypeError("cache must implement append, read_batch and ack together")
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
+        self._cache = cache if all(callable(method) for method in methods) else None
+
+    def recorder(self) -> MetricRecorder:
+        """Open an independently owned automatic-recording lifetime."""
+        from ._recorder import _MetricRecorder
+
+        return _MetricRecorder(self, self._cache)
 
     @property
     def namespace(self) -> str:
         return self._namespace
 
     @classmethod
-    def in_memory(cls, *, namespace: str = "default") -> Metrics:
-        return cls(InMemoryMetricStore(), namespace=namespace)
+    def in_memory(
+        cls, *, namespace: str = "default", cache: object | None = None,
+    ) -> Metrics:
+        return cls(InMemoryMetricStore(), namespace=namespace, cache=cache)
 
     @classmethod
-    def sqlite(cls, path: str | Path, *, namespace: str = "default") -> Metrics:
-        return cls(SQLiteMetricStore(path), namespace=namespace)
+    def sqlite(
+        cls, path: str | Path, *, namespace: str = "default",
+        cache: object | None = None,
+    ) -> Metrics:
+        return cls(SQLiteMetricStore(path), namespace=namespace, cache=cache)
 
     @classmethod
-    def sql(cls, engine: AsyncEngine, *, namespace: str = "default") -> Metrics:
+    def sql(
+        cls, engine: AsyncEngine, *, namespace: str = "default",
+        cache: object | None = None,
+    ) -> Metrics:
         from ._sql import SqlMetricStore
 
-        return cls(SqlMetricStore(engine), namespace=namespace)
+        return cls(SqlMetricStore(engine), namespace=namespace, cache=cache)
 
     @classmethod
-    def from_store(cls, store: MetricStore, *, namespace: str = "default") -> Metrics:
-        return cls(store, namespace=namespace)
+    def from_store(
+        cls, store: MetricStore, *, namespace: str = "default",
+        cache: object | None = None,
+    ) -> Metrics:
+        return cls(store, namespace=namespace, cache=cache)
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):

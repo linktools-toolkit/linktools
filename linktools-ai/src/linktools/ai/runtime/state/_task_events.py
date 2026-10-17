@@ -207,7 +207,7 @@ async def _guard_task_event_owner(
         raise AIError(missing_code)
     guarded = await transaction.guard_record(
         graph_key,
-        expected_storage_version=graph_record.storage_version,
+        expected_storage_revision=graph_record.storage_revision,
     )
     if guarded is None:
         raise _TaskEventAppendConflict

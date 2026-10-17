@@ -73,7 +73,7 @@ async def test_evaluation_unchanged_fresh_storage_records_decode_once(tmp_path, 
         return None if value is None else replace(value, data=dict(value.data))
 
     async def decode(stored, target):
-        decodes.append(stored.storage_version)
+        decodes.append(stored.storage_revision)
         return await original_decode(stored, target)
 
     monkeypatch.setattr(repository, "_record", read)
@@ -183,7 +183,7 @@ async def test_evaluation_read_reuse_rejects_changed_or_failed_storage(tmp_path,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", (
     ("scope_digest", b"s" * 32), ("parent_digest", b"p" * 32),
-    ("state", "changed"), ("storage_version", 19),
+    ("state", "changed"), ("storage_revision", 19),
     ("lease_owner", "other"), ("lease_fence", 7),
     ("lease_expires_at", NOW + timedelta(hours=1)),
     ("key_digest", b"k" * 32), ("kind", "other"), ("sort_key", "different"),

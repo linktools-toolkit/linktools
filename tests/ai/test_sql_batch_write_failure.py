@@ -63,14 +63,14 @@ async def test_caught_replace_failure_rolls_back_group(
         if failure == "conflict":
             await transaction.get_records(tuple(record.key_digest for record in records))
             table = transaction._table("ai_state_records")
-            # Preserve stale cached versions to model a competing CAS winner.
+            # Preserve stale cached CAS revisions to model a competing winner.
             await execute(transaction, update(table).where(
                 table.c.store_digest == store.store_digest.hex(),
                 table.c.key_digest == records[-1].key_digest.hex(),
-            ).values(storage_version=1))
+            ).values(storage_revision=1))
         try:
             await transaction.replace_records(tuple(
-                RecordReplacement(replace(record, storage_version=1, data={"changed": True}), 0)
+                RecordReplacement(replace(record, storage_revision=1, data={"changed": True}), 0)
                 for record in records
             ))
         except (asyncio.CancelledError, AIError, SQLAlchemyError) as error:
@@ -100,7 +100,7 @@ async def test_caught_replace_failure_rolls_back_group(
         await other.validate_integrity()
         # Failure ownership is local to the discarded transaction.
         assert await store.mutate(lambda tx: tx.replace_record(
-            replace(records[0], storage_version=1), expected_storage_version=0,
+            replace(records[0], storage_revision=1), expected_storage_revision=0,
         ))
     finally:
         await other.close()
@@ -124,9 +124,9 @@ async def test_lost_scalar_cas_does_not_abort_unrelated_write(tmp_path: Path) ->
         await transaction._execute(update(table).where(
             table.c.store_digest == store.store_digest.hex(),
             table.c.key_digest == record.key_digest.hex(),
-        ).values(storage_version=1))
+        ).values(storage_revision=1))
         assert not await transaction.replace_record(
-            replace(record, storage_version=1), expected_storage_version=0,
+            replace(record, storage_revision=1), expected_storage_revision=0,
         )
         await transaction.insert_record(_record(2))
 
@@ -213,15 +213,15 @@ async def test_mysql_large_replacements_preserve_individual_record_capacity(
                 await store.initialize()
                 records = tuple(_record(index) for index in range(8))
                 await store.mutate(lambda tx: tx.insert_records(records))
-                replacements = tuple(replace(record, storage_version=1, data={"body": "x" * (128 * 1024)})
+                replacements = tuple(replace(record, storage_revision=1, data={"body": "x" * (128 * 1024)})
                                      for record in records)
 
                 async def replace_individually(transaction):
                     for record in replacements:
-                        assert await transaction.replace_record(record, expected_storage_version=0)
+                        assert await transaction.replace_record(record, expected_storage_revision=0)
 
                 await store.mutate(replace_individually)
-                final = tuple(replace(record, storage_version=2, state="replaced") for record in replacements)
+                final = tuple(replace(record, storage_revision=2, state="replaced") for record in replacements)
                 await store.mutate(lambda tx: tx.replace_records(tuple(
                     RecordReplacement(record, 1) for record in final
                 )))

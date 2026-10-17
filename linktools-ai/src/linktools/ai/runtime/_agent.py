@@ -12,6 +12,7 @@ from typing import Literal, overload, TYPE_CHECKING, Awaitable, Callable, Generi
 from pydantic import BaseModel
 from ..core import BudgetUsage, RunBudget, JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode, ObservationError
+from ._shared_stream import SharedStreamEvent
 from ._wait import WaitResult
 from ._execution_observation import _ExecutionModelObservation
 from ._observation import _wait, _validate_wait, _await_stream_cleanup, _is_observation_cleanup, _owned_watch
@@ -19,6 +20,7 @@ from ._execution_context import ExecutionInputContext
 from ._input_contract import UserPromptInput, validate_user_input
 from ._watch_cursor import (
     decode_execution_watch_cursor,
+    get_preview_positions, ExecutionWatchPositions,
     encode_execution_watch_cursor,
 )
 from .recovery import (
@@ -185,7 +187,12 @@ class Execution(Generic[AppT]):
                 finalizing=finalizing,
                 register=self._runtime._register_observation, release=self._runtime._release_observation,
             )
-        return self._watch_prepared(cursor, include_content, None)
+        return _owned_watch(
+            self._watch_prepared(cursor, include_content, None),
+            scope="execution", resource_id=self.execution_id, cursor=cursor,
+            finalizing=asyncio.Event(),
+            register=self._runtime._register_observation, release=self._runtime._release_observation,
+        )
 
     def _watch_models(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
@@ -209,6 +216,7 @@ class Execution(Generic[AppT]):
             self._runtime.namespace, self._principal.tenant_id, self.execution_id,
             cursor, include_content=include_content,
         )
+        sequences = ExecutionWatchPositions(sequences or {}, get_preview_positions(sequences))
         stream = self._watch_tree(
             self.execution_id, principal=self._principal, after_event_seqs=sequences,
             include_content=include_content, ready=ready,
@@ -221,6 +229,7 @@ class Execution(Generic[AppT]):
         cursor: str | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         sequences = dict(after_event_seqs or {})
+        previews = get_preview_positions(after_event_seqs)
         last_cursor = cursor
         try:
             async for event in stream:
@@ -230,9 +239,14 @@ class Execution(Generic[AppT]):
                     if durable_seq <= previous:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     sequences[event.execution_id] = durable_seq
+                if isinstance(event.event, SharedStreamEvent):
+                    if event.event.position[0]:
+                        previews[event.execution_id] = event.event.position
+                    else:
+                        previews.pop(event.execution_id, None)
                 last_cursor = encode_execution_watch_cursor(
                     self._runtime.namespace, self._principal.tenant_id, self.execution_id,
-                    include_content=include_content, event_seqs=sequences,
+                    include_content=include_content, event_seqs=sequences, preview_positions=previews,
                 )
                 yield replace(event, cursor=last_cursor)
         except _ExecutionStreamFailure as failure:

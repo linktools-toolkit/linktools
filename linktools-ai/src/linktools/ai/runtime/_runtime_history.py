@@ -4,7 +4,7 @@
 
 import json
 import heapq
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,7 +33,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..storage import ObjectStore, StoredPayload, read_object
+from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ..spec import CapabilityRef
 from ..task import (
     TaskBindingContract,
@@ -47,7 +47,7 @@ from ._event import project_event_payload
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
-from ._history_service import DefaultExecutionHistoryService
+from ._history_service import DefaultExecutionHistoryService, _read_model_interaction_updates
 from ._runtime_identity import token_seed
 from ._transient_history import TransientExecutionHistoryStore
 from ._session_timeline import (
@@ -75,6 +75,7 @@ from .service_api import (
     UsageSummary,
 )
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from .state._execution_repositories import ExecutionRepositoryImpl
 from .state._step_archive import StagingAgentRunStore
 from .state._contracts import (
     ConversationRepositories,
@@ -248,6 +249,7 @@ class RuntimeHistory:
         namespace: "str | None" = None,
         execution_objects: "ObjectStore | None" = None,
         task_objects: "ObjectStore | None" = None,
+        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
         artifacts: "ArtifactService | None" = None,
         conversation: "ConversationRepositories | None" = None,
         session_transcript_store: "SessionTimelineTranscriptStore | None" = None,
@@ -265,6 +267,7 @@ class RuntimeHistory:
         )
         self._execution_objects = execution_objects
         self._task_objects = task_objects
+        self._object_reader = object_reader
         self._artifacts = artifacts
         self._conversation = conversation
         self._session_transcript_store = session_transcript_store
@@ -308,10 +311,8 @@ class RuntimeHistory:
             raise AIError(ErrorCode.EXECUTION_NOT_READY)
 
         executions, _authorization = self._require_direct_reader()
-        stored = await executions.get_result(
-            execution_id,
-            tenant_id=principal.tenant_id,
-        )
+        stored = (record.result if type(executions) is ExecutionRepositoryImpl else
+                  await executions.get_result(execution_id, tenant_id=principal.tenant_id))
         if stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -334,10 +335,7 @@ class RuntimeHistory:
 
         if stored.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        output = await self._read_payload(
-            stored.output,
-            self._execution_objects,
-        )
+        output = await self._read_payload(stored.output)
         return ExecutionResult(
             record.execution_id,
             record.status,
@@ -939,6 +937,22 @@ class RuntimeHistory:
             limit=limit,
         )
 
+    async def read_model_interaction_updates(
+        self, execution_id: str, *, principal: Principal,
+        after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        """Read a fresh boundary and a bounded suffix without changing older service contracts."""
+        if type(self) is not RuntimeHistory:
+            return await _read_model_interaction_updates(
+                self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
+            )
+        read = getattr(self._service, "read_model_interaction_updates", None)
+        if callable(read):
+            return await read(execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit)
+        return await _read_model_interaction_updates(
+            self._service, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
+        )
+
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, principal: Principal,
     ) -> ModelInteractionReadBoundary:
@@ -1067,20 +1081,24 @@ class RuntimeHistory:
     async def _read_payload(
         self,
         payload: StoredPayload,
-        objects: "ObjectStore | None",
     ) -> JsonValue:
         try:
             if payload.kind == "inline":
                 value = payload.decode()
             else:
-                if objects is None or payload.ref is None:
+                if payload.ref is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                raw = await read_object(
-                    objects,
-                    payload.ref.key,
-                    expected_digest=payload.ref.digest,
-                    expected_size=payload.ref.size,
-                )
+                if self._object_reader is not None:
+                    raw = await self._object_reader(RuntimeDomain.EXECUTION, payload.ref)
+                else:
+                    if self._execution_objects is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    raw = await read_object(
+                        self._execution_objects,
+                        payload.ref.key,
+                        expected_digest=payload.ref.digest,
+                        expected_size=payload.ref.size,
+                    )
                 value = json.loads(raw.decode("utf-8"))
             return normalize_json_value(value)
         except AIError:
@@ -1187,6 +1205,7 @@ async def _open_runtime_history(
             namespace=resolved_namespace,
             execution_objects=selected_storage.object_store(RuntimeDomain.EXECUTION),
             task_objects=selected_storage.object_store(RuntimeDomain.TASK),
+            object_reader=selected_storage.read_object,
             artifacts=artifacts,
             cursor_signer=HmacCursorSigner(
                 "runtime-history",

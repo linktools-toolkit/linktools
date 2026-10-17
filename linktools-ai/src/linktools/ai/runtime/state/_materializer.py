@@ -91,6 +91,7 @@ async def materialize_runtime_storage(
     namespace: str,
     tenant_id: str,
     object_store: ObjectStore | None,
+    cache: object | None = None,
     read_only: bool = False,
 ) -> _MaterializedRuntimeStorage:
     stores: dict[RuntimeDomain, StateStore] = {}
@@ -311,7 +312,10 @@ async def materialize_runtime_storage(
             await component.initialize()
 
         repositories = _repositories(bundles)
-        objects = build_runtime_object_router(plan, object_store, stores, sql_contexts)
+        objects = build_runtime_object_router(
+            plan, object_store, stores, sql_contexts,
+            cache=cache, namespace=namespace, tenant_id=tenant_id,
+        )
         run_store = build_runtime_agent_run_store(
             plan,
             stores,
@@ -332,6 +336,7 @@ async def materialize_runtime_storage(
         )
         actions: list[Callable[[], Awaitable[None]]] = [
             run_store.preflight_close,
+            objects.drain_reads,
             objects.preflight_close,
             retention.close,
             run_store.close,

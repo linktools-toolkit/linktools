@@ -28,6 +28,7 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime.state._durability import (
     CommitObservation,
     DurableCommitState,
@@ -418,6 +419,7 @@ async def test_runtime_close_coordinator_does_not_close_lower_resources_after_pr
 @pytest.mark.asyncio
 async def test_local_execution_close_rejects_pending_command_owned_work() -> None:
     backend = object.__new__(LocalExecutionBackend)
+    backend._live_broker = LiveExecutionEventBroker()
     backend._accepting = True
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())

@@ -27,7 +27,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.observations: list[Observation] = []
 
-    def try_record(self, observation: Observation) -> bool:
+    async def try_record(self, observation: Observation) -> bool:
         self.observations.append(observation)
         return True
 

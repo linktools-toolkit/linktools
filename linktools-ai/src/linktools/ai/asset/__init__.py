@@ -23,11 +23,11 @@ from ._filesystem import FilesystemAssetBackend, filesystem_root
 from ._materialization import AssetMaterializer, MaterializedAssets, validate_materialized_path
 from ._object import AssetObjectKeyFactory
 from ._sql import SqlAssetBackend, build_asset_sql_metadata
-from ._store import AssetCacheAdapter, AssetStore, AssetStoreReader
+from ._store import AssetContentCache, AssetStore, AssetStoreReader
 
 __all__ = [
     "AssetBackend",
-    "AssetCacheAdapter",
+    "AssetContentCache",
     "AssetError",
     "AssetInfo",
     "AssetKey",

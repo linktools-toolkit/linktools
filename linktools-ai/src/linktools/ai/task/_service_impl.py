@@ -543,14 +543,20 @@ class DefaultTaskGraphService(TaskGraphService):
 
         finalizer = asyncio.create_task(finalize())
         try:
-            return await asyncio.shield(finalizer)
+            result = await asyncio.shield(finalizer)
         except asyncio.CancelledError:
             if finalizer.done():
-                return finalizer.result()
-            self._detach_finalizer(
-                cast("asyncio.Task[object]", finalizer), submission.graph_id,
+                result = finalizer.result()
+            else:
+                self._detach_finalizer(
+                    cast("asyncio.Task[object]", finalizer), submission.graph_id,
+                )
+                raise
+        if result.admitted and self._metric_projector is not None:
+            await self._metric_projector.trigger(
+                submission.graph_id, tenant_id=principal.tenant_id,
             )
-            raise
+        return result
 
 
     async def _arm_graph(self, launch: TaskGraphLaunch) -> None:
@@ -811,7 +817,6 @@ class DefaultTaskGraphService(TaskGraphService):
                     )
                     if settled_cancel.status is not OperationStatus.SUCCEEDED:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await self._observe_metric_history(view, tenant_id=tenant_id)
             settled = await self._record_success(
                 operation,
                 tenant_id,
@@ -820,6 +825,8 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if settled.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if _terminal(view.status):
+                await self._observe_metric_history(view, tenant_id=tenant_id)
             return await self._result(view, tenant_id)
 
         if node_cancel_operations:
@@ -960,9 +967,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 )
                 if settled.status is not OperationStatus.SUCCEEDED:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-        elif _terminal(view.status):
-            await self._observe_metric_history(view, tenant_id=tenant_id)
-        else:
+        elif not _terminal(view.status):
             if admission is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             launch = admission.launch()
@@ -985,6 +990,8 @@ class DefaultTaskGraphService(TaskGraphService):
         )
         if settled.status is not OperationStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if _terminal(view.status):
+            await self._observe_metric_history(view, tenant_id=tenant_id)
         _logger.info(
             "task graph recovery settled: tenant=%s graph=%s status=%s",
             tenant_id,
@@ -1849,7 +1856,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 if state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if _terminal(state.status):
-                    await self._observe_metric_history(state, tenant_id=tenant_id)
+                    await self._release_graph_dependencies(state, tenant_id=tenant_id)
                     return state
                 if state.status is TaskStatus.RECOVERY_REQUIRED:
                     return state
@@ -1879,13 +1886,17 @@ class DefaultTaskGraphService(TaskGraphService):
 
         try:
             if timeout_seconds is None:
-                return await consume()
-            return await asyncio.wait_for(consume(), timeout_seconds)
+                state = await consume()
+            else:
+                state = await asyncio.wait_for(consume(), timeout_seconds)
         except asyncio.TimeoutError as error:
             raise AIError(
                 ErrorCode.TASK_WAIT_TIMEOUT,
                 safe_details={"graph_id": graph_id},
             ) from error
+        if _terminal(state.status) and self._metric_projector is not None:
+            await self._metric_projector.trigger(graph_id, tenant_id=principal.tenant_id)
+        return state
 
     async def cancel_node(
         self,
@@ -2078,12 +2089,16 @@ class DefaultTaskGraphService(TaskGraphService):
             name=f"task-cancel-finalizer-{tenant_id}-{graph_id}",
         )
         try:
-            return await asyncio.shield(finalizer)
+            view = await asyncio.shield(finalizer)
         except asyncio.CancelledError:
             if finalizer.done():
-                return finalizer.result()
-            self._detach_finalizer(cast("asyncio.Task[object]", finalizer), graph_id)
-            raise
+                view = finalizer.result()
+            else:
+                self._detach_finalizer(cast("asyncio.Task[object]", finalizer), graph_id)
+                raise
+        if self._metric_projector is not None:
+            await self._metric_projector.trigger(graph_id, tenant_id=tenant_id)
+        return view
 
     async def _claim_cancel_operation(
         self,
@@ -2223,6 +2238,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 )
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if operation.status is OperationStatus.SUCCEEDED:
+            await self._release_graph_dependencies(view, tenant_id=tenant_id)
             return view
 
         drive_cancel = operation.status in {
@@ -2321,7 +2337,7 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await self._observe_metric_history(view, tenant_id=tenant_id)
+        await self._release_graph_dependencies(view, tenant_id=tenant_id)
         _logger.info(
             "task graph cancel settled: tenant=%s graph=%s status=%s",
             tenant_id,
@@ -2401,7 +2417,7 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if current.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await self._observe_metric_history(view, tenant_id=tenant_id)
+            await self._release_graph_dependencies(view, tenant_id=tenant_id)
             return view
         if isinstance(error, AIError) and error.code in {
             ErrorCode.STORAGE_COMMIT_UNKNOWN,
@@ -2596,6 +2612,16 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         tenant_id: str,
     ) -> None:
+        await self._release_graph_dependencies(view, tenant_id=tenant_id)
+        if self._metric_projector is not None:
+            await self._metric_projector.trigger(view.graph_id, tenant_id=tenant_id)
+
+    async def _release_graph_dependencies(
+        self,
+        view: TaskGraphView | TaskGraphState,
+        *,
+        tenant_id: str,
+    ) -> None:
         if _terminal(view.status) and self._preflight is not None:
             state = (
                 view
@@ -2609,8 +2635,6 @@ class DefaultTaskGraphService(TaskGraphService):
                 state,
                 tenant_id=tenant_id,
             )
-        if self._metric_projector is not None:
-            self._metric_projector.trigger(view.graph_id, tenant_id=tenant_id)
 
     async def _result(
         self,

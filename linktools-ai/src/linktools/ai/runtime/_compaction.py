@@ -217,20 +217,16 @@ class _ObservedCompactionModel(WrapperModel):
                     )
                     raise
                 finished = self._journal.finish(model_request_seq, status="SUCCEEDED")
-                interrupted = await _await_request_handoff(
-                    self._notify(
-                        finished,
-                        phase="completed",
-                        response=response,
-                        error=None,
-                        messages=messages,
-                        model_settings=model_settings,
-                        parameters=model_request_parameters,
-                        client_requests=client_recorder.requests,
-                    )
+                await self._notify(
+                    finished,
+                    phase="completed",
+                    response=response,
+                    error=None,
+                    messages=messages,
+                    model_settings=model_settings,
+                    parameters=model_request_parameters,
+                    client_requests=client_recorder.requests,
                 )
-                if interrupted:
-                    raise asyncio.CancelledError
                 return response
             finally:
                 self._journal.consume(model_request_seq)
@@ -249,20 +245,16 @@ class _ObservedCompactionModel(WrapperModel):
         client_requests: tuple[ModelClientRequest, ...],
     ) -> None:
         finished = self._journal.finish(model_request_seq, status=status)
-        interrupted = await _await_request_handoff(
-            self._notify(
-                finished,
-                phase=phase,
-                response=response,
-                error=error,
-                messages=messages,
-                model_settings=model_settings,
-                parameters=parameters,
-                client_requests=client_requests,
-            )
+        await self._notify(
+            finished,
+            phase=phase,
+            response=response,
+            error=error,
+            messages=messages,
+            model_settings=model_settings,
+            parameters=parameters,
+            client_requests=client_requests,
         )
-        if interrupted:
-            raise asyncio.CancelledError
 
     async def _notify(
         self,
@@ -276,8 +268,9 @@ class _ObservedCompactionModel(WrapperModel):
         parameters: ModelRequestParameters,
         client_requests: tuple[ModelClientRequest, ...],
     ) -> None:
+        interrupted = False
         if self._observer is not None:
-            await self._observer(
+            observation = self._observer(
                 self._ctx,
                 fact,
                 phase,
@@ -285,6 +278,10 @@ class _ObservedCompactionModel(WrapperModel):
                 response,
                 error,
             )
+            if phase == "started":
+                await observation
+            else:
+                interrupted = await _await_request_handoff(observation)
         if self._recorder is not None:
             await self._recorder(
                 self._ctx,
@@ -300,6 +297,8 @@ class _ObservedCompactionModel(WrapperModel):
                 self._source_messages,
                 client_requests,
             )
+        if interrupted:
+            raise asyncio.CancelledError
 
 
 class CompactionCapability(AbstractCapability[None]):

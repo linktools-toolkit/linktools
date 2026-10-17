@@ -500,9 +500,9 @@ def _validate_history_association_coverage(
         record_key_digest(namespace, tenant_id, domain.value, "history_association",
                           [run.agent_run_id, "coverage", "event"]),
         None, record.parent_digest, "history_association", "coverage:event",
-        None, record.storage_version, None, 0, None, {"sequence": covered},
+        None, record.storage_revision, None, 0, None, {"sequence": covered},
     )
-    if covered > event_count or record.storage_version < 1 or not _same_physical_identity(record, expected):
+    if covered > event_count or record.storage_revision < 1 or not _same_physical_identity(record, expected):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for key, association in associations.items():
         if association.data["sequence"] <= covered:
@@ -821,7 +821,7 @@ def _expected_record(
         parent=parent,
         state=state,
         sort_key=sort_key,
-        storage_version=record.storage_version,
+        storage_revision=record.storage_revision,
     )
 
 def _record_identity(
@@ -932,7 +932,7 @@ def _expected_session_turn_commit(
         "session_turn_commit",
         sortable_identity(identity),
         None,
-        record.storage_version,
+        record.storage_revision,
         None,
         0,
         None,
@@ -961,7 +961,7 @@ def _same_physical_identity(left: StoredRecord, right: StoredRecord) -> bool:
         and left.kind == right.kind
         and left.sort_key == right.sort_key
         and left.state == right.state
-        and left.storage_version == right.storage_version
+        and left.storage_revision == right.storage_revision
         and left.lease_owner == right.lease_owner
         and left.lease_fence == right.lease_fence
         and left.lease_expires_at == right.lease_expires_at

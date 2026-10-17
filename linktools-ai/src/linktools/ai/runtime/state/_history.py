@@ -3,7 +3,7 @@
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
@@ -91,7 +91,7 @@ class PreparedTranscriptObservation:
     base_message_count: int
     target_message_count: int
     chunks: tuple[TranscriptChunk, ...]
-    base_storage_version: int
+    base_storage_revision: int
     pending: RuntimePayloadRef | None
     pending_parts: tuple[_PendingPart, ...]
     new_pending_parts: tuple[StoredFact, ...]
@@ -100,7 +100,7 @@ class PreparedTranscriptObservation:
 @dataclass(frozen=True, slots=True)
 class _PendingCache:
     message_index: int
-    storage_version: int
+    storage_revision: int
     pending: RuntimePayloadRef | None
     parts: tuple[_PendingPart, ...]
 
@@ -197,9 +197,11 @@ class TranscriptRepository:
         runtime_domain: RuntimeDomain,
         context_sources: Mapping[RuntimeDomain, "TranscriptRepository"] | None = None,
         history_repository: "ConversationHistoryRepository | None" = None,
+        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
     ) -> None:
         self._store = store
         self._object_store = object_store
+        self._object_reader = object_reader
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._namespace_digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
@@ -432,11 +434,11 @@ class TranscriptRepository:
         async def capture(transaction: StateTransaction):
             entry = await self.get_head_in_transaction(transaction, owner_id)
             head = self.empty_head(owner_id) if entry is None else entry[0]
-            version = -1 if entry is None else entry[1].storage_version
+            version = -1 if entry is None else entry[1].storage_revision
             cache = self._pending_cache.get(owner_id)
             previous = ()
             if (cache is not None and cache.message_index == head.message_count
-                    and cache.storage_version <= version and cache.pending == head.pending
+                    and cache.storage_revision <= version and cache.pending == head.pending
                     and len(cache.parts) <= head.pending_part_count):
                 previous = cache.parts
             chunks, keys = await self._capture_pending_suffix(
@@ -537,7 +539,7 @@ class TranscriptRepository:
     ) -> None:
         entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
         if entry is None:
-            if prepared.base_storage_version != -1:
+            if prepared.base_storage_revision != -1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self.create_head_in_transaction(transaction, prepared.owner_id)
             entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
@@ -545,7 +547,7 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head, record = entry
         if (
-            record.storage_version != max(0, prepared.base_storage_version)
+            record.storage_revision != max(0, prepared.base_storage_revision)
             or head.message_count != prepared.base_message_count
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -555,7 +557,7 @@ class TranscriptRepository:
             and head.pending_part_count == len(prepared.pending_parts)
         ):
             guarded = await transaction.guard_record(
-                record.key_digest, expected_storage_version=record.storage_version,
+                record.key_digest, expected_storage_revision=record.storage_revision,
             )
             if guarded is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -566,13 +568,14 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head, record = entry
         next_head = replace(head, pending=prepared.pending, pending_part_count=len(prepared.pending_parts))
-        upgraded = replace(
-            record,
-            data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
-            storage_version=record.storage_version + 1,
-        )
-        if not await transaction.replace_record(upgraded, expected_storage_version=record.storage_version):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if not prepared.chunks or next_head != head:
+            upgraded = replace(
+                record,
+                data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
+                storage_revision=record.storage_revision + 1,
+            )
+            if not await transaction.replace_record(upgraded, expected_storage_revision=record.storage_revision):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         if prepared.new_pending_parts:
             await transaction.insert_facts(prepared.new_pending_parts)
 
@@ -748,11 +751,11 @@ class TranscriptRepository:
             data=encode_envelope(
                 {"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}
             ),
-            storage_version=head_record.storage_version + 1,
+            storage_revision=head_record.storage_revision + 1,
         )
         if not await transaction.replace_record(
             upgraded,
-            expected_storage_version=head_record.storage_version,
+            expected_storage_revision=head_record.storage_revision,
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         final = await transaction.reserve_sequence(
@@ -1096,7 +1099,7 @@ class TranscriptRepository:
         current = await self._store.read(
             lambda transaction: transaction.get_record(record.key_digest)
         )
-        if current is None or current.storage_version != record.storage_version:
+        if current is None or current.storage_revision != record.storage_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def history_message_count(self, history_id: str, *, tenant_id: str) -> int:
@@ -1130,13 +1133,12 @@ class TranscriptRepository:
         tenant_id: str,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_session_model_context")
-        projection = await self.load_projection(history_id)
+        projection, head = await self._load_context_metadata(history_id)
         if projection is not None:
             return await self._load_model_context_from_projection(
                 history_id,
                 projection,
             )
-        head = await self.get_head(history_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history = (
@@ -1293,9 +1295,9 @@ class TranscriptRepository:
                 value,
                 scope_digest=current.scope_digest,
                 parent_digest=current.parent_digest,
-                storage_version=current.storage_version + 1,
+                storage_revision=current.storage_revision + 1,
             ),
-            expected_storage_version=current.storage_version,
+            expected_storage_revision=current.storage_revision,
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -1435,15 +1437,28 @@ class TranscriptRepository:
         owner_id: str,
     ) -> LoadedModelContext:
         require_no_run_history_lock("TranscriptRepository.load_model_context")
-        projection = await self.load_projection(owner_id)
+        projection, head = await self._load_context_metadata(owner_id)
         if projection is None:
-            head = await self.get_head(owner_id)
             if head is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if head.message_count:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return LoadedModelContext(())
         return await self._load_model_context_from_projection(owner_id, projection)
+
+    async def _load_context_metadata(
+        self, owner_id: str,
+    ) -> tuple[ContextProjection | None, TranscriptHeadRecord | None]:
+        projection_key = self._projection_key(owner_id)
+        head_key = self._head_key(owner_id)
+        records = await self._store.read(
+            lambda transaction: transaction.get_records((projection_key, head_key))
+        )
+        projection = records.get(projection_key)
+        if projection is not None:
+            return _decode_enveloped_domain(projection.data, ContextProjection), None
+        head = records.get(head_key)
+        return None, None if head is None else self._decode_head(head)
 
     async def _load_model_context_from_projection(
         self,
@@ -1813,7 +1828,11 @@ class TranscriptRepository:
             if not isinstance(value, bytes):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return value
-        if payload.ref is None or self._object_store is None:
+        if payload.ref is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._object_reader is not None:
+            return await self._object_reader(self._runtime_domain, payload.ref)
+        if self._object_store is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await read_object(
             self._object_store,

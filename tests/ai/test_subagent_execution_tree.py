@@ -834,6 +834,7 @@ async def test_tree_close_keeps_child_live_cleanup_authoritative_failure():
             if self.key == "child":
                 raise cause
     class Live:
+        shared = None
         def claim_local_producer(self, key):
             return Subscription(key)
         def is_local_producer(self, key):

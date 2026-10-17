@@ -142,7 +142,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
             owner = await transaction.get_record(owner_key)
             assert owner is not None
             guarded = await transaction.guard_record(
-                owner_key, expected_storage_version=owner.storage_version
+                owner_key, expected_storage_revision=owner.storage_revision
             )
             assert guarded is not None
             sequence = await transaction.next_sequence(

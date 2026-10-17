@@ -23,6 +23,10 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
+from ._shared_stream import (
+    SharedStreamPublisher, SharedStreamEvent, decode_stream_record,
+    shared_stream_position, shared_stream_requested, stream_key,
+)
 from ._observation import _is_observation_cleanup, _await_stream_cleanup
 from .service_api import (
     ExecutionEvent,
@@ -242,9 +246,10 @@ class _LiveSubscription:
 
 
 class LiveExecutionEventBroker:
-    def __init__(self, *, max_bytes: int = _DEFAULT_BUFFER_BYTES) -> None:
+    def __init__(self, *, max_bytes: int = _DEFAULT_BUFFER_BYTES, shared: SharedStreamPublisher | None = None) -> None:
         if max_bytes < 1:
             raise ValueError("live broker buffer must be positive")
+        self._shared = shared
         self._max_bytes = max_bytes
         self._buffers: dict[str, deque[_OrderedItem]] = {}
         self._buffer_bytes: dict[str, int] = {}
@@ -258,6 +263,18 @@ class LiveExecutionEventBroker:
         self._prepared: dict[str, _PreparedStreamLease] = {}
         self._replay_required: set[str] = set()
         self._pending_event_counts: dict[str, int] = {}
+
+    @property
+    def shared(self) -> SharedStreamPublisher | None:
+        return self._shared
+
+    def admit_shared_producer(self, execution_id: str, generation: int, claim: str) -> None:
+        if self._shared is not None:
+            self._shared.admit(execution_id, generation, claim)
+
+    async def close_shared(self) -> None:
+        if self._shared is not None:
+            await self._shared.close()
 
     def register_local_producer(self, execution_id: str, base_event_seq: int) -> None:
         if base_event_seq < 0:
@@ -282,6 +299,8 @@ class LiveExecutionEventBroker:
         return self._base_event_seqs.get(execution_id)
 
     def publish(self, delta: ExecutionDelta) -> None:
+        if self._shared is not None and delta.content:
+            self._shared.delta(delta.execution_id, delta.event_type, delta.content, delta.stream_truncated)
         if not delta.content:
             return
         if delta.execution_id in self._replay_required:
@@ -383,6 +402,8 @@ class LiveExecutionEventBroker:
                         )
                     return
 
+        if self._shared is not None:
+            self._shared.event(execution_id, event_name, payload, durable_seq)
         event = _LiveEvent(execution_id, event_name, payload, durable_seq)
         value_size = _live_item_size(event)
         self._buffer_bytes.setdefault(execution_id, 0)
@@ -426,6 +447,8 @@ class LiveExecutionEventBroker:
                 if not isinstance(value, _LiveEvent) or value.durable_seq is not None:
                     continue
                 value.durable_seq = sequence
+                if self._shared is not None:
+                    self._shared.event(execution_id, value.event_type, value.payload, sequence)
                 sequence += 1
                 confirmed += 1
                 if confirmed == count:
@@ -511,6 +534,8 @@ class LiveExecutionEventBroker:
                     self._activity.pop(execution_id)
 
     def complete(self, execution_id: str) -> None:
+        if self._shared is not None:
+            self._shared.complete(execution_id)
         self._completed.add(execution_id)
         subscriptions = tuple(self._subscriptions.get(execution_id, ()))
         for subscription in subscriptions:
@@ -521,6 +546,8 @@ class LiveExecutionEventBroker:
 
     def handoff(self, execution_id: str) -> None:
         """Continue observers from durable truth after this producer loses its claim."""
+        if self._shared is not None:
+            self._shared.handoff(execution_id)
         for subscription in tuple(self._subscriptions.pop(execution_id, ())):
             subscription.require_replay(discard_uncommitted=True)
             subscription.finish()
@@ -574,6 +601,8 @@ class LiveExecutionEventBroker:
         if execution_id in self._replay_required:
             return
         self._replay_required.add(execution_id)
+        if self._shared is not None:
+            self._shared.handoff(execution_id)
         self._buffers.pop(execution_id, None)
         self._buffer_bytes.pop(execution_id, None)
         self._last_type.pop(execution_id, None)
@@ -745,6 +774,13 @@ class DefaultEventService:
             raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
+        if not is_local_producer and self._live.shared is not None and shared_stream_requested():
+            async with aclosing(self._stream_shared(
+                execution_id, principal=principal, after_event_seq=after_event_seq,
+            )) as shared_stream:
+                async for event in shared_stream:
+                    yield event
+            return
         if not is_local_producer:
             async with aclosing(self._stream_durable(
                 execution_id,
@@ -774,6 +810,11 @@ class DefaultEventService:
         cursor = after_event_seq
         stream_error: BaseException | None = None
         try:
+            if shared_stream_position(execution_id) is not None:
+                # Transport positions cannot address the local preview buffer.
+                yield SharedStreamEvent(
+                    execution_id, None, "STREAM_RESET", {"stream_truncated": True}, ("", 0),
+                )
             while cursor < base_event_seq:
                 page = await self._read_durable(
                     execution_id,
@@ -993,6 +1034,160 @@ class DefaultEventService:
                 )
                 if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                     return
+
+    async def _stream_shared(
+        self, execution_id: str, *, principal: Principal, after_event_seq: int,
+    ) -> AsyncIterator[ExecutionStreamEvent]:
+        shared = self._live.shared
+        assert shared is not None
+        head = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
+        cursor = after_event_seq
+        resumed = shared_stream_position(execution_id)
+        generation = 0 if head is None else head.producer_generation
+        position = 0 if resumed is None else resumed[1]
+        claim = None if head is None else head.producer_claim_id
+        key = (b"" if not claim else stream_key(
+            shared.namespace, principal.tenant_id, execution_id, generation, claim,
+        ))
+        identity = key.hex()
+        gap = ((resumed is not None and resumed[0] != identity)
+               or (resumed is None and after_event_seq > 0))
+        if head is None or head.state.value != "open" or generation < 1 or not claim:
+            gap = gap or resumed is not None
+        else:
+            loop = asyncio.get_running_loop()
+            backoff = 1.0
+            deadline = loop.time() + backoff
+            opening_deadline = deadline
+            sealed = False
+            while not gap:
+                remaining = max(0.0, deadline - loop.time())
+                if not remaining:
+                    current = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
+                    if (current is None or current.producer_generation != generation
+                            or current.producer_claim_id != claim
+                            or current.state.value != "open"):
+                        gap = True
+                        break
+                    backoff = min(30.0, backoff * 2)
+                    deadline = loop.time() + backoff
+                    remaining = backoff
+                try:
+                    batch = await asyncio.wait_for(
+                        shared.backend.read_stream(key, position, limit=100, wait_seconds=remaining),
+                        timeout=remaining + 0.05,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    gap = True
+                    break
+                if batch.gap:
+                    if position == 0 and resumed is None and loop.time() < opening_deadline:
+                        # Admission precedes the single asynchronous open; a reader never creates it.
+                        await asyncio.sleep(min(0.1, max(0.0, deadline - loop.time())))
+                        continue
+                    gap = True
+                    break
+                prefetched: deque[ExecutionEvent] = deque()
+                for index, (sequence, payload) in enumerate(batch.records):
+                    # A consumer may pause between yields while a batch remains buffered.
+                    if loop.time() >= deadline:
+                        prefetched.clear()
+                        current = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
+                        if (current is None or current.producer_generation != generation
+                                or current.producer_claim_id != claim or current.state.value != "open"):
+                            gap = True
+                            break
+                        backoff = min(30.0, backoff * 2)
+                        deadline = loop.time() + backoff
+                    if sequence != position + 1:
+                        gap = True
+                        break
+                    try:
+                        record = decode_stream_record(payload)
+                    except AIError:
+                        gap = True
+                        break
+                    position = sequence
+                    kind = record["kind"]
+                    if kind == "delta":
+                        try:
+                            delta_type = ExecutionDeltaType(record.get("type"))
+                        except (TypeError, ValueError):
+                            gap = True
+                            break
+                        if (not isinstance(record.get("text"), str)
+                                or not isinstance(record.get("truncated", False), bool)):
+                            gap = True
+                            break
+                        yield SharedStreamEvent(
+                            execution_id, None, delta_type.value,
+                            {"text": record["text"], "stream_truncated": record.get("truncated", False)},
+                            (identity, position),
+                        )
+                    elif kind == "event":
+                        target = record.get("durable")
+                        if isinstance(target, bool) or not isinstance(target, int) or target < 1:
+                            gap = True
+                            break
+                        # Only the durable owner supplies semantic facts. The log is a wakeup.
+                        while cursor < target:
+                            if not prefetched:
+                                high_water = target
+                                for offset, (next_sequence, next_payload) in enumerate(
+                                    batch.records[index + 1:], start=1,
+                                ):
+                                    if next_sequence != sequence + offset:
+                                        break
+                                    try:
+                                        following = decode_stream_record(next_payload)
+                                    except AIError:
+                                        break
+                                    next_target = following.get("durable")
+                                    if (following["kind"] != "event" or isinstance(next_target, bool)
+                                            or not isinstance(next_target, int) or next_target < 1):
+                                        break
+                                    high_water = max(high_water, next_target)
+                                page = await self._read_durable(
+                                    execution_id, tenant_id=principal.tenant_id,
+                                    after_event_seq=cursor, limit=min(200, high_water - cursor),
+                                )
+                                prefetched.extend(page.items)
+                            if not prefetched:
+                                gap = True
+                                break
+                            while prefetched and cursor < target:
+                                event = prefetched.popleft()
+                                if event.event_seq != cursor + 1:
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                                cursor = event.event_seq
+                                yield SharedStreamEvent(
+                                    execution_id, cursor, event.event_type, event.payload,
+                                    (identity, position if cursor == target else position - 1),
+                                )
+                                if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
+                                    return
+                        if gap:
+                            break
+                    else:
+                        gap = kind == "gap"
+                        sealed = kind == "seal"
+                        break
+                if gap or batch.sealed or sealed:
+                    break
+                if not batch.records and loop.time() < deadline:
+                    # A backend may return an empty batch immediately; avoid a busy loop.
+                    await asyncio.sleep(min(0.01, max(0.0, deadline - loop.time())))
+        if gap:
+            yield SharedStreamEvent(
+                execution_id, None, "STREAM_RESET", {"stream_truncated": True}, ("", 0),
+            )
+        async with aclosing(self._stream_durable(
+            execution_id, tenant_id=principal.tenant_id, after_event_seq=cursor,
+        )) as durable:
+            async for event in durable:
+                yield event
 
     async def _stream_durable(
         self,

@@ -8,16 +8,22 @@ import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai.capability import CapabilityGroup
-from linktools.ai.core import ExecutionStatus, JsonValue, Page, Principal, TaskStatus
+from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page, Principal, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
+from linktools.ai.runtime._agent_executor import AgentExecutor, AgentExecutionResult
+from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime.service_api import CancelExecutionRequest
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskEvent,
@@ -77,9 +83,12 @@ class _TextModels:
 class _CaptureRecorder:
     def __init__(self) -> None:
         self.observations: list[Observation] = []
+        self.terminal_recorded = asyncio.Event()
 
-    def try_record(self, observation: Observation) -> bool:
+    async def try_record(self, observation: Observation) -> bool:
         self.observations.append(observation)
+        if observation.kind == "linktools.task.graph.terminal":
+            self.terminal_recorded.set()
         return True
 
 
@@ -359,35 +368,33 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
 
 
 @pytest.mark.asyncio
-async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(runtime_metrics, "_QUEUE_CAPACITY", 1)
+async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open() -> None:
     store = _BlockingMetricStore()
-    buffer = runtime_metrics._MetricBuffer(
-        Metrics.from_store(store, namespace="buffer")  # type: ignore[arg-type]
+    buffer = runtime_metrics._RuntimeMetricRecorder(
+        Metrics.from_store(store, namespace="buffer", cache=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2)).recorder()  # type: ignore[arg-type]
     )
 
-    assert buffer.try_record(_observation("first")) is True
+    assert await buffer.try_record(_observation("first")) is True
+    await buffer.flush(timeout_seconds=0)
     await asyncio.wait_for(store.entered.wait(), timeout=1)
-    assert buffer.try_record(_observation("second")) is True
-    assert buffer.try_record(_observation("third")) is False
+    assert await buffer.try_record(_observation("second")) is True
+    assert await buffer.try_record(_observation("third")) is False
 
     store.release.set()
     await buffer.close()
-    assert buffer.try_record(_observation("after-close")) is False
+    assert await buffer.try_record(_observation("after-close")) is False
     assert sum(len(batch) for batch in store.batches) == 2
 
 
 @pytest.mark.asyncio
 async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
-    buffer = runtime_metrics._MetricBuffer(
-        Metrics.from_store(store, namespace="buffer-retry")  # type: ignore[arg-type]
+    buffer = runtime_metrics._RuntimeMetricRecorder(
+        Metrics.from_store(store, namespace="buffer-retry", cache=InMemoryCacheBackend(max_bytes=1024 * 1024)).recorder()  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
 
-    assert buffer.try_record(observation) is True
+    assert await buffer.try_record(observation) is True
     await buffer.close()
 
     assert len(store.batches) == 2
@@ -715,6 +722,7 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
     )
 
     await launcher.start(launch)
+    await asyncio.wait_for(recorder.terminal_recorded.wait(), timeout=1)
     for _ in range(100):
         if not launcher.owns_graph("graph", tenant_id="tenant"):
             break
@@ -753,3 +761,190 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
         "latency_ns": 4_000_000_000,
         "retry_count": 0,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", (False, True))
+async def test_agent_metric_cancellation_follows_usage_accounting(failure: bool) -> None:
+    entered = asyncio.Event()
+    captured_usage: list[UsageMetrics] = []
+    observations: list[Observation] = []
+
+    class BlockingRecorder:
+        async def try_record(self, observation: Observation) -> bool:
+            observations.append(observation)
+            entered.set()
+            await asyncio.Event().wait()
+            return True
+
+    executor = object.__new__(AgentExecutor)
+    executor._metrics = BlockingRecorder()
+    usage = UsageMetrics(model_requests=1, input_tokens=4, output_tokens=2)
+    original_error = AIError(ErrorCode.MODEL_UNAVAILABLE)
+
+    async def execute(scope: object, *, run_usage: RunUsage, usage_limits: object) -> AgentExecutionResult:
+        if failure:
+            run_usage.requests = 1
+            raise original_error
+        return AgentExecutionResult("run", "done", [], usage)
+
+    executor._execute_with_sandbox = execute
+    scope = SimpleNamespace(
+        binding=SimpleNamespace(compiled_agent=SimpleNamespace(
+            spec=SimpleNamespace(id="agent", usage_limits=None),
+        )),
+        context=SimpleNamespace(
+            namespace="workspace", execution_id="execution", session_id=None,
+            principal=Principal("owner", "tenant"),
+        ),
+        agent_run_id="run", usage_sink=captured_usage.append,
+    )
+    task = asyncio.create_task(executor.execute(scope))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert len(captured_usage) == 1
+    assert captured_usage[0].model_requests == 1
+    assert observations[0].status == ("FAILED" if failure else "SUCCEEDED")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(captured_usage) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit_unknown", (False, True))
+async def test_terminal_metric_cancellation_preserves_published_success_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+    commit_unknown: bool,
+) -> None:
+    original_commit = RuntimeStateCommands.commit_terminal_checkpoint
+    committed_unknown = False
+
+    async def commit(self: RuntimeStateCommands, *args: object, **kwargs: object) -> object:
+        nonlocal committed_unknown
+        result = await original_commit(self, *args, **kwargs)
+        if commit_unknown and not committed_unknown:
+            committed_unknown = True
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        return result
+
+    monkeypatch.setattr(RuntimeStateCommands, "commit_terminal_checkpoint", commit)
+    class BlockingTerminalStore(InMemoryMetricStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.producer: asyncio.Task[object] | None = None
+
+        async def put_observations(self, namespace: str, observations: tuple[Observation, ...]) -> None:
+            if any(item.kind == "linktools.execution.terminal" for item in observations):
+                self.producer = asyncio.current_task()
+                self.entered.set()
+                await asyncio.Event().wait()
+            await super().put_observations(namespace, observations)
+
+    store = BlockingTerminalStore()
+    metrics = Metrics.from_store(store, namespace="terminal-order")
+    async with Runtime.open(
+        "terminal-order", models=_TextModels(), storage=RuntimeStorage.in_memory(),
+        capabilities=(_agent_group(),), metrics=metrics,
+    ) as runtime:
+        execution = await runtime.agents.get("default").start("hello")
+        try:
+            await asyncio.wait_for(store.entered.wait(), timeout=2)
+            assert store.producer is not None
+            assert not store.producer.done()
+            view = await asyncio.wait_for(runtime.executions.inspect(
+                execution.execution_id, principal=runtime.default_principal,
+            ), timeout=2)
+            assert view.status is ExecutionStatus.SUCCEEDED
+            assert committed_unknown is commit_unknown
+            history = await asyncio.wait_for(execution.model_interactions(include_content=True), timeout=2)
+            assert len(history.items) == 1
+            assert history.items[0].status == "SUCCEEDED"
+            events = await asyncio.wait_for(execution.list_events(), timeout=2)
+            assert events.items[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value
+            store.producer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(store.producer, timeout=2)
+            result = await execution.wait(timeout_seconds=2)
+            assert result.result.status is ExecutionStatus.SUCCEEDED
+            after = await runtime.executions.result(
+                execution.execution_id, principal=runtime.default_principal,
+            )
+            assert after.status is ExecutionStatus.SUCCEEDED
+            assert await execution.model_interactions(include_content=True) == history
+        finally:
+            if store.producer is not None and not store.producer.done():
+                store.producer.cancel()
+                await asyncio.gather(store.producer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = asyncio.Event()
+    release_prepare = asyncio.Event()
+    execution_ids: list[str] = []
+    aborted: list[str] = []
+    original_prepare = LocalExecutionBackend.prepare_start
+    original_abort = LocalExecutionBackend.abort_start
+
+    async def prepare(self: LocalExecutionBackend, request: object, execution: object, identity: object) -> object:
+        execution_ids.append(execution.execution_id)
+        prepared.set()
+        await release_prepare.wait()
+        return await original_prepare(self, request, execution, identity)
+
+    async def abort(self: LocalExecutionBackend, execution: object) -> None:
+        await original_abort(self, execution)
+        aborted.append(execution.execution_id)
+
+    monkeypatch.setattr(LocalExecutionBackend, "prepare_start", prepare)
+    monkeypatch.setattr(LocalExecutionBackend, "abort_start", abort)
+
+    class Store(InMemoryMetricStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.attempts: list[Observation] = []
+            self.caller: asyncio.Task[object] | None = None
+
+        async def put_observations(self, namespace: str, observations: tuple[Observation, ...]) -> None:
+            self.attempts.extend(observations)
+            self.caller = asyncio.current_task()
+            self.entered.set()
+            await self.release.wait()
+            await super().put_observations(namespace, observations)
+
+    store = Store()
+    async with Runtime.open(
+        "pending-cancel-metric", models=_TextModels(), storage=RuntimeStorage.in_memory(),
+        capabilities=(_agent_group(),), metrics=Metrics.from_store(store),
+    ) as runtime:
+        starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
+        cancellation: asyncio.Task[object] | None = None
+        try:
+            await asyncio.wait_for(prepared.wait(), timeout=2)
+            execution_id = execution_ids[0]
+            request = CancelExecutionRequest(runtime.default_principal, "cancel-pending")
+            cancellation = asyncio.create_task(runtime.executions.cancel(execution_id, request))
+            await asyncio.wait_for(store.entered.wait(), timeout=2)
+            assert store.caller is cancellation
+            assert aborted == [execution_id]
+            assert len(store.attempts) == 1
+            assert store.attempts[0].status == "CANCELLED"
+            cancellation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancellation
+            terminal = await runtime.executions.result(execution_id, principal=runtime.default_principal)
+            assert terminal.status is ExecutionStatus.CANCELLED
+            repeated = await runtime.executions.cancel(execution_id, request)
+            assert repeated.cancelled
+            assert len(store.attempts) == 1
+        finally:
+            starter.cancel()
+            if cancellation is not None:
+                cancellation.cancel()
+            store.release.set()
+            await asyncio.gather(starter, *(() if cancellation is None else (cancellation,)), return_exceptions=True)

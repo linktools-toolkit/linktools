@@ -458,7 +458,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                                 "id": "review/guide.md",
                                 "layer_id": "",
                                 "revision": 1,
-                                "etag": "a" * 64,
+                                "digest": "a" * 64,
                                 "size": 1,
                             },
                             "executable_bits": 0,
@@ -916,7 +916,7 @@ async def test_mcp_resource_capture_is_stable_and_includes_binary_files() -> Non
 
         assert first_versions == second_versions
         assert {
-            item.key.id: item.etag
+            item.key.id: item.digest
             for item in first_versions
         } == {
             "server/data.bin": hashlib.sha256(binary).hexdigest(),

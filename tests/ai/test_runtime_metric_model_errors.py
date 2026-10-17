@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Model metric error classification and cancellation semantics."""
 
+import asyncio
+
 import httpx
 import pytest
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
@@ -16,6 +18,7 @@ from linktools.ai.runtime._metric_capability import (
 )
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, RunCancelled
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -25,7 +28,7 @@ class _Recorder:
     def __init__(self) -> None:
         self.observations: list[Observation] = []
 
-    def try_record(self, observation: Observation) -> bool:
+    async def try_record(self, observation: Observation) -> bool:
         self.observations.append(observation)
         return True
 
@@ -171,3 +174,61 @@ async def _observe_failure(error: Exception) -> Observation:
     assert captured.value is error
     assert len(recorder.observations) == 1
     return recorder.observations[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_error", (None, RuntimeError("model failed")))
+async def test_model_metric_cancellation_follows_completed_request_handoff(
+    original_error: Exception | None,
+) -> None:
+    entered = asyncio.Event()
+    phases: list[str] = []
+    observations: list[Observation] = []
+
+    class BlockingRecorder(_Recorder):
+        async def try_record(self, observation: Observation) -> bool:
+            observations.append(observation)
+            entered.set()
+            await asyncio.Event().wait()
+            return True
+
+    capability = ModelObservationCapability(
+        BlockingRecorder(), source_namespace="workspace", tenant_id="tenant",
+        execution_id="execution", session_id=None, agent_run_id="agent-run",
+        agent_id="agent",
+    )
+
+    async def record_event(fact: object, *, phase: str, **kwargs: object) -> None:
+        phases.append("durable:" + phase)
+
+    async def publish_event(fact: object, *, phase: str, **kwargs: object) -> None:
+        phases.append("published:" + phase)
+
+    capability._record_request_event = record_event
+    capability._publish_request_event = publish_event
+    model = TestModel()
+    context = RunContext(
+        deps=type("Deps", (), {"correlation": {}})(), model=model,
+        usage=RunUsage(), run_id="run", run_step=1,
+    )
+    request = ModelRequestContext(
+        model=model, messages=[], model_settings=None,
+        model_request_parameters=ModelRequestParameters(),
+    )
+
+    async def handler(_request: object) -> ModelResponse:
+        if original_error is not None:
+            raise original_error
+        return ModelResponse(parts=())
+
+    task = asyncio.create_task(capability.wrap_model_request(
+        context, request_context=request, handler=handler,
+    ))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    terminal_phase = "completed" if original_error is None else "failed"
+    assert phases[-2:] == ["durable:" + terminal_phase, "published:" + terminal_phase]
+    assert observations[0].status == ("SUCCEEDED" if original_error is None else "FAILED")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert phases[-2:] == ["durable:" + terminal_phase, "published:" + terminal_phase]

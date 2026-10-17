@@ -156,7 +156,7 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
         await transaction.insert_records(records)
     await store.mutate(seed)
     replacements = tuple(RecordReplacement(replace(
-        record, state="updated", storage_version=1,
+        record, state="updated", storage_revision=1,
         lease_owner="owner" if index % 2 else None, lease_fence=index,
         lease_expires_at=datetime(2026, 10, 11, tzinfo=timezone.utc) if index % 2 else None,
         data={"index": index, "updated": True},
@@ -186,14 +186,14 @@ async def _assert_record_cas(engine: AsyncEngine) -> None:
             if sql.startswith("UPDATE ai_state_records") and not injected:
                 injected = True
                 conn.exec_driver_sql(
-                    "UPDATE ai_state_records SET storage_version = 2 WHERE key_digest = '"
+                    "UPDATE ai_state_records SET storage_revision = 2 WHERE key_digest = '"
                     + records[-1].key_digest.hex() + "'"
                 )
         event.listen(engine.sync_engine, "before_cursor_execute", stale_one_version)
         try:
             with pytest.raises(AIError, match="STORAGE_CONFLICT"):
                 await store.mutate(lambda transaction: transaction.replace_records(tuple(
-                    RecordReplacement(replace(value.record, storage_version=2, state="lost"), 1)
+                    RecordReplacement(replace(value.record, storage_revision=2, state="lost"), 1)
                     for value in replacements
                 )))
         finally:

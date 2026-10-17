@@ -167,7 +167,7 @@ class RuntimeRecoveryCommands:
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 guarded = await execution_tx.guard_record(
-                    key, expected_storage_version=stored.storage_version,
+                    key, expected_storage_revision=stored.storage_revision,
                 )
                 if guarded is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -325,7 +325,7 @@ class RuntimeRecoveryCommands:
                 await _replace_checked(
                     execution_tx,
                     _projected_record(self._execution, stored, updated),
-                    stored.storage_version,
+                    stored.storage_revision,
                 )
                 await execution_tx.insert_facts(
                     (
@@ -467,7 +467,7 @@ class RuntimeRecoveryCommands:
                 await _replace_checked(
                     transaction,
                     _projected_record(self._execution, stored, updated),
-                    stored.storage_version,
+                    stored.storage_revision,
                 )
                 if event_type is ExecutionEventType.EXECUTION_RESUMED:
                     await self._execution.admit_history_producer_in_transaction(

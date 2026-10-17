@@ -18,10 +18,10 @@ from ._store import RecordQuery, RecordReplacement, StateStore, StateTransaction
 
 
 class _UnresolvedLocalReservation(AIError):
-    def __init__(self, scope_id: str, storage_version: int, *, inconsistent: bool = False) -> None:
+    def __init__(self, scope_id: str, storage_revision: int, *, inconsistent: bool = False) -> None:
         super().__init__(ErrorCode.STORAGE_CONFLICT)
         self.scope_id = scope_id
-        self.storage_version = storage_version
+        self.storage_revision = storage_revision
         self.inconsistent = inconsistent
 
 
@@ -73,7 +73,7 @@ class BudgetRepositoryImpl(RepositoryBase):
                 row, _ = await self._store.read(
                     lambda transaction: self._scope_record(transaction, scope_id)
                 )
-                if row.storage_version == error.storage_version:
+                if row.storage_revision == error.storage_revision:
                     if error.inconsistent:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                     self._reject(error.scope_id, "total_tokens", "unresolved_in_flight")
@@ -156,8 +156,8 @@ class BudgetRepositoryImpl(RepositoryBase):
         self, transaction: StateTransaction, row: StoredRecord, usage: BudgetUsage,
     ) -> None:
         candidate = self._stored("budget_scope", usage.scope_id, usage)
-        await replace_checked(transaction, replace(candidate, storage_version=row.storage_version + 1),
-                              row.storage_version)
+        await replace_checked(transaction, replace(candidate, storage_revision=row.storage_revision + 1),
+                              row.storage_revision)
 
     async def ensure(self, scope_id: str, limits: RunBudget) -> BudgetUsage:
         async def readback() -> BudgetUsage | None:
@@ -238,7 +238,7 @@ class BudgetRepositoryImpl(RepositoryBase):
             ))
             if len(rows) != usage.in_flight_model_requests:
                 raise _UnresolvedLocalReservation(
-                    usage.scope_id, scope_row.storage_version, inconsistent=True,
+                    usage.scope_id, scope_row.storage_revision, inconsistent=True,
                 )
             for row in rows:
                 reservation = await self._decode(row, BudgetModelReservation)
@@ -249,7 +249,7 @@ class BudgetRepositoryImpl(RepositoryBase):
                 if (
                     reservation.scope_id, reservation.request_id, reservation.admission_id
                 ) not in self._active_requests:
-                    raise _UnresolvedLocalReservation(usage.scope_id, scope_row.storage_version)
+                    raise _UnresolvedLocalReservation(usage.scope_id, scope_row.storage_revision)
         if usage.total_tokens >= limits.total_tokens:
             self._reject(usage.scope_id, "total_tokens", "limit_exceeded")
 
@@ -333,10 +333,10 @@ class BudgetRepositoryImpl(RepositoryBase):
             )
             scope_candidate = self._stored("budget_scope", scope_id, updated)
             await transaction.replace_records((
-                RecordReplacement(replace(candidate, storage_version=row.storage_version + 1),
-                                  row.storage_version),
-                RecordReplacement(replace(scope_candidate, storage_version=scope_row.storage_version + 1),
-                                  scope_row.storage_version),
+                RecordReplacement(replace(candidate, storage_revision=row.storage_revision + 1),
+                                  row.storage_revision),
+                RecordReplacement(replace(scope_candidate, storage_revision=scope_row.storage_revision + 1),
+                                  scope_row.storage_revision),
             ))
             return updated
 

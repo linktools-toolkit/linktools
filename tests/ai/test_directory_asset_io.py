@@ -137,7 +137,7 @@ async def test_directory_asset_versions_ignore_revision_but_verify_content(
             ref.key,
             ref.layer_id,
             StorageEntryRevision(ref.revision.value + 1),
-            ref.etag,
+            ref.digest,
             ref.size,
         )
         assert await store.read_versions((other_revision,)) == (b"first",)

@@ -6,11 +6,14 @@ import asyncio
 import sys
 from collections import deque
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Protocol
 
 from ..core import ExecutionEventType, ExecutionLineageKind, Page, Principal
 from ..errors import AIError, ErrorCode
 from ._event import project_event_payload
+from ._shared_stream import shared_stream_positions
+from ._watch_cursor import ExecutionWatchPositions, get_preview_positions
 from ._observation import _is_observation_cleanup, _drain_stream_tasks, _await_stream_cleanup, _report_observation_error
 from .service_api import (
     ExecutionStreamEvent,
@@ -305,7 +308,7 @@ class ExecutionTreeStreamer:
                 after_event_seq=after_event_seqs.get(view.execution_id, 0),
             )
             streams[view.execution_id] = stream
-            pending[view.execution_id] = _next_event_task(stream, view.execution_id)
+            pending[view.execution_id] = _next_event_task(stream, view.execution_id, after_event_seqs)
 
         def wait_for_children(parent_id: str) -> None:
             child_waits[parent_id] = asyncio.create_task(
@@ -516,7 +519,7 @@ class ExecutionTreeStreamer:
                         depths[key],
                         _project_stream_event(event, include_content),
                     )
-                    pending[key] = _next_event_task(streams[key], key)
+                    pending[key] = _next_event_task(streams[key], key, after_event_seqs)
         finally:
             active_error = sys.exc_info()[1]
 
@@ -583,13 +586,14 @@ def _cleanup_failure(
 
 
 def _next_event_task(
-    stream: AsyncIterator[ExecutionStreamEvent],
-    execution_id: str,
+    stream: AsyncIterator[ExecutionStreamEvent], execution_id: str,
+    positions: Mapping[str, int],
 ) -> asyncio.Task[ExecutionStreamEvent]:
-    return asyncio.create_task(
-        stream.__anext__(),
-        name=f"execution-tree-stream-{execution_id}",
-    )
+    if isinstance(positions, ExecutionWatchPositions):
+        # The new task inherits this context; the generator never owns a cross-yield token.
+        with shared_stream_positions(get_preview_positions(positions)):
+            return asyncio.create_task(stream.__anext__(), name=f"execution-events-{execution_id}")
+    return asyncio.create_task(stream.__anext__(), name=f"execution-events-{execution_id}")
 
 
 def _validate_root(view: ExecutionView, execution_id: str) -> None:
@@ -622,14 +626,9 @@ def _project_stream_event(
     event: ExecutionStreamEvent,
     include_content: bool,
 ) -> ExecutionStreamEvent:
-    return ExecutionStreamEvent(
-        event.execution_id,
-        event.durable_seq,
-        event.event_type,
-        project_event_payload(
-            event.event_type, event.payload, include_content=include_content
-        ),
-    )
+    return replace(event, payload=project_event_payload(
+        event.event_type, event.payload, include_content=include_content,
+    ))
 
 
 def _normalize_after_event_seqs(
@@ -650,7 +649,8 @@ def _normalize_after_event_seqs(
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         result[execution_id] = sequence
-    return result
+    return (ExecutionWatchPositions(result, get_preview_positions(value))
+            if isinstance(value, ExecutionWatchPositions) else result)
 
 
 __all__ = ["ExecutionTreeBroker", "ExecutionTreeStreamer"]

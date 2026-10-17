@@ -1059,8 +1059,11 @@ class LocalTaskGraphLauncher:
         view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self._metric_projector is not None and view.status in _TERMINAL:
-            self._metric_projector.trigger(graph_id, tenant_id=tenant_id)
+        if view.status in _TERMINAL and isinstance(self._runner, _TaskDependencyPreparation):
+            state = await self._repository.graph_state(graph_id, tenant_id=tenant_id)
+            if state is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._runner.release_graph_dependencies(state, tenant_id=tenant_id)
         if unknown_effect:
             raise AIError(
                 ErrorCode.TASK_EFFECT_UNKNOWN,
@@ -1108,7 +1111,12 @@ class LocalTaskGraphLauncher:
 
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
-        return await self.settle_cancel(launch, invoke_effects=True)
+        view = await self.settle_cancel(launch, invoke_effects=True)
+        if self._metric_projector is not None and view.status in _TERMINAL:
+            await self._metric_projector.trigger(
+                launch.graph_id, tenant_id=launch.principal.tenant_id,
+            )
+        return view
 
     async def shutdown(self) -> None:
         cleanup = asyncio.create_task(
@@ -1241,7 +1249,7 @@ class LocalTaskGraphLauncher:
                                     tenant_id=tenant_id,
                                 )
                             if self._metric_projector is not None:
-                                self._metric_projector.trigger(
+                                await self._metric_projector.trigger(
                                     request.graph_id,
                                     tenant_id=tenant_id,
                                 )

@@ -468,20 +468,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         checkpoint: AgentRunCheckpoint,
         captured_interactions: Sequence[StagedModelInteraction] | None = None,
     ) -> tuple[PreparedAgentRunCheckpoint, tuple[ModelInteractionRecord, ...], int]:
-        checkpoint = await archive.relocate_run_checkpoint(run, checkpoint)
-        batch = await archive.prepare_checkpoints(run, (checkpoint,))
+        checkpoint, batch = await archive.prepare_run_checkpoint(run, checkpoint)
         prepared = batch.checkpoints[0]
-        async def capture_metadata(_transaction: StateTransaction) -> tuple[int, int]:
-            sequence = await archive.checkpoint_count(agent_run_id=run.agent_run_id)
-            if not sequence or not await archive.verify_checkpoint_range(
-                agent_run_id=run.agent_run_id, after_sequence=sequence - 1,
-                checkpoints=(prepared,),
-            ):
-                sequence += 1
-            high_water = await archive.model_interaction_count(agent_run_id=run.agent_run_id)
-            return sequence, high_water
-
-        sequence, high_water = await archive.state_store.read(capture_metadata)
+        sequence, high_water = await archive.capture_checkpoint_progress(
+            agent_run_id=run.agent_run_id, checkpoint=prepared,
+        )
         if captured_interactions is None:
             staged = await self._terminal_staged_interactions(
                 agent_run_id=run.agent_run_id, after_model_request_seq=high_water,

@@ -282,7 +282,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     stored = await transaction.get_record(key)
                     assert stored is not None
                     await transaction.delete_record(
-                        key, expected_storage_version=stored.storage_version
+                        key, expected_storage_revision=stored.storage_revision
                     )
 
                 await repository.state_store.mutate(remove_seal)

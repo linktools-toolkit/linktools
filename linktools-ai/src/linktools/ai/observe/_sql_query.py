@@ -157,6 +157,12 @@ async def _sql_features_available(
     if version < ((3, 25, 0) if window else (3, 9, 0)):
         return False
 
+    # SQLite extension capabilities belong to a physical connection. Pool
+    # replacement clears info; query results and missing capabilities never live here.
+    capability_key = ("linktools.metrics.sqlite_features", version, window)
+    if connection.info.get(capability_key) is True:
+        return True
+
     from sqlalchemy import text
     from sqlalchemy.exc import OperationalError
 
@@ -175,6 +181,7 @@ async def _sql_features_available(
         }:
             return False
         raise
+    connection.info[capability_key] = True
     return True
 
 

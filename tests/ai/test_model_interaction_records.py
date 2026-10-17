@@ -152,7 +152,7 @@ async def test_interaction_identity_survives_preparation_and_completion(
                 lambda tx: tx.list_records(RecordQuery(kind="model_interaction"))
             )
             assert len(records) == 1
-            assert records[0].storage_version == 2
+            assert records[0].storage_revision == 2
             facts = await archive.state_store.read(lambda tx: tx.scan_facts())
             assert not any(fact.kind == "model_interaction" for fact in facts)
     finally:

@@ -38,7 +38,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import ObjectStore, PayloadPolicy
+from ..storage import ObjectStore, PayloadPolicy, StreamBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -56,6 +56,7 @@ from ._evaluation import RuntimeEvaluations
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
+from ._shared_stream import SharedStreamPublisher
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history_projection import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
@@ -63,7 +64,7 @@ from ._input import ExecutionInputMaterializer
 from ._input_capture import RuntimeInputCaptures
 from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
-from ._metrics import _MetricBuffer
+from ._metrics import _RuntimeMetricRecorder
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
@@ -98,7 +99,7 @@ class _RuntimeComponents:
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
-    metric_control: _MetricBuffer | None
+    metric_control: _RuntimeMetricRecorder | None
     binding_resolver: _AgentBindingResolver
     history: object
     task_admissions: TaskAdmissionRepository
@@ -335,10 +336,13 @@ def _runtime_close_actions(
     execution: DefaultExecutionService,
     backend: LocalExecutionBackend | None,
     input_materializer: ExecutionInputMaterializer,
-    metric_buffer: _MetricBuffer | None,
+    metric_buffer: _RuntimeMetricRecorder | None,
     storage: RuntimeStorage,
+    session: DefaultSessionService | None = None,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+    if session is not None:
+        actions.append(("runtime.session.display", session.drain_display_reads))
     if graph_service is not None:
         actions.extend(
             (
@@ -501,7 +505,7 @@ async def _build_local_components(
     metrics: "Metrics | None",
     tool_responses: ToolResponseFixture | None,
 ) -> _RuntimeComponents:
-    metric_buffer: _MetricBuffer | None = None
+    metric_buffer: _RuntimeMetricRecorder | None = None
     metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
@@ -525,10 +529,20 @@ async def _build_local_components(
         if not storage.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         _require_storage_identity(storage, namespace=namespace, tenant_id=tenant_id)
-        metric_buffer = None if metrics is None else _MetricBuffer(metrics)
+        metric_buffer = None if metrics is None else _RuntimeMetricRecorder(metrics.recorder())
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
-        live_broker = LiveExecutionEventBroker()
+        stream_cache = (
+            storage.cache
+            if isinstance(storage.cache, StreamBackend)
+            and storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE
+            else None
+        )
+        live_broker = LiveExecutionEventBroker(shared=(
+            None if stream_cache is None else SharedStreamPublisher(
+                stream_cache, namespace, tenant_id,
+            )
+        ))
         history_service = DefaultExecutionHistoryService(
             storage.execution.executions,
             authorization,
@@ -559,6 +573,7 @@ async def _build_local_components(
             input_materializer=input_materializer,
             session_execution_ready=session_execution_ready,
             tool_responses=tool_responses,
+            object_reader=storage.read_object,
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -609,6 +624,7 @@ async def _build_local_components(
             transient,
         )
 
+    session: DefaultSessionService | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
     graph_service: DefaultTaskGraphService | None = None
     coordinator: _RuntimeCloseCoordinator | None = None
@@ -671,6 +687,12 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
+            cache=(
+                storage.cache
+                if all(storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+                       for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION))
+                else None
+            ),
             transcript_store=storage.run_store,
             release_terminal=storage.retention.release_session,
             workspace_access=input_materializer.access,
@@ -793,6 +815,7 @@ async def _build_local_components(
             input_materializer=input_materializer,
             metric_buffer=metric_buffer,
             storage=storage,
+            session=session,
         )
         close_actions = (("runtime.evaluation", evaluation.close), *close_actions)
         coordinator = _RuntimeCloseCoordinator(
@@ -814,6 +837,7 @@ async def _build_local_components(
                 input_materializer=input_materializer,
                 metric_buffer=metric_buffer,
                 storage=storage,
+                session=session,
             )
         )
         await _run_cleanup_actions(abort_actions)
@@ -863,6 +887,7 @@ def _borrowed_runtime_history(
         namespace=storage.namespace,
         execution_objects=storage.object_store(RuntimeDomain.EXECUTION),
         task_objects=storage.object_store(RuntimeDomain.TASK),
+        object_reader=storage.read_object,
         artifacts=artifact,
         cursor_signer=HmacCursorSigner(
             "runtime-history",

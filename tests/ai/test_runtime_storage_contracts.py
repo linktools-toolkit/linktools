@@ -121,7 +121,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
         assert stored.data == {
             "nested": {"value": "original"},
         }
-        assert stored.storage_version == 0
+        assert stored.storage_revision == 0
     finally:
         await store.close()
 
@@ -788,7 +788,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         assert await second.mutate(
             lambda transaction: transaction.guard_record(
                 record_key,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             )
         ) is None
         with pytest.raises(AIError) as raised:
