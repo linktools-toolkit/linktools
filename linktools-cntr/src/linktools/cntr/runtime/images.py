@@ -62,7 +62,6 @@ class ImagePreparer:
         self.manager = manager
 
     BUILD_LABEL = "io.linktools.cntr.build-revision"
-    BUILD_ARG = "CNTR_BUILD_REVISION"
 
     def with_build_revisions(self, model: "dict[str, Any]", containers,
                              targets: "Sequence[str]") -> "dict[str, Any]":
@@ -94,8 +93,7 @@ class ImagePreparer:
                              if path.name == "current" and path.is_symlink()), None) if source else None
             if snapshot:
                 labels = dict(build.get("labels") or {})
-                args = dict(build.get("args") or {})
-                if self.BUILD_LABEL in labels or self.BUILD_ARG in args:
+                if self.BUILD_LABEL in labels:
                     raise ImagePreparationError("Reserved build metadata in " + name)
                 dockerfile = build.get("dockerfile_inline")
                 if dockerfile is None:
@@ -123,8 +121,7 @@ class ImagePreparer:
                 digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
                         separators=(",", ":")).encode("utf-8")).hexdigest()
                 labels[self.BUILD_LABEL] = digest
-                args[self.BUILD_ARG] = digest
-                build["labels"], build["args"] = labels, args
+                build["labels"] = labels
             services[name] = dict(spec, build=build)
         return dict(model, services=services)
 

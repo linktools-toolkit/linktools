@@ -41,9 +41,37 @@ def test_auto_label_is_stable_and_normal_up_disables_implicit_build_pull(tmp_pat
     prep, model = case(tmp_path)
     spec = model["services"]["app"]["build"]
     assert spec["pull"] is False
-    assert spec["labels"][prep.BUILD_LABEL] == spec["args"][prep.BUILD_ARG]
+    assert "args" not in spec
     assert spec["labels"][prep.BUILD_LABEL] == case(tmp_path)[1]["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]
     assert case(tmp_path, "r2")[1]["services"]["app"]["build"]["labels"][prep.BUILD_LABEL] != spec["labels"][prep.BUILD_LABEL]
+
+
+@pytest.mark.parametrize("args", [None, {}, {"VERSION": "one"}, {"CNTR_BUILD_REVISION": "user-value"}])
+def test_build_identity_preserves_user_args_and_original_digest(tmp_path, args):
+    import hashlib
+    import json
+
+    owner = Owner(tmp_path / "source")
+    prep = ImagePreparer(SimpleNamespace())
+    build = {"context": str(owner.get_docker_context_path()), "dockerfile_inline": "FROM scratch"}
+    if args is not None:
+        build["args"] = dict(args)
+    model = {"services": {"app": {"image": "app:fixed", "build": build}}}
+    identity = {"context": str(owner.get_docker_context_path().resolve()),
+                "dockerfile": "FROM scratch", "build": dict(build, pull=False), "platform": None}
+    expected = hashlib.sha256(json.dumps(identity, sort_keys=True,
+                                        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    result = prep.with_build_revisions(model, (owner,), ("app",))["services"]["app"]["build"]
+    assert result["labels"][prep.BUILD_LABEL] == expected
+    assert result.get("args") == args
+    assert build.get("args") == args
+    assert "labels" not in build
+    if args is not None:
+        build["args"] = dict(args, VERSION="two")
+        changed = prep.with_build_revisions(model, (owner,), ("app",))["services"]["app"]["build"]
+        assert changed["args"] == build["args"]
+        assert changed["labels"][prep.BUILD_LABEL] != expected
 
 
 @pytest.mark.parametrize("exists,matching,refresh,build_expected", [
@@ -96,7 +124,6 @@ def test_missing_tree_keeps_identity_without_restoration(tmp_path):
     expected = model["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]
     build = dict(model["services"]["app"]["build"])
     build.pop("labels")
-    build.pop("args")
     owner = Owner(tmp_path / "source")
     shutil.rmtree(str(owner.get_docker_context_path().resolve()))
     result = prep.with_build_revisions({"services": {"app": {"image": "app:fixed", "build": build}}},
@@ -133,7 +160,6 @@ def test_external_dockerfile_change_changes_identity(tmp_path):
     owner = Owner(tmp_path / "source")
     build = dict(model["services"]["app"]["build"])
     build.pop("labels")
-    build.pop("args")
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
     result = prep.with_build_revisions({"services": {"app": {"image": "app:fixed", "build": build}}},
                                        (owner,), ("app",))

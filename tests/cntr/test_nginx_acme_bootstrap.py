@@ -86,7 +86,6 @@ def test_acme_issuance_happens_in_image_build_only(certificate_case):
     assert "AS acme-build" not in dockerfile
     assert "--issue --force" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_dns" in dockerfile
-    assert "CNTR_BUILD_REVISION" not in dockerfile
     assert "ENV CF_Token" not in dockerfile
     assert "nginx-certificates renew" in dockerfile
     spec = container.docker_compose["services"]["nginx"]
@@ -107,8 +106,7 @@ def test_builtin_nginx_build_uses_native_certificate_identity(fresh_manager, htt
     spec = model["services"]["nginx"]
     revision = container.cert_image_revision
     assert spec["image"] == container.get_service_name("nginx") + ":" + revision
-    assert "CNTR_BUILD_REVISION" not in dockerfile
-    assert "CNTR_BUILD_REVISION" not in spec["build"].get("args", {})
+    assert "args" not in spec["build"]
     if https:
         assert 'certificate-revision="' + revision + '"' in dockerfile
         issuance = dockerfile.split("RUN --mount=type=secret,id=cntr_acme_account", 1)[1].split("\nRUN ", 1)[0]
