@@ -75,6 +75,7 @@ from .service_api import (
     UsageSummary,
 )
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from .state._execution_repositories import ExecutionRepositoryImpl
 from .state._step_archive import StagingAgentRunStore
 from .state._contracts import (
     ConversationRepositories,
@@ -310,10 +311,8 @@ class RuntimeHistory:
             raise AIError(ErrorCode.EXECUTION_NOT_READY)
 
         executions, _authorization = self._require_direct_reader()
-        stored = await executions.get_result(
-            execution_id,
-            tenant_id=principal.tenant_id,
-        )
+        stored = (record.result if type(executions) is ExecutionRepositoryImpl else
+                  await executions.get_result(execution_id, tenant_id=principal.tenant_id))
         if stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
