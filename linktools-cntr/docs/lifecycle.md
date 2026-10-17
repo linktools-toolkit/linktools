@@ -303,15 +303,17 @@ an alternative configuration to hide a cycle.
 Initial certificates are issued during a single-stage image build. DNS
 credentials are written to `APP_PATH/nginx/acme-secrets/dns.env` with restricted
 host permissions, used as a BuildKit secret and mounted read-only at runtime.
-Only the ACME subprocess loads them into its environment. Known DNS provider
-assignments are removed from saved ACME configuration before it is copied into
-image state, including credentials from a previously selected provider.
+Only the ACME subprocess loads them into its environment. ACME configuration
+is retained intact for account reuse and renewal. acme.sh may save DNS credentials
+in that configuration, including credentials from a previously selected provider;
+these can therefore remain in the image, persisted state and account backups.
 
 Nginx passes its base-image tag, primary domain, certificate domains and ACME
 server/provider/email through native build arguments. The framework fingerprints
 those inputs; nginx does not compute a separate revision or version its image tag.
-Plaintext DNS credentials remain BuildKit secret inputs; only their digest is a
-build argument.
+DNS credentials are supplied through BuildKit secret inputs; only their digest
+is a build argument. Secret mounts do not prevent acme.sh from persisting credentials
+in its output configuration.
 
 The single nginx instance uses `/etc/certs/live`, an atomic pointer to an
 append-only directory under `/etc/certs/versions`. Each generation retains the
@@ -334,8 +336,9 @@ layer caching.
 The existing certificate script owns all TLS pointer changes and renewal reloads,
 under the shared certificate lock. Renewal verifies the served certificate and
 restores the previous served certificate on failure. Host ACME-account archival
-uses the same lock on supported Linux bind mounts. Certificate and account keys
-remain sensitive contents of the image; do not distribute it to untrusted users.
+uses the same lock on supported Linux bind mounts. Certificate keys, account keys
+and saved DNS credentials are sensitive contents of the image and backups; keep
+them private and do not distribute them to untrusted users.
 
 Nginx hashes its selected DNS provider's resolved environment payload with SHA-256
 and supplies only that digest as `ACME_DNS_CREDENTIALS_DIGEST`. The issuance RUN

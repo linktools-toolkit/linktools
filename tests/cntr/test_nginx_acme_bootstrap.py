@@ -94,6 +94,45 @@ def test_acme_issuance_happens_in_image_build_only(certificate_case):
     assert spec["build"]["secrets"] == ["cntr_acme_account", "cntr_acme_dns"]
 
 
+@pytest.mark.parametrize("exit_code", [0, 42])
+def test_acme_wrapper_loads_secret_and_preserves_state(certificate_case, tmp_path, exit_code):
+    container = certificate_case[0]
+    state = tmp_path / "account state"
+    state.mkdir()
+    account = state / "account.conf"
+    saved = "SAVED_DP_Key='test-only-old-key'\n"
+    account.write_text(saved)
+    credentials = tmp_path / "dns.env"
+    credentials.write_text("export CF_Token='test-only-current-token'\n")
+    mock = tmp_path / "mock-acme"
+    mock.write_text('''#!/bin/sh
+set -eu
+test "$CF_Token" = test-only-current-token
+test "$1" = --home
+test "$2" = /opt/acme
+test "$3" = --config-home
+test "$4" = "$EXPECTED_STATE"
+test "$5" = --domain
+test "$6" = '*.example.test'
+test "$(umask)" = 0077
+test "$(cat "$4/account.conf")" = "SAVED_DP_Key='test-only-old-key'"
+printf "SAVED_CF_Token='test-only-current-token'\\n" >> "$4/account.conf"
+exit "$EXPECTED_EXIT"
+''')
+    mock.chmod(0o755)
+    script = container.get_source_path("nginx-acme").read_text()
+    script = script.replace("/run/acme-secrets/dns.env", str(credentials))
+    script = script.replace("/opt/acme/acme.sh", str(mock))
+    wrapper = tmp_path / "wrapper"
+    wrapper.write_text(script)
+    env = dict(os.environ, EXPECTED_STATE=str(state), EXPECTED_EXIT=str(exit_code))
+    result = subprocess.run(["sh", str(wrapper), str(state), "--domain", "*.example.test"],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == exit_code, result.stderr
+    assert result.stdout == result.stderr == ""
+    assert account.read_text() == saved + "SAVED_CF_Token='test-only-current-token'\n"
+
+
 def test_build_step_consumes_native_arguments_without_shell_evaluation(certificate_case, tmp_path):
     container = certificate_case[0]
     command = container.docker_file.split("<<'BUILD_CERTIFICATES'\n", 1)[1].split("\nBUILD_CERTIFICATES", 1)[0]
@@ -607,17 +646,12 @@ exit 94
     result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
     if failure:
         assert result.returncode != 0
-        assert not (home / "dns-keys").exists()
         return
     assert result.returncode == 0, result.stderr
     assert os.access(home / "acme.sh", os.X_OK)
     assert config.is_dir()
     assert not (work / "acme.sh-master").exists()
     assert not (work / "acme.tar.gz").exists()
-    keys = next(line[4:] for line in dockerfile.splitlines() if line.startswith("RUN printf '%s\\n'"))
-    keys = keys.replace("/opt/acme", str(home))
-    subprocess.run(["sh", "-c", keys], check=True, env=env)
-    assert "CF_Token" in (home / "dns-keys").read_text().splitlines()
     local_bin = tmp_path / "usr-local-bin"
     usr_bin = tmp_path / "usr-bin"
     local_bin.mkdir()
