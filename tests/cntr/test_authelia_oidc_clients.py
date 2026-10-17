@@ -32,10 +32,10 @@ def test_oidc_redirects_derive_only_from_current_declarations(fresh_manager, mon
     declaration = Authelia.oidc(("https://service.example.com", "https://service.example.com/callback",
                                  "https://external.example.com/callback", "https://service.example.com/callback"))
     monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, declaration),)))
-    assert authelia.oidc_redirects == (
+    assert authelia.oidc_redirects == tuple(sorted((
         authelia.oidc_client["issuer_url"], "https://service.example.com",
         "https://service.example.com/callback", "https://external.example.com/callback",
-    )
+    )))
     assert isinstance(authelia.oidc_client["redirect_uris"], tuple)
 
 

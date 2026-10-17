@@ -90,7 +90,7 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
     monkeypatch.setattr(container, "get_config", lambda key: "saved-secret")
     client = container.oidc_client
     assert client["client_secret"] == "saved-secret"
-    assert client["redirect_uris"] == ("https://sso.test", "https://app.test")
+    assert client["redirect_uris"] == ("https://app.test", "https://sso.test")
     assert isinstance(client["scopes"], tuple)
     with pytest.raises(TypeError):
         client["client_id"] = "bad"

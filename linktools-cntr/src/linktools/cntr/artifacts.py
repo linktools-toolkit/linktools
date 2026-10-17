@@ -300,7 +300,7 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
                 raise ContainerError(conflict)
             if any(
                     not (destination / name).is_file() or
-                    (destination / name).read_text(encoding="utf-8") != content or
+                    (destination / name).read_bytes() != content.encode("utf-8") or
                     stat.S_IMODE((destination / name).stat().st_mode) != mode or
                     (group is not None and (destination / name).stat().st_gid != group)
                     for name, content in files.items()):
@@ -332,13 +332,19 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
             for declaration in declarations
             if declaration.consumer == container.name
         })
-        container.manager.artifact_index.record({
+        tree = os.path.relpath(str(destination), str(container.manager.data_path))
+        records = {
             os.path.relpath(str(destination / name), str(container.manager.data_path)): {
                 "kind": "generated-config", "container": container.name,
                 "sha256": sha256_of(content), "producers": producers,
-                "tree": os.path.relpath(str(destination), str(container.manager.data_path)),
+                "tree": tree,
             } for name, content in files.items()
-        })
+        }
+        records[tree] = {
+            "kind": "generated-config-tree", "container": container.name,
+            "producers": producers, "tree": tree,
+        }
+        container.manager.artifact_index.record(records)
         return destination
 
 
@@ -368,16 +374,22 @@ def _indexed_sources(manager: "ContainerManager") -> "dict[str, tuple[str, str, 
     sources = {}
     for filename, entry in manager.artifact_index.load().items():
         tree, owner = entry.get("tree"), entry.get("container")
-        if (entry.get("kind") != "generated-config" or not isinstance(tree, str) or
+        kind = entry.get("kind")
+        if (kind not in ("generated-config", "generated-config-tree") or not isinstance(tree, str) or
                 not tree or not isinstance(owner, str) or not owner):
             continue
         path, file_path = Path(tree), Path(filename)
         if (path.is_absolute() or ".." in path.parts or file_path.is_absolute() or
-                ".." in file_path.parts or path not in file_path.parents):
+                ".." in file_path.parts):
+            continue
+        if (kind == "generated-config-tree" and file_path != path or
+                kind == "generated-config" and path not in file_path.parents):
             continue
         root = str(Path(manager.data_path) / path)
-        source = str(Path(manager.data_path) / file_path)
-        entries = {root: (owner, "", root), source: (owner, file_path.relative_to(path).as_posix(), root)}
+        entries = {root: (owner, "", root)}
+        if kind == "generated-config":
+            source = str(Path(manager.data_path) / file_path)
+            entries[source] = (owner, file_path.relative_to(path).as_posix(), root)
         for destination, identity in entries.items():
             if destination in sources and sources[destination] != identity:
                 raise ContainerError("Conflicting generated file provenance for " + destination)
@@ -499,7 +511,7 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
             index = models.manager.artifact_index
             tree = os.path.relpath(str(path), str(models.manager.data_path))
             removed = tuple(key for key, entry in index.load().items()
-                            if entry.get("kind") == "generated-config" and
+                            if entry.get("kind") in ("generated-config", "generated-config-tree") and
                             entry.get("container") == name and entry.get("tree") == tree)
             shutil.rmtree(str(path))
             index.record({}, remove=removed)

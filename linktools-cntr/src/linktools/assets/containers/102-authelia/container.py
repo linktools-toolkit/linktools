@@ -155,7 +155,7 @@ class Container(BaseContainer):
             for redirect in declaration.resolve_redirect_uris(producer.config):
                 if redirect not in redirects:
                     redirects.append(redirect)
-        return tuple(redirects)
+        return tuple(sorted(redirects))
 
     @cached_property
     def acl_config(self) -> str:

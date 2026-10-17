@@ -36,7 +36,7 @@ def test_authelia_written_config_uses_only_complete_resolved_callbacks(fresh_man
     callbacks = Authelia.oidc(("/callback", "{base_url}", "//host.test/cb", "https:///cb", "",
                               ConfigRef("CALLBACK_URL"), "custom://app.test/callback"))
     monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, callbacks),)))
-    expected = ("https://sso.test", "http://private.test:65535/cb?q=%2F", "custom://app.test/callback")
+    expected = ("custom://app.test/callback", "http://private.test:65535/cb?q=%2F", "https://sso.test")
     assert provider.oidc_redirects == expected
     rendered = provider.render_template(provider.get_source_path("templates", "configuration.oidc.yml"))
     # Authelia evaluates its native secret expression after the Jinja render.

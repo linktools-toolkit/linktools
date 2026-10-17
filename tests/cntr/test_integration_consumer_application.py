@@ -11,7 +11,7 @@ from linktools.cntr.artifacts import AppliedServiceModels, prepared_hooks
 from test_lifecycle_rebuild import setup_case
 
 
-def consumer_case(tmp_path, running=True, changed=True, historical=False):
+def consumer_case(tmp_path, running=True, changed=True, historical=False, empty_prior=False):
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new"}}),
         ("consumer", {"consumer": {"image": "consumer:stable", "environment": {"SETTING": "stable"}}}),
@@ -20,7 +20,7 @@ def consumer_case(tmp_path, running=True, changed=True, historical=False):
     owner.runtime = SimpleNamespace(chmod=lambda path, mode: path.chmod(mode))
     manager.integration_snapshot["app"] = (SimpleNamespace(consumer="consumer"),)
     prior = OperationContext(project_containers=list(manager.containers.values()), target_services=("consumer",))
-    old_path = prior.write_files(owner, {"config.yml": "old"})
+    old_path = prior.write_files(owner, {} if empty_prior else {"config.yml": "old"})
     manager.model["services"]["consumer"]["volumes"] = [
         {"type": "bind", "source": str(old_path), "target": "/generated", "read_only": True}]
     if running:
@@ -464,3 +464,11 @@ def test_repeated_generated_updates_keep_declared_image_and_build_in_saved_model
         assert [event[1] for event in manager.events if event[0] == "images"] == [("app",)]
         assert [event[1] for event in manager.events if event[0] == "apply"] == ["app", "consumer"]
     assert paths[0] != paths[1]
+
+
+@pytest.mark.parametrize("action", ["up", "restart"])
+def test_empty_historical_tree_still_selects_running_consumer(tmp_path, action):
+    manager = consumer_case(tmp_path, historical=True, empty_prior=True)
+    getattr(manager.compose_operations, action)(["app"], pull=True)
+    assert {event[1] for event in manager.events if event[0] == "apply"} == {"app", "consumer"}
+    assert [event[1] for event in manager.events if event[0] == "images"] == [("app",)]

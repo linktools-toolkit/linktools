@@ -87,7 +87,7 @@ def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(ow
     })
     stage_files(owner, {"configuration.yml": "content"})
     entries = owner.manager.artifact_index.load()
-    assert len(entries) == 1
+    assert len(entries) == 2
     assert next(iter(entries.values()))["producers"] == ["app", "other"]
 
 

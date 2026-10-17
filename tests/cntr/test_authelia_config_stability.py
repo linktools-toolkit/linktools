@@ -75,3 +75,39 @@ def test_generated_config_is_stable_across_process_hash_seeds(tmp_path):
                                    env=environment, capture_output=True, text=True, check=True)
         results.append(json.loads(completed.stdout))
     assert results[1:] == results[:1] * 2
+
+
+def test_resolved_oidc_allowlist_order_is_stable(fresh_manager, monkeypatch):
+    from linktools.core import ConfigRef
+
+    manager = fresh_manager
+    configure_builtin_inputs(manager)
+    container = manager.containers["authelia"]
+    producers = [manager.containers["portainer"], manager.containers["nginx"]]
+    urls = ("https://z.test/callback", "https://A.test/callback", "https://a.test/callback",
+            "https://a.test/callback/", "https://a.test/callback?q=1", "https://a.test/Callback")
+    entries = []
+    manager.containers["nginx"].sites
+    monkeypatch.setattr(manager, "iter_integrations", lambda consumer: iter(entries))
+
+    def render(reverse):
+        declarations = []
+        for producer, values in zip(producers, (urls[:3], urls[3:])):
+            resolved = tuple(reversed(values)) if reverse else values
+            key = "TEST_OIDC_CALLBACKS_" + producer.name.upper()
+            producer.config.set(key, resolved + ("/incomplete", resolved[0]))
+            declaration = Authelia.oidc(ConfigRef(key))
+            assert declaration.resolve_redirect_uris(producer.config) == resolved
+            declarations.append((producer, declaration))
+        entries[:] = reversed(declarations) if reverse else declarations
+        for name in ("oidc_redirects", "oidc_client", "config_path"):
+            container.__dict__.pop(name, None)
+        text = container.render_template(container.get_source_path("templates", "configuration.oidc.yml"))
+        return container.oidc_redirects, text, container.config_path
+
+    first = render(False)
+    assert render(True) == first
+    assert first[0] == tuple(sorted((container.public_url,) + urls))
+    # The native secret expression is evaluated later by Authelia.
+    rendered = "\n".join(line for line in first[1].splitlines() if "- key: {{ secret" not in line)
+    assert yaml.safe_load(rendered)["identity_providers"]["oidc"]["clients"][0]["redirect_uris"] == list(first[0])

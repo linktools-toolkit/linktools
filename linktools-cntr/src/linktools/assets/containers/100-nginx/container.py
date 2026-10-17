@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 from pathlib import Path
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -120,7 +121,7 @@ class Container(BaseContainer):
                 raise ContainerError(f"Duplicate or reserved nginx auth header: {key}")
             seen.add(normalized)
             result[key] = value
-        return result
+        return OrderedDict(sorted(result.items()))
 
     @cached_property
     def dnsapi(self) -> "dict[str, Any]":

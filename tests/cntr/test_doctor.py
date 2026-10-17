@@ -536,3 +536,15 @@ def test_doctor_repository_inspection_failure_is_isolated(fresh_manager, monkeyp
     assert [(f.component, f.code) for f in findings] == [
         ("bad", "repo.config_invalid"), ("good", "repo.dirty"),
     ]
+
+
+def test_tree_provenance_is_not_reported_as_a_stale_file(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
+    fresh_manager.artifact_index.record({
+        "app/empty": {"kind": "generated-config-tree", "container": "nginx",
+                      "tree": "app/empty", "producers": []},
+    })
+    findings = Doctor(fresh_manager).check_artifacts(fresh_manager.containers.values())
+    assert not any(f.code == ARTIFACT_STALE and "app/empty" in f.message for f in findings)
+    assert "app/empty" in fresh_manager.artifact_index.load()

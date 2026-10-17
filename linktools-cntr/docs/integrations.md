@@ -488,8 +488,12 @@ or `load_nginx_url` or `load_config_url`
 to declare full lazy URLs. Flare likewise writes only complete resolved URLs;
 independent absolute links do not depend on a public site.
 Provider-specific URI rules remain subject to [native Authelia validation](https://www.authelia.com/configuration/identity-providers/openid-connect/clients/#redirect_uris).
-Deduplication preserves exact strings and order,
-including path, query, and trailing slash differences.
+Declaration resolution deduplicates exact strings while preserving declaration order,
+including case, path, query, and trailing slash differences. The built-in Authelia
+consumer sorts the fully resolved and validated callback URLs by their exact strings
+for its final `oidc_redirects` tuple, `oidc_client` metadata, and generated YAML.
+Producer order and callback declaration order therefore do not affect this allowlist;
+the issuer URL has no special first position. URL strings are not normalized.
 
 Move former `Nginx.site(..., oidc_redirects=...)` values to an `Authelia.oidc`
 declaration. Replace empty/root-relative site callbacks with explicit lazy public

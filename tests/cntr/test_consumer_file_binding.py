@@ -105,7 +105,7 @@ def test_old_source_must_have_exact_tree_provenance(owner, legacy):
     old, applied = saved(owner)
     if legacy in ("no-tree", "wrong-owner", "wrong-kind"):
         for entry in owner.manager.artifact_index.values.values():
-            if entry.get("kind") != "generated-config":
+            if entry.get("kind") not in ("generated-config", "generated-config-tree"):
                 continue
             if legacy == "no-tree":
                 entry.pop("tree")

@@ -190,3 +190,51 @@ def test_concurrent_revision_publish_cannot_replace_an_empty_tree(owner, monkeyp
             second.result(timeout=5)
     assert tuple(destination.iterdir()) == ()
     assert not tuple(destination.parent.glob(".prepare-*"))
+
+
+@pytest.mark.parametrize("revision", [None, "newline"])
+@pytest.mark.parametrize("content", ["one\r\ntwo\r\n", "one\rtwo\r", "one\ntwo\n"])
+def test_prepared_files_compare_exact_utf8_bytes(owner, revision, content):
+    files = {"config": content}
+    path = stage_files(owner, files, revision=revision)
+    assert (path / "config").read_bytes() == content.encode("utf-8")
+    assert stage_files(owner, files, revision=revision) == path
+    (path / "config").write_bytes(content.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+                                  if "\r" in content else content.replace("\n", "\r\n").encode("utf-8"))
+    with pytest.raises(ContainerError, match="modified|conflicts"):
+        stage_files(owner, files, revision=revision)
+
+
+def test_empty_tree_provenance_supports_consumer_updates_and_pruning(owner):
+    from linktools.cntr.artifacts import ArtifactIndex, validate_consumer_config
+
+    owner.manager.project_name = "test"
+    owner.manager.artifact_index = ArtifactIndex(owner.manager)
+    paths = []
+    for revision, files in (("first", {}), ("second", {}), ("third", {"config": "value"})):
+        ctx = context(owner)
+        path = owner.prepare_files(files, revision=revision)
+        models = AppliedServiceModels(owner.manager, model(owner, path))
+        if paths:
+            assert validate_consumer_config(ctx, model(owner, path), models, ("auth", "admin")) == ("auth", "admin")
+        assert ctx.write_files(owner, files, revision=revision) == path
+        models.record(("auth", "admin"))
+        prune_prepared_files(ctx, models)
+        paths.append(path)
+    assert not paths[0].exists()
+    assert paths[1].exists() and paths[2].exists()
+    entries = owner.manager.artifact_index.load()
+    assert all(entry.get("tree") != str(paths[0].relative_to(owner.manager.data_path)) for entry in entries.values())
+    assert entries[str(paths[1].relative_to(owner.manager.data_path))]["kind"] == "generated-config-tree"
+
+
+def test_legacy_file_only_provenance_still_allows_consumer_update(owner):
+    from linktools.cntr.artifacts import validate_consumer_config
+
+    old = stage_files(owner, {"config": "old"})
+    index = owner.manager.artifact_index
+    index.record({}, remove=[key for key, entry in index.load().items() if entry["kind"] == "generated-config-tree"])
+    AppliedServiceModels(owner.manager, model(owner, old)).record(("auth", "admin"))
+    new = owner.prepare_files({}, revision="empty")
+    models = AppliedServiceModels(owner.manager, model(owner, new))
+    assert validate_consumer_config(context(owner), model(owner, new), models, ("auth", "admin")) == ("auth", "admin")

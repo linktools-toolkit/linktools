@@ -270,7 +270,9 @@ class Doctor:
             os.path.relpath(dest, str(self.manager.data_path)).replace(os.sep, "/")
             for dest in candidates
         }
-        for path in sorted(set(indexed) - current_paths):
+        file_paths = {path for path, entry in indexed.items()
+                      if entry.get("kind") != "generated-config-tree"}
+        for path in sorted(file_paths - current_paths):
             findings.append(Finding(
                 INFO, f"generated artifact `{path}` is no longer produced by any installed container.",
                 code=ARTIFACT_STALE, component=path))
