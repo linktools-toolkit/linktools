@@ -1,6 +1,6 @@
 # Storage 缓存与缓冲写入统一设计
 
-状态：统一 cache 实例接入正在实施和验证；设计确认不代表当前整项交付完成。
+状态：已确认的框架实现与定向验收已完成；精确代码基线、测量范围和未认证环境见第9至12节。
 日期：2026-10-17
 范围：Issue #190 / PR #191
 
@@ -76,7 +76,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 
 ## 5. 最小接入方式
 
-已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现但尚未整体交付：RuntimeStorage.cache及内部读取路由。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
+已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：RuntimeStorage.cache及内部读取路由。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
 
 普通调用方只注入一个可选 cache 实例，不另外构造写策略、options、总管理器或全能力包装。实例按实际需要提供完整方法组：热点 get/put/delete，批写 append/read_batch/ack，流 open_stream/read_stream。contains_many 是可选热点批探测。所属消费方仅检查自身使用的方法组；该组全部缺失就沿用该场景的直接源或已有本地流路径，半组立即 TypeError，不静默换用内部队列。宿主无需继承新 Protocol，也无需给无用能力写空方法。
 
@@ -203,7 +203,7 @@ RuntimeStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，
 
 ### 高频展示读取的边界
 
-会话原始页缓存已完成原型验证，但未采用：原分页 generation 不随 execution 忙闲变化，整页复用会漏掉新的 active_execution_id；补 generation 又会让原本连续的分页新增 CURSOR_INVALID。该方案虽然热页省一次 SELECT，却还给每次实际 admission/release 增加一次批量 sequence 写入，不能当作无代价的净收益。保持原分页契约，不发布该整页缓存；继续按稳定身份与展示状态的真实责任边界筛选，不用 TTL 放宽取消、终态或授权正确性，也不另造持久影子版本。
+会话原始页缓存已完成原型验证，但未采用：原分页 generation 不随 execution 忙闲变化，整页复用会漏掉新的 active_execution_id；补 generation 又会让原本连续的分页新增 CURSOR_INVALID。该方案虽然热页省一次 SELECT，却还给每次实际 admission/release 增加一次批量 sequence 写入，不能当作无代价的净收益。保持原分页契约，不发布该整页缓存；已采用独立的 SessionDetail 显式 max_age 展示捕获：默认强刷新，调用方显式选择max_age=3时至多复用3秒，同时重验权限、资源存在性、active绑定与终态变化；不修改原分页generation，不用 TTL 放宽控制或授权正确性，也不另造持久影子版本。
 
 ## 7. 共享文件缓存：纯文件与共享真实用量
 
@@ -213,7 +213,7 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 逐次全目录扫描原型虽通过50项定向测试，但16384项暖 put 约97.20ms，性能门未通过，不发布。目录时间戳不是可靠变更序列；锁保证互斥，却不能使旧的进程本地容量索引自动正确。
 
-最小实现方向是一个共享小计量记录，仅包含总charge和dirty状态。每次mutation持锁读取记录，先原子标dirty，再修改内容与逐出，最后原子写入clean计量。正常只stat目标及实际逐出候选，本地索引仅排热度、不信旧size；候选不足时容量压力触发扫描。每实例首次mutation无条件锁内全扫描校准，记录缺失、损坏、dirty时也扫描恢复。失败不能写假clean。没有完整共享entry索引、generation或后台服务。
+当前实现使用一个共享小计量记录，仅包含总charge和dirty状态。每次mutation持锁读取记录，先原子标dirty，再修改内容与逐出，最后原子写入clean计量。正常只stat目标及实际逐出候选，本地索引仅排热度、不信旧size；候选不足时容量压力触发扫描。每实例首次mutation无条件锁内全扫描校准，记录缺失、损坏、dirty时也扫描恢复。失败不能写假clean。没有完整共享entry索引、generation或后台服务。
 
 取消等待mutation worker结算后才释放锁。该缓存允许丢失，不新增数据库式断电持久性保证；机器重启后首次mutation校准，不能称只读打开即完成修复。保留不受管理文件，不跟随symlink做清理，不支持旧writer绕过协议混跑。
 
@@ -266,23 +266,41 @@ MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭�
 
 普通指标错误 fail-open；外部取消继续传播，但不能重写已交接的成功事实，尤其不能将成功工具误记为效果未知。Task graph/node 投影同样采用 awaited 调用，不用原后台 task 继续隐藏无缓存 I/O；事实收集与记录分别遵守自己的生命周期。
 
-新增验证涵盖：无缓存实际等待且无隐藏队列、显式缓存接纳、128/60首条窗口、主动flush、前缀后接纳、直接并发、scope独立关闭、未知提交、组批/写入取消及成功业务交接后的指标取消。未执行前不将设计确认当作实现通过。
+已执行的定向验证涵盖：无缓存实际等待且无隐藏队列、显式缓存接纳、128/60首条窗口、主动flush、前缀后接纳、直接并发、scope独立关闭、未知提交、组批/写入取消及成功业务交接后的指标取消。这些结果按第9节精确代码基线归档，不将设计确认替代执行证据。
 
-## 9. 验证与阶段事实
+## 9. 验证与完成矩阵
 
-已发布 PR191 8fe3b1b：metadata/共享观察、Runtime DURABLE 内容缓存、生命周期、固定版本读取合并及公开命名收敛，CI run38767666785成功。新增显式写缓存仍在本地实现与验证，不能沿用此前绿色检查声称整体完成。
+本次实现基线为 PR191 `69535dc05ca4b76c2e37813fabe2881cd1b7c9da`，tree 为 `c53d25217803a4981c1a2371cdbf03dde1c0ab44`。统一 cache 注入、自动 Metrics 批写和 StorageBuffer 两种读取可见性已发布，不再是本地待实现草案。该精确 head 的自然 CI run39022486641 全部9项成功，包含 Python 3.10 与 3.x 的 runtime、evaluation-recovery 和最终 gate。
 
-机制实验：SQLite4MiB正文读取10次，源传输40MiB降至4MiB，但均10条SELECT。内容缓存不能声称消除逐波SQL。P0根目标仍包括逐波读消除：使用已建立的实时生命周期/订阅事件路径，不再为每波文本刷新完整模型观察树；剩余权威状态、树和执行边界读由既有观察读取优化独立归属跟进，不把正文缓存当其替代。冷/禁用/命中/缓存错误路径均需按各自实际源调用计量。
+2026-10-17 对相同代码 tree 补充执行348项 storage/cache/buffer/revision/当前格式与生命周期定向测试（247项9.24秒、101项5.14秒），另有126项 session/stream/backend 测试（7.67秒）及3项 Web 接线测试（1.54秒）。history result 增量的110项定向测试与上述范围有重叠，不合并为不重复的总数。定向测试不等于完整测试集；长矩阵交由上述精确 head CI。
 
-### 必须验证矩阵
+| 已确认需求 | 实现与当前验证入口 | 结论与边界 |
+|---|---|---|
+| 单一 cache 接入与全局命名 | storage/asset/runtime 公开接口、`test_runtime_stream_storage.py`、架构 gate | 完整可选方法组已收敛；无新总管理器或 Redis 依赖 |
+| 热点内容、miss合并、版本绑定与损坏回源 | `test_storage_cache_miss_io.py`、`test_asset_cache_integrity_and_close.py`、Runtime object/history cache 测试 | 同owner共享flight；每reader独立解码；源错误与删除不被缓存吞掉 |
+| 共享纯文件真实预算 | `test_filesystem_content_cache_shared.py`、`test_storage_cache_regressions.py` | Linux本地跨进程、kill writer、dirty恢复、失败发布、空值计费和正常mutation不全扫描已验证；不是全局最小quota |
+| revision新鲜度与writer归属 | `test_storage_metadata_refresh.py`、`test_storage_writer_revision_source.py` | 同批观察、后到读、旧刷新失效与非primary writer通知已验证；未引入通用TTL提示框架 |
+| 当前格式与批读同步 | `test_asset_backend_conformance.py`、`test_runtime_storage_contracts.py`、`test_runtime_schema_ddl_contract.py` | digest在三backend、版本、snapshot与receipt往返；storage_revision/CAS及当前DDL验证；不增加旧格式迁移 |
+| pending-visible与committed-only | `test_storage_buffer.py` | 删除、同key覆盖、旧批/新写、源读跨结算、未知/部分提交、失败回源已验证；无跨实例pending保证 |
+| 容量、接纳、ack与关闭 | `test_storage_buffer.py`、`test_runtime_metric_buffer.py` | hot/pending/inflight共预算，未知接纳失败关闭，ack失败不重放成功sink，取消仍保留I/O所有权 |
+| Metrics显式强写与自动批写 | `test_metrics_recording.py`、`test_runtime_metric_buffer.py`、`test_runtime_metrics.py`、`test_runtime_tool_metrics.py` | 128/60窗口、flush、close、业务交接后指标取消已验证；查询不混入pending，无聚合TTL |
+| 权限、保留期与生命周期 | Runtime object/history/session、`test_storage_lifecycle_ownership.py`、recovery CI | DURABLE内容路径、权威存在性、授权、preflight/drain与借用关闭边界保留 |
+| session重复刷新与stream订阅 | `test_session_display_cache.py`、`test_runtime_shared_stream.py`、`test_stream_backend.py`及Web接线测试 | 显式展示捕获、断线cursor、缺失/损坏/代际变化回退和关闭已验证；实时预览不冒充终态提交 |
 
-- 批读：重复/缺失/空输入，所有backend与facade等价，不增SQL
-- 缓存：冷/热/关闭/禁用/错误/损坏/删除/保留期/授权，查询数与传输量分开
-- revision：同批/后到/刷新失败/旧刷新覆盖/写通知/取消/关闭/多实例，以及非primary writer不污染primary提示源
-- 文件：双实例顺序反例、跨进程并发、替换/删除、扫描/逐出失败、取消、崩溃、旧文件复用、空字节计费
-- 生命周期：初始化与close、preflight读写、重复close、等待者取消、借用资源不误关
-- 写缓冲：容量、定时与主动flush、并发接纳、取消、异常提交结果、重试幂等、close排空和超时/丢失边界
-- 同步改造/当前格式一致性：所有导出/调用/测试/文档同步；当前JSON/SQL/快照/receipt生成和读取双端验证，不实现旧数据迁移
+### 真实读取测量
+
+- SQLite session详情：强刷新每次6条SELECT（含正文场景8条），显式`max_age=3`冷读6/8条、热读4条。减少正文与派生读，仍保留权威校验。
+- 两个真实 Runtime 使用同一 SQLite 权威源和同一个组合 cache；公开 `watch(include_content=True, include_model_interactions=True)` 在相同两秒输出窗口中分别消费1和50个实际文本delta，最终正文均为50个字符。读取方完整watch分别耗时2.403/2.394秒、均62条SELECT。测量不含最初admission/get和最终wait；不能称全栈所有SQL为62，也不承诺长流查询数不随时间增长。
+- history.result 的inline读取由3降至2条SELECT，cache开启/关闭各三轮一致；精确内置repository复用授权后的fresh record，自定义与子类保留get_result。
+- Runtime对象热读仍查询源成员；固定Asset版本独立调用仍验证历史源。正文传输减少与SQL减少分别计量，不以正文缓存声称消除权威SQL。
+
+### 明确保留的边界
+
+上游内置Web session详情仍走强history读取；这与宿主显式选择展示捕获是不同消费路径，不能据此推断所有宿主尚未接入。应用可以沿用公开refresh和watch，不接触内部cache key或队列。
+
+`inspect_execution`固定fixture仍为10条总SELECT，其中跨owner授权不能直接删除。最后同reader重复get可进一步优化，但需保留自定义cutoff override；它不是逐文本片段查询，不构成本轮已确认契约的未修缺陷。
+
+通用revision TTL、指标聚合TTL、长驻历史版本缓存新协议、跨进程pending视图和远端控制路由均未作为本轮新增承诺。真实Redis、Windows/网络文件系统、网络分区及生产部署不由这些本地/SQLite证据认证，不把未批准扩展列为完成阻塞项。
 
 ## 10. 实施边界及交付标准
 
@@ -290,25 +308,25 @@ MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭�
 
 旧数据范围已明确：不保留旧格式兼容或迁移工具，不执行实际环境数据删除。当前代码各 backend、调用方、快照生成与读取必须同步，不能留下只改一端的状态。
 
-其他常规命名与组装选择由设计审查负责。显式写缓存公共入口已确认，新增实现须重新独立复审并按矩阵验证；旧范围的复审结论不覆盖未执行的新验证。不得把静态审查或局部CI通过扩张成全部生产场景无问题保证。
+其他常规命名与组装选择由设计审查负责。显式写缓存公共入口、实现及其接纳/结算/关闭回归已经独立复审并按矩阵验证；后续扩展仍需针对自己的改动重新核验。不得把静态审查或局部CI通过扩张成全部生产场景无问题保证。
 
 ## 11. 可核对来源
 
 - 需求范围：https://github.com/linktools-toolkit/linktools/issues/190
 - 已发布增量：https://github.com/linktools-toolkit/linktools/pull/191
-- 已核实 CI：https://github.com/linktools-toolkit/linktools/actions/runs/38767666785
-- 已发布代码基线：8fe3b1b16312e8286601de7def047ce742e15e81
+- 已核实 CI：https://github.com/linktools-toolkit/linktools/actions/runs/39022486641
+- 已发布代码基线：69535dc05ca4b76c2e37813fabe2881cd1b7c9da
 - 核验文件：storage/_contracts.py、_composition.py、_cache.py、_revision.py、_lock.py；asset 各 backend；runtime/state/_root.py、_object_router.py；runtime/_metrics.py；observe/_metrics.py、_store.py、_sql.py
 
-新增写缓存实现须在精确 head 重跑相应验证；本稿不把设计确认当作已实现。
+本稿记录已执行的精确代码基线；若后续实现改动，原结果不能替代新head验证。
 
 ## 12. 已发布范围设计复审结论
 
 适用规则：根目录及 linktools-ai/AGENTS.md，尤其公共接口、单一所有权、revision/version 词汇、当前格式双端一致及 filelock 协调规则。审查覆盖本稿职责、名称、批读、多级缓存、修订提示、共享文件预算、写缓冲前缀与生命周期合同。
 
-本轮已订正冷读后到借用者stat、来源提示绑定、初始化关闭、孤儿temp、容量单位、关闭预算和未确认写入等确认问题的方案。第5节原有验证使用临时资产和SQLite持久session/transcript/result与三级缓存，关闭后可重开。第8节新增接口须在其实现后重新验证，不能沿用旧示例结论。
+本轮已订正冷读后到借用者stat、来源提示绑定、初始化关闭、孤儿temp、容量单位、关闭预算和未确认写入等确认问题的方案。第5节原有验证使用临时资产和SQLite持久session/transcript/result与三级缓存，关闭后可重开。第8及14节实现已由第9节列出的独立定向测试补充验证，未沿用旧示例冒充新增覆盖。
 
-在上述声明范围、已检查代码基线和现有验证证据下，未发现尚未闭环的必须修复设计问题。已知代码缺口在第6至9节明确列入实施与回归，不将设计通过扩大为尚未实施代码、未验证生产后端或任意业务数据可丢的保证。
+在上述声明范围、已检查代码基线和现有验证证据下，未发现尚未闭环的必须修复设计问题。已确认实现范围的验证已闭环；第6至9节保留真实一致性、测量和环境边界，不将通过结论扩大为未验证生产后端或任意业务数据可丢的保证。
 
 ## 13. 缓冲写入与读取可见性
 
