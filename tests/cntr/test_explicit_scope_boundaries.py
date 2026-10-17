@@ -16,8 +16,8 @@ from test_lifecycle_rebuild import setup_case
 @pytest.mark.parametrize("contexts", [{"base": "service:base"}, ["base=service:base"]])
 def test_native_build_context_requires_explicit_external_service(tmp_path, contexts):
     manager = setup_case(tmp_path, [
-        ("app", {"app": {"image": "app:new", "build": {"context": "/tmp/app", "additional_contexts": contexts}}}),
-        ("base", {"base": {"image": "base:new", "build": {"context": "/tmp/base"}}}),
+        ("app", {"app": {"image": "app:new", "build": {"context": "/tmp/app", "dockerfile_inline": "FROM scratch", "additional_contexts": contexts}}}),
+        ("base", {"base": {"image": "base:new", "build": {"context": "/tmp/base", "dockerfile_inline": "FROM scratch"}}}),
     ])
     instrument_images(manager)
     with pytest.raises(ContainerError, match="Build contexts.*base"):
@@ -90,9 +90,9 @@ def test_shared_native_completed_dependency_overrides_incomplete_last_fragment(t
 def test_native_build_context_transitive_dependency_stays_in_explicit_scope(tmp_path):
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new", "build": {
-            "context": "/tmp/app", "additional_contexts": {"base": "service:base"}}}}),
+            "context": "/tmp/app", "dockerfile_inline": "FROM scratch", "additional_contexts": {"base": "service:base"}}}}),
         ("base", {"base": {"image": "base:new", "build": {
-            "context": "/tmp/base", "additional_contexts": {"third": "service:third"}}}}),
+            "context": "/tmp/base", "dockerfile_inline": "FROM scratch", "additional_contexts": {"third": "service:third"}}}}),
         ("third", {"third": {"image": "third:new"}}),
     ])
     instrument_images(manager)

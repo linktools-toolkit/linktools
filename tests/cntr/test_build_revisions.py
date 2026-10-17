@@ -147,29 +147,56 @@ def test_snapshot_dockerfile_does_not_require_restoring_missing_tree(tmp_path):
     assert prep.with_build_revisions(model, (owner,), ("app",)) == before
 
 
-def test_plain_build_context_keeps_existing_image_rule(tmp_path):
+@pytest.mark.parametrize("context", ["local", "https://example.com/repo.git#main", "git@example.com:repo.git"])
+@pytest.mark.parametrize("actual", [None, "different", "matching"])
+def test_all_build_contexts_get_automatic_identity(tmp_path, context, actual):
     prep = ImagePreparer(SimpleNamespace())
-    owner = SimpleNamespace(services={"app": {}})
-    model = {"services": {"app": {"image": "app:fixed", "build": {"context": str(tmp_path)}}}}
-    result = prep.with_build_revisions(model, (owner,), ("app",))
-    assert "labels" not in result["services"]["app"]["build"]
-
-
-@pytest.mark.parametrize("actual", [None, "different", "explicit-inputs"])
-def test_plain_build_context_honors_explicit_build_label(tmp_path, actual):
-    prep = ImagePreparer(SimpleNamespace())
-    owner = SimpleNamespace(services={"app": {}})
-    build = {"context": str(tmp_path), "labels": {prep.BUILD_LABEL: "explicit-inputs"}}
+    owner = SimpleNamespace(services={"app": {}}, docker_file=None)
+    build = {"context": str(tmp_path) if context == "local" else context,
+             "dockerfile_inline": "FROM scratch",
+             "args": {"VERSION": "one"}, "labels": {"user-label": "kept"}}
     model = {"services": {"app": {"image": "app:fixed", "build": build}}}
     result = prep.with_build_revisions(model, (owner,), ("app",))
-    assert result["services"]["app"]["build"]["labels"] == build["labels"]
-    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture", actual) for image in images}
-    assert bool(prep.plan(result).build) == (actual != "explicit-inputs")
-    if actual == "explicit-inputs":
+    expected = result["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]
+    assert result["services"]["app"]["build"]["labels"]["user-label"] == "kept"
+    assert result["services"]["app"]["build"]["args"] == {"VERSION": "one"}
+    assert build["labels"] == {"user-label": "kept"}
+    assert prep.with_build_revisions(model, (owner,), ("app",)) == result
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:fixture", expected if actual == "matching" else actual)
+                                         for image in images}
+    assert bool(prep.plan(result).build) == (actual != "matching")
+    if actual == "matching":
         prep.verify_builds(result, ("app",))
     else:
         with pytest.raises(ImagePreparationError, match="revision mismatch"):
             prep.verify_builds(result, ("app",))
+    build["args"]["VERSION"] = "two"
+    assert prep.with_build_revisions(model, (owner,), ("app",)) != result
+    build["labels"][prep.BUILD_LABEL] = "manual"
+    with pytest.raises(ImagePreparationError, match="Reserved"):
+        prep.with_build_revisions(model, (owner,), ("app",))
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_plain_context_dockerfile_content_changes_identity(tmp_path, inline):
+    prep = ImagePreparer(SimpleNamespace(data_path=tmp_path))
+    owner = SimpleNamespace(services={"app": {}}, docker_file=None)
+    context = tmp_path / "compose" / "local"
+    context.mkdir(parents=True)
+    build = {"context": "local"}
+    model = {"services": {"app": {"image": "app:fixed", "build": build}}}
+    with pytest.raises(ImagePreparationError, match="Cannot read build Dockerfile"):
+        prep.with_build_revisions(model, (owner,), ("app",))
+    if inline:
+        build["dockerfile_inline"] = "FROM scratch"
+    else:
+        (context / "Dockerfile").write_text("FROM scratch")
+    before = prep.with_build_revisions(model, (owner,), ("app",))
+    if inline:
+        build["dockerfile_inline"] = "FROM alpine"
+    else:
+        (context / "Dockerfile").write_text("FROM alpine")
+    assert prep.with_build_revisions(model, (owner,), ("app",)) != before
 
 
 def test_external_dockerfile_change_changes_identity(tmp_path):
@@ -184,8 +211,9 @@ def test_external_dockerfile_change_changes_identity(tmp_path):
 
 
 @pytest.mark.parametrize("previous_file", [False, True])
-def test_source_build_fingerprints_pending_generated_dockerfile(fresh_manager, tmp_path, previous_file):
-    from linktools.cntr import OperationContext
+@pytest.mark.parametrize("source", [False, True])
+def test_build_fingerprints_pending_generated_dockerfile(fresh_manager, tmp_path, previous_file, source):
+    from linktools.cntr import BaseContainer, OperationContext
     from test_source_revisions import Source
 
     root = tmp_path / "container"
@@ -193,10 +221,11 @@ def test_source_build_fingerprints_pending_generated_dockerfile(fresh_manager, t
     template = root / "Dockerfile"
     template.write_text("FROM first\n")
     (root / "compose.yml").write_text("services:\n  app: {}\n")
-    owner = Source(fresh_manager, root, name="source-build")
-    digest = "a" * 64
-    (owner._source_root / "versions" / digest / "pkg").mkdir(parents=True)
-    owner._publish_source(digest)
+    owner = (Source if source else BaseContainer)(fresh_manager, root, name="local-build")
+    if source:
+        digest = "a" * 64
+        (owner._source_root / "versions" / digest / "pkg").mkdir(parents=True)
+        owner._publish_source(digest)
     prep = ImagePreparer(fresh_manager)
     destination = owner.get_docker_file_destination()
     if previous_file:
@@ -223,3 +252,45 @@ def test_source_build_fingerprints_pending_generated_dockerfile(fresh_manager, t
     fresh_manager.runtime.create_docker_process = lambda *args, **kwargs: SimpleNamespace(check_call=lambda: 0)
     fresh_manager.compose_runner.build(context, fresh_manager.compose_runner.options_for_build(("app",)))
     assert destination.read_text() == "FROM second"
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError, OSError])
+def test_plain_context_dockerfile_read_errors_fail_preparation(tmp_path, monkeypatch, failure):
+    from pathlib import Path
+
+    prep = ImagePreparer(SimpleNamespace())
+    owner = SimpleNamespace(services={"app": {}}, docker_file=None)
+    model = {"services": {"app": {"image": "app:fixed", "build": {"context": str(tmp_path)}}}}
+
+    def fail_read(*args, **kwargs):
+        raise failure("unreadable")
+
+    monkeypatch.setattr(Path, "read_text", fail_read)
+    with pytest.raises(ImagePreparationError, match="Cannot read build Dockerfile for app"):
+        prep.with_build_revisions(model, (owner,), ("app",))
+    assert "labels" not in model["services"]["app"]["build"]
+
+
+def test_remote_context_fingerprints_native_data_without_reading_local_files(monkeypatch):
+    from pathlib import Path
+
+    def fail_read(*args, **kwargs):
+        raise AssertionError("Remote builds must not read a local Dockerfile")
+
+    monkeypatch.setattr(Path, "read_text", fail_read)
+    prep = ImagePreparer(SimpleNamespace())
+    owner = SimpleNamespace(services={"app": {}}, docker_file=None)
+    build = {"context": "https://example.com/repo.git#main", "dockerfile": "Dockerfile.custom"}
+    spec = {"image": "app:fixed", "build": build}
+    model = {"services": {"app": spec}}
+    original = prep.with_build_revisions(model, (owner,), ("app",))
+    revision = original["services"]["app"]["build"]["labels"][prep.BUILD_LABEL]
+    for key, value in (("context", "https://example.com/repo.git#v2"),
+                       ("dockerfile", "Dockerfile.other"), ("labels", {"user-label": "value"}),
+                       ("args", {"VERSION": "two"})):
+        changed = {"services": {"app": dict(spec, build=dict(build, **{key: value}))}}
+        result = prep.with_build_revisions(changed, (owner,), ("app",))
+        assert result["services"]["app"]["build"]["labels"][prep.BUILD_LABEL] != revision
+    spec["platform"] = "linux/arm64"
+    result = prep.with_build_revisions(model, (owner,), ("app",))
+    assert result["services"]["app"]["build"]["labels"][prep.BUILD_LABEL] != revision

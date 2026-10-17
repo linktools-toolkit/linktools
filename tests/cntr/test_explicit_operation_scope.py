@@ -37,7 +37,8 @@ def instrument_images(manager: SimpleNamespace) -> None:
         manager.events.append(("build", tuple(options.services)))
         for service in options.services:
             image = context.compose_model["services"][service]["image"]
-            available[image] = LocalImage("sha256:old-" + service, None)
+            revision = context.compose_model["services"][service]["build"]["labels"][preparer.BUILD_LABEL]
+            available[image] = LocalImage("sha256:old-" + service, revision)
 
     preparer.inspect_images = inspect
     manager.image_preparer = preparer
@@ -61,7 +62,7 @@ def application_case(tmp_path: Path, running: "tuple[str, ...]") -> SimpleNamesp
         ("safeline", {"safeline": {"image": "safeline:new", "depends_on": ["nginx"]}}),
         ("sublink", {"sublink": {"image": "sublink:new", "depends_on": ["nginx"]}}),
         ("omniroute", {"omniroute": {"image": "omniroute:new", "depends_on": ["auth"]}}),
-        ("nginx", {"nginx": {"image": "nginx:new", "build": {"context": "/tmp/nginx"},
+        ("nginx", {"nginx": {"image": "nginx:new", "build": {"context": "/tmp/nginx", "dockerfile_inline": "FROM scratch"},
                               "depends_on": ["auth"]}}),
         ("auth", {"auth": {"image": "auth:new", "depends_on": ["lldap", "redis"]}}),
         ("lldap", {"lldap": {"image": "lldap:new"}}),
@@ -148,7 +149,7 @@ def test_named_container_keeps_all_its_services_in_dependency_order(tmp_path: Pa
             "safeline-mgt": {"image": "safeline-mgt:new", "depends_on": ["safeline-db", "nginx"]},
             "safeline-db": {"image": "safeline-db:new"},
         }),
-        ("nginx", {"nginx": {"image": "nginx:new", "build": {"context": "/tmp/nginx"}}}),
+        ("nginx", {"nginx": {"image": "nginx:new", "build": {"context": "/tmp/nginx", "dockerfile_inline": "FROM scratch"}}}),
     ], running=("nginx",) + selected if action == "restart" else ("nginx",))
     instrument_images(manager)
 
@@ -216,7 +217,7 @@ def test_running_integration_consumer_remains_outside_the_named_operation(
         tmp_path: Path, previous_provenance: bool) -> None:
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new"}}),
-        ("nginx", {"nginx": {"image": "nginx:new", "build": {"context": "/tmp/nginx"}}}),
+        ("nginx", {"nginx": {"image": "nginx:new", "build": {"context": "/tmp/nginx", "dockerfile_inline": "FROM scratch"}}}),
     ], running=("nginx",))
     if previous_provenance:
         manager.artifact_index.record({"generated/site.conf": {

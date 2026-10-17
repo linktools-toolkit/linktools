@@ -77,25 +77,25 @@ class ImagePreparer:
                 continue
             build = dict(spec["build"])
             build["pull"] = False
+            labels = dict(build.get("labels") or {})
+            if self.BUILD_LABEL in labels:
+                raise ImagePreparationError("Reserved build metadata in " + name)
             context = build.get("context", ".")
-            if "://" in context or context.startswith("git@"):
-                services[name] = dict(spec, build=build)
-                continue
-            context = Path(context)
-            if not context.is_absolute():
-                context = self.manager.data_path / "compose" / context
-            source = next((owner for owner in owners[name]
-                           if isinstance(owner, SourceContainer) and
-                           owner.get_docker_context_path().absolute() == context.absolute()), None)
-            # The source pointer retains its identity even when its target tree
-            # needs restoration. An absent pointer must still allow image reuse.
-            snapshot = next((path for path in (context, *context.parents)
-                             if path.name == "current" and path.is_symlink()), None) if source else None
-            if snapshot:
-                labels = dict(build.get("labels") or {})
-                if self.BUILD_LABEL in labels:
-                    raise ImagePreparationError("Reserved build metadata in " + name)
-                dockerfile = build.get("dockerfile_inline")
+            dockerfile = build.get("dockerfile_inline")
+            if "://" not in context and not context.startswith("git@"):
+                context = Path(context)
+                if not context.is_absolute():
+                    context = self.manager.data_path / "compose" / context
+                source = next((owner for owner in owners[name]
+                               if isinstance(owner, SourceContainer) and
+                               owner.get_docker_context_path().absolute() == context.absolute()), None)
+                # Keep an absent source pointer eligible for image reuse without
+                # fetching source. A dangling pointer still identifies its archive.
+                snapshot = next((path for path in (context, *context.parents)
+                                 if path.name == "current" and path.is_symlink()), None) if source else None
+                if source is not None and snapshot is None:
+                    services[name] = dict(spec, build=build)
+                    continue
                 if dockerfile is None:
                     path = Path(build.get("dockerfile", "Dockerfile"))
                     if not path.is_absolute():
@@ -105,23 +105,29 @@ class ImagePreparer:
                         if candidate is not None and candidate[0].resolve() == path.resolve():
                             dockerfile = candidate[1]
                     if dockerfile is None:
-                        # Archive identity covers files in a missing snapshot;
-                        # generated files above use the pending rendered bytes.
-                        try:
-                            path.resolve().relative_to(snapshot.resolve())
-                        except ValueError:
+                        # Archive identity covers native files in source snapshots,
+                        # including a tree that is currently absent from disk.
+                        in_snapshot = False
+                        if snapshot is not None:
+                            try:
+                                path.resolve().relative_to(snapshot.resolve())
+                                in_snapshot = True
+                            except ValueError:
+                                pass
+                        if not in_snapshot:
                             try:
                                 dockerfile = path.read_text(encoding="utf-8")
                             except OSError as exc:
                                 raise ImagePreparationError("Cannot read build Dockerfile for " + name) from exc
-                identity = {
-                    "context": str(context.resolve()), "dockerfile": dockerfile,
-                    "build": build, "platform": spec.get("platform"),
-                }
-                digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
-                        separators=(",", ":")).encode("utf-8")).hexdigest()
-                labels[self.BUILD_LABEL] = digest
-                build["labels"] = labels
+                context = str(context.resolve())
+            identity = {
+                "context": context, "dockerfile": dockerfile,
+                "build": build, "platform": spec.get("platform"),
+            }
+            digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
+                    separators=(",", ":")).encode("utf-8")).hexdigest()
+            labels[self.BUILD_LABEL] = digest
+            build["labels"] = labels
             services[name] = dict(spec, build=build)
         return dict(model, services=services)
 

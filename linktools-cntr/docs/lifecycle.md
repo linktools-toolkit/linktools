@@ -204,19 +204,30 @@ Unchanged definitions are not force-recreated. Docker Compose can still replace 
 service when its locally selected image changes. Recreating a container does not
 by itself rebuild its image or request a new certificate.
 
-Build identity comes from the final Compose inputs. For a local `SourceContainer`
-snapshot, the image preparer fingerprints its resolved versioned context, the
-pending generated Dockerfile (or native Dockerfile/inline content), build options
-and platform. Container authors do not implement `get_build_revision`. Containers
-without a managed source snapshot can declare `io.linktools.cntr.build-revision`
-in native Compose `build.labels`; image planning and verification honor that value.
-Nginx uses its certificate revision in this label and its native image tag.
+Build identity comes from the final Compose inputs. The image preparer adds the
+reserved `io.linktools.cntr.build-revision` label automatically for build services,
+fingerprinting native build options (including args and ordinary labels), platform,
+and context. Local builds use the pending generated Dockerfile or visible native
+Dockerfile/inline content. An unreadable local Dockerfile fails preparation; pending
+generated Dockerfiles need not already exist on disk. Remote contexts use their
+URL and visible build data without network access. This is an input fingerprint, not a recursive
+hash of arbitrary context files or a remote branch freshness check.
 
-Ordinary `up` reuses an existing image when neither a local source snapshot nor
-an explicit build revision is present;
-computing identity neither downloads source nor forces a build in that case.
-A retained local snapshot built with the previous fingerprint scheme may require
-one rebuild to acquire the current label. Subsequent unchanged runs reuse it.
+For a local `SourceContainer` snapshot, its resolved versioned context identifies
+the immutable archive, including native Dockerfiles in that archive. A missing
+snapshot tree does not require restoration just to compute its identity. Without
+a local source pointer, ordinary `up` still reuses an existing image without
+fetching source or forcing a build. Container authors do not implement revision
+getters, inject revision args, or set the reserved label themselves; native build
+args and ordinary labels are preserved. Nginx supplies its certificate inputs as
+native build args and uses a stable image name. Its certificate storage keeps
+validated generations and a single active link, independent of the build digest.
+Startup reuses a valid generation only when its domain and ACME settings match;
+restoring an older image can reselect a retained matching generation instead of
+replacing renewed certificates with its initial image seed.
+
+An existing image without the matching automatic label may require one rebuild.
+Subsequent unchanged runs reuse it.
 
 Readiness follows effective Docker health checks and Compose dependency
 conditions. Successful finite jobs are recorded as applied, not running.
@@ -293,24 +304,41 @@ Only the ACME subprocess loads them into its environment. Known DNS provider
 assignments are removed from saved ACME configuration before it is copied into
 image state, including credentials from a previously selected provider.
 
-The certificate revision identifies build code and TLS inputs, excluding DNS
-credential values. Each revision has a separate TLS storage slot under
-`/etc/certs/<revision>`. The image entrypoint installs preissued material into its
-own slot; ordinary startup does not contact a CA. The restored image/configuration
-therefore references its original slot without Python code changing a TLS pointer.
+Nginx passes its base-image tag, primary domain, certificate domains and ACME
+server/provider/email through native build arguments. The framework fingerprints
+those inputs; nginx does not compute a separate revision or version its image tag.
+Plaintext DNS credentials remain BuildKit secret inputs; only their digest is a
+build argument.
 
-Only this revision-based layout is managed automatically. Before upgrading an old
-deployment, manually back up its container-local `/etc/certs` and `/root/.acme.sh`
-contents. The tool does not copy old writable layers, import flat `certs/live`
-directories, or add migration mounts to rollback models. Existing files and
-backups are left untouched; restoring old-layout data is a manual operation.
-An ACME account supplied in the host `nginx/acme` directory remains a build input
-when no current revision account exists. Changing the certificate script requires
-one normal image rebuild and build-time issuance; ordinary `up` adds no image pull
-or runtime issuance.
+The single nginx instance uses `/etc/certs/live`, an atomic pointer to an
+append-only directory under `/etc/certs/versions`. Each generation retains the
+actual primary/domain/ACME settings alongside its certificate and renewal state.
+Startup checks those settings, certificate validity, domain coverage and the
+public/private key pair before reuse. If the active generation does not match,
+it selects a retained valid matching generation, or installs preissued image
+material when none exists. Restoring an older image can therefore recover its
+previously renewed generation. Ordinary startup does not contact a CA.
+
+Older revision directories and unrecognized flat layouts are not imported or
+deleted. Back up old container-local certificate and account data before upgrading;
+restoring that data is a manual operation. A host `nginx/acme` account remains a
+build input when the active generation has no account state. The builtin certificate
+and ACME scripts are embedded with native COPY heredocs in the rendered Dockerfile,
+so edits to either script change the build fingerprint. Changes to arbitrary
+COPY sources are not a recursive build fingerprint input; use an explicit image
+refresh when only those sources change. Docker retains its native layer caching.
 
 The existing certificate script owns all TLS pointer changes and renewal reloads,
 under the shared certificate lock. Renewal verifies the served certificate and
 restores the previous served certificate on failure. Host ACME-account archival
 uses the same lock on supported Linux bind mounts. Certificate and account keys
 remain sensitive contents of the image; do not distribute it to untrusted users.
+
+Nginx hashes its selected DNS provider's resolved environment payload with SHA-256
+and supplies only that digest as `ACME_DNS_CREDENTIALS_DIGEST`. The issuance RUN
+consumes this native argument so rotating credentials invalidates its build cache.
+The payload is sorted by environment variable name and uses the same shell-quoted
+UTF-8 text written to the BuildKit secret file. Account archives, certificate keys,
+and renewal output are excluded. The digest is visible in build metadata; providers
+using low-entropy passwords therefore permit offline password guessing from it.
+The generic build fingerprint does not read secret contents.

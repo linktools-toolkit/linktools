@@ -1,10 +1,18 @@
 services:
   nginx:
-    image: '{{ container.get_service_name("nginx") }}:{{ container.cert_image_revision }}'
+    image: '{{ container.get_service_name("nginx") }}'
     build:
       context: '{{ container.get_docker_context_path() }}'
-      labels:
-        io.linktools.cntr.build-revision: '{{ container.cert_image_revision }}'
+      args:
+        NGINX_TAG: '{{ NGINX_TAG }}'
+#     {% if NGINX_HTTPS_ENABLE %}
+        NGINX_ROOT_DOMAIN: {{ config.get('NGINX_ROOT_DOMAIN') | tojson }}
+        NGINX_CERT_DOMAINS: {{ "\n".join(container.acme_ssl_domains) | tojson }}
+        ACME_SERVER: {{ config.get('ACME_SERVER') | tojson }}
+        ACME_DNS_API: {{ config.get('ACME_DNS_API') | tojson }}
+        ACME_ACCOUNT_EMAIL: {{ config.get('ACME_ACCOUNT_EMAIL') | tojson }}
+        ACME_DNS_CREDENTIALS_DIGEST: '{{ utils.get_hash(container.acme_dns_environment, "sha256") }}'
+#     {% endif %}
       dockerfile: '{{ container.get_docker_file_destination() }}'
 #   {% if NGINX_HTTPS_ENABLE %}
       secrets:

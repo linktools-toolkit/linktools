@@ -38,7 +38,8 @@ def _context(container, explicit=False, services=("app",), state=None):
         state = SimpleNamespace(running_services=frozenset(("authelia",)))
     context = OperationContext(
         target_containers=[container] if explicit else [], target_services=services,
-        initial_runtime_state=state)
+        initial_runtime_state=state, compose_model={"services": {"nginx": {"build": {"labels": {
+            "io.linktools.cntr.build-revision": REVISION}}}}})
     return context, container._prepared
 
 
@@ -58,7 +59,7 @@ def _state(*revisions, oneoff_revisions=(), label="io.linktools.cntr.build-revis
 
 def test_nginx_consumer_renders_without_dns_credentials_or_account_preparation(monkeypatch):
     container = _container("100-nginx", monkeypatch)
-    container.__dict__.update(cert_image_revision=REVISION,
+    container.__dict__.update(
                               _rendered_site_files=({"sites/generated.conf": "site configuration"}, True))
     monkeypatch.setattr(container, "get_config", _unexpected)
     rendered = []
@@ -86,7 +87,6 @@ def test_nginx_consumer_renders_without_dns_credentials_or_account_preparation(m
 ])
 def test_nginx_consumer_requires_explicit_selection_for_unverified_certificate_revision(monkeypatch, state):
     container = _container("100-nginx", monkeypatch)
-    container.__dict__["cert_image_revision"] = REVISION
     monkeypatch.setattr(container, "get_config", _unexpected)
     monkeypatch.setattr(container, "_render_site_template", _unexpected)
     context, written = _context(container, services=("nginx",), state=state)
@@ -100,7 +100,7 @@ def test_nginx_consumer_requires_explicit_selection_for_unverified_certificate_r
 def test_nginx_consumer_checks_compatible_certificates_without_reading_dns_secrets(monkeypatch):
     from dataclasses import replace
     container = _container("100-nginx", monkeypatch)
-    container.__dict__.update(cert_image_revision=REVISION, sites={}, config_path=Path("/generated") / REVISION)
+    container.__dict__.update( sites={}, config_path=Path("/generated") / REVISION)
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: False)
     calls = []
     container.manager.compose_runner = SimpleNamespace(validate_service=lambda *args, **kwargs:
@@ -117,7 +117,7 @@ def test_nginx_consumer_checks_compatible_certificates_without_reading_dns_secre
 
 def test_nginx_explicit_selection_keeps_dns_and_account_preparation(tmp_path, monkeypatch):
     container = _container("100-nginx", monkeypatch)
-    container.__dict__.update(cert_image_revision=REVISION, extra_fields={"DNS_TOKEN": "DNS_TOKEN"},
+    container.__dict__.update(extra_fields={"DNS_TOKEN": "DNS_TOKEN"},
                               _rendered_site_files=({}, False))
     monkeypatch.setattr(container, "get_app_path", lambda *parts: tmp_path.joinpath(*parts))
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: {
@@ -126,7 +126,7 @@ def test_nginx_explicit_selection_keeps_dns_and_account_preparation(tmp_path, mo
     monkeypatch.setattr(container, "_render_site_template", lambda *args: "nginx configuration")
     permissions = []
     container.runtime.chmod = lambda *args: permissions.append(args)
-    account = tmp_path / "certs" / OLD_REVISION / "live" / "acme"
+    account = tmp_path / "certs" / "live" / "acme"
     account.mkdir(parents=True)
     (account / "account.conf").write_text("existing account", encoding="utf-8")
     context, written = _context(container, explicit=True, services=("nginx",), state=_state(OLD_REVISION))
@@ -316,7 +316,7 @@ def test_lldap_keeps_persistent_initialization_separate_from_prepared_files(tmp_
 def test_nginx_validation_explicitly_mounts_candidate_without_changing_deployment(tmp_path, monkeypatch, https):
     from copy import deepcopy
     container = _container("100-nginx", monkeypatch)
-    container.__dict__.update(sites={}, cert_image_revision=REVISION, config_path=tmp_path / "candidate")
+    container.__dict__.update(sites={},  config_path=tmp_path / "candidate")
     values = {"NGINX_WILDCARD_DOMAIN": False, "NGINX_WAF_ENABLE": False,
               "NGINX_AUTH_ENABLE": False, "NGINX_HTTPS_ENABLE": https, "NGINX_ROOT_DOMAIN": "example.test"}
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: values[key])
@@ -327,7 +327,7 @@ def test_nginx_validation_explicitly_mounts_candidate_without_changing_deploymen
         assert mounts["/etc/nginx/managed"] == str(tmp_path / "candidate")
         if https:
             certificates = Path(mounts["/etc/certs"])
-            assert (certificates / REVISION / "previous").is_dir()
+            assert (certificates / "previous").is_dir()
         calls.append((service, command, kwargs))
         return SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0)
     container.manager.compose_runner = SimpleNamespace(validate_service=validate)

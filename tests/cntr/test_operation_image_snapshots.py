@@ -15,7 +15,7 @@ def image_case(tmp_path, count=10, buildable=False):
     specs = {"app" + str(i): {"image": "image" + str(i) + ":local"} for i in range(count)}
     if buildable:
         for spec in specs.values():
-            spec["build"] = {"context": "/fixture"}
+            spec["build"] = {"context": "/fixture", "dockerfile_inline": "FROM fixture"}
     manager = setup_case(tmp_path, [("app", specs)])
     owner = manager.containers["app"]
     owner.docker_file = "FROM fixture"

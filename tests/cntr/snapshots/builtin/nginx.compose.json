@@ -15,11 +15,17 @@
   "services": {
     "nginx": {
       "build": {
+        "args": {
+          "ACME_ACCOUNT_EMAIL": "",
+          "ACME_DNS_API": "dns_cf",
+          "ACME_DNS_CREDENTIALS_DIGEST": "1816625231d9a6cf64af1183069b1740eeb296b937032d3997741b4cad6e3f7a",
+          "ACME_SERVER": "letsencrypt",
+          "NGINX_CERT_DOMAINS": "example.test\n*.example.test",
+          "NGINX_ROOT_DOMAIN": "example.test",
+          "NGINX_TAG": "stable-alpine"
+        },
         "context": "<ASSETS>/100-nginx",
         "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
-        "labels": {
-          "io.linktools.cntr.build-revision": "34e4962d8e31b174"
-        },
         "secrets": [
           "cntr_acme_account",
           "cntr_acme_dns"
@@ -53,7 +59,7 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx:34e4962d8e31b174",
+      "image": "aio-nginx",
       "logging": {
         "driver": "json-file",
         "options": {

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shlex
-import hashlib
 from pathlib import Path
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -203,6 +202,18 @@ class Container(BaseContainer):
         return fields
 
     @cached_property
+    def acme_dns_environment(self) -> str:
+        values = []
+        for key, field in sorted(self.extra_fields.items()):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ContainerError("Invalid DNS environment variable name: " + key)
+            value = str(self.get_config(field))
+            if "\n" in value or "\r" in value:
+                raise ContainerError("DNS credentials must be single-line values")
+            values.append("export {}={}\n".format(key, shlex.quote(value)))
+        return "".join(values)
+
+    @cached_property
     def acme_ssl_domains(self) -> "list[str]":
         result = []
         domain = self.get_config("NGINX_ROOT_DOMAIN")
@@ -216,35 +227,6 @@ class Container(BaseContainer):
                     if value and value not in result:
                         result.append(value)
         return result
-
-    @cached_property
-    def cert_image_revision(self) -> str:
-        """Identify build code and TLS inputs without including DNS credentials."""
-        parts = [self.get_config("NGINX_TAG"),
-                 str(self.get_config("NGINX_HTTPS_ENABLE", type=bool)),
-                 self.get_source_path("Dockerfile").read_text(encoding="utf-8")]
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            parts.extend((self.get_config("ACME_SERVER"), self.get_config("ACME_DNS_API"),
-                          self.get_config("ACME_ACCOUNT_EMAIL")))
-            parts.extend(self.acme_ssl_domains)
-            parts.extend(self.get_source_path(name).read_text(encoding="utf-8")
-                         for name in ("nginx-certificates", "nginx-acme", "dnsapi.json"))
-        return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
-
-    @cached_property
-    def acme_ssl_domains_args(self) -> str:
-        return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)
-
-    @cached_property
-    def acme_ssl_certificate_args(self) -> str:
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            return " ".join([
-                "--cert-file", shlex.quote(f"/etc/certs/{domain}_cert.pem"),
-                "--key-file", shlex.quote(f"/etc/certs/{domain}_key.pem"),
-                "--fullchain-file", shlex.quote(f"/etc/certs/{domain}_fullchain.pem"),
-            ])
-        return ""
 
     def shell_quote(self, value: object) -> str:
         return shlex.quote(str(value))
@@ -267,11 +249,15 @@ class Container(BaseContainer):
             actual = context.initial_runtime_state
             instances = tuple(item for item in actual.service_instances("nginx")
                               if item.state in ("running", "restarting")) if actual is not None else ()
-            if not instances or any(
-                    item.labels.get(ImagePreparer.BUILD_LABEL) != self.cert_image_revision
+            models = getattr(context, "service_models", None)
+            model = models.current_model("nginx") if models is not None else context.compose_model
+            expected = ((model or {}).get("services", {}).get("nginx", {}).get("build") or {}).get(
+                "labels", {}).get(ImagePreparer.BUILD_LABEL)
+            if expected is None or not instances or any(
+                    item.labels.get(ImagePreparer.BUILD_LABEL) != expected
                     for item in instances):
                 raise ContainerError(
-                    "Nginx certificate image revision changed or is unavailable; "
+                    "Nginx build inputs changed or its image is unavailable; "
                     "explicitly select nginx to prepare and build its image.")
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
@@ -303,14 +289,17 @@ class Container(BaseContainer):
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
                 mounts["/etc/certs"] = directory
-                source = self.get_app_path("certs", self.cert_image_revision, "live").resolve()
-                previous = Path(directory) / self.cert_image_revision / "previous"
+                source = self.get_app_path("certs", "live").resolve()
+                previous = Path(directory) / "previous"
                 previous.mkdir(parents=True, mode=0o700)
                 domain = self.get_config("NGINX_ROOT_DOMAIN")
                 for suffix in ("cert", "key", "fullchain"):
                     path = source / (domain + "_" + suffix + ".pem")
                     if path.is_file():
                         shutil.copy2(str(path), str(previous / path.name))
+                for name in ("primary", "domains", "settings"):
+                    if (source / name).is_file():
+                        shutil.copy2(str(source / name), str(previous / name))
                 result = runner.validate_service(context, "nginx", (
                     "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
                     "exec nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t"),
@@ -523,27 +512,12 @@ class Container(BaseContainer):
             for name in ("certs", "acme", "acme-secrets"):
                 self.get_app_path(name).mkdir(parents=True, exist_ok=True)
             self.runtime.chmod(self.get_app_path("acme-secrets"), 0o700)
-            values = []
-            for key, field in self.extra_fields.items():
-                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-                    raise ContainerError("Invalid DNS environment variable name: " + key)
-                value = str(self.get_config(field))
-                if "\n" in value or "\r" in value:
-                    raise ContainerError("DNS credentials must be single-line values")
-                values.append("export {}={}\n".format(key, shlex.quote(value)))
             atomic_write_text_if_changed(self.get_app_path("acme-secrets", "dns.env"),
-                                         "".join(values), mode=0o600)
+                                         self.acme_dns_environment, mode=0o600)
             lock_path = self.get_app_path("certs", ".acme.lock")
             with FileLock(str(lock_path)):
                 self.runtime.chmod(lock_path, 0o600)
-                previous_revision = next((item.labels.get(ImagePreparer.BUILD_LABEL)
-                                          for item in context.initial_runtime_state.services
-                                          if item.service == "nginx"), None)
-                account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
-                if not account.is_dir() and previous_revision is not None:
-                    if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):
-                        raise ContainerError("Invalid running nginx certificate revision")
-                    account = self.get_app_path("certs", previous_revision, "live", "acme")
+                account = self.get_app_path("certs", "live", "acme")
                 if not account.is_dir():
                     account = self.get_app_path("acme")
                 archive = self.get_app_path("acme-build-account.tar")
