@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Caller-owned revisions name immutable trees without bypassing validation."""
+import os
+
+import pytest
+
+from linktools.cntr import ContainerError
+from linktools.cntr.artifacts import (AppliedServiceModels, prepared_files_path, prepared_hooks,
+                                     prune_prepared_files, sha256_of, stage_files)
+from linktools.cntr.lifecycle.hooks import HookPhase
+from test_prepared_files import context, model, owner
+
+
+@pytest.mark.parametrize("revision", ["release-1", "", "../outside", "/absolute", "a\\b", "发布/一"])
+def test_revision_is_opaque_and_does_not_mix_content(owner, revision):
+    root = owner.get_app_path("generated")
+    path = prepared_files_path(root, {"config": "a"}, revision=revision)
+    assert path == root / ("revision-" + sha256_of(revision))
+    assert prepared_files_path(root, {"other": "b"}, revision=revision, mode=0o640) == path
+    assert path != prepared_files_path(root, {"config": "a"})
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("revision", [1, False, [], object()])
+def test_revision_rejects_non_strings_before_registering(owner, revision):
+    with pytest.raises(ContainerError, match="revision must be a string or None"):
+        owner.prepare_files({"config": "value"}, revision=revision)
+    assert prepared_hooks(owner) == ()
+    assert not owner.get_app_path("generated").exists()
+
+
+@pytest.mark.parametrize("change", ["name", "content", "mode"])
+def test_same_revision_conflict_does_not_hide_in_hook_dedup(owner, change):
+    files, mode = {"config": "first"}, 0o600
+    path = owner.prepare_files(files, revision="release-1")
+    if change == "name":
+        files = {"other": "first"}
+    elif change == "content":
+        files = {"config": "second"}
+    elif change == "mode":
+        mode = 0o640
+    with pytest.raises(ContainerError, match="revision conflicts with an existing declaration"):
+        owner.prepare_files(files, revision="release-1", mode=mode)
+    assert len(prepared_hooks(owner)) == 1
+    assert owner.prepare_files({"config": "first"}, revision="release-1") == path
+    ctx = context(owner)
+    owner.hooks.call(HookPhase.BEFORE_START, ctx)
+    assert ctx.prepared_dirs[owner.name] == path
+    assert (path / "config").read_text() == "first"
+
+
+def test_revision_and_files_are_captured_once(owner):
+    files = {"config": "first"}
+    revision = "release-1"
+    path = owner.prepare_files(files, revision=revision)
+    files["config"] = "second"
+    revision = "release-2"
+    assert not path.exists()
+    ctx = context(owner)
+    owner.hooks.call(HookPhase.BEFORE_START, ctx)
+    assert ctx.file_path(owner, "config").read_text() == "first"
+    assert ctx.prepared_dirs[owner.name] == path
+    assert not prepared_files_path(owner.get_app_path("generated"), files, revision=revision).exists()
+
+
+@pytest.mark.parametrize("change", ["name", "content"])
+def test_existing_revision_rejects_different_files(owner, change):
+    path = stage_files(owner, {"config": "first"}, revision="release-1")
+    files, mode = {"config": "first"}, 0o600
+    if change == "name":
+        files = {"other": "first"}
+    elif change == "content":
+        files = {"config": "second"}
+    with pytest.raises(ContainerError, match="revision conflicts"):
+        stage_files(owner, files, revision="release-1", mode=mode)
+    assert stage_files(owner, {"config": "first"}, revision="release-1") == path
+    assert (path / "config").read_text() == "first"
+    assert (path / "config").stat().st_mode & 0o777 == 0o600
+
+
+def test_failed_revision_write_can_retry_without_polluting_old_generation(owner, monkeypatch):
+    old = stage_files(owner, {"config": "old"}, revision="old")
+    index = owner.manager.artifact_index.load()
+    new = owner.prepare_files({"config": "new"}, revision="new")
+    original = owner.runtime.chmod
+    calls = []
+
+    def fail_once(path, mode):
+        if not calls:
+            calls.append(True)
+            raise OSError("test write failure")
+        original(path, mode)
+
+    monkeypatch.setattr(owner.runtime, "chmod", fail_once)
+    ctx = context(owner)
+    with pytest.raises(OSError, match="test write failure"):
+        prepared_hooks(owner)[0].callback(ctx)
+    assert not new.exists()
+    assert not tuple(new.parent.glob(".prepare-*"))
+    assert ctx.prepared_dirs == {}
+    assert owner.manager.artifact_index.load() == index
+    assert (old / "config").read_text() == "old"
+    assert owner.prepare_files({"config": "new"}, revision="new") == new
+    prepared_hooks(owner)[0].callback(ctx)
+    assert (new / "config").read_text() == "new"
+    assert (old / "config").read_text() == "old"
+
+
+def test_revision_pruning_keeps_referenced_and_rollback_generations(owner):
+    def apply(revision, value):
+        ctx = context(owner)
+        path = ctx.write_files(owner, {"config": value}, revision=revision)
+        models = AppliedServiceModels(owner.manager, model(owner, path))
+        models.record(("auth", "admin"))
+        prune_prepared_files(ctx, models)
+        return path
+
+    first = apply("first", "old")
+    abandoned = stage_files(owner, {"config": "abandoned"}, revision="abandoned")
+    later = apply("later", "new")
+    assert first.exists() and later.exists()
+    assert not abandoned.exists()
+    newest = apply("newest", "newest")
+    assert later.exists() and newest.exists()
+    assert not first.exists()
+    assert all(entry.get("tree") != str(first.relative_to(owner.manager.data_path))
+               for entry in owner.manager.artifact_index.load().values())
+    # Removed generations have no permanent version registry.
+    assert stage_files(owner, {"config": "reused"}, revision="first") == first
+
+
+def test_revision_alone_changes_applied_mounts(owner):
+    files = {"config": "unchanged"}
+    first = stage_files(owner, files, revision="v1")
+    initial = AppliedServiceModels(owner.manager, model(owner, first))
+    initial.record(("auth", "admin"))
+    same = stage_files(owner, files, revision="v1")
+    assert AppliedServiceModels(owner.manager, model(owner, same)).changed_services == frozenset()
+    next_path = owner.prepare_files(files, revision="v2")
+    assert not next_path.exists()
+    changed = AppliedServiceModels(owner.manager, model(owner, next_path))
+    assert changed.changed_services == frozenset(("auth", "admin"))
+
+
+def test_concurrent_revision_publish_cannot_replace_an_empty_tree(owner, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event
+
+    reached_rename, release_rename, second_started = Event(), Event(), Event()
+    original = os.rename
+    original_lock = owner.manager.environ.locks.file_lock
+    destination = prepared_files_path(owner.get_app_path("generated"), {}, revision="same")
+
+    def pause_first(source, target):
+        if str(target) == str(destination) and not reached_rename.is_set():
+            reached_rename.set()
+            assert release_rename.wait(5)
+        return original(source, target)
+
+    @contextmanager
+    def observe_lock(path):
+        if reached_rename.is_set():
+            second_started.set()
+        with original_lock(path):
+            yield
+
+    def publish_second():
+        return stage_files(owner, {"config": "different"}, revision="same")
+
+    monkeypatch.setattr(os, "rename", pause_first)
+    monkeypatch.setattr(owner.manager.environ.locks, "file_lock", observe_lock)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(stage_files, owner, {}, revision="same")
+        try:
+            assert reached_rename.wait(5)
+            second = executor.submit(publish_second)
+            assert second_started.wait(5)
+        finally:
+            release_rename.set()
+        assert first.result(timeout=5) == destination
+        with pytest.raises(ContainerError, match="revision conflicts"):
+            second.result(timeout=5)
+    assert tuple(destination.iterdir()) == ()
+    assert not tuple(destination.parent.glob(".prepare-*"))
+
+
+@pytest.mark.parametrize("revision", [None, "newline"])
+@pytest.mark.parametrize("content", ["one\r\ntwo\r\n", "one\rtwo\r", "one\ntwo\n"])
+def test_prepared_files_compare_exact_utf8_bytes(owner, revision, content):
+    files = {"config": content}
+    path = stage_files(owner, files, revision=revision)
+    assert (path / "config").read_bytes() == content.encode("utf-8")
+    assert stage_files(owner, files, revision=revision) == path
+    (path / "config").write_bytes(content.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+                                  if "\r" in content else content.replace("\n", "\r\n").encode("utf-8"))
+    with pytest.raises(ContainerError, match="modified|conflicts"):
+        stage_files(owner, files, revision=revision)
+
+
+def test_empty_tree_provenance_supports_consumer_updates_and_pruning(owner):
+    from linktools.cntr.artifacts import ArtifactIndex, validate_consumer_config
+
+    owner.manager.project_name = "test"
+    owner.manager.artifact_index = ArtifactIndex(owner.manager)
+    paths = []
+    for revision, files in (("first", {}), ("second", {}), ("third", {"config": "value"})):
+        ctx = context(owner)
+        path = owner.prepare_files(files, revision=revision)
+        models = AppliedServiceModels(owner.manager, model(owner, path))
+        if paths:
+            assert validate_consumer_config(ctx, model(owner, path), models, ("auth", "admin")) == ("auth", "admin")
+        assert ctx.write_files(owner, files, revision=revision) == path
+        models.record(("auth", "admin"))
+        prune_prepared_files(ctx, models)
+        paths.append(path)
+    assert not paths[0].exists()
+    assert paths[1].exists() and paths[2].exists()
+    entries = owner.manager.artifact_index.load()
+    assert all(entry.get("tree") != str(paths[0].relative_to(owner.manager.data_path)) for entry in entries.values())
+    assert entries[str(paths[1].relative_to(owner.manager.data_path))]["kind"] == "generated-config-tree"
+
+
+def test_legacy_file_only_provenance_still_allows_consumer_update(owner):
+    from linktools.cntr.artifacts import validate_consumer_config
+
+    old = stage_files(owner, {"config": "old"})
+    index = owner.manager.artifact_index
+    index.record({}, remove=[key for key, entry in index.load().items() if entry["kind"] == "generated-config-tree"])
+    AppliedServiceModels(owner.manager, model(owner, old)).record(("auth", "admin"))
+    new = owner.prepare_files({}, revision="empty")
+    models = AppliedServiceModels(owner.manager, model(owner, new))
+    assert validate_consumer_config(context(owner), model(owner, new), models, ("auth", "admin")) == ("auth", "admin")
+
+
+@pytest.mark.parametrize("revision", [None, "permissions-managed-by-template"])
+def test_reuse_preserves_template_managed_permissions(owner, revision, monkeypatch):
+    files = {"nested/config": "unchanged"}
+    path = stage_files(owner, files, revision=revision, mode=0o600)
+    path.chmod(0o750)
+    (path / "nested").chmod(0o700)
+    target = path / "nested/config"
+    target.chmod(0o640)
+    ownership = (target.stat().st_uid, target.stat().st_gid)
+    monkeypatch.setattr(owner.runtime, "chmod", lambda *args: pytest.fail("reuse chmod"))
+    owner.runtime.chown = lambda *args: pytest.fail("reuse chown")
+    assert stage_files(owner, files, revision=revision, mode=0o600) == path
+    if revision is not None:
+        assert stage_files(owner, files, revision=revision, mode=0o400) == path
+    assert path.stat().st_mode & 0o777 == 0o750
+    assert (path / "nested").stat().st_mode & 0o777 == 0o700
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert (target.stat().st_uid, target.stat().st_gid) == ownership

@@ -58,43 +58,22 @@ def test_directory_policy_creates_new_tree_without_changing_legacy_generation(fi
     assert (legacy / "nested/config").read_text() == "private"
 
 
-@pytest.mark.parametrize("change", ["root", "nested", "extra", "symlink"])
-def test_reuse_rejects_directory_drift_without_repairing_active_tree(file_owner, change):
+@pytest.mark.parametrize("change", ["extra", "symlink"])
+def test_reuse_rejects_topology_drift_without_repairing_active_tree(file_owner, change):
     files = {"nested/config": "private"}
     root = stage_files(file_owner, files)
-    if change in ("root", "nested"):
-        (root if change == "root" else root / "nested").chmod(0o700)
-    elif change == "extra":
+    if change == "extra":
         (root / "extra").mkdir()
     else:
         (root / "extra").symlink_to(root / "nested", target_is_directory=True)
     with pytest.raises(ContainerError, match="modified"):
         stage_files(file_owner, files)
-    if change in ("root", "nested"):
-        assert stat.S_IMODE((root if change == "root" else root / "nested").stat().st_mode) == 0o700
-    else:
-        assert (root / "extra").exists()
+    assert (root / "extra").exists()
 
 
-@pytest.mark.parametrize("membership", ["primary", "supplementary", "absent"])
-@pytest.mark.parametrize("owns_file", [True, False])
-def test_prepared_group_change_uses_privilege_only_when_needed(file_owner, monkeypatch, membership, owns_file):
-    target = os.getgid() + 10000
-    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() if owns_file else os.getuid() + 1)
-    monkeypatch.setattr(os, "getegid", lambda: target if membership == "primary" else os.getgid())
-    monkeypatch.setattr(os, "getgroups", lambda: [target] if membership == "supplementary" else [])
-    calls = []
-    file_owner.runtime.create_process = lambda *args, **kwargs: SimpleNamespace(
-        check_call=lambda: calls.append((args, kwargs)))
-    stage_files(file_owner, {"config": "private"}, mode=0o640, group=target)
-    assert len(calls) == 1
-    assert calls[0][0][0:2] == ("chgrp", str(target))
-    assert calls[0][1]["privilege"] is not (owns_file and membership != "absent")
-
-
-def test_unchanged_group_does_not_run_chgrp(file_owner):
-    file_owner.runtime.create_process = lambda *args, **kwargs: pytest.fail("unnecessary chgrp")
-    stage_files(file_owner, {"config": "private"}, mode=0o640, group=os.getgid())
+def test_prepared_files_do_not_change_ownership(file_owner):
+    file_owner.runtime.create_process = lambda *args, **kwargs: pytest.fail("ownership command")
+    stage_files(file_owner, {"config": "private"}, mode=0o640)
 
 
 @pytest.fixture
@@ -159,7 +138,7 @@ def test_template_ownership_accepts_lazy_numeric_ids_and_root(fresh_manager, tmp
     monkeypatch.setattr(owner.runtime, "chown", lambda path, user, **kwargs: calls.append(
         (str(path), str(user), str(kwargs["group"]), kwargs["recursive"])))
     template = tmp_path / "compose.yml"
-    template.write_text('{{ "/private/home" | chown(DOCKER_UID, True, group=DOCKER_GID) }}')
+    template.write_text('{{ "/private/home" | chown(DOCKER_UID, DOCKER_GID, recursive=True) }}')
     assert owner.render_template(template) == "/private/home"
     assert len(hooks) == 1
     hooks[0]()
@@ -269,3 +248,14 @@ def test_prepared_tree_root_link_is_rejected_without_following_it(file_owner, tm
         stage_files(file_owner, files)
     assert root.is_symlink()
     assert (retained / "nested/config").read_text() == "private"
+
+
+@pytest.mark.parametrize("expression", [
+    '"/private/home" | chown(1, 2, True)',
+    'chown("/private/home", 1, 2, True)',
+])
+def test_template_chown_requires_keyword_recursive(fresh_manager, tmp_path, expression):
+    template = tmp_path / "compose.yml"
+    template.write_text("{{ " + expression + " }}")
+    with pytest.raises(TypeError, match="positional"):
+        fresh_manager.containers["flare"].render_template(template)

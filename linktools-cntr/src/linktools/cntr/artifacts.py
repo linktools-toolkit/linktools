@@ -223,34 +223,22 @@ class ArtifactIndex:
             return atomic_write_text_if_changed(path, content)
 
 
-def _files_destination(container: "BaseContainer", files: "Mapping[str, str]", *,
-                       mode: int, group: "int | None") -> "Path":
-    from pathlib import PurePosixPath
+def prepared_files_path(root: "PathType", files: "Mapping[str, str]", *,
+                        revision: "str | None" = None, mode: int = 0o600) -> "Path":
+    """Locate an immutable tree without writing or depending on a container."""
+    from pathlib import Path, PurePosixPath
 
     for name in files:
         path = PurePosixPath(name)
         if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
             raise ContainerError("Prepared file must stay within its tree: " + name)
-    payload = json.dumps([mode, group, 0o755, sorted(files.items())], ensure_ascii=True,
+    if revision is not None:
+        if not isinstance(revision, str):
+            raise ContainerError("Prepared file revision must be a string or None")
+        return Path(root) / ("revision-" + sha256_of(revision))
+    payload = json.dumps([mode, 0o755, sorted(files.items())], ensure_ascii=True,
                          separators=(",", ":"))
-    return container.get_app_path("generated") / sha256_of(payload)
-
-
-def prepare_files(container: "BaseContainer", files: "Mapping[str, str]", *,
-                  mode: int = 0o600, group: "int | None" = None) -> "Path":
-    """Declare immutable files and defer their materialization until BEFORE_START."""
-    from types import MappingProxyType
-
-    files = MappingProxyType(dict(files))
-    path = _files_destination(container, files, mode=mode, group=group)
-
-    def write(context: "OperationContext") -> None:
-        context.write_files(container, files, mode=mode, group=group)
-
-    container.add_start_hook(("generated-config", str(path)), write,
-                             name="prepare generated files", order=100,
-                             source="generated-config", metadata={"path": str(path), "files": sorted(files)})
-    return path
+    return Path(root) / sha256_of(payload)
 
 
 def _is_prepared_hook(hook: "Hook") -> bool:
@@ -278,72 +266,77 @@ def prepared_paths(container: "BaseContainer") -> "tuple[Path, ...]":
 
 
 def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
-                mode: int = 0o600, group: "int | None" = None) -> "Path":
+                revision: "str | None" = None, mode: int = 0o600) -> "Path":
     """Materialize immutable inputs; no current pointer or service is changed."""
+    from contextlib import ExitStack
     import shutil
     import tempfile
     from pathlib import Path, PurePosixPath
 
-    destination = _files_destination(container, files, mode=mode, group=group)
-    directories = {"."}
-    for name in files:
-        directories.update(str(parent) for parent in PurePosixPath(name).parents)
-    directory_mode = 0o755
-    root = destination.parent
-    if destination.is_symlink():
-        raise ContainerError("Prepared file tree was modified: " + str(destination))
-    if destination.exists():
-        entries = tuple(destination.rglob("*"))
-        actual = {path.relative_to(destination).as_posix() for path in entries}
-        expected = set(files) | (directories - {"."})
-        if (actual != expected or
-                any(path.is_symlink() for path in entries) or any(
-                    not (destination / name).is_dir() or
-                    stat.S_IMODE((destination / name).stat().st_mode) != directory_mode
-                    for name in directories)):
-            raise ContainerError("Prepared file tree was modified: " + str(destination))
-        if any(
-                not (destination / name).is_file() or
-                (destination / name).read_text(encoding="utf-8") != content or
-                stat.S_IMODE((destination / name).stat().st_mode) != mode or
-                (group is not None and (destination / name).stat().st_gid != group)
-                for name, content in files.items()):
-            raise ContainerError("Prepared file tree was modified: " + str(destination))
-    else:
-        root.mkdir(parents=True, exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
-        try:
-            for name in sorted(directories, key=lambda value: len(PurePosixPath(value).parts)):
-                directory = temporary / name
-                directory.mkdir(parents=True, exist_ok=True)
-                os.chmod(directory, directory_mode)
-            for name, content in files.items():
-                path = temporary / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                utils.atomic_write(path, content, encoding="utf-8")
-                if group is not None and path.stat().st_gid != group:
-                    unprivileged = (os.name == "posix" and path.stat().st_uid == os.geteuid() and
-                                    group in {os.getegid(), *os.getgroups()})
-                    container.runtime.create_process(
-                        "chgrp", str(group), str(path), privilege=not unprivileged).check_call()
-                container.runtime.chmod(path, mode)
-            os.rename(str(temporary), str(destination))
-        except BaseException:
-            shutil.rmtree(str(temporary))
-            raise
-    producers = sorted({
-        name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
-        for declaration in declarations
-        if declaration.consumer == container.name
-    })
-    container.manager.artifact_index.record({
-        os.path.relpath(str(destination / name), str(container.manager.data_path)): {
-            "kind": "generated-config", "container": container.name,
-            "sha256": sha256_of(content), "producers": producers,
-            "tree": os.path.relpath(str(destination), str(container.manager.data_path)),
-        } for name, content in files.items()
-    })
-    return destination
+    root = container.get_app_path("generated")
+    destination = prepared_files_path(root, files, revision=revision, mode=mode)
+    with ExitStack() as stack:
+        if revision is not None:
+            stack.enter_context(container.manager.environ.locks.file_lock(root))
+        conflict = ("Prepared file revision conflicts with existing content: "
+                    if revision is not None else "Prepared file tree was modified: ") + str(destination)
+        directories = {"."}
+        for name in files:
+            directories.update(str(parent) for parent in PurePosixPath(name).parents)
+        directory_mode = 0o755
+        root = destination.parent
+        if destination.is_symlink():
+            raise ContainerError(conflict)
+        if destination.exists():
+            entries = tuple(destination.rglob("*"))
+            actual = {path.relative_to(destination).as_posix() for path in entries}
+            expected = set(files) | (directories - {"."})
+            if (actual != expected or
+                    any(path.is_symlink() for path in entries) or any(
+                        not (destination / name).is_dir()
+                        for name in directories)):
+                raise ContainerError(conflict)
+            if any(
+                    not (destination / name).is_file() or
+                    (destination / name).read_bytes() != content.encode("utf-8")
+                    for name, content in files.items()):
+                raise ContainerError(conflict)
+        else:
+            root.mkdir(parents=True, exist_ok=True)
+            temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
+            try:
+                for name in sorted(directories, key=lambda value: len(PurePosixPath(value).parts)):
+                    directory = temporary / name
+                    directory.mkdir(parents=True, exist_ok=True)
+                    os.chmod(directory, directory_mode)
+                for name, content in files.items():
+                    path = temporary / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    utils.atomic_write(path, content, encoding="utf-8")
+                    container.runtime.chmod(path, mode)
+                os.rename(str(temporary), str(destination))
+            except BaseException:
+                shutil.rmtree(str(temporary))
+                raise
+        producers = sorted({
+            name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
+            for declaration in declarations
+            if declaration.consumer == container.name
+        })
+        tree = os.path.relpath(str(destination), str(container.manager.data_path))
+        records = {
+            os.path.relpath(str(destination / name), str(container.manager.data_path)): {
+                "kind": "generated-config", "container": container.name,
+                "sha256": sha256_of(content), "producers": producers,
+                "tree": tree,
+            } for name, content in files.items()
+        }
+        records[tree] = {
+            "kind": "generated-config-tree", "container": container.name,
+            "producers": producers, "tree": tree,
+        }
+        container.manager.artifact_index.record(records)
+        return destination
 
 
 def _service_support(model: dict, service: str) -> dict:
@@ -372,16 +365,22 @@ def _indexed_sources(manager: "ContainerManager") -> "dict[str, tuple[str, str, 
     sources = {}
     for filename, entry in manager.artifact_index.load().items():
         tree, owner = entry.get("tree"), entry.get("container")
-        if (entry.get("kind") != "generated-config" or not isinstance(tree, str) or
+        kind = entry.get("kind")
+        if (kind not in ("generated-config", "generated-config-tree") or not isinstance(tree, str) or
                 not tree or not isinstance(owner, str) or not owner):
             continue
         path, file_path = Path(tree), Path(filename)
         if (path.is_absolute() or ".." in path.parts or file_path.is_absolute() or
-                ".." in file_path.parts or path not in file_path.parents):
+                ".." in file_path.parts):
+            continue
+        if (kind == "generated-config-tree" and file_path != path or
+                kind == "generated-config" and path not in file_path.parents):
             continue
         root = str(Path(manager.data_path) / path)
-        source = str(Path(manager.data_path) / file_path)
-        entries = {root: (owner, "", root), source: (owner, file_path.relative_to(path).as_posix(), root)}
+        entries = {root: (owner, "", root)}
+        if kind == "generated-config":
+            source = str(Path(manager.data_path) / file_path)
+            entries[source] = (owner, file_path.relative_to(path).as_posix(), root)
         for destination, identity in entries.items():
             if destination in sources and sources[destination] != identity:
                 raise ContainerError("Conflicting generated file provenance for " + destination)
@@ -496,13 +495,14 @@ def prune_prepared_files(context: "OperationContext", models: "AppliedServiceMod
             continue
         keep = {candidate} | {Path(indexed[source][2]) for source in sources if source in indexed}
         for path in known - keep:
-            if (path.is_symlink() or not path.is_dir() or len(path.name) != 64 or
-                    any(char not in "0123456789abcdef" for char in path.name)):
+            identifier = path.name[len("revision-"):] if path.name.startswith("revision-") else path.name
+            if (path.is_symlink() or not path.is_dir() or len(identifier) != 64 or
+                    any(char not in "0123456789abcdef" for char in identifier)):
                 continue
             index = models.manager.artifact_index
             tree = os.path.relpath(str(path), str(models.manager.data_path))
             removed = tuple(key for key, entry in index.load().items()
-                            if entry.get("kind") == "generated-config" and
+                            if entry.get("kind") in ("generated-config", "generated-config-tree") and
                             entry.get("container") == name and entry.get("tree") == tree)
             shutil.rmtree(str(path))
             index.record({}, remove=removed)

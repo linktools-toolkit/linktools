@@ -235,8 +235,8 @@ def test_authelia_callbacks_resolve_nested_values_with_exact_deduplication() -> 
     manager = _manager(("first", first, [declaration]), ("second", second, [declaration]))
     assert first.reads == second.reads == []
     assert manager.containers["authelia"].oidc_redirects == (
-        "https://sso.test", "https://one.test/callback?q=%23", "custom://app.test/one",
-        "https://two.test/callback", "custom://app.test/two",
+        "custom://app.test/one", "custom://app.test/two",
+        "https://one.test/callback?q=%23", "https://sso.test", "https://two.test/callback",
     )
 
 
@@ -246,7 +246,7 @@ def test_authelia_endpoint_expands_only_explicit_placeholder_after_config_values
     manager = _manager(("app", config, lambda producer: endpoint(
         producer, domain=ConfigRef("DOMAIN"), extensions=[callbacks])))
     assert manager.containers["authelia"].oidc_redirects == (
-        "https://sso.test", "https://app.test/return",
+        "https://app.test/return", "https://sso.test",
     )
     assert "DOMAIN" in config.reads
 

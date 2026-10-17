@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import yaml
 
-from linktools.cntr import ContainerManager, Integration, OperationContext
-from linktools.cntr.artifacts import (AppliedServiceModels, prepare_files, prepared_paths,
+from linktools.cntr import BaseContainer, ContainerManager, Integration, OperationContext
+from linktools.cntr.artifacts import (AppliedServiceModels, prepared_paths,
                                      prepared_hooks, stage_files, prune_prepared_files)
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.ext import endpoint
@@ -30,11 +30,14 @@ class Index:
 
 @pytest.fixture
 def owner(tmp_path):
-    manager = SimpleNamespace(data_path=tmp_path, artifact_index=Index())
+    from linktools.core._locks import LockManager
+    manager = SimpleNamespace(data_path=tmp_path, artifact_index=Index(),
+                              environ=SimpleNamespace(locks=LockManager(tmp_path / "locks")))
     root = tmp_path / "app/auth"
     value = SimpleNamespace(name="auth", services={"auth": {}, "admin": {}}, manager=manager,
                             get_app_path=lambda *parts: root.joinpath(*parts),
                             runtime=SimpleNamespace(chmod=lambda path, mode: os.chmod(path, mode)))
+    value.prepare_files = MethodType(BaseContainer.prepare_files, value)
     value.hooks = HookRegistry(owner=value, scope="container")
     value.add_start_hook = lambda key, hook, **kwargs: value.hooks.register(
         HookPhase.BEFORE_START, hook, key=key, **kwargs)
@@ -84,7 +87,7 @@ def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(ow
     })
     stage_files(owner, {"configuration.yml": "content"})
     entries = owner.manager.artifact_index.load()
-    assert len(entries) == 1
+    assert len(entries) == 2
     assert next(iter(entries.values()))["producers"] == ["app", "other"]
 
 
@@ -125,11 +128,11 @@ def test_stage_detects_content_tampering(owner):
         stage_files(owner, {"config": "original"})
 
 
-def test_stage_detects_permission_tampering(owner):
+def test_stage_preserves_externally_managed_permissions(owner):
     path = stage_files(owner, {"config": "secret"})
-    (path / "config").chmod(0o644)
-    with pytest.raises(ContainerError, match="modified"):
-        stage_files(owner, {"config": "secret"})
+    (path / "config").chmod(0o640)
+    assert stage_files(owner, {"config": "secret"}) == path
+    assert (path / "config").stat().st_mode & 0o777 == 0o640
 
 
 def test_operation_accepts_one_prepared_tree_per_owner(owner):
@@ -144,7 +147,7 @@ def test_operation_accepts_one_prepared_tree_per_owner(owner):
 
 def test_prepare_is_pure_and_materializes_frozen_files_before_validation(owner):
     files = {"nested/config.yml": "secret"}
-    path = prepare_files(owner, files)
+    path = owner.prepare_files(files)
     files["nested/config.yml"] = "mutated"
     files["added.yml"] = "new"
     assert not owner.get_app_path("generated").exists()
@@ -153,7 +156,7 @@ def test_prepare_is_pure_and_materializes_frozen_files_before_validation(owner):
     hook, = prepared_hooks(owner)
     assert hook.key == ("generated-config", str(path))
     assert hook.source == "generated-config"
-    assert hook.metadata == {"path": str(path), "files": ["nested/config.yml"]}
+    assert hook.metadata == {"path": str(path), "files": ["nested/config.yml"], "identity": str(path)}
     validated = []
     owner.add_start_hook(("check",), lambda ctx: validated.append(ctx.file_path(owner, "nested/config.yml").read_text()))
     ctx = context(owner)
@@ -165,8 +168,8 @@ def test_prepare_is_pure_and_materializes_frozen_files_before_validation(owner):
 
 
 def test_same_preparation_registers_one_hook_without_writing(owner):
-    path = prepare_files(owner, {"a": "1", "b": "2"})
-    assert prepare_files(owner, {"b": "2", "a": "1"}) == path
+    path = owner.prepare_files({"a": "1", "b": "2"})
+    assert owner.prepare_files({"b": "2", "a": "1"}) == path
     assert len(prepared_hooks(owner)) == 1
     assert not path.exists()
     owner.hooks.call(HookPhase.BEFORE_START, context(owner))
@@ -174,7 +177,7 @@ def test_same_preparation_registers_one_hook_without_writing(owner):
 
 
 def test_declared_paths_ignore_unrelated_metadata_and_wrong_phase(owner):
-    prepare_files(owner, {"a": "1"})
+    owner.prepare_files({"a": "1"})
     declared = prepared_paths(owner)
     for phase, key, source, metadata in (
         (HookPhase.BEFORE_START, ("unrelated",), "generated-config", {"path": "/unrelated"}),
@@ -186,19 +189,17 @@ def test_declared_paths_ignore_unrelated_metadata_and_wrong_phase(owner):
     assert prepared_paths(owner) == declared
 
 
-@pytest.mark.parametrize("change", ["name", "content", "mode", "group"])
+@pytest.mark.parametrize("change", ["name", "content", "mode"])
 def test_tree_identity_includes_files_and_permissions(owner, change):
-    files, mode, group = {"config": "content"}, 0o600, None
-    first = prepare_files(owner, files, mode=mode, group=group)
+    files, mode = {"config": "content"}, 0o600
+    first = owner.prepare_files(files, mode=mode)
     if change == "name":
         files = {"renamed": "content"}
     elif change == "content":
         files = {"config": "other"}
     elif change == "mode":
         mode = 0o640
-    else:
-        group = 1234
-    assert prepare_files(owner, files, mode=mode, group=group) != first
+    assert owner.prepare_files(files, mode=mode) != first
     assert not owner.get_app_path("generated").exists()
 
 
@@ -206,7 +207,7 @@ def test_acl_change_changes_mount_source_for_each_consumer_service(owner):
     old = stage_files(owner, {"base.yml": "same", "acl.yml": "deny"})
     previous = model(owner, old)
     AppliedServiceModels(owner.manager, previous).record(("auth", "admin"))
-    new = prepare_files(owner, {"base.yml": "same", "acl.yml": "allow"})
+    new = owner.prepare_files({"base.yml": "same", "acl.yml": "allow"})
     current = model(owner, new)
     store = AppliedServiceModels(owner.manager, current)
     assert store.changed_services == {"auth", "admin"}
@@ -220,7 +221,7 @@ def test_acl_change_changes_mount_source_for_each_consumer_service(owner):
 def test_same_files_have_identical_model_identity(owner):
     first = stage_files(owner, {"base.yml": "same"})
     AppliedServiceModels(owner.manager, model(owner, first)).record(("auth", "admin"))
-    later = prepare_files(owner, {"base.yml": "same"})
+    later = owner.prepare_files({"base.yml": "same"})
     assert not AppliedServiceModels(owner.manager, model(owner, later)).changed_services
 
 

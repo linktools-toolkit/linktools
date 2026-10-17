@@ -3,7 +3,6 @@
 """Lifecycle plans describe exactly the registered hooks dispatch will visit."""
 import pytest
 
-from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import BaseContainer
 from linktools.cntr.context import OperationContext
 from linktools.cntr.lifecycle import HookCycleError, HookPhase, HookRegistry, HookValidationError
@@ -245,7 +244,7 @@ def test_prepare_start_only_initializes_explicit_owners_without_running_hooks(li
     context.target_containers = [first]
     for owner, registry in ((first.name, first.hooks), (second.name, second.hooks), (None, manager.hooks)):
         _register(registry, HookPhase.BEFORE_START, events, owner, "before")
-    prepare_files(second, {"config.yml": "new"})
+    second.prepare_files({"config.yml": "new"})
 
     manager.lifecycle.prepare_start(context)
 
@@ -262,8 +261,8 @@ def test_split_start_runs_only_generated_hooks_for_extra_consumers(lifecycle_cas
         _register(owner.hooks, HookPhase.BEFORE_START, events, owner.name, "before")
         _register(owner.hooks, HookPhase.AFTER_START, events, owner.name, "after")
     _register(manager.hooks, HookPhase.BEFORE_START, events, None, "before")
-    prepare_files(second, {"config.yml": "new"})
-    prepare_files(unchanged, {"config.yml": "old"})
+    second.prepare_files({"config.yml": "new"})
+    unchanged.prepare_files({"config.yml": "old"})
     context.write_files = lambda owner, files, **kwargs: events.append(("generated", owner.name, "write"))
     manager.lifecycle.prepare_start(context)
     context.target_containers = [first, second]
@@ -308,7 +307,7 @@ def test_generated_hook_failure_prevents_checks_and_runtime(lifecycle_case) -> N
     context.target_containers = [first]
     manager.lifecycle.prepare_start(context)
     context.target_containers = [first, second]
-    prepare_files(second, {"config.yml": "invalid"})
+    second.prepare_files({"config.yml": "invalid"})
 
     def fail(*args, **kwargs):
         raise RuntimeError("generated files failed")

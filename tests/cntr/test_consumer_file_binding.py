@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 
-from linktools.cntr.artifacts import AppliedServiceModels, prepare_files, stage_files, validate_consumer_config
+from linktools.cntr.artifacts import AppliedServiceModels, stage_files, validate_consumer_config
 from linktools.cntr.errors import ContainerError
 from test_prepared_files import context, model, owner
 
@@ -19,7 +19,7 @@ def saved(owner):
 
 
 def changed_model(owner, applied, *, files=None, mode=0o600):
-    path = prepare_files(owner, files or {"base.yml": "same", "acl.yml": "allow"}, mode=mode)
+    path = owner.prepare_files(files or {"base.yml": "same", "acl.yml": "allow"}, mode=mode)
     desired = deepcopy(applied)
     for spec in desired["services"].values():
         spec["volumes"][0]["source"] = str(path)
@@ -95,7 +95,7 @@ def test_sidecar_without_declared_generated_mount_is_ignored(owner):
 
 
 def test_consumer_without_saved_model_requires_explicit_selection(owner):
-    path = prepare_files(owner, {"base.yml": "new"})
+    path = owner.prepare_files({"base.yml": "new"})
     with pytest.raises(ContainerError, match="No applied Compose model.*auth.*explicitly select"):
         validate(owner, model(owner, path))
 
@@ -105,7 +105,7 @@ def test_old_source_must_have_exact_tree_provenance(owner, legacy):
     old, applied = saved(owner)
     if legacy in ("no-tree", "wrong-owner", "wrong-kind"):
         for entry in owner.manager.artifact_index.values.values():
-            if entry.get("kind") != "generated-config":
+            if entry.get("kind") not in ("generated-config", "generated-config-tree"):
                 continue
             if legacy == "no-tree":
                 entry.pop("tree")
@@ -182,7 +182,7 @@ def test_exact_file_mounts_follow_declared_tree_identity(owner):
     applied["services"]["auth"]["volumes"][0]["source"] = str(old / "acl.yml")
     applied["services"]["admin"]["volumes"][0]["source"] = str(old / "base.yml")
     AppliedServiceModels(owner.manager, applied).record(("auth", "admin"))
-    path = prepare_files(owner, {"base.yml": "same", "acl.yml": "allow"})
+    path = owner.prepare_files({"base.yml": "same", "acl.yml": "allow"})
     desired = deepcopy(applied)
     desired["services"]["auth"]["volumes"][0]["source"] = str(path / "acl.yml")
     desired["services"]["admin"]["volumes"][0]["source"] = str(path / "base.yml")
@@ -204,6 +204,6 @@ def test_nested_generated_file_identity_is_exact(owner):
     old = stage_files(owner, {"nested/config.yml": "old"})
     applied = model(owner, old / "nested/config.yml")
     AppliedServiceModels(owner.manager, applied).record(("auth", "admin"))
-    path = prepare_files(owner, {"nested/config.yml": "new"})
+    path = owner.prepare_files({"nested/config.yml": "new"})
     desired = model(owner, path / "nested/config.yml")
     assert validate(owner, desired) == ("auth",)

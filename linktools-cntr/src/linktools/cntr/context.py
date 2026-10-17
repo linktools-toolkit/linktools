@@ -27,12 +27,12 @@ class OperationContext:
     refresh_services: "frozenset[str]" = frozenset()
 
     def write_files(self, container: "BaseContainer", files: "Mapping[str, str]", *,
-                    mode: int = 0o600, group: "int | None" = None) -> "Path":
+                    revision: "str | None" = None, mode: int = 0o600) -> "Path":
         """Prepare one immutable file tree without changing running services."""
         from .artifacts import stage_files
         if container.name in self.prepared_dirs:
             raise ValueError("Files already prepared for " + container.name)
-        path = stage_files(container, files, mode=mode, group=group)
+        path = stage_files(container, files, revision=revision, mode=mode)
         self.prepared_dirs[container.name] = path
         return path
 

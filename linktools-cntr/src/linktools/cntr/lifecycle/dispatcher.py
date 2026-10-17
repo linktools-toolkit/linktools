@@ -109,8 +109,17 @@ class LifecycleDispatcher:
         for container in targets:
             if container in generated_only:
                 from ..artifacts import prepared_hooks
-                for hook in prepared_hooks(container):
-                    hook.callback(context)
+                from pathlib import Path
+                prepared = prepared_hooks(container)
+                files = {str(Path(hook.metadata["path"]) / name)
+                         for hook in prepared for name in hook.metadata.get("files", ())}
+                for hook in container.hooks.iter_phase(HookPhase.BEFORE_START):
+                    key = hook.key
+                    ownership = (hook.source == "builtin" and isinstance(key, tuple) and
+                                 len(key) == 5 and key[0] == "chown" and
+                                 key[1] in files and key[3] is False)
+                    if hook in prepared or ownership:
+                        self._invoke_callback(hook.callback, context)
             else:
                 container.hooks.call(HookPhase.BEFORE_START, context)
         self.manager.hooks.call(HookPhase.BEFORE_START, context)

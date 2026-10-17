@@ -112,7 +112,7 @@ class ComposeOperations:
         previous_consumers = {}
         if running:
             for entry in self.manager.artifact_index.load().values():
-                if entry.get("kind") != "generated-config":
+                if entry.get("kind") not in ("generated-config", "generated-config-tree"):
                     continue
                 consumer = installed.get(entry.get("container"))
                 if consumer is None or not set(consumer.services).intersection(running):
@@ -186,7 +186,7 @@ class ComposeOperations:
         installed = {container.name: container for container in selection.project_containers}
         historical = {}
         for entry in self.manager.artifact_index.load().values():
-            if entry.get("kind") == "generated-config":
+            if entry.get("kind") in ("generated-config", "generated-config-tree"):
                 for producer in entry.get("producers", ()):
                     historical.setdefault(producer, set()).add(entry.get("container"))
         selected = set(selection.target_containers)

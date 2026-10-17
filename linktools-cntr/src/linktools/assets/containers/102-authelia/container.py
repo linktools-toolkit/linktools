@@ -13,7 +13,6 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia
 from linktools.core import ConfigField, ConfigLazy, ConfigRef, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
@@ -156,7 +155,7 @@ class Container(BaseContainer):
             for redirect in declaration.resolve_redirect_uris(producer.config):
                 if redirect not in redirects:
                     redirects.append(redirect)
-        return tuple(redirects)
+        return tuple(sorted(redirects))
 
     @cached_property
     def acl_config(self) -> str:
@@ -170,7 +169,7 @@ class Container(BaseContainer):
         })
         return yaml.safe_dump(
             {"access_control": {"default_policy": "deny", "rules": rules}},
-            sort_keys=False, allow_unicode=True,
+            sort_keys=True, allow_unicode=True,
         )
 
     def on_check(self, context: "OperationContext") -> None:
@@ -252,4 +251,4 @@ class Container(BaseContainer):
     def config_path(self) -> "Path":
         files = {name: self.render_template(self.get_source_path("templates", name)) for name in self.config_files}
         files["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
-        return prepare_files(self, files)
+        return self.prepare_files(files)

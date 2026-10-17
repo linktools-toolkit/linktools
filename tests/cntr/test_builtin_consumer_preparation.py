@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from _harness import builtin_container_type, builtin_module
-from linktools.cntr import ContainerError, OperationContext
+from linktools.cntr import BaseContainer, ContainerError, OperationContext
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
 
@@ -26,8 +26,8 @@ def _container(name, monkeypatch):
         runtime=SimpleNamespace(chmod=_unexpected, chown=_unexpected), user="test")
     container._name = name.split("-", 1)[1]
     container._prepared = []
-    monkeypatch.setattr(builtin_module(name), "prepare_files", lambda owner, files, **kwargs: (
-        container._prepared.append((owner, files, kwargs)) or Path("/generated") / REVISION))
+    monkeypatch.setattr(container, "prepare_files", lambda files, **kwargs: (
+        container._prepared.append((container, files, kwargs)) or Path("/generated") / REVISION))
     monkeypatch.setattr(container, "get_app_path", _unexpected)
     monkeypatch.setattr(container, "get_source_path", lambda *parts: Path(*parts))
     return container
@@ -191,7 +191,7 @@ def test_flare_consumer_renders_without_runtime_app_migration(monkeypatch):
 
     assert container.config_path == Path("/generated") / REVISION
 
-    assert written == [(container, navigation, {"mode": 0o640, "group": 123})]
+    assert written == [(container, navigation, {"mode": 0o640})]
     assert context.target_containers == []
     assert context.target_services == ("app",)
 
@@ -226,7 +226,7 @@ def test_flare_explicit_selection_keeps_runtime_app_migration(tmp_path, monkeypa
     assert not (app / "bookmarks.yml").exists()
     assert (legacy / "apps.yml").read_text(encoding="utf-8") == "old generated data"
     assert permissions == [("chown", "test", {"recursive": True}), ("chmod", 0o750)]
-    assert written == [(container, {"apps.yml": "current applications"}, {"mode": 0o640, "group": 123})]
+    assert written == [(container, {"apps.yml": "current applications"}, {"mode": 0o640})]
 
 
 def test_authelia_admin_only_validation_requires_explicit_container(monkeypatch):
@@ -263,7 +263,7 @@ def test_builtin_config_path_is_fixed_for_the_integration_snapshot(monkeypatch, 
 
     expected = container.config_path
     assert len(container._prepared) == 1
-    monkeypatch.setattr(builtin_module(name), "prepare_files", _unexpected)
+    monkeypatch.setattr(container, "prepare_files", _unexpected)
     monkeypatch.setattr(container, "get_config", _unexpected)
     container.on_prepare()
     assert container.config_path == expected
@@ -393,11 +393,10 @@ def test_unselected_nginx_has_no_implicit_runtime_gate(monkeypatch):
 def test_builtin_config_path_defers_materialization_to_start_hook(tmp_path, monkeypatch, name):
     import os
     import stat
-    from linktools.cntr.artifacts import prepare_files
     from linktools.cntr.lifecycle.hooks import HookPhase
 
     container = _container(name, monkeypatch)
-    monkeypatch.setattr(builtin_module(name), "prepare_files", prepare_files)
+    monkeypatch.setattr(container, "prepare_files", BaseContainer.prepare_files.__get__(container))
     monkeypatch.setattr(container, "get_app_path", lambda *parts: tmp_path.joinpath(*parts))
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs:
                         os.getgid() if key == "DOCKER_GID" else "saved-password")
