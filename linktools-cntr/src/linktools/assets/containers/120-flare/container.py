@@ -118,7 +118,7 @@ class Container(BaseContainer):
     @cached_property
     def config_path(self) -> "Path":
         return self.prepare_files(
-            self._navigation_files(), mode=0o640, group=self.get_config("DOCKER_GID", type=int))
+            self._navigation_files(), mode=0o640)
 
     def on_check(self, context: "OperationContext") -> None:
         for name in ("apps.yml", "bookmarks.yml"):

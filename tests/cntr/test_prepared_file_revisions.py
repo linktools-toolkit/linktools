@@ -17,7 +17,7 @@ def test_revision_is_opaque_and_does_not_mix_content(owner, revision):
     root = owner.get_app_path("generated")
     path = prepared_files_path(root, {"config": "a"}, revision=revision)
     assert path == root / ("revision-" + sha256_of(revision))
-    assert prepared_files_path(root, {"other": "b"}, revision=revision, mode=0o640, group=42) == path
+    assert prepared_files_path(root, {"other": "b"}, revision=revision, mode=0o640) == path
     assert path != prepared_files_path(root, {"config": "a"})
     assert not root.exists()
 
@@ -30,9 +30,9 @@ def test_revision_rejects_non_strings_before_registering(owner, revision):
     assert not owner.get_app_path("generated").exists()
 
 
-@pytest.mark.parametrize("change", ["name", "content", "mode", "group"])
+@pytest.mark.parametrize("change", ["name", "content", "mode"])
 def test_same_revision_conflict_does_not_hide_in_hook_dedup(owner, change):
-    files, mode, group = {"config": "first"}, 0o600, None
+    files, mode = {"config": "first"}, 0o600
     path = owner.prepare_files(files, revision="release-1")
     if change == "name":
         files = {"other": "first"}
@@ -40,10 +40,8 @@ def test_same_revision_conflict_does_not_hide_in_hook_dedup(owner, change):
         files = {"config": "second"}
     elif change == "mode":
         mode = 0o640
-    else:
-        group = os.getgid()
     with pytest.raises(ContainerError, match="revision conflicts with an existing declaration"):
-        owner.prepare_files(files, revision="release-1", mode=mode, group=group)
+        owner.prepare_files(files, revision="release-1", mode=mode)
     assert len(prepared_hooks(owner)) == 1
     assert owner.prepare_files({"config": "first"}, revision="release-1") == path
     ctx = context(owner)
@@ -66,20 +64,16 @@ def test_revision_and_files_are_captured_once(owner):
     assert not prepared_files_path(owner.get_app_path("generated"), files, revision=revision).exists()
 
 
-@pytest.mark.parametrize("change", ["name", "content", "mode", "group"])
-def test_existing_revision_rejects_different_files_or_permissions(owner, change):
+@pytest.mark.parametrize("change", ["name", "content"])
+def test_existing_revision_rejects_different_files(owner, change):
     path = stage_files(owner, {"config": "first"}, revision="release-1")
-    files, mode, group = {"config": "first"}, 0o600, None
+    files, mode = {"config": "first"}, 0o600
     if change == "name":
         files = {"other": "first"}
     elif change == "content":
         files = {"config": "second"}
-    elif change == "mode":
-        mode = 0o640
-    else:
-        group = (path / "config").stat().st_gid + 1
     with pytest.raises(ContainerError, match="revision conflicts"):
-        stage_files(owner, files, revision="release-1", mode=mode, group=group)
+        stage_files(owner, files, revision="release-1", mode=mode)
     assert stage_files(owner, {"config": "first"}, revision="release-1") == path
     assert (path / "config").read_text() == "first"
     assert (path / "config").stat().st_mode & 0o777 == 0o600
@@ -238,3 +232,23 @@ def test_legacy_file_only_provenance_still_allows_consumer_update(owner):
     new = owner.prepare_files({}, revision="empty")
     models = AppliedServiceModels(owner.manager, model(owner, new))
     assert validate_consumer_config(context(owner), model(owner, new), models, ("auth", "admin")) == ("auth", "admin")
+
+
+@pytest.mark.parametrize("revision", [None, "permissions-managed-by-template"])
+def test_reuse_preserves_template_managed_permissions(owner, revision, monkeypatch):
+    files = {"nested/config": "unchanged"}
+    path = stage_files(owner, files, revision=revision, mode=0o600)
+    path.chmod(0o750)
+    (path / "nested").chmod(0o700)
+    target = path / "nested/config"
+    target.chmod(0o640)
+    ownership = (target.stat().st_uid, target.stat().st_gid)
+    monkeypatch.setattr(owner.runtime, "chmod", lambda *args: pytest.fail("reuse chmod"))
+    owner.runtime.chown = lambda *args: pytest.fail("reuse chown")
+    assert stage_files(owner, files, revision=revision, mode=0o600) == path
+    if revision is not None:
+        assert stage_files(owner, files, revision=revision, mode=0o400) == path
+    assert path.stat().st_mode & 0o777 == 0o750
+    assert (path / "nested").stat().st_mode & 0o777 == 0o700
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert (target.stat().st_uid, target.stat().st_gid) == ownership

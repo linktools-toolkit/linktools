@@ -128,11 +128,11 @@ def test_stage_detects_content_tampering(owner):
         stage_files(owner, {"config": "original"})
 
 
-def test_stage_detects_permission_tampering(owner):
+def test_stage_preserves_externally_managed_permissions(owner):
     path = stage_files(owner, {"config": "secret"})
-    (path / "config").chmod(0o644)
-    with pytest.raises(ContainerError, match="modified"):
-        stage_files(owner, {"config": "secret"})
+    (path / "config").chmod(0o640)
+    assert stage_files(owner, {"config": "secret"}) == path
+    assert (path / "config").stat().st_mode & 0o777 == 0o640
 
 
 def test_operation_accepts_one_prepared_tree_per_owner(owner):
@@ -189,19 +189,17 @@ def test_declared_paths_ignore_unrelated_metadata_and_wrong_phase(owner):
     assert prepared_paths(owner) == declared
 
 
-@pytest.mark.parametrize("change", ["name", "content", "mode", "group"])
+@pytest.mark.parametrize("change", ["name", "content", "mode"])
 def test_tree_identity_includes_files_and_permissions(owner, change):
-    files, mode, group = {"config": "content"}, 0o600, None
-    first = owner.prepare_files(files, mode=mode, group=group)
+    files, mode = {"config": "content"}, 0o600
+    first = owner.prepare_files(files, mode=mode)
     if change == "name":
         files = {"renamed": "content"}
     elif change == "content":
         files = {"config": "other"}
     elif change == "mode":
         mode = 0o640
-    else:
-        group = 1234
-    assert owner.prepare_files(files, mode=mode, group=group) != first
+    assert owner.prepare_files(files, mode=mode) != first
     assert not owner.get_app_path("generated").exists()
 
 

@@ -191,7 +191,7 @@ def test_flare_consumer_renders_without_runtime_app_migration(monkeypatch):
 
     assert container.config_path == Path("/generated") / REVISION
 
-    assert written == [(container, navigation, {"mode": 0o640, "group": 123})]
+    assert written == [(container, navigation, {"mode": 0o640})]
     assert context.target_containers == []
     assert context.target_services == ("app",)
 
@@ -226,7 +226,7 @@ def test_flare_explicit_selection_keeps_runtime_app_migration(tmp_path, monkeypa
     assert not (app / "bookmarks.yml").exists()
     assert (legacy / "apps.yml").read_text(encoding="utf-8") == "old generated data"
     assert permissions == [("chown", "test", {"recursive": True}), ("chmod", 0o750)]
-    assert written == [(container, {"apps.yml": "current applications"}, {"mode": 0o640, "group": 123})]
+    assert written == [(container, {"apps.yml": "current applications"}, {"mode": 0o640})]
 
 
 def test_authelia_admin_only_validation_requires_explicit_container(monkeypatch):

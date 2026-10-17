@@ -30,8 +30,8 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
                                  name="mkdir", order=100, source="builtin")
         return path
 
-    def chown(path: "PathType", user: "str | int | None" = None, recursive: bool = False, *,
-              group: "str | int | None" = None) -> str:
+    def chown(path: "PathType", user: "str | int | None" = None,
+              group: "str | int | None" = None, *, recursive: bool = False) -> str:
         path = config.cast(path, type="path")
         if not isinstance(user, type(None)) and str(user) != "":
             options = {} if isinstance(group, type(None)) else {"group": group}

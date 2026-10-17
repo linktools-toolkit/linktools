@@ -217,7 +217,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
         self.hooks.register(HookPhase.BEFORE_START, hook, key=key, **kwargs)
 
     def prepare_files(self, files: "Mapping[str, str]", *, revision: "str | None" = None,
-                      mode: int = 0o600, group: "int | None" = None) -> "Path":
+                      mode: int = 0o600) -> "Path":
         """Freeze generated inputs and register their immutable tree for BEFORE_START."""
         from types import MappingProxyType
         from .artifacts import prepared_files_path
@@ -225,15 +225,15 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
         files = MappingProxyType(dict(files))
         root = self.get_app_path("generated")
-        path = prepared_files_path(root, files, revision=revision, mode=mode, group=group)
-        identity = str(path if revision is None else prepared_files_path(root, files, mode=mode, group=group))
+        path = prepared_files_path(root, files, revision=revision, mode=mode)
+        identity = str(path if revision is None else prepared_files_path(root, files, mode=mode))
         key = ("generated-config", str(path))
         previous = self.hooks.get(HookPhase.BEFORE_START, key)
         if previous is not None and previous.metadata.get("identity") != identity:
             raise ContainerError("Prepared file revision conflicts with an existing declaration")
 
         def write(context: "OperationContext") -> None:
-            context.write_files(self, files, revision=revision, mode=mode, group=group)
+            context.write_files(self, files, revision=revision, mode=mode)
 
         self.add_start_hook(key, write,
                             name="prepare generated files", order=100, source="generated-config",

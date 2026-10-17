@@ -224,8 +224,7 @@ class ArtifactIndex:
 
 
 def prepared_files_path(root: "PathType", files: "Mapping[str, str]", *,
-                        revision: "str | None" = None, mode: int = 0o600,
-                        group: "int | None" = None) -> "Path":
+                        revision: "str | None" = None, mode: int = 0o600) -> "Path":
     """Locate an immutable tree without writing or depending on a container."""
     from pathlib import Path, PurePosixPath
 
@@ -237,7 +236,7 @@ def prepared_files_path(root: "PathType", files: "Mapping[str, str]", *,
         if not isinstance(revision, str):
             raise ContainerError("Prepared file revision must be a string or None")
         return Path(root) / ("revision-" + sha256_of(revision))
-    payload = json.dumps([mode, group, 0o755, sorted(files.items())], ensure_ascii=True,
+    payload = json.dumps([mode, 0o755, sorted(files.items())], ensure_ascii=True,
                          separators=(",", ":"))
     return Path(root) / sha256_of(payload)
 
@@ -267,7 +266,7 @@ def prepared_paths(container: "BaseContainer") -> "tuple[Path, ...]":
 
 
 def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
-                revision: "str | None" = None, mode: int = 0o600, group: "int | None" = None) -> "Path":
+                revision: "str | None" = None, mode: int = 0o600) -> "Path":
     """Materialize immutable inputs; no current pointer or service is changed."""
     from contextlib import ExitStack
     import shutil
@@ -275,11 +274,11 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
     from pathlib import Path, PurePosixPath
 
     root = container.get_app_path("generated")
-    destination = prepared_files_path(root, files, revision=revision, mode=mode, group=group)
+    destination = prepared_files_path(root, files, revision=revision, mode=mode)
     with ExitStack() as stack:
         if revision is not None:
             stack.enter_context(container.manager.environ.locks.file_lock(root))
-        conflict = ("Prepared file revision conflicts with existing content or permissions: "
+        conflict = ("Prepared file revision conflicts with existing content: "
                     if revision is not None else "Prepared file tree was modified: ") + str(destination)
         directories = {"."}
         for name in files:
@@ -294,15 +293,12 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
             expected = set(files) | (directories - {"."})
             if (actual != expected or
                     any(path.is_symlink() for path in entries) or any(
-                        not (destination / name).is_dir() or
-                        stat.S_IMODE((destination / name).stat().st_mode) != directory_mode
+                        not (destination / name).is_dir()
                         for name in directories)):
                 raise ContainerError(conflict)
             if any(
                     not (destination / name).is_file() or
-                    (destination / name).read_bytes() != content.encode("utf-8") or
-                    stat.S_IMODE((destination / name).stat().st_mode) != mode or
-                    (group is not None and (destination / name).stat().st_gid != group)
+                    (destination / name).read_bytes() != content.encode("utf-8")
                     for name, content in files.items()):
                 raise ContainerError(conflict)
         else:
@@ -317,11 +313,6 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
                     path = temporary / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     utils.atomic_write(path, content, encoding="utf-8")
-                    if group is not None and path.stat().st_gid != group:
-                        unprivileged = (os.name == "posix" and path.stat().st_uid == os.geteuid() and
-                                        group in {os.getegid(), *os.getgroups()})
-                        container.runtime.create_process(
-                            "chgrp", str(group), str(path), privilege=not unprivileged).check_call()
                     container.runtime.chmod(path, mode)
                 os.rename(str(temporary), str(destination))
             except BaseException:

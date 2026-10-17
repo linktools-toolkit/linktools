@@ -3,7 +3,6 @@
 """Generated trees keep their established identity and immutable-file guarantees."""
 import hashlib
 import json
-import os
 
 import pytest
 
@@ -12,9 +11,9 @@ from linktools.cntr.errors import ContainerError
 from test_prepared_files import context, owner
 
 
-def test_pure_destination_preserves_existing_stage_hash(owner):
+def test_pure_destination_matches_content_and_mode_hash(owner):
     files = {"nested/file": "value", "config": "secret"}
-    payload = json.dumps([0o640, None, 0o755, sorted(files.items())], ensure_ascii=True, separators=(",", ":"))
+    payload = json.dumps([0o640, 0o755, sorted(files.items())], ensure_ascii=True, separators=(",", ":"))
     expected = owner.get_app_path("generated") / hashlib.sha256(payload.encode("utf-8")).hexdigest()
     declared = owner.prepare_files(files, mode=0o640)
     assert declared == expected
@@ -32,14 +31,12 @@ def test_prepare_rejects_escaping_paths_before_registration(owner, name):
     assert not owner.get_app_path("generated").exists()
 
 
-@pytest.mark.parametrize("tampering", ["extra", "directory-mode", "file-symlink", "tree-symlink"])
+@pytest.mark.parametrize("tampering", ["extra", "file-symlink", "tree-symlink"])
 def test_staging_rechecks_existing_tree_integrity(owner, tampering):
     files = {"nested/config": "secret"}
     tree = stage_files(owner, files)
     if tampering == "extra":
         (tree / "extra").write_text("injected")
-    elif tampering == "directory-mode":
-        (tree / "nested").chmod(0o777)
     elif tampering == "file-symlink":
         target = owner.get_app_path("external")
         target.write_text("secret")
@@ -53,11 +50,9 @@ def test_staging_rechecks_existing_tree_integrity(owner, tampering):
         stage_files(owner, files)
 
 
-def test_stage_group_and_directory_modes_are_preserved(owner):
-    group = os.getegid()
-    path = stage_files(owner, {"nested/config": "secret"}, mode=0o640, group=group)
-    assert (path / "nested/config").stat().st_gid == group
+def test_stage_file_and_directory_modes_are_preserved(owner):
+    path = stage_files(owner, {"nested/config": "secret"}, mode=0o640)
     assert (path / "nested/config").stat().st_mode & 0o777 == 0o640
     assert path.stat().st_mode & 0o777 == 0o755
     assert (path / "nested").stat().st_mode & 0o777 == 0o755
-    assert stage_files(owner, {"nested/config": "secret"}, mode=0o640, group=group) == path
+    assert stage_files(owner, {"nested/config": "secret"}, mode=0o640) == path
