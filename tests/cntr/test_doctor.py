@@ -271,8 +271,10 @@ def test_doctor_default_command_does_not_raise_regardless_of_findings(fresh_mana
 
 # -- Compose config validation (--runtime only) -------------------------------
 
-def test_check_compose_validation_is_empty_without_docker_binary(fresh_manager):
-    # This sandbox genuinely has no `docker` binary.
+def test_check_compose_validation_is_empty_without_docker_binary(fresh_manager, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr(fresh_manager.docker_inspector, "validate_compose",
+                        lambda containers: pytest.fail("Missing Docker must skip native validation"))
     findings = Doctor(fresh_manager).check_compose_validation(fresh_manager.containers.values())
     assert findings == []
 
