@@ -72,6 +72,8 @@ def test_up_records_build_and_up_phases(fresh_manager, monkeypatch):
 
 
 def test_down_records_failure_with_message(fresh_manager, monkeypatch):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
 
@@ -108,6 +110,8 @@ def test_down_records_failure_with_message(fresh_manager, monkeypatch):
 
 
 def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, monkeypatch):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
 

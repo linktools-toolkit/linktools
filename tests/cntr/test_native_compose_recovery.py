@@ -22,9 +22,6 @@ class Owner:
         self.services = {service: {} for service in services}
         self.generation_services = generation_services or tuple(services)
 
-    def get_config_revision(self, service: str) -> "str | None":
-        return None
-
 
 def test_optional_compose_provider_not_added_to_start_or_build_scope():
     app = Owner("app", ("app",))

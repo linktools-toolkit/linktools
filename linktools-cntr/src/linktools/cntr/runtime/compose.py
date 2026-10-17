@@ -379,12 +379,6 @@ class ComposeRunner:
                 service_dependencies(context.compose_model["services"][name]).items()
                 if options.get("condition") == "service_completed_successfully"}
 
-    @staticmethod
-    def _matches_config_revision(spec, matches):
-        from ..artifacts import CONFIG_REVISION_LABEL
-        revision = (spec.get("labels") or {}).get(CONFIG_REVISION_LABEL)
-        return revision is None or all(item.labels.get(CONFIG_REVISION_LABEL) == revision for item in matches)
-
     def ready_services(self, context: "OperationContext", services: "Sequence[str]",
                        state: "ProjectRuntimeState", image_ids: "Mapping[str, str]") -> "set[str]":
         """Services whose complete runtime replica set satisfies the desired model."""
@@ -395,8 +389,7 @@ class ComposeRunner:
             spec = definitions[service]
             replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
             matches = state.service_instances(service)
-            if (len(matches) != replicas or any(item.image_id != image_ids[service] for item in matches)
-                    or not self._matches_config_revision(spec, matches)):
+            if len(matches) != replicas or any(item.image_id != image_ids[service] for item in matches):
                 continue
             if service in completed:
                 valid = all(item.state == "exited" and item.exit_code == 0 for item in matches)
@@ -422,8 +415,6 @@ class ComposeRunner:
             for service in pending:
                 matches = state.service_instances(service)
                 spec = context.compose_model["services"][service]
-                if not self._matches_config_revision(spec, matches):
-                    raise ContainerError("Service {} did not reach its desired configuration revision".format(service))
                 if not matches or any((item.state not in ("running", "restarting") and not
                                        (item.state == "exited" and item.exit_code == 0 and
                                         (service in completed or item.health is None))) or
@@ -754,8 +745,6 @@ class ComposeRunner:
         while True:
             actual = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
             matches = actual.service_instances(service)
-            if not self._matches_config_revision(model["services"][service], matches):
-                raise ContainerError("Service {} did not reach its desired configuration revision".format(service))
             if completed:
                 if self._service_completed(matches, service, timeout is None):
                     return False

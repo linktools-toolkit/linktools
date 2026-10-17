@@ -11,14 +11,13 @@ from linktools.cntr.runtime.images import ImagePreparer
 from test_lifecycle_rebuild import setup_case
 
 
-def image_case(tmp_path, count=10, managed=False):
+def image_case(tmp_path, count=10, buildable=False):
     specs = {"app" + str(i): {"image": "image" + str(i) + ":local"} for i in range(count)}
-    if managed:
+    if buildable:
         for spec in specs.values():
             spec["build"] = {"context": "/fixture"}
     manager = setup_case(tmp_path, [("app", specs)])
     owner = manager.containers["app"]
-    owner.get_build_revision = lambda service: "fixture"
     owner.docker_file = "FROM fixture"
     manager.image_preparer = ImagePreparer(manager)
     model = manager.image_preparer.with_build_revisions(manager.model, (owner,), tuple(specs))
@@ -35,9 +34,9 @@ def image_case(tmp_path, count=10, managed=False):
     return manager, metadata, calls
 
 
-@pytest.mark.parametrize("managed", [False, True])
-def test_existing_local_images_need_two_batches_independent_of_service_count(tmp_path, managed):
-    manager, metadata, calls = image_case(tmp_path, managed=managed)
+@pytest.mark.parametrize("buildable", [False, True])
+def test_existing_local_images_need_two_batches_independent_of_service_count(tmp_path, buildable):
+    manager, metadata, calls = image_case(tmp_path, buildable=buildable)
     manager.compose_operations.up(["app"])
     assert calls == [("image", "inspect", *metadata)] * 2
     assert not any(event[0] == "images" for event in manager.events)

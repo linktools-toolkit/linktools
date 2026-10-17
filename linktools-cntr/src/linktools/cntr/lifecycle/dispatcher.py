@@ -44,22 +44,16 @@ class LifecycleDispatcher:
     @classmethod
     def _preparation_steps(cls, containers, prepare=True):
         if prepare:
-            for callback in ("on_starting", "on_integrating"):
-                for container in containers:
-                    yield LifecycleStep(container, callback=callback)
+            for container in containers:
+                yield LifecycleStep(container, callback="on_starting")
         for container in containers:
             yield LifecycleStep(container, HookPhase.BEFORE_START)
         yield LifecycleStep(phase=HookPhase.BEFORE_START)
 
-    def prepare_start(self, context: "OperationContext",
-                      integrations: "Iterable[BaseContainer]" = ()) -> None:
-        """Prepare explicit owners, then integration candidates before scope selection."""
-        targets = tuple(context.target_containers)
-        consumers = tuple(dict.fromkeys((*targets, *integrations)))
+    def prepare_start(self, context: "OperationContext") -> None:
+        """Initialize only explicitly selected owners before comparing consumers."""
         self._dispatch_steps((LifecycleStep(container, callback="on_starting")
-                              for container in targets), context)
-        self._dispatch_steps((LifecycleStep(container, callback="on_integrating")
-                              for container in consumers), context)
+                              for container in tuple(context.target_containers)), context)
 
     @classmethod
     def iter_steps(cls, action: str, containers: "Sequence[BaseContainer]",
@@ -106,12 +100,21 @@ class LifecycleDispatcher:
                               for container in tuple(context.target_containers)), context)
 
     @contextlib.contextmanager
-    def notify_start(self, context: "OperationContext", *, prepare: bool = True) -> "Iterator[None]":
+    def notify_start(self, context: "OperationContext", *, prepare: bool = True,
+                     generated_only: "Iterable[BaseContainer]" = ()) -> "Iterator[None]":
         """Notify application targets; skip preparation after a prior prepare_start."""
         targets = tuple(context.target_containers)
         if prepare:
             self.prepare_start(context)
-        self._dispatch_steps(self._preparation_steps(targets, prepare=False), context)
+        generated_only = set(generated_only)
+        for container in targets:
+            if container in generated_only:
+                from ..artifacts import prepared_hooks
+                for hook in prepared_hooks(container):
+                    hook.callback(context)
+            else:
+                container.hooks.call(HookPhase.BEFORE_START, context)
+        self.manager.hooks.call(HookPhase.BEFORE_START, context)
         yield
         try:
             self._dispatch_steps(self.iter_steps("up", targets, after=True), context)

@@ -53,7 +53,6 @@ def instrument_images(manager: SimpleNamespace) -> None:
 
     manager.compose_runner.apply_services = apply
     for owner in manager.containers.values():
-        owner.get_build_revision = lambda service: None
         owner.on_prepare = lambda owner=owner: manager.events.append(("resolve", owner.name))
 
 

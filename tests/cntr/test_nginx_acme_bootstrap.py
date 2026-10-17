@@ -23,6 +23,7 @@ def certificate_case(fresh_manager, tmp_path):
     settings.set("ACME_DNS_API", "dns_cf")
     settings.set("CF_Token", "fake-secret")
     container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test"]
+    container.__dict__["sites"] = {}
     for name in ("docker_file", "docker_compose"):
         container.__dict__.pop(name, None)
 
@@ -166,7 +167,8 @@ def test_https_validation_uses_writable_disposable_certificate_tree(certificate_
 
     monkeypatch.setattr(container.runtime, "create_docker_process", lambda *args, **kwargs: args)
     monkeypatch.setattr(container.manager.structured_runner, "execute", execute)
-    container.on_check(OperationContext(compose_model=model, prepared_dirs={container.name: generated}))
+    container.__dict__["config_path"] = generated
+    container.on_check(OperationContext(compose_model=model))
     assert len(observed) == 1
     assert not observed[0].exists()
 
@@ -217,10 +219,9 @@ def test_build_account_uses_current_storage_without_migrating_old_files(fresh_ma
             "io.linktools.nginx.certificate-revision": running_revision,
         }),)),
         previous_compose_contents={"nginx": "original model"},
-        write_files=lambda *args: container.get_app_path("generated", "candidate"),
     )
     container.on_starting(context)
-    container.on_integrating(context)
+    assert not container.config_path.exists()
     with tarfile.open(str(container.get_app_path("acme-build-account.tar"))) as archive:
         if source == "empty":
             assert archive.getnames() == []

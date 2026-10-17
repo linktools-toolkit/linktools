@@ -89,6 +89,8 @@ def test_explicit_public_base_path_keeps_origin_and_cookie_domain_separate(fresh
     sites = {declaration: value for declaration, value in sites.items() if value.producer is not authelia}
     sites[site._declaration] = site
     monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", sites)
+    # The synthetic site replaces the declaration referenced by the builtin ACL.
+    monkeypatch.setitem(authelia.__dict__, "acl_rules", [])
     assert authelia.oidc_client["issuer_url"] == "https://login.example.com:8443/auth"
     config = yaml.safe_load(authelia.render_template(authelia.get_source_path("templates", "configuration.yml")))
     cookie = config["session"]["cookies"][0]
@@ -104,7 +106,9 @@ def test_unconfigured_public_identity_remains_metadata_only(fresh_manager):
     fresh_manager.config.set("AUTHELIA_DOMAIN", "_")
     authelia = fresh_manager.containers["authelia"]
     assert authelia.public_url == ""
-    assert "TRUSTED_ORIGINS=" in authelia.services["authelia-admin"]["environment"]
+    assert "config_path" not in authelia.__dict__
+    with pytest.raises(ContainerError, match="requires domain or domain_regex|concrete HTTPS"):
+        _ = authelia.docker_compose
     with pytest.raises(ContainerError, match="concrete HTTPS"):
         _ = authelia.oidc_client
 

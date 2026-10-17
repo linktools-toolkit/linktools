@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.cli import CommandError
 from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.ext import Flare, load_port_url
 from linktools.core import ConfigRef, ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
     from linktools.cntr import OperationContext, Integrations
     from linktools.types import PathType
@@ -19,14 +21,6 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
-    _config_revision: "str | None" = None
-
-    def on_prepare(self) -> None:
-        self._config_revision = None
-
-    def get_config_revision(self, service: str) -> "str | None":
-        return self._config_revision if service == "lldap" else None
-
     @cached_property
     def fields(self) -> "dict[str, Any]":
         def get_base_dn(cfg: "ConfigResolver") -> str:
@@ -77,9 +71,9 @@ class Container(BaseContainer):
         self.runtime.chmod(secret_path, 0o700, recursive=True)
         self._create_secret_file(secret_path / "jwt_secret", length=64)
 
-    def on_integrating(self, context: "OperationContext") -> None:
-        self._config_revision = None
-        self._config_revision = context.write_files(self, {
+    @cached_property
+    def config_path(self) -> "Path":
+        return prepare_files(self, {
             "lldap_config.toml": self.render_template(self.get_source_path("templates", "lldap_config.toml")),
             "ldap_user_pass": str(self.get_config("LLDAP_ADMIN_PASSWORD")),
-        }).name
+        })

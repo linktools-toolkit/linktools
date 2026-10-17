@@ -3,6 +3,7 @@
 """Lifecycle plans describe exactly the registered hooks dispatch will visit."""
 import pytest
 
+from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import BaseContainer
 from linktools.cntr.context import OperationContext
 from linktools.cntr.lifecycle import HookCycleError, HookPhase, HookRegistry, HookValidationError
@@ -27,9 +28,6 @@ class _Container(BaseContainer):
 
     def on_starting(self):
         self.events.append(("callback", self.name, "starting"))
-
-    def on_integrating(self, context: OperationContext) -> None:
-        self.events.append(("callback", self.name, "integrating"))
 
     def on_started(self, context):
         self.events.append(("callback", self.name, "started"))
@@ -197,7 +195,6 @@ def test_starting_callbacks_all_finish_before_start_registry_lookup(lifecycle_ca
 
     assert events == [
         ("callback", "first", "starting"), ("callback", "second", "starting"),
-        ("callback", "first", "integrating"), ("callback", "second", "integrating"),
         ("before-start", "first", "a"), ("before-start", "first", "b"),
         ("callback", "first", "check"), ("callback", "second", "check"),
         ("runtime", None, "up"),
@@ -243,23 +240,21 @@ def test_partial_restart_leaves_unselected_provider_outside_all_lifecycle_phases
                if event[0] in ("check", "before-start"))
 
 
-def test_integration_candidates_prepare_once_without_starting_or_hooks(lifecycle_case) -> None:
+def test_prepare_start_only_initializes_explicit_owners_without_running_hooks(lifecycle_case) -> None:
     manager, (first, second), context, events = lifecycle_case
     context.target_containers = [first]
     for owner, registry in ((first.name, first.hooks), (second.name, second.hooks), (None, manager.hooks)):
         _register(registry, HookPhase.BEFORE_START, events, owner, "before")
+    prepare_files(second, {"config.yml": "new"})
 
-    manager.lifecycle.prepare_start(context, integrations=(second, first, second))
+    manager.lifecycle.prepare_start(context)
 
     assert context.target_containers == [first]
-    assert events == [
-        ("callback", "first", "starting"),
-        ("callback", "first", "integrating"),
-        ("callback", "second", "integrating"),
-    ]
+    assert events == [("callback", "first", "starting")]
+    assert context.prepared_dirs == {}
 
 
-def test_split_start_only_notifies_actual_application_targets(lifecycle_case, tmp_path) -> None:
+def test_split_start_runs_only_generated_hooks_for_extra_consumers(lifecycle_case, tmp_path) -> None:
     manager, (first, second), context, events = lifecycle_case
     unchanged = _Container(manager, tmp_path, "unchanged", events)
     context.target_containers = [first]
@@ -267,20 +262,20 @@ def test_split_start_only_notifies_actual_application_targets(lifecycle_case, tm
         _register(owner.hooks, HookPhase.BEFORE_START, events, owner.name, "before")
         _register(owner.hooks, HookPhase.AFTER_START, events, owner.name, "after")
     _register(manager.hooks, HookPhase.BEFORE_START, events, None, "before")
-    manager.lifecycle.prepare_start(context, integrations=(second, unchanged))
+    prepare_files(second, {"config.yml": "new"})
+    prepare_files(unchanged, {"config.yml": "old"})
+    context.write_files = lambda owner, files, **kwargs: events.append(("generated", owner.name, "write"))
+    manager.lifecycle.prepare_start(context)
     context.target_containers = [first, second]
 
-    with manager.lifecycle.notify_start(context, prepare=False):
+    with manager.lifecycle.notify_start(context, prepare=False, generated_only=(second,)):
         manager.lifecycle.check(context)
         events.append(("runtime", None, "up"))
 
     assert events == [
         ("callback", "first", "starting"),
-        ("callback", "first", "integrating"),
-        ("callback", "second", "integrating"),
-        ("callback", "unchanged", "integrating"),
         ("before-start", "first", "before"),
-        ("before-start", "second", "before"),
+        ("generated", "second", "write"),
         ("before-start", None, "before"),
         ("callback", "first", "check"),
         ("callback", "second", "check"),
@@ -292,65 +287,60 @@ def test_split_start_only_notifies_actual_application_targets(lifecycle_case, tm
     ]
 
 
-def test_integrating_callbacks_finish_before_start_hook_validation(lifecycle_case) -> None:
-    manager, (first, second), context, events = lifecycle_case
-    _register(first.hooks, HookPhase.BEFORE_START, events, first.name, "later", after=("integration",))
-
-    def on_integrating():
-        events.append(("callback", second.name, "integrating"))
-        _register(first.hooks, HookPhase.BEFORE_START, events, first.name, "integration")
-
-    second.on_integrating = on_integrating
-    with manager.lifecycle.notify_start(context):
-        events.append(("runtime", None, "up"))
-
-    integration = events.index(("callback", second.name, "integrating"))
-    assert integration < events.index(("before-start", first.name, "integration"))
-    assert events.index(("before-start", first.name, "integration")) < events.index(
-        ("before-start", first.name, "later"))
-
-
-def test_integrating_failure_prevents_start_hooks_and_runtime(lifecycle_case) -> None:
+def test_starting_failure_prevents_start_hooks_and_runtime(lifecycle_case) -> None:
     manager, (first, second), context, events = lifecycle_case
     _register(first.hooks, HookPhase.BEFORE_START, events, first.name, "before")
     _register(manager.hooks, HookPhase.BEFORE_START, events, None, "before")
 
     def fail(context):
-        raise RuntimeError("integration failed")
+        raise RuntimeError("preparation failed")
 
-    second.on_integrating = fail
-    with pytest.raises(RuntimeError, match="integration failed"):
+    second.on_starting = fail
+    with pytest.raises(RuntimeError, match="preparation failed"):
         with manager.lifecycle.notify_start(context):
             events.append(("runtime", None, "up"))
 
-    assert events == [
-        ("callback", first.name, "starting"),
-        ("callback", second.name, "starting"),
-        ("callback", first.name, "integrating"),
-    ]
+    assert events == [("callback", first.name, "starting")]
+
+
+def test_generated_hook_failure_prevents_checks_and_runtime(lifecycle_case) -> None:
+    manager, (first, second), context, events = lifecycle_case
+    context.target_containers = [first]
+    manager.lifecycle.prepare_start(context)
+    context.target_containers = [first, second]
+    prepare_files(second, {"config.yml": "invalid"})
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("generated files failed")
+
+    context.write_files = fail
+    with pytest.raises(RuntimeError, match="generated files failed"):
+        with manager.lifecycle.notify_start(context, prepare=False, generated_only=(second,)):
+            manager.lifecycle.check(context)
+            events.append(("runtime", None, "up"))
+
+    assert events == [("callback", first.name, "starting")]
 
 
 def test_split_start_runtime_failure_skips_after_notifications(lifecycle_case) -> None:
     manager, (first, second), context, events = lifecycle_case
     context.target_containers = [first]
-    manager.lifecycle.prepare_start(context, integrations=(second,))
+    manager.lifecycle.prepare_start(context)
     context.target_containers = [first, second]
     with pytest.raises(RuntimeError, match="apply failed"):
-        with manager.lifecycle.notify_start(context, prepare=False):
+        with manager.lifecycle.notify_start(context, prepare=False, generated_only=(second,)):
             raise RuntimeError("apply failed")
     assert not any(event[2] == "started" for event in events)
 
 
 @pytest.mark.parametrize("action", ["up", "restart", "down"])
-def test_planned_integration_callbacks_follow_all_starting_callbacks(lifecycle_case, action) -> None:
+def test_planned_callbacks_keep_native_lifecycle_without_generated_preparation_callback(lifecycle_case, action) -> None:
     manager, containers, _, events = lifecycle_case
     steps = list(manager.lifecycle.iter_steps(action, containers))
     callbacks = [(step.callback, step.container.name) for step in steps if step.callback is not None]
     if action == "down":
-        assert all(name not in ("on_starting", "on_integrating") for name, _ in callbacks)
+        assert all(name != "on_starting" for name, _ in callbacks)
     else:
-        assert callbacks[:4] == [
-            ("on_starting", "first"), ("on_starting", "second"),
-            ("on_integrating", "first"), ("on_integrating", "second"),
-        ]
+        assert callbacks[:2] == [("on_starting", "first"), ("on_starting", "second")]
+        assert callbacks[2:4] == [("on_check", "first"), ("on_check", "second")]
     assert events == []

@@ -14,6 +14,7 @@ from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined,
 
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import ContainerTemplateError
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
@@ -76,14 +77,6 @@ def _has_config_value(value: "Any", seen: "set[int] | None" = None) -> bool:
 
 
 class Container(BaseContainer):
-    _config_revision: "str | None" = None
-
-    def on_prepare(self) -> None:
-        self._config_revision = None
-
-    def get_config_revision(self, service: str) -> "str | None":
-        return self._config_revision if service == "nginx" else None
-
     # Snapshot native request values before business rewrites or auth subrequests.
     original_fields = (
         ("scheme", "$scheme", "$waf_scheme"),
@@ -236,8 +229,6 @@ class Container(BaseContainer):
             parts.extend(self.get_source_path(name).read_text(encoding="utf-8")
                          for name in ("nginx-certificates", "nginx-acme", "dnsapi.json"))
         return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
-    def get_build_revision(self, service: str) -> "str | None":
-        return self.cert_image_revision if service == "nginx" else None
 
     @cached_property
     def acme_ssl_domains_args(self) -> str:
@@ -271,6 +262,16 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
+        if context.target_containers is not None and self not in context.target_containers:
+            actual = context.initial_runtime_state
+            instances = tuple(item for item in actual.service_instances("nginx")
+                              if item.state in ("running", "restarting")) if actual is not None else ()
+            if not instances or any(
+                    item.labels.get("io.linktools.nginx.certificate-revision") != self.cert_image_revision
+                    for item in instances):
+                raise ContainerError(
+                    "Nginx certificate image revision changed or is unavailable; "
+                    "explicitly select nginx to prepare and build its image.")
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
@@ -297,7 +298,7 @@ class Container(BaseContainer):
                                      "; select their containers explicitly.")
         runner = self.manager.compose_runner
         command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
-        mounts = {"/etc/nginx/managed": str(context.file_path(self))}
+        mounts = {"/etc/nginx/managed": str(self.config_path)}
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
                 mounts["/etc/certs"] = directory
@@ -556,23 +557,13 @@ class Container(BaseContainer):
                         raise
                 os.replace(temporary, str(archive))
 
-    def on_integrating(self, context: "OperationContext") -> None:
+    @cached_property
+    def config_path(self) -> "Path":
         from types import SimpleNamespace
 
-        self._config_revision = None
-        if context.target_containers is not None and self not in context.target_containers:
-            actual = context.initial_runtime_state
-            instances = tuple(item for item in actual.service_instances("nginx")
-                              if item.state in ("running", "restarting")) if actual is not None else ()
-            if not instances or any(
-                    item.labels.get("io.linktools.nginx.certificate-revision") != self.cert_image_revision
-                    for item in instances):
-                raise ContainerError(
-                    "Nginx certificate image revision changed or is unavailable; "
-                    "explicitly select nginx to prepare and build its image.")
         files, waf = self._rendered_site_files
         result = dict(files)
         root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
-        self._config_revision = context.write_files(self, result).name
+        return prepare_files(self, result)

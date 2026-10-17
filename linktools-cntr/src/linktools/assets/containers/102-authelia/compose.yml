@@ -21,9 +21,9 @@ services:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
 #     {% for name in container.config_files %}
-      - '{{ APP_PATH/"generated/current"/name }}:/generated/{{ name }}:ro'
+      - '{{ container.config_path/name }}:/generated/{{ name }}:ro'
 #     {% endfor %}
-      - '{{ APP_PATH/"generated/current/authentication_backend_ldap_password" }}:/generated/authentication_backend_ldap_password:ro'
+      - '{{ container.config_path/"authentication_backend_ldap_password" }}:/generated/authentication_backend_ldap_password:ro'
     networks:
       authelia:
       nginx:
@@ -47,7 +47,7 @@ services:
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
-      - '{{ APP_PATH/"generated/current/configuration.yml" }}:/generated/configuration.yml:ro'
+      - '{{ container.config_path/"configuration.yml" }}:/generated/configuration.yml:ro'
     environment:
       - AAD_LOGLEVEL=DEBUG
       - AAD_AUTHELIA_CONFIG_PATH=/generated/configuration.yml

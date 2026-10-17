@@ -235,26 +235,12 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Prepare execution inputs before execution scope and service selection."""
         pass
 
-    def get_build_revision(self, service: str) -> "str | None":
-        """Optional local build identity; never refresh remote inputs."""
-        return None
-
-    def get_config_revision(self, service: str) -> "str | None":
-        """Return the prepared configuration identity consumed by this service."""
-        return None
-
     def on_check(self, context: "OperationContext") -> None:
         pass
 
     def on_starting(self, context: "OperationContext") -> None:
         pass
 
-    def on_integrating(self, context: "OperationContext") -> None:
-        """Stage integration inputs for selected or additional running consumers.
-
-        Do not initialize persistent state or change running services here.
-        """
-        pass
 
     def on_started(self, context: "OperationContext") -> None:
         pass
@@ -503,16 +489,6 @@ class SourceContainer(BaseContainer):
         if value.parent != Path("versions") or not re.fullmatch("[0-9a-f]{64}", value.name):
             raise ContainerError("Invalid source snapshot pointer: " + str(link))
         return value.name
-
-    def get_build_revision(self, service: str) -> "str | None":
-        import hashlib
-        import json
-        digest = self._source_digest()
-        if digest is None:
-            return None
-        identity = json.dumps([str(self._source_url), str(self._source_path), digest],
-                              ensure_ascii=True, separators=(",", ":"))
-        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     def _prepare_source(self, context: "OperationContext") -> None:
         root = self._source_root

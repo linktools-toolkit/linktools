@@ -11,8 +11,8 @@ services:
       - LLDAP_JWT_SECRET_FILE=/secrets/jwt_secret
       - LLDAP_LDAP_USER_PASS_FILE=/generated/ldap_user_pass
     volumes:
-      - '{{ APP_PATH/"generated/current/lldap_config.toml" }}:/generated/lldap_config.toml:ro'
-      - '{{ APP_PATH/"generated/current/ldap_user_pass" }}:/generated/ldap_user_pass:ro'
+      - '{{ container.config_path/"lldap_config.toml" }}:/generated/lldap_config.toml:ro'
+      - '{{ container.config_path/"ldap_user_pass" }}:/generated/ldap_user_pass:ro'
       - '{{ (APP_PATH/"data") | mkdir | chown }}:/data'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
 #   {% if LLDAP_PORT > 0 or LLDAP_WEB_PORT > 0 %}

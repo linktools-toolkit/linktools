@@ -9,7 +9,7 @@ import pytest
 from linktools.cntr.execution.planner import ExecutionPlanner
 from linktools.cntr.lifecycle.hooks import HookPhase, HookRegistry
 from linktools.cntr.runtime.compose import ComposeRunner
-from linktools.cntr.runtime.images import ImagePreparer, ImagePreparationError
+from linktools.cntr.runtime.images import ImagePreparer
 from linktools.cntr.runtime.process import CommandSpec
 from test_lifecycle_rebuild import setup_case
 
@@ -129,57 +129,42 @@ def test_unique_service_start_does_not_add_native_model_queries(tmp_path):
     assert manager.events.count(("model",)) == 1
 
 
-def build_owner(name, revision, build):
-    return SimpleNamespace(name=name, services={"app": {"build": build} if build is not None else {}},
-                           docker_file="FROM scratch\n", get_build_revision=lambda service: revision)
-
-
 @pytest.mark.parametrize("overlay_build", [None, {"args": {"EXTRA": "yes"}}])
-def test_shared_service_preserves_managed_build_revision_from_earlier_author(overlay_build):
+def test_shared_source_build_uses_final_inputs(tmp_path, overlay_build):
+    from test_build_revisions import Owner
+    source = Owner(tmp_path / "source")
+    overlay = SimpleNamespace(services={"app": {"build": overlay_build} if overlay_build else {}}, docker_file=None)
     preparer = ImagePreparer(SimpleNamespace())
-    model = {"services": {"app": {"image": "app:fixed", "build": {
-        "context": "/source", "dockerfile": "/generated/base.Dockerfile"}}}}
-    owners = [build_owner("base", "source-revision", model["services"]["app"]["build"]),
-              build_owner("overlay", None, overlay_build)]
-    result = preparer.with_build_revisions(model, owners, ("app",))
+    build = {"context": str(source.get_docker_context_path()), "dockerfile_inline": "FROM scratch"}
+    if overlay_build:
+        build.update(overlay_build)
+    model = {"services": {"app": {"image": "app:fixed", "build": build}}}
+    result = preparer.with_build_revisions(model, (source, overlay), ("app",))
     assert preparer.BUILD_LABEL in result["services"]["app"]["build"]["labels"]
 
 
-def test_shared_managed_build_claims_select_effective_native_dockerfile():
+def test_shared_source_build_selects_final_context_and_dockerfile(tmp_path):
+    from test_build_revisions import Owner
+    first, second = Owner(tmp_path / "first"), Owner(tmp_path / "second")
     preparer = ImagePreparer(SimpleNamespace())
-    first = {"context": "/first", "dockerfile": "/generated/first.Dockerfile"}
-    second = {"context": "/second", "dockerfile": "/generated/second.Dockerfile"}
-    model = {"services": {"app": {"image": "app:fixed", "build": second}}}
-    owners = [build_owner("first", "first-revision", first), build_owner("second", "second-revision", second)]
-    expected = preparer.with_build_revisions(model, owners[1:], ("app",))
-    assert preparer.with_build_revisions(model, owners, ("app",)) == expected
+    dockerfile = tmp_path / "first.Dockerfile"
+    dockerfile.write_text("FROM scratch\n")
+    model = {"services": {"app": {"image": "app:fixed", "build": {
+        "context": str(second.get_docker_context_path()), "dockerfile": str(dockerfile)}}}}
+    expected = preparer.with_build_revisions(model, (second,), ("app",))
+    assert preparer.with_build_revisions(model, (first, second), ("app",)) == expected
+    dockerfile.write_text("FROM alpine\n")
+    assert preparer.with_build_revisions(model, (first, second), ("app",)) != expected
 
 
-def test_conflicting_shared_managed_build_claims_fail_before_build():
+def test_duplicate_source_owners_keep_one_final_build_identity(tmp_path):
+    from test_build_revisions import Owner
+    first, second = Owner(tmp_path / "source"), Owner(tmp_path / "source")
     preparer = ImagePreparer(SimpleNamespace())
-    build = {"context": "/source", "dockerfile": "/generated/shared.Dockerfile"}
-    model = {"services": {"app": {"image": "app:fixed", "build": build}}}
-    owners = [build_owner("first", "first-revision", build), build_owner("second", "second-revision", build)]
-    with pytest.raises(ImagePreparationError, match="Ambiguous.*app"):
-        preparer.with_build_revisions(model, owners, ("app",))
-
-
-def test_identical_shared_managed_build_claims_keep_one_identity():
-    preparer = ImagePreparer(SimpleNamespace())
-    build = {"context": "/source", "dockerfile": "/generated/shared.Dockerfile"}
-    model = {"services": {"app": {"image": "app:fixed", "build": build}}}
-    owners = [build_owner("first", "same-revision", build), build_owner("second", "same-revision", build)]
-    assert preparer.with_build_revisions(model, owners, ("app",)) == preparer.with_build_revisions(model, owners[:1], ("app",))
-
-
-def test_mixed_managed_context_and_dockerfile_claims_are_not_guessed():
-    preparer = ImagePreparer(SimpleNamespace())
-    first = {"context": "/first", "dockerfile": "/generated/first.Dockerfile"}
-    second = {"context": "/second"}
-    model = {"services": {"app": {"image": "app:fixed", "build": dict(first, context="/second")}}}
-    owners = [build_owner("first", "first-revision", first), build_owner("second", "second-revision", second)]
-    with pytest.raises(ImagePreparationError, match="Ambiguous.*app"):
-        preparer.with_build_revisions(model, owners, ("app",))
+    model = {"services": {"app": {"image": "app:fixed", "build": {
+        "context": str(first.get_docker_context_path()), "dockerfile_inline": "FROM scratch"}}}}
+    expected = preparer.with_build_revisions(model, (first,), ("app",))
+    assert preparer.with_build_revisions(model, (first, second), ("app",)) == expected
 
 
 @pytest.mark.parametrize("initial_app", [False, True])

@@ -18,6 +18,8 @@ import linktools.cntr.commands._shared as cntr_shared
 
 
 def _record(manager, monkeypatch):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(manager)
     recorded = []
 
     def fake(*args, privilege=None, **kwargs):

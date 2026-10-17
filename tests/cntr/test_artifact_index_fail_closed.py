@@ -45,6 +45,8 @@ def test_doctor_run_does_not_crash_on_corrupt_index(fresh_manager):
 
 
 def test_plan_fails_explicitly_on_corrupt_index(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     _corrupt_index(fresh_manager)
     planner = ExecutionPlanner(fresh_manager)
 

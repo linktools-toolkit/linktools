@@ -19,6 +19,7 @@ import getpass
 import importlib.util
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from types import ModuleType
     from typing import Type
     from linktools.cntr.container import BaseContainer
+    from linktools.cntr.manager import ContainerManager
 
 _INTERACTIVE_PATCHED = False
 
@@ -180,6 +182,20 @@ def _scrub_pairs(manager):
     return pairs
 
 
+def configure_builtin_snapshot(manager: "ContainerManager") -> None:
+    """Seed the complete public identity required by native config snapshots."""
+    manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    manager.config.set("NGINX_WILDCARD_DOMAIN", True)
+    manager.config.set("NGINX_HTTPS_ENABLE", True)
+    manager.config.set("AUTHELIA_OIDC_CLIENT_SECRET", "snapshot-oidc-secret")
+
+
+def configure_builtin_inputs(manager: "ContainerManager") -> None:
+    """Configure installed consumers before read-only model construction."""
+    configure_builtin_snapshot(manager)
+    manager.config.set("HOST", "host.example.test")
+
+
 def normalize_compose(data, manager) -> str:
     """Render-independent normalized JSON of a compose dict (test-only).
 
@@ -193,6 +209,7 @@ def normalize_compose(data, manager) -> str:
     )
     for value, token in _scrub_pairs(manager):
         text = text.replace(value, token)
+    text = re.sub(r"(/generated/)[0-9a-f]{64}(?=[/\":])", r"\1<CONFIG_DIGEST>", text)
     return text
 
 

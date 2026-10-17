@@ -13,16 +13,19 @@ from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.artifacts import AppliedServiceModels
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
+from linktools.cntr.lifecycle.hooks import HookPhase, HookRegistry
 from linktools.cntr.runtime.compose import ComposeRunner, order_services
 from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
 
-class Hooks:
+class Hooks(HookRegistry):
     def __init__(self, events, owner):
-        self.events, self.owner = events, owner
+        super().__init__(owner=owner)
+        self.events, self.event_owner = events, owner
 
     def call(self, phase, context, reverse=False):
-        self.events.append((phase.value, self.owner))
+        self.events.append((phase.value, self.event_owner))
+        super().call(phase, context, reverse=reverse)
 
 
 class Index:
@@ -46,8 +49,8 @@ class Owner:
         self.docker_compose = {"services": services}
         self.hooks = Hooks(manager.events, name)
 
-    def get_config_revision(self, service: str) -> "str | None":
-        return None
+    def add_start_hook(self, key, hook, **kwargs):
+        self.hooks.register(HookPhase.BEFORE_START, hook, key=key, **kwargs)
 
     def on_prepare(self):
         pass
@@ -57,9 +60,6 @@ class Owner:
 
     def on_starting(self, context):
         self.manager.events.append(("prepare", self.name))
-
-    def on_integrating(self, context: OperationContext) -> None:
-        pass
 
     def on_check(self, context):
         self.manager.events.append(("check-callback", self.name))

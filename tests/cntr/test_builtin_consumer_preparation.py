@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from _harness import builtin_container_type
+from _harness import builtin_container_type, builtin_module
 from linktools.cntr import ContainerError, OperationContext
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
@@ -25,6 +25,9 @@ def _container(name, monkeypatch):
     container.manager = SimpleNamespace(
         runtime=SimpleNamespace(chmod=_unexpected, chown=_unexpected), user="test")
     container._name = name.split("-", 1)[1]
+    container._prepared = []
+    monkeypatch.setattr(builtin_module(name), "prepare_files", lambda owner, files, **kwargs: (
+        container._prepared.append((owner, files, kwargs)) or Path("/generated") / REVISION))
     monkeypatch.setattr(container, "get_app_path", _unexpected)
     monkeypatch.setattr(container, "get_source_path", lambda *parts: Path(*parts))
     return container
@@ -36,10 +39,7 @@ def _context(container, explicit=False, services=("app",), state=None):
     context = OperationContext(
         target_containers=[container] if explicit else [], target_services=services,
         initial_runtime_state=state)
-    written = []
-    context.write_files = lambda owner, files, **kwargs: (
-        written.append((owner, files, kwargs)) or Path("/generated") / REVISION)
-    return context, written
+    return context, container._prepared
 
 
 def _state(*revisions, oneoff_revisions=()):
@@ -70,7 +70,7 @@ def test_nginx_consumer_renders_without_dns_credentials_or_account_preparation(m
     state = replace(state, services=state.services + (stopped,))
     context, written = _context(container, state=state)
 
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
 
     assert rendered == [{"waf": True, "site_files": ("sites/generated.conf",)}]
     assert written == [(container, {"sites/generated.conf": "site configuration",
@@ -88,12 +88,30 @@ def test_nginx_consumer_requires_explicit_selection_for_unverified_certificate_r
     container.__dict__["cert_image_revision"] = REVISION
     monkeypatch.setattr(container, "get_config", _unexpected)
     monkeypatch.setattr(container, "_render_site_template", _unexpected)
-    context, written = _context(container, state=state)
+    context, written = _context(container, services=("nginx",), state=state)
 
     with pytest.raises(ContainerError, match="explicitly select nginx"):
-        container.on_integrating(context)
+        container.on_check(context)
 
     assert written == []
+
+
+def test_nginx_consumer_checks_compatible_certificates_without_reading_dns_secrets(monkeypatch):
+    from dataclasses import replace
+    container = _container("100-nginx", monkeypatch)
+    container.__dict__.update(cert_image_revision=REVISION, sites={}, config_path=Path("/generated") / REVISION)
+    monkeypatch.setattr(container, "get_config", lambda key, **kwargs: False)
+    calls = []
+    container.manager.compose_runner = SimpleNamespace(validate_service=lambda *args, **kwargs:
+        calls.append(args) or SimpleNamespace(succeeded=True, stdout="", stderr=""))
+    state = _state(REVISION, REVISION, oneoff_revisions=(OLD_REVISION,))
+    stopped = replace(_state(OLD_REVISION).services[0], state="exited")
+    state = replace(state, services=state.services + (stopped,))
+    context, _ = _context(container, services=("app", "nginx"), state=state)
+
+    container.on_check(context)
+
+    assert len(calls) == 1
 
 
 def test_nginx_explicit_selection_keeps_dns_and_account_preparation(tmp_path, monkeypatch):
@@ -115,7 +133,7 @@ def test_nginx_explicit_selection_keeps_dns_and_account_preparation(tmp_path, mo
     container.on_starting(context)
     assert written == []
     monkeypatch.setattr(container, "get_app_path", _unexpected)
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
 
     assert (tmp_path / "acme-secrets" / "dns.env").read_text(encoding="utf-8") == "export DNS_TOKEN=test-token\n"
     with tarfile.open(str(tmp_path / "acme-build-account.tar")) as archive:
@@ -133,7 +151,7 @@ def test_authelia_consumer_renders_without_creating_secrets(monkeypatch, service
     monkeypatch.setattr(container, "render_template", lambda path: "rendered " + path.name)
     context, written = _context(container, services=services)
 
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
 
     expected = {name: "rendered " + name for name in container.config_files}
     expected["authentication_backend_ldap_password"] = "current LDAP password"
@@ -158,7 +176,7 @@ def test_authelia_explicit_selection_keeps_persistent_initialization(tmp_path, m
     container.on_starting(context)
     assert written == []
     monkeypatch.setattr(container, "get_app_path", _unexpected)
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
 
     assert (tmp_path / "secrets").is_dir()
     assert (tmp_path / "config").is_dir()
@@ -174,8 +192,9 @@ def test_authelia_explicit_redis_selection_still_skips_generated_configuration(m
     context, written = _context(container, explicit=True, services=("authelia-redis",))
 
     container.on_starting(context)
-    container.on_integrating(context)
+    container.on_check(context)
 
+    assert "config_path" not in container.__dict__
     assert written == []
 
 
@@ -186,7 +205,7 @@ def test_flare_consumer_renders_without_runtime_app_migration(monkeypatch):
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: 123)
     context, written = _context(container)
 
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
 
     assert written == [(container, navigation, {"mode": 0o640, "group": 123})]
     assert context.target_containers == []
@@ -213,7 +232,7 @@ def test_flare_explicit_selection_keeps_runtime_app_migration(tmp_path, monkeypa
     container.on_starting(context)
     assert written == []
     monkeypatch.setattr(container, "get_app_path", _unexpected)
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
 
     app = tmp_path / "runtime-app"
     assert (app / "icons" / "app.svg").read_text(encoding="utf-8") == "icon"
@@ -242,15 +261,12 @@ def test_flare_yaml_validation_does_not_infer_container_permissions_from_host_id
         path.write_text('links: []\n', encoding='utf-8')
         path.chmod(0o640)
     context = OperationContext(compose_model={'services': {'flare': {'user': '12345:23456'}}})
-    context.file_path = lambda owner, name: tmp_path / name
+    container.__dict__["config_path"] = tmp_path
     container.on_check(context)
 
 
-@pytest.mark.parametrize("name,services", [
-    ("100-nginx", ("nginx",)), ("101-lldap", ("lldap",)),
-    ("102-authelia", ("authelia", "authelia-admin")), ("120-flare", ("flare",)),
-])
-def test_builtin_revision_tracks_only_the_current_prepared_tree(monkeypatch, name, services):
+@pytest.mark.parametrize("name", ["100-nginx", "101-lldap", "102-authelia", "120-flare"])
+def test_builtin_config_path_is_fixed_for_the_integration_snapshot(monkeypatch, name):
     container = _container(name, monkeypatch)
     monkeypatch.setattr(container, "get_config", lambda *args, **kwargs: "configured value")
     if name == "100-nginx":
@@ -260,32 +276,16 @@ def test_builtin_revision_tracks_only_the_current_prepared_tree(monkeypatch, nam
         monkeypatch.setattr(container, "_navigation_files", lambda: {"apps.yml": "links: []"})
     else:
         monkeypatch.setattr(container, "render_template", lambda path: "rendered " + path.name)
-    context, _ = _context(container, explicit=True, services=services)
 
-    assert all(container.get_config_revision(service) is None for service in services)
-    container.on_integrating(context)
-    assert all(container.get_config_revision(service) == REVISION for service in services)
-    assert container.get_config_revision("unrelated") is None
-    assert container.get_config_revision("authelia-redis") is None
-
+    expected = container.config_path
+    assert len(container._prepared) == 1
+    monkeypatch.setattr(builtin_module(name), "prepare_files", _unexpected)
+    monkeypatch.setattr(container, "get_config", _unexpected)
     container.on_prepare()
-    assert all(container.get_config_revision(service) is None for service in services)
-    container.on_integrating(context)
-    context.write_files = _unexpected
-    with pytest.raises(AssertionError, match="must not initialize"):
-        container.on_integrating(context)
-    assert all(container.get_config_revision(service) is None for service in services)
-
-
-def test_authelia_redis_only_clears_a_previous_config_revision(monkeypatch):
-    container = _container("102-authelia", monkeypatch)
-    container._config_revision = OLD_REVISION
-    monkeypatch.setattr(container, "render_template", _unexpected)
-    context, written = _context(container, explicit=True, services=("authelia-redis",))
-    container.on_integrating(context)
-    assert written == []
-    assert container.get_config_revision("authelia") is None
-    assert container.get_config_revision("authelia-admin") is None
+    assert container.config_path == expected
+    assert "on_integrating" not in type(container).__dict__
+    assert "get_config_revision" not in type(container).__dict__
+    assert "_config_revision" not in container.__dict__
 
 
 def test_lldap_keeps_persistent_initialization_separate_from_prepared_files(tmp_path, monkeypatch):
@@ -305,18 +305,17 @@ def test_lldap_keeps_persistent_initialization_separate_from_prepared_files(tmp_
     assert created == [("jwt_secret", {"length": 64})]
     assert permissions == [((tmp_path / "secrets", 0o700), {"recursive": True})]
     monkeypatch.setattr(container, "get_app_path", _unexpected)
-    container.on_integrating(context)
+    assert container.config_path == Path("/generated") / REVISION
     assert written == [(container, {
         "lldap_config.toml": "rendered lldap_config.toml", "ldap_user_pass": "LDAP password",
     }, {})]
-    assert container.get_config_revision("lldap") == REVISION
 
 
 @pytest.mark.parametrize("https", [False, True])
 def test_nginx_validation_explicitly_mounts_candidate_without_changing_deployment(tmp_path, monkeypatch, https):
     from copy import deepcopy
     container = _container("100-nginx", monkeypatch)
-    container.__dict__.update(sites={}, cert_image_revision=REVISION)
+    container.__dict__.update(sites={}, cert_image_revision=REVISION, config_path=tmp_path / "candidate")
     values = {"NGINX_WILDCARD_DOMAIN": False, "NGINX_WAF_ENABLE": False,
               "NGINX_AUTH_ENABLE": False, "NGINX_HTTPS_ENABLE": https, "NGINX_ROOT_DOMAIN": "example.test"}
     monkeypatch.setattr(container, "get_config", lambda key, **kwargs: values[key])
@@ -332,8 +331,8 @@ def test_nginx_validation_explicitly_mounts_candidate_without_changing_deploymen
         return SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0)
     container.manager.compose_runner = SimpleNamespace(validate_service=validate)
     context = OperationContext(target_containers=[container], target_services=("nginx",),
-                               prepared_dirs={"nginx": tmp_path / "candidate"}, compose_model={"services": {"nginx": {
-                                   "volumes": [{"type": "bind", "source": "/generated/current",
+                               compose_model={"services": {"nginx": {
+                                   "volumes": [{"type": "bind", "source": "/generated/previous-hash",
                                                 "target": "/etc/nginx/managed", "read_only": True}],
                                }}})
     original = deepcopy(context.compose_model)
@@ -354,8 +353,8 @@ def test_authelia_validation_explicitly_mounts_all_candidate_files(tmp_path, mon
     calls = []
     container.manager.compose_runner = SimpleNamespace(validate_service=lambda *args, **kwargs:
         calls.append((args, kwargs)) or SimpleNamespace(succeeded=True))
-    context = OperationContext(target_containers=[container], target_services=("authelia", "authelia-admin"),
-                               prepared_dirs={"authelia": tmp_path})
+    container.__dict__["config_path"] = tmp_path
+    context = OperationContext(target_containers=[container], target_services=("authelia", "authelia-admin"))
 
     container.on_check(context)
 
@@ -376,6 +375,7 @@ def test_authelia_validation_explicitly_mounts_all_candidate_files(tmp_path, mon
 def test_selected_nginx_requires_unselected_auth_and_waf_services_running(monkeypatch, state, selected, expected):
     container = _container("100-nginx", monkeypatch)
     container.__dict__["sites"] = {object(): SimpleNamespace(enabled=True, auth=True, waf=True)}
+    container.__dict__["config_path"] = Path("/candidate")
     container.manager.containers = {
         "authelia": SimpleNamespace(enable=True),
         "safeline": SimpleNamespace(enable=True, services={"safeline-mgt": {}, "safeline-tengine": {}}),
@@ -388,8 +388,7 @@ def test_selected_nginx_requires_unselected_auth_and_waf_services_running(monkey
     instances = tuple(replace(_state(REVISION).services[0], service=name, state=state)
                       for name in ("authelia", "safeline-mgt", "safeline-tengine")) if state else ()
     context = OperationContext(target_containers=[container], target_services=selected,
-                               initial_runtime_state=ProjectRuntimeState("test", instances, "docker"),
-                               prepared_dirs={"nginx": Path("/candidate")})
+                               initial_runtime_state=ProjectRuntimeState("test", instances, "docker"))
 
     if expected:
         container.on_check(context)
@@ -404,3 +403,76 @@ def test_unselected_nginx_has_no_implicit_runtime_gate(monkeypatch):
     container = _container("100-nginx", monkeypatch)
     monkeypatch.setattr(container, "get_config", _unexpected)
     container.on_check(OperationContext(target_services=("app",)))
+
+
+@pytest.mark.parametrize("name", ["100-nginx", "101-lldap", "102-authelia", "120-flare"])
+def test_builtin_config_path_defers_materialization_to_start_hook(tmp_path, monkeypatch, name):
+    import os
+    import stat
+    from linktools.cntr.artifacts import prepare_files
+    from linktools.cntr.lifecycle.hooks import HookPhase
+
+    container = _container(name, monkeypatch)
+    monkeypatch.setattr(builtin_module(name), "prepare_files", prepare_files)
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: tmp_path.joinpath(*parts))
+    monkeypatch.setattr(container, "get_config", lambda key, **kwargs:
+                        os.getgid() if key == "DOCKER_GID" else "saved-password")
+    container.manager.data_path = tmp_path
+    container.manager.artifact_index = SimpleNamespace(record=lambda entries: None)
+    container.runtime.chmod = lambda path, mode: path.chmod(mode)
+    if name == "100-nginx":
+        container.__dict__["_rendered_site_files"] = ({"sites/generated.conf": "site configuration"}, False)
+        monkeypatch.setattr(container, "_render_site_template", lambda *args: "nginx configuration")
+        expected = {"sites/generated.conf": "site configuration", "nginx.conf": "nginx configuration"}
+    elif name == "120-flare":
+        expected = {"apps.yml": "links: []\n", "bookmarks.yml": "categories: []\nlinks: []\n"}
+        monkeypatch.setattr(container, "_navigation_files", lambda: expected)
+    else:
+        monkeypatch.setattr(container, "render_template", lambda path: "rendered " + path.name)
+        if name == "101-lldap":
+            expected = {"lldap_config.toml": "rendered lldap_config.toml", "ldap_user_pass": "saved-password"}
+        else:
+            expected = {filename: "rendered " + filename for filename in container.config_files}
+            expected["authentication_backend_ldap_password"] = "saved-password"
+
+    destination = container.config_path
+    assert destination.parent == tmp_path / "generated"
+    assert len(destination.name) == 64
+    assert not destination.parent.exists()
+    assert container.config_path == destination
+    assert len(tuple(container.hooks.iter_phase(HookPhase.BEFORE_START))) == 1
+    context = OperationContext()
+    container.hooks.call(HookPhase.BEFORE_START, context)
+
+    assert context.file_path(container) == destination
+    assert {path.relative_to(destination).as_posix(): path.read_text(encoding="utf-8")
+            for path in destination.rglob("*") if path.is_file()} == expected
+    for filename in expected:
+        info = (destination / filename).stat()
+        assert stat.S_IMODE(info.st_mode) == (0o640 if name == "120-flare" else 0o600)
+        if name == "120-flare":
+            assert info.st_gid == os.getgid()
+    assert not (destination.parent / "current").exists()
+    assert not container.get_app_path("secrets").exists()
+    assert not container.get_app_path("runtime-app").exists()
+
+
+@pytest.mark.parametrize("name,services,targets", [
+    ("nginx", ("nginx",), ("/etc/nginx/managed",)),
+    ("lldap", ("lldap",), ("/generated/lldap_config.toml", "/generated/ldap_user_pass")),
+    ("authelia", ("authelia", "authelia-admin"), ("/generated/configuration.yml",)),
+    ("flare", ("flare",), ("/app/apps.yml", "/app/bookmarks.yml")),
+])
+def test_builtin_compose_binds_the_immutable_config_path(fresh_manager, tmp_path, name, services, targets):
+    container = fresh_manager.containers[name]
+    destination = tmp_path / "generated" / ("a" * 64)
+    container.__dict__["config_path"] = destination
+    specs = container.docker_compose["services"]
+
+    for service in services:
+        volumes = specs[service]["volumes"]
+        for target in targets:
+            mount = next(volume for volume in volumes if volume.endswith(":" + target + ":ro"))
+            expected = destination if name == "nginx" else destination / Path(target).name
+            assert mount == str(expected) + ":" + target + ":ro"
+    assert not destination.exists()

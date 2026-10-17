@@ -1,120 +1,150 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Configuration consumers retain applied settings and change only their revision."""
+"""Extra consumers can change only exactly declared generated-tree sources."""
 from copy import deepcopy
 
 import pytest
 
-from linktools.cntr.artifacts import AppliedServiceModels, bind_consumer_revisions, apply_config_revisions, CONFIG_REVISION_LABEL
+from linktools.cntr.artifacts import AppliedServiceModels, prepare_files, stage_files, validate_consumer_config
 from linktools.cntr.errors import ContainerError
 from test_prepared_files import context, model, owner
 
 
-def saved(owner, *, directory=False, mode=0o600):
-    ctx = context(owner)
-    ctx.write_files(owner, {"base.yml": "same", "acl.yml": "deny"}, mode=mode)
-    desired = model(owner)
-    spec = desired["services"]["auth"]
-    spec.update(environment={"VALUE": "applied"}, ports=[{"target": 80, "published": "8080"}])
-    if directory:
-        spec["volumes"] = [{"type": "bind", "source": str(owner.get_app_path("generated/current")),
-                            "target": "/generated", "read_only": True}]
-    bound = apply_config_revisions(ctx, desired)
-    AppliedServiceModels(owner.manager, bound).record(("auth", "admin"))
-    return ctx, bound
+def saved(owner):
+    old = stage_files(owner, {"base.yml": "same", "acl.yml": "deny"})
+    applied = model(owner, old)
+    applied["services"]["auth"].update(environment={"VALUE": "applied"}, ports=[{"target": 80, "published": "8080"}])
+    AppliedServiceModels(owner.manager, applied).record(("auth", "admin"))
+    return old, applied
 
 
-@pytest.mark.parametrize("changed", [False, True])
-def test_consumer_directory_rebind_preserves_applied_settings(owner, changed):
-    old, applied = saved(owner, directory=True)
+def changed_model(owner, applied, *, files=None, mode=0o600):
+    path = prepare_files(owner, files or {"base.yml": "same", "acl.yml": "allow"}, mode=mode)
     desired = deepcopy(applied)
-    desired["services"]["auth"].update(image="auth:pending", environment={"VALUE": "pending"}, ports=[])
+    for spec in desired["services"].values():
+        spec["volumes"][0]["source"] = str(path)
+    return path, desired
+
+
+def validate(owner, desired, services=("auth",)):
+    return validate_consumer_config(context(owner), desired, AppliedServiceModels(owner.manager, desired), services)
+
+
+def test_declared_tree_changes_are_returned_without_rewriting_models(owner):
+    _, applied = saved(owner)
+    path, desired = changed_model(owner, applied)
     original = deepcopy(desired)
-    current = context(owner)
-    current.target_services = ("admin",)
-    candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "allow" if changed else "deny"})
     store = AppliedServiceModels(owner.manager, desired)
-
-    result = bind_consumer_revisions(current, desired, store, ("auth",))
-
-    expected = deepcopy(applied["services"]["auth"])
-    expected["labels"][CONFIG_REVISION_LABEL] = candidate.name
-    assert result["services"]["auth"] == expected
-    assert result["services"]["admin"] == desired["services"]["admin"]
+    ctx = context(owner)
+    ctx.target_services = ("admin",)
+    assert validate_consumer_config(ctx, desired, store, ("auth", "auth")) == ("auth",)
     assert desired == original
     assert store.previous_model("auth") == applied
-    assert current.target_services == ("admin",)
-    store.set_model(result)
-    assert store.changed_services == ({"auth"} if changed else set())
-    assert candidate != old.prepared_dirs["auth"] if changed else candidate == old.prepared_dirs["auth"]
+    assert ctx.target_services == ("admin",)
+    assert not path.exists()
 
 
-def test_consumer_single_files_share_whole_tree_revision_without_rebinding(owner):
+def test_permission_change_is_visible_through_exact_tree_source(owner):
+    old, applied = saved(owner)
+    path, desired = changed_model(owner, applied, files={"base.yml": "same", "acl.yml": "deny"}, mode=0o640)
+    assert path != old
+    assert validate(owner, desired, ("auth", "admin")) == ("auth", "admin")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("image", "auth:pending"), ("environment", {"VALUE": "pending"}),
+    ("ports", []), ("build", {"context": "/pending"}), ("command", ["pending"]),
+    ("labels", {"pending": "label"}), ("depends_on", {"admin": {"condition": "service_started"}}),
+])
+def test_changed_consumer_rejects_other_pending_service_settings(owner, field, value):
     _, applied = saved(owner)
-    current = context(owner)
-    candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
-    desired = model(owner)
-    desired["services"]["auth"]["environment"] = {"VALUE": "pending"}
-    store = AppliedServiceModels(owner.manager, desired)
-
-    result = bind_consumer_revisions(current, desired, store, ("auth", "admin"))
-
-    assert result["services"]["admin"]["volumes"] == applied["services"]["admin"]["volumes"]
-    assert result["services"]["admin"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
-    mounts = result["services"]["auth"]["volumes"]
-    assert mounts[0] == applied["services"]["auth"]["volumes"][0]
-    assert mounts[1] == applied["services"]["auth"]["volumes"][1]
-    assert result["services"]["auth"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
-    assert result["services"]["auth"]["environment"] == {"VALUE": "applied"}
+    _, desired = changed_model(owner, applied)
+    desired["services"]["auth"][field] = value
+    with pytest.raises(ContainerError, match="outside.*explicitly select"):
+        validate(owner, desired)
 
 
-def test_consumer_permission_change_uses_new_revision_without_rebinding(owner):
+@pytest.mark.parametrize("field,value", [("target", "/different"), ("read_only", False),
+                                         ("type", "volume"), ("bind", {"propagation": "rshared"})])
+def test_generated_mount_metadata_is_not_rewritten(owner, field, value):
     _, applied = saved(owner)
-    current = context(owner)
-    candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "deny"}, mode=0o640)
-    store = AppliedServiceModels(owner.manager, model(owner))
+    _, desired = changed_model(owner, applied)
+    desired["services"]["auth"]["volumes"][0][field] = value
+    if field == "type":
+        # It no longer consumes a declared bind tree, so it is not an extra consumer.
+        assert validate(owner, desired) == ()
+    else:
+        with pytest.raises(ContainerError, match="outside.*explicitly select"):
+            validate(owner, desired)
 
-    result = bind_consumer_revisions(current, model(owner), store, ("auth",))
 
-    assert result["services"]["auth"]["volumes"] == applied["services"]["auth"]["volumes"]
-    assert result["services"]["auth"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
-    assert result["services"]["auth"]["labels"] != applied["services"]["auth"]["labels"]
+def test_consumer_with_unchanged_generated_source_ignores_unrelated_pending_changes(owner):
+    old, applied = saved(owner)
+    path, desired = changed_model(owner, applied, files={"base.yml": "same", "acl.yml": "deny"})
+    assert path == old
+    desired["services"]["auth"]["image"] = "pending"
+    desired["name"] = "pending-project"
+    assert validate(owner, desired) == ()
 
 
-def test_consumer_missing_applied_model_requires_explicit_selection(owner):
-    current = context(owner)
-    current.write_files(owner, {"base.yml": "same", "acl.yml": "deny"})
-    store = AppliedServiceModels(owner.manager, model(owner))
+def test_sidecar_without_declared_generated_mount_is_ignored(owner):
+    _, applied = saved(owner)
+    _, desired = changed_model(owner, applied)
+    desired["services"]["admin"] = {"image": "redis:pending", "environment": {"PENDING": "yes"}}
+    assert validate(owner, desired, ("admin",)) == ()
+
+
+def test_consumer_without_saved_model_requires_explicit_selection(owner):
+    path = prepare_files(owner, {"base.yml": "new"})
     with pytest.raises(ContainerError, match="No applied Compose model.*auth.*explicitly select"):
-        bind_consumer_revisions(current, model(owner), store, ("auth",))
+        validate(owner, model(owner, path))
 
 
-def test_consumer_preserves_current_and_unowned_mounts(owner):
+@pytest.mark.parametrize("legacy", ["no-tree", "wrong-owner", "wrong-kind", "unknown-path"])
+def test_old_source_must_have_exact_tree_provenance(owner, legacy):
+    old, applied = saved(owner)
+    if legacy in ("no-tree", "wrong-owner", "wrong-kind"):
+        for entry in owner.manager.artifact_index.values.values():
+            if entry.get("kind") != "generated-config":
+                continue
+            if legacy == "no-tree":
+                entry.pop("tree")
+            elif legacy == "wrong-owner":
+                entry["container"] = "other"
+            else:
+                entry["kind"] = "compose"
+    else:
+        applied["services"]["auth"]["volumes"][0]["source"] = str(old.parent / "current")
+        AppliedServiceModels(owner.manager, applied).record(("auth",))
+    _, desired = changed_model(owner, applied)
+    with pytest.raises(ContainerError, match="outside.*explicitly select"):
+        validate(owner, desired)
+
+
+def test_nonregistered_new_file_path_is_not_inferred_as_generated(owner):
     _, applied = saved(owner)
-    mounts = applied["services"]["auth"]["volumes"]
-    mounts.extend([
-        {"type": "bind", "source": str(owner.get_app_path("generated/manual/file")), "target": "/manual"},
-        {"type": "bind", "source": str(owner.get_app_path("other/current/file")), "target": "/other"},
-    ])
+    path, desired = changed_model(owner, applied)
+    desired["services"]["auth"]["volumes"][0]["source"] = str(path / "undeclared.yml")
+    assert validate(owner, desired) == ()
+
+
+def test_user_owned_mount_change_alongside_generated_change_requires_selection(owner):
+    _, applied = saved(owner)
+    applied["services"]["auth"]["volumes"].append({"type": "bind", "source": "/user-owned", "target": "/manual"})
     AppliedServiceModels(owner.manager, applied).record(("auth",))
-    current = context(owner)
-    candidate = current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
-    store = AppliedServiceModels(owner.manager, model(owner))
-
-    result = bind_consumer_revisions(current, model(owner), store, ("auth",))
-
-    rebound = result["services"]["auth"]["volumes"]
-    assert rebound == mounts
-    assert result["services"]["auth"]["labels"][CONFIG_REVISION_LABEL] == candidate.name
+    _, desired = changed_model(owner, applied)
+    desired["services"]["auth"]["volumes"][1]["source"] = "/different"
+    with pytest.raises(ContainerError, match="outside.*explicitly select"):
+        validate(owner, desired)
 
 
 def support_model(owner):
     _, applied = saved(owner)
     spec = applied["services"]["auth"]
-    spec.update(networks={"auth-net": {"aliases": ["applied"]}},
-                secrets=[{"source": "auth-secret", "target": "secret"}], configs=["auth-config"])
+    spec.update(networks={"auth-net": {}}, secrets=[{"source": "auth-secret", "target": "secret"}],
+                configs=["auth-config"])
     spec["volumes"].append({"type": "volume", "source": "auth-data", "target": "/data"})
-    applied.update(networks={"auth-net": {"name": "applied-net"}, "unrelated-old": {"name": "old"}},
+    applied.update(networks={"auth-net": {"name": "applied-net"}},
                    volumes={"auth-data": {"name": "applied-data"}},
                    secrets={"auth-secret": {"file": "/applied/secret"}},
                    configs={"auth-config": {"file": "/applied/config"}}, name="project")
@@ -122,83 +152,58 @@ def support_model(owner):
     return applied
 
 
-def test_consumer_retains_referenced_support_without_importing_unrelated_old_support(owner):
-    applied = support_model(owner)
-    desired = model(owner)
-    desired["networks"] = {"unrelated-new": {"name": "new"}}
-    current = context(owner)
-    current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
-    store = AppliedServiceModels(owner.manager, desired)
-
-    result = bind_consumer_revisions(current, desired, store, ("auth",))
-
-    assert result["networks"] == {"auth-net": applied["networks"]["auth-net"],
-                                  "unrelated-new": {"name": "new"}}
-    for category in ("volumes", "secrets", "configs"):
-        assert result[category] == applied[category]
-    assert result["name"] == "project"
-    assert result["services"]["auth"]["image"] == applied["services"]["auth"]["image"]
-    assert result["services"]["auth"]["networks"] == applied["services"]["auth"]["networks"]
-
-
 @pytest.mark.parametrize("category,name", [("networks", "auth-net"), ("volumes", "auth-data"),
                                            ("secrets", "auth-secret"), ("configs", "auth-config")])
-def test_consumer_support_conflict_requires_explicit_selection(owner, category, name):
+def test_referenced_support_changes_require_explicit_selection(owner, category, name):
     applied = support_model(owner)
-    desired = deepcopy(applied)
+    _, desired = changed_model(owner, applied)
     desired[category][name] = {"external": True}
-    desired["services"]["admin"][category] = deepcopy(desired["services"]["auth"][category])
-    current = context(owner)
-    store = AppliedServiceModels(owner.manager, desired)
-    with pytest.raises(ContainerError, match="conflicts.*auth.*explicitly select"):
-        bind_consumer_revisions(current, desired, store, ("auth",))
+    with pytest.raises(ContainerError, match="outside.*explicitly select"):
+        validate(owner, desired)
 
 
-def test_consumer_project_support_conflict_requires_explicit_selection(owner):
+def test_project_support_changes_require_explicit_selection(owner):
     applied = support_model(owner)
-    desired = dict(applied, name="pending-project")
-    current = context(owner)
-    store = AppliedServiceModels(owner.manager, desired)
-    with pytest.raises(ContainerError, match="Compose 'name' conflicts.*auth.*explicitly select"):
-        bind_consumer_revisions(current, desired, store, ("auth",))
+    _, desired = changed_model(owner, applied)
+    desired["name"] = "different"
+    with pytest.raises(ContainerError, match="outside.*explicitly select"):
+        validate(owner, desired)
 
 
-@pytest.mark.parametrize("file_mount", [False, True])
-def test_consumer_without_managed_revision_requires_explicit_migration(owner, file_mount):
+def test_unreferenced_support_changes_do_not_block_generated_update(owner):
+    applied = support_model(owner)
+    _, desired = changed_model(owner, applied)
+    desired["networks"]["unrelated"] = {"name": "pending-net"}
+    assert validate(owner, desired) == ("auth",)
+
+
+def test_exact_file_mounts_follow_declared_tree_identity(owner):
     old, applied = saved(owner)
-    original = deepcopy(applied)
-    source = old.prepared_dirs["auth"] / "base.yml" if file_mount else old.prepared_dirs["auth"]
-    applied["services"]["auth"]["volumes"][0]["source"] = str(source)
-    applied["services"]["auth"].pop("labels")
-    AppliedServiceModels(owner.manager, applied).record(("auth",))
-    current = context(owner)
-    current.write_files(owner, {"base.yml": "same", "acl.yml": "allow"})
-    store = AppliedServiceModels(owner.manager, original)
-    with pytest.raises(ContainerError, match="no applied configuration revision.*explicitly select"):
-        bind_consumer_revisions(current, original, store, ("auth",))
-    assert store.previous_model("auth") == applied
-    assert not owner.get_app_path("generated/current").exists()
-
-
-@pytest.mark.parametrize("category,name", [("networks", "auth-net"), ("volumes", "auth-data"),
-                                           ("secrets", "auth-secret"), ("configs", "auth-config")])
-def test_consumer_only_support_retains_applied_definition_over_pending_value(owner, category, name):
-    applied = support_model(owner)
+    applied["services"]["auth"]["volumes"][0]["source"] = str(old / "acl.yml")
+    applied["services"]["admin"]["volumes"][0]["source"] = str(old / "base.yml")
+    AppliedServiceModels(owner.manager, applied).record(("auth", "admin"))
+    path = prepare_files(owner, {"base.yml": "same", "acl.yml": "allow"})
     desired = deepcopy(applied)
-    desired[category][name] = {"external": True}
-    current = context(owner)
-    store = AppliedServiceModels(owner.manager, desired)
-    result = bind_consumer_revisions(current, desired, store, ("auth",))
-    assert result[category][name] == applied[category][name]
+    desired["services"]["auth"]["volumes"][0]["source"] = str(path / "acl.yml")
+    desired["services"]["admin"]["volumes"][0]["source"] = str(path / "base.yml")
+    assert validate(owner, desired, ("auth", "admin")) == ("auth", "admin")
 
 
-def test_two_consumers_with_different_applied_support_cannot_overwrite_each_other(owner):
-    applied = support_model(owner)
-    second = deepcopy(applied)
-    second['services']['admin']['networks'] = {'auth-net': {}}
-    second['networks']['auth-net'] = {'name': 'other-applied-network'}
-    AppliedServiceModels(owner.manager, second).record(('admin',))
-    current = context(owner)
-    store = AppliedServiceModels(owner.manager, applied)
-    with pytest.raises(ContainerError, match='conflicts.*admin.*explicitly select'):
-        bind_consumer_revisions(current, applied, store, ('auth', 'admin'))
+@pytest.mark.parametrize("old_name,new_name", [("base.yml", "acl.yml"), ("", "base.yml"), ("base.yml", "")])
+def test_cannot_swap_distinct_generated_files_or_root_and_file(owner, old_name, new_name):
+    old, applied = saved(owner)
+    applied["services"]["auth"]["volumes"][0]["source"] = str(old / old_name)
+    AppliedServiceModels(owner.manager, applied).record(("auth",))
+    path, desired = changed_model(owner, applied)
+    desired["services"]["auth"]["volumes"][0]["source"] = str(path / new_name)
+    with pytest.raises(ContainerError, match="outside.*explicitly select"):
+        validate(owner, desired)
+
+
+def test_nested_generated_file_identity_is_exact(owner):
+    old = stage_files(owner, {"nested/config.yml": "old"})
+    applied = model(owner, old / "nested/config.yml")
+    AppliedServiceModels(owner.manager, applied).record(("auth", "admin"))
+    path = prepare_files(owner, {"nested/config.yml": "new"})
+    desired = model(owner, path / "nested/config.yml")
+    assert validate(owner, desired) == ("auth",)

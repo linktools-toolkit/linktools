@@ -18,6 +18,8 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 
 
 def _ready_dependencies(manager, monkeypatch) -> None:
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(manager)
     services = {name for container in manager.containers.values() if container.name != "portainer"
                 for name in container.services}
     model = {"services": {name: {"image": name + ":current"}

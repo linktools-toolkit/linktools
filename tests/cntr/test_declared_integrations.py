@@ -91,6 +91,8 @@ def test_preparation_does_not_access_navigation(fresh_manager, monkeypatch):
 
 
 def test_absent_flare_does_not_consume_navigation(fresh_manager, monkeypatch):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     installed = [c for c in fresh_manager.installed_state.get(resolve=True) if c.name != "flare"]
     monkeypatch.setattr(fresh_manager.installed_state, "get", lambda resolve=False: installed)
     assert list(fresh_manager.iter_integrations("flare")) == []
@@ -130,6 +132,8 @@ def test_container_authoring_has_one_integration_entry():
 
 
 def test_proxy_integrations_do_not_implicitly_select_runtime_providers(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     operations = fresh_manager.compose_operations
     explicit = operations.select(["portainer"], for_start=True)
     selected = operations.required_selection(explicit)
@@ -138,6 +142,8 @@ def test_proxy_integrations_do_not_implicitly_select_runtime_providers(fresh_man
 
 
 def test_explicit_authelia_dependencies_remain_required(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     operations = fresh_manager.compose_operations
     explicit = operations.select(["authelia"], for_start=True)
     selected = operations.required_selection(explicit)
@@ -618,6 +624,8 @@ def test_installed_container_metadata_reuses_actual_instances(fresh_manager):
 
 
 def test_integration_containers_preserve_dependencies(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     assert tuple(fresh_manager.containers["authelia"].dependencies) == ("nginx", "lldap")
     assert tuple(fresh_manager.containers["safeline"].dependencies) == ("nginx",)
     installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])

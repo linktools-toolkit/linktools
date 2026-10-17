@@ -18,6 +18,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         manager = _harness.make_manager(root / "data", root / "temp")
+        _harness.configure_builtin_snapshot(manager)
         missing = [name for name in BUILTIN_CONTAINERS if name not in manager.containers]
         if missing:
             print("ERROR: expected builtin containers missing: %s" % missing, file=sys.stderr)
