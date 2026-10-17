@@ -86,11 +86,50 @@ def test_acme_issuance_happens_in_image_build_only(certificate_case):
     assert "AS acme-build" not in dockerfile
     assert "--issue --force" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_dns" in dockerfile
-    assert "ARG CNTR_BUILD_REVISION" in dockerfile
+    assert "CNTR_BUILD_REVISION" not in dockerfile
     assert "ENV CF_Token" not in dockerfile
     assert "nginx-certificates renew" in dockerfile
     spec = container.docker_compose["services"]["nginx"]
     assert spec["build"]["secrets"] == ["cntr_acme_account", "cntr_acme_dns"]
+
+
+@pytest.mark.parametrize("https", [False, True])
+def test_builtin_nginx_build_uses_native_certificate_identity(fresh_manager, https):
+    container = fresh_manager.containers["nginx"]
+    fresh_manager.config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.config.set("NGINX_HTTPS_ENABLE", https)
+    fresh_manager.config.set("ACME_DNS_API", "dns_cf")
+    container.__dict__["sites"] = {}
+
+    dockerfile = container.docker_file
+    model = fresh_manager.image_preparer.with_build_revisions(
+        container.docker_compose, [container], ["nginx"])
+    spec = model["services"]["nginx"]
+    revision = container.cert_image_revision
+    assert spec["image"] == container.get_service_name("nginx") + ":" + revision
+    assert "CNTR_BUILD_REVISION" not in dockerfile
+    assert "CNTR_BUILD_REVISION" not in spec["build"].get("args", {})
+    if https:
+        assert 'certificate-revision="' + revision + '"' in dockerfile
+        issuance = dockerfile.split("RUN --mount=type=secret,id=cntr_acme_account", 1)[1].split("\nRUN ", 1)[0]
+        assert "--issue --force" in issuance
+        assert revision in issuance
+        assert "--domain example.test" in issuance
+
+        container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test", "other.test"]
+        for name in ("cert_image_revision", "acme_ssl_domains_args", "docker_file", "docker_compose"):
+            container.__dict__.pop(name, None)
+        changed = container.docker_file
+        changed_issuance = changed.split("RUN --mount=type=secret,id=cntr_acme_account", 1)[1].split("\nRUN ", 1)[0]
+        assert container.cert_image_revision != revision
+        assert changed_issuance != issuance
+        assert container.cert_image_revision in changed_issuance
+        assert "--domain other.test" in changed_issuance
+        assert container.docker_compose["services"]["nginx"]["image"].endswith(":" + container.cert_image_revision)
+    else:
+        assert "--issue" not in dockerfile
+        assert "cntr_acme" not in dockerfile
+        assert "secrets" not in spec["build"]
 
 
 def test_offline_install_preserves_baked_cert_and_account(certificate_case):
@@ -317,7 +356,7 @@ exit 94
     usr_bin.mkdir()
     for name in ("nginx-certificates", "nginx-acme"):
         shutil.copyfile(container.get_source_path(name), local_bin / name)
-    setup = "chmod +x " + dockerfile.split("RUN chmod +x ", 1)[1].split("\n\nARG ", 1)[0]
+    setup = "chmod +x " + dockerfile.split("RUN chmod +x ", 1)[1].split("\nRUN ", 1)[0]
     setup = setup.replace("\\\n", "").replace("/usr/local/bin", str(local_bin))
     setup = setup.replace("/usr/bin", str(usr_bin)).replace("/opt/acme", str(home))
     subprocess.run(["sh", "-c", setup], check=True, env=env)
