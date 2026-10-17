@@ -83,6 +83,26 @@ counts, observed tokens, and an admission deadline across the execution tree.
 See [shared run budgets](docs/run-budgets.md) for concurrency, unknown usage,
 continuation, and durable recovery guarantees.
 
+## Runtime-wide capabilities
+
+Register native Pydantic AI behavior through the same `CapabilityGroup` used for
+Agent declarations. The default `scope="agent"` keeps normal Agent selection;
+`scope="runtime"` applies host policy to every Runtime-owned Agent run,
+independently of `allow_capabilities` and `capability_filter`:
+
+```python
+group.capability(global_rate_limit, id="host.rate-limit", scope="runtime")
+async with Runtime.open(
+    "application", models=models, storage=storage, capabilities=(group,),
+) as runtime:
+    ...
+```
+
+A host can define its own `GlobalRateLimit` using native model/tool hooks, shared
+state and request/usage metadata. See [Runtime-wide capabilities](docs/runtime-capabilities.md)
+for a runnable RPM/TPM example, streaming/cancellation behavior, quota accounting
+and provider retry boundaries.
+
 ## Evaluation
 
 See [Task graph authoring](docs/task-graphs.md) for typed JSON results, conditional branches, batch expansion, collection, and submission-time diagnostics.

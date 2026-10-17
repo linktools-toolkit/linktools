@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import TypeVar
 
 from linktools.core import environ
+from pydantic_ai.capabilities import AbstractCapability
 
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler, CapabilityFilter
 from ..capability import (
+    AgentContext,
     AssetSkillSource,
     CapabilityContribution,
     CapabilityGroup,
@@ -177,6 +179,21 @@ async def compose_runtime_components(
             if group.asset_reader is not None:
                 asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
+        runtime_capabilities = tuple(
+            candidate.value for candidate in candidates
+            if candidate.scope == "runtime"
+        )
+        runtime_ids: set[str] = set()
+
+        def register_runtime_id(capability: AbstractCapability[AgentContext[AppT]]) -> None:
+            if capability.id is not None:
+                if capability.id in runtime_ids:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                runtime_ids.add(capability.id)
+
+        for capability in runtime_capabilities:
+            capability.apply(register_runtime_id)
+        candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
             tuple(
                 AssetSkillSource(group.group_id, reader)
@@ -295,6 +312,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
+            runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
@@ -490,6 +508,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
+    runtime_capabilities: Sequence[AbstractCapability[AgentContext[AppT]]],
     asset_sources: Mapping[str, AssetStoreReader],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
@@ -569,6 +588,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
+            runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             metrics=metric_buffer,
             sandbox=sandbox,

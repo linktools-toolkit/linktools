@@ -438,6 +438,10 @@ class Runtime(Generic[AppT]):
 
         Explicit graph and execution recovery remain available when disabled.
         Closing still drains work owned by this Runtime.
+
+        Runtime-scoped CapabilityGroup registrations apply to every agent run,
+        independently of Agent capability selection. They use native hooks and
+        lifecycle and are not persisted in execution bindings.
         """
         if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
             raise TypeError("tool_responses must be ToolResponseFixture")
