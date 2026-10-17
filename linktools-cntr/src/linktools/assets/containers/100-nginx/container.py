@@ -15,7 +15,6 @@ from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import ContainerTemplateError
-from linktools.cntr.runtime.images import ImagePreparer
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -245,20 +244,6 @@ class Container(BaseContainer):
         import tempfile
         if context.target_services is not None and "nginx" not in context.target_services:
             return
-        if context.target_containers is not None and self not in context.target_containers:
-            actual = context.initial_runtime_state
-            instances = tuple(item for item in actual.service_instances("nginx")
-                              if item.state in ("running", "restarting")) if actual is not None else ()
-            models = getattr(context, "service_models", None)
-            model = models.current_model("nginx") if models is not None else context.compose_model
-            expected = ((model or {}).get("services", {}).get("nginx", {}).get("build") or {}).get(
-                "labels", {}).get(ImagePreparer.BUILD_LABEL)
-            if expected is None or not instances or any(
-                    item.labels.get(ImagePreparer.BUILD_LABEL) != expected
-                    for item in instances):
-                raise ContainerError(
-                    "Nginx build inputs changed or its image is unavailable; "
-                    "explicitly select nginx to prepare and build its image.")
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
@@ -289,17 +274,30 @@ class Container(BaseContainer):
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
                 mounts["/etc/certs"] = directory
-                source = self.get_app_path("certs", "live").resolve()
+                root = self.get_app_path("certs")
                 previous = Path(directory) / "previous"
                 previous.mkdir(parents=True, mode=0o700)
+                candidates = [((root / "live").resolve(), previous)]
+                versions = root / "versions"
+                if versions.is_dir():
+                    candidates.extend((source, Path(directory) / "versions" / source.name)
+                                      for source in versions.iterdir() if source.is_dir())
                 domain = self.get_config("NGINX_ROOT_DOMAIN")
-                for suffix in ("cert", "key", "fullchain"):
-                    path = source / (domain + "_" + suffix + ".pem")
-                    if path.is_file():
-                        shutil.copy2(str(path), str(previous / path.name))
-                for name in ("primary", "domains", "settings"):
-                    if (source / name).is_file():
-                        shutil.copy2(str(source / name), str(previous / name))
+                names = [domain + "_" + suffix + ".pem" for suffix in ("cert", "key", "fullchain")]
+                names.extend(("primary", "domains", "settings"))
+                for source, destination in candidates:
+                    # Match install eligibility without exposing account or renewal state.
+                    if not (source / "acme").is_dir():
+                        continue
+                    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    for name in names:
+                        path = source / name
+                        if path.is_file():
+                            shutil.copy2(str(path), str(destination / name))
+                    modified = source.stat()
+                    os.utime(str(destination), ns=(modified.st_atime_ns, modified.st_mtime_ns))
+                    if destination == previous:
+                        (Path(directory) / "live").symlink_to("previous")
                 result = runner.validate_service(context, "nginx", (
                     "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
                     "exec nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t"),

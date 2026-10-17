@@ -303,6 +303,66 @@ def test_builtin_script_changes_require_explicit_build(fresh_manager, tmp_path, 
     assert prep.plan(changed, force_pull=True).build == ("nginx",)
 
 
+@pytest.mark.parametrize("active", ["other_settings", "absent_pointer", "matching_live"])
+def test_preflight_and_install_select_same_retained_certificate(certificate_case, monkeypatch, tmp_path, active):
+    container, script, base, seed, env, settings = certificate_case
+    assert run_script(certificate_case, "install").returncode == 0
+    retained = os.readlink(str(base / "live"))
+    if active == "other_settings":
+        (seed / "settings").write_text("other-ca\ndns_cf\n\n")
+        assert run_script(certificate_case, "install").returncode == 0
+        (seed / "settings").write_text(settings)
+    elif active == "absent_pointer":
+        (base / "live").unlink()
+    older = base / "versions" / "older-matching"
+    shutil.copytree(str(base / retained), str(older))
+    os.utime(str(older), (1, 1))
+    incomplete = base / "versions" / "incomplete-newer"
+    shutil.copytree(str(base / retained), str(incomplete))
+    shutil.rmtree(str(incomplete / "acme"))
+    os.utime(str(incomplete), (2000000000, 2000000000))
+    # The old image's seed has expired, while its retained renewed generation is valid.
+    chain = seed / "certs/example.test_fullchain.pem"
+    expired = tmp_path / "expired.pem"
+    subprocess.run(["openssl", "x509", "-in", str(chain), "-signkey",
+                    str(seed / "certs/example.test_key.pem"), "-days", "0", "-out", str(expired)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    chain.write_bytes(expired.read_bytes())
+    assert subprocess.run(["openssl", "x509", "-in", str(chain), "-noout", "-checkend", "0"],
+                          capture_output=True).returncode != 0
+    original_app_path = container.get_app_path
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: (
+        base.joinpath(*parts[1:]) if parts and parts[0] == "certs" else original_app_path(*parts)))
+    container.__dict__["config_path"] = tmp_path / "managed"
+    pointer_before = os.readlink(str(base / "live")) if (base / "live").is_symlink() else None
+    checked = []
+
+    def validate(context, service, command, mount_overrides, check):
+        isolated = Path(mount_overrides["/etc/certs"])
+        assert not list(isolated.rglob("acme"))
+        assert not list(isolated.rglob("renewal"))
+        assert not (isolated / "versions/incomplete-newer").exists()
+        assert (isolated / retained).stat().st_mtime_ns == (base / retained).stat().st_mtime_ns
+        probe = tmp_path / "isolated-check"
+        probe.write_text(script.read_text().replace(str(base), str(isolated)))
+        probe.chmod(0o755)
+        result = subprocess.run([str(probe), "check"], env=env, capture_output=True, text=True)
+        checked.append(result.returncode)
+        assert os.readlink(str(isolated / "live")) == ("previous" if active == "matching_live" else retained)
+        assert (isolated / "live/example.test_fullchain.pem").read_bytes() == (
+            base / retained / "example.test_fullchain.pem").read_bytes()
+        return SimpleNamespace(succeeded=result.returncode == 0, returncode=result.returncode,
+                               stdout=result.stdout, stderr=result.stderr)
+
+    monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
+    container.on_check(OperationContext())
+    assert checked == [0]
+    assert (os.readlink(str(base / "live")) if (base / "live").is_symlink() else None) == pointer_before
+    installed = run_script(certificate_case, "install")
+    assert installed.returncode == 0, installed.stderr
+    assert os.readlink(str(base / "live")) == retained
+
+
 def test_offline_install_preserves_baked_cert_and_account(certificate_case):
     _, _, base, seed, _, _ = certificate_case
     result = run_script(certificate_case, "install")

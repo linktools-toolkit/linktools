@@ -77,8 +77,8 @@ both modes, and execution uses `--no-deps` with the resolved service list.
 
 A named operation on a shared Compose service requires all contributing
 containers to be named, so no unprepared contributor is silently applied. Native
-Compose resolves their merged definitions. Managed build revisions follow the
-contributing build owner; ambiguous build ownership fails before application.
+Compose resolves their merged definitions. Managed build revisions use the final
+Compose build inputs; pending rendered Dockerfiles are matched by destination path.
 
 Running outside consumers with `restart: true` edges or namespace bindings can
 need joint application or recovery when a selected provider changes. Named

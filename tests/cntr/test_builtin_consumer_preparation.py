@@ -80,23 +80,6 @@ def test_nginx_consumer_renders_without_dns_credentials_or_account_preparation(m
     assert context.target_services == ("app",)
 
 
-@pytest.mark.parametrize("state", [
-    None, _state(), _state(None), _state(OLD_REVISION), _state(REVISION, OLD_REVISION),
-    _state(oneoff_revisions=(REVISION,)),
-    _state(REVISION, label="io.linktools.nginx.certificate-revision"),
-])
-def test_nginx_consumer_requires_explicit_selection_for_unverified_certificate_revision(monkeypatch, state):
-    container = _container("100-nginx", monkeypatch)
-    monkeypatch.setattr(container, "get_config", _unexpected)
-    monkeypatch.setattr(container, "_render_site_template", _unexpected)
-    context, written = _context(container, services=("nginx",), state=state)
-
-    with pytest.raises(ContainerError, match="explicitly select nginx"):
-        container.on_check(context)
-
-    assert written == []
-
-
 def test_nginx_consumer_checks_compatible_certificates_without_reading_dns_secrets(monkeypatch):
     from dataclasses import replace
     container = _container("100-nginx", monkeypatch)
