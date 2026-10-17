@@ -15,7 +15,7 @@
       "environment": [
         "UID=0",
         "GID=0",
-        "LLDAP_LDAP_BASE_DN=dc=_",
+        "LLDAP_LDAP_BASE_DN=dc=example,dc=test",
         "LLDAP_JWT_SECRET_FILE=/secrets/jwt_secret",
         "LLDAP_LDAP_USER_PASS_FILE=/generated/ldap_user_pass"
       ],
@@ -41,8 +41,8 @@
       },
       "restart": "unless-stopped",
       "volumes": [
-        "<APP_DATA>/lldap/generated/current/lldap_config.toml:/generated/lldap_config.toml:ro",
-        "<APP_DATA>/lldap/generated/current/ldap_user_pass:/generated/ldap_user_pass:ro",
+        "<APP_DATA>/lldap/generated/<CONFIG_DIGEST>/lldap_config.toml:/generated/lldap_config.toml:ro",
+        "<APP_DATA>/lldap/generated/<CONFIG_DIGEST>/ldap_user_pass:/generated/ldap_user_pass:ro",
         "<APP_DATA>/lldap/data:/data",
         "<APP_DATA>/lldap/secrets:/secrets:ro"
       ]

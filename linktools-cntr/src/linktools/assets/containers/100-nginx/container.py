@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shlex
-import hashlib
 from pathlib import Path
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -14,6 +13,7 @@ from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined,
 
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.container import ContainerTemplateError
 from linktools.core import ConfigValue, ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
@@ -25,8 +25,8 @@ from linktools.types import MISSING
 if TYPE_CHECKING:
     from types import SimpleNamespace
     from linktools.cntr.ext import ResolvedSite, Nginx
-    from collections.abc import Iterable, Sequence
-    from typing import AbstractSet, Any, Callable, Iterator
+    from collections.abc import Sequence
+    from typing import Any, Callable, Iterator
     from linktools.core import Config
     from linktools.cntr import OperationContext
     from linktools.types import PathType
@@ -76,7 +76,6 @@ def _has_config_value(value: "Any", seen: "set[int] | None" = None) -> bool:
 
 
 class Container(BaseContainer):
-
     # Snapshot native request values before business rewrites or auth subrequests.
     original_fields = (
         ("scheme", "$scheme", "$waf_scheme"),
@@ -202,6 +201,18 @@ class Container(BaseContainer):
         return fields
 
     @cached_property
+    def acme_dns_environment(self) -> str:
+        values = []
+        for key, field in sorted(self.extra_fields.items()):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ContainerError("Invalid DNS environment variable name: " + key)
+            value = str(self.get_config(field))
+            if "\n" in value or "\r" in value:
+                raise ContainerError("DNS credentials must be single-line values")
+            values.append("export {}={}\n".format(key, shlex.quote(value)))
+        return "".join(values)
+
+    @cached_property
     def acme_ssl_domains(self) -> "list[str]":
         result = []
         domain = self.get_config("NGINX_ROOT_DOMAIN")
@@ -215,37 +226,6 @@ class Container(BaseContainer):
                     if value and value not in result:
                         result.append(value)
         return result
-
-    @cached_property
-    def cert_image_revision(self) -> str:
-        """Identify build code and TLS inputs without including DNS credentials."""
-        parts = [self.get_config("NGINX_TAG"),
-                 str(self.get_config("NGINX_HTTPS_ENABLE", type=bool)),
-                 self.get_source_path("Dockerfile").read_text(encoding="utf-8")]
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            parts.extend((self.get_config("ACME_SERVER"), self.get_config("ACME_DNS_API"),
-                          self.get_config("ACME_ACCOUNT_EMAIL")))
-            parts.extend(self.acme_ssl_domains)
-            parts.extend(self.get_source_path(name).read_text(encoding="utf-8")
-                         for name in ("nginx-certificates", "nginx-acme", "dnsapi.json"))
-        return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
-    def get_build_revision(self, service: str) -> "str | None":
-        return self.cert_image_revision if service == "nginx" else None
-
-    @cached_property
-    def acme_ssl_domains_args(self) -> str:
-        return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)
-
-    @cached_property
-    def acme_ssl_certificate_args(self) -> str:
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            return " ".join([
-                "--cert-file", shlex.quote(f"/etc/certs/{domain}_cert.pem"),
-                "--key-file", shlex.quote(f"/etc/certs/{domain}_key.pem"),
-                "--fullchain-file", shlex.quote(f"/etc/certs/{domain}_fullchain.pem"),
-            ])
-        return ""
 
     def shell_quote(self, value: object) -> str:
         return shlex.quote(str(value))
@@ -262,30 +242,68 @@ class Container(BaseContainer):
     def on_check(self, context: "OperationContext") -> None:
         import shutil
         import tempfile
+        if context.target_services is not None and "nginx" not in context.target_services:
+            return
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
+        required = set()
+        for site in self.sites.values():
+            if not site.enabled:
+                continue
+            if site.auth:
+                required.add("authelia")
+            if site.waf:
+                required.update(self.containers["safeline"].services)
+        if context.target_services is not None:
+            unavailable = []
+            for service in sorted(required.difference(context.target_services)):
+                actual = context.initial_runtime_state
+                instances = actual.service_instances(service) if actual is not None else ()
+                if not instances or any(item.state != "running" for item in instances):
+                    unavailable.append(service)
+            if unavailable:
+                raise ContainerError("Nginx requires running integration services: " + ", ".join(unavailable) +
+                                     "; select their containers explicitly.")
         runner = self.manager.compose_runner
         command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
+        mounts = {"/etc/nginx/managed": str(self.config_path)}
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
-                source = self.get_app_path("certs", self.cert_image_revision, "live").resolve()
-                previous = Path(directory) / self.cert_image_revision / "previous"
+                mounts["/etc/certs"] = directory
+                root = self.get_app_path("certs")
+                previous = Path(directory) / "previous"
                 previous.mkdir(parents=True, mode=0o700)
+                candidates = [((root / "live").resolve(), previous)]
+                versions = root / "versions"
+                if versions.is_dir():
+                    candidates.extend((source, Path(directory) / "versions" / source.name)
+                                      for source in versions.iterdir() if source.is_dir())
                 domain = self.get_config("NGINX_ROOT_DOMAIN")
-                for suffix in ("cert", "key", "fullchain"):
-                    path = source / (domain + "_" + suffix + ".pem")
-                    if path.is_file():
-                        shutil.copy2(str(path), str(previous / path.name))
+                names = [domain + "_" + suffix + ".pem" for suffix in ("cert", "key", "fullchain")]
+                names.extend(("primary", "domains", "settings"))
+                for source, destination in candidates:
+                    # Match install eligibility without exposing account or renewal state.
+                    if not (source / "acme").is_dir():
+                        continue
+                    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    for name in names:
+                        path = source / name
+                        if path.is_file():
+                            shutil.copy2(str(path), str(destination / name))
+                    modified = source.stat()
+                    os.utime(str(destination), ns=(modified.st_atime_ns, modified.st_mtime_ns))
+                    if destination == previous:
+                        (Path(directory) / "live").symlink_to("previous")
                 result = runner.validate_service(context, "nginx", (
                     "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
                     "exec nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t"),
-                    mount_overrides={"/etc/certs": directory}, check=False)
+                    mount_overrides=mounts, check=False)
         else:
-            result = runner.validate_service(context, "nginx", command, check=False)
+            result = runner.validate_service(context, "nginx", command, mount_overrides=mounts, check=False)
         if not result.succeeded or "conflicting server name" in (result.stdout + result.stderr).lower():
             match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
             location = " at {}:{}".format(*match.groups()) if match else ""
@@ -335,23 +353,6 @@ class Container(BaseContainer):
         if authentication:
             headers.update({"Content-Length": "", "Connection": "", "Upgrade": ""})
         return tuple((key, self.complex_value(value)) for key, value in headers.items())
-
-    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
-        manager = self.manager
-        sites = self.sites
-        needs_nginx = self.name in required or any(
-            site.producer.name in required and site.enabled for site in sites.values())
-        if not needs_nginx:
-            return {}
-        result = {self.name: tuple(self.services)}
-        for site in sites.values():
-            if not site.enabled or (self.name not in required and site.producer.name not in required):
-                continue
-            for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
-                if getattr(site, capability):
-                    result[provider] = (("authelia",) if provider == "authelia"
-                                        else tuple(manager.containers[provider].services))
-        return result
 
     def _render_site_template(self, container: "BaseContainer", source: "PathType",
                         site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
@@ -503,34 +504,18 @@ class Container(BaseContainer):
         import tarfile
         import tempfile
         from filelock import FileLock
-        from types import SimpleNamespace
         from linktools.cntr.artifacts import atomic_write_text_if_changed
 
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             for name in ("certs", "acme", "acme-secrets"):
                 self.get_app_path(name).mkdir(parents=True, exist_ok=True)
             self.runtime.chmod(self.get_app_path("acme-secrets"), 0o700)
-            values = []
-            for key, field in self.extra_fields.items():
-                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-                    raise ContainerError("Invalid DNS environment variable name: " + key)
-                value = str(self.get_config(field))
-                if "\n" in value or "\r" in value:
-                    raise ContainerError("DNS credentials must be single-line values")
-                values.append("export {}={}\n".format(key, shlex.quote(value)))
             atomic_write_text_if_changed(self.get_app_path("acme-secrets", "dns.env"),
-                                         "".join(values), mode=0o600)
+                                         self.acme_dns_environment, mode=0o600)
             lock_path = self.get_app_path("certs", ".acme.lock")
             with FileLock(str(lock_path)):
                 self.runtime.chmod(lock_path, 0o600)
-                previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
-                                          for item in context.initial_runtime_state.services
-                                          if item.service == "nginx"), None)
-                account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
-                if not account.is_dir() and previous_revision is not None:
-                    if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):
-                        raise ContainerError("Invalid running nginx certificate revision")
-                    account = self.get_app_path("certs", previous_revision, "live", "acme")
+                account = self.get_app_path("certs", "live", "acme")
                 if not account.is_dir():
                     account = self.get_app_path("acme")
                 archive = self.get_app_path("acme-build-account.tar")
@@ -544,9 +529,14 @@ class Container(BaseContainer):
                         os.unlink(temporary)
                         raise
                 os.replace(temporary, str(archive))
+
+    @cached_property
+    def config_path(self) -> "Path":
+        from types import SimpleNamespace
+
         files, waf = self._rendered_site_files
         result = dict(files)
         root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
-        context.write_files(self, result)
+        return prepare_files(self, result)

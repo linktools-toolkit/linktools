@@ -15,6 +15,12 @@ if TYPE_CHECKING:
     from linktools.cntr import ContainerManager
 
 
+@pytest.fixture(autouse=True)
+def _configured_inputs(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
+
+
 def _state(services):
     return ProjectRuntimeState(project="aio", services=tuple(services), backend="docker")
 

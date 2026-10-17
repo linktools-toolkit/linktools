@@ -16,8 +16,8 @@ from test_lifecycle_rebuild import setup_case
 @pytest.mark.parametrize("contexts", [{"base": "service:base"}, ["base=service:base"]])
 def test_native_build_context_requires_explicit_external_service(tmp_path, contexts):
     manager = setup_case(tmp_path, [
-        ("app", {"app": {"image": "app:new", "build": {"context": "/tmp/app", "additional_contexts": contexts}}}),
-        ("base", {"base": {"image": "base:new", "build": {"context": "/tmp/base"}}}),
+        ("app", {"app": {"image": "app:new", "build": {"context": "/tmp/app", "dockerfile_inline": "FROM scratch", "additional_contexts": contexts}}}),
+        ("base", {"base": {"image": "base:new", "build": {"context": "/tmp/base", "dockerfile_inline": "FROM scratch"}}}),
     ])
     instrument_images(manager)
     with pytest.raises(ContainerError, match="Build contexts.*base"):
@@ -26,15 +26,14 @@ def test_native_build_context_requires_explicit_external_service(tmp_path, conte
     assert all("base:new" not in event[1] for event in manager.events if event[0] == "inspect-images")
 
 
-def test_provider_owned_requirements_are_checked_without_selecting_provider(tmp_path):
+def test_unreferenced_provider_does_not_block_or_expand_application(tmp_path):
     manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}}),
                                     ("provider", {"provider": {"image": "provider:new"}})])
-    manager.containers["provider"].get_runtime_requirements = lambda names: (
-        {"provider": ("provider",)} if "app" in names else {})
     instrument_images(manager)
-    with pytest.raises(ContainerError, match="dependencies.*provider"):
-        manager.compose_operations.up(["app"], pull=True)
-    assert_no_image_or_service_mutation(manager)
+    manager.compose_operations.up(["app"], pull=True)
+    assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
+    assert [event[1] for event in manager.events if event[0] == "pull"] == [("app",)]
+    assert all("provider:new" not in event[1] for event in manager.events if event[0] == "inspect-images")
 
 
 def test_pending_external_zero_scale_does_not_bypass_namespace_readiness(tmp_path):
@@ -91,9 +90,9 @@ def test_shared_native_completed_dependency_overrides_incomplete_last_fragment(t
 def test_native_build_context_transitive_dependency_stays_in_explicit_scope(tmp_path):
     manager = setup_case(tmp_path, [
         ("app", {"app": {"image": "app:new", "build": {
-            "context": "/tmp/app", "additional_contexts": {"base": "service:base"}}}}),
+            "context": "/tmp/app", "dockerfile_inline": "FROM scratch", "additional_contexts": {"base": "service:base"}}}}),
         ("base", {"base": {"image": "base:new", "build": {
-            "context": "/tmp/base", "additional_contexts": {"third": "service:third"}}}}),
+            "context": "/tmp/base", "dockerfile_inline": "FROM scratch", "additional_contexts": {"third": "service:third"}}}}),
         ("third", {"third": {"image": "third:new"}}),
     ])
     instrument_images(manager)

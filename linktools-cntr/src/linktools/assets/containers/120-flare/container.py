@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.ext import endpoint, Authelia, Flare, Nginx, load_port_url
 from linktools.core import ConfigField, ConfigLazy, ConfigRef, LazyProvider
 from linktools.decorator import cached_property
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
-
     @cached_property
     def fields(self) -> "dict[str, Any]":
         return dict(
@@ -115,12 +115,15 @@ class Container(BaseContainer):
             except BaseException:
                 shutil.rmtree(str(temporary))
                 raise
-        context.write_files(self, self._navigation_files(), mode=0o640,
-                            group=self.get_config("DOCKER_GID", type=int))
+
+    @cached_property
+    def config_path(self) -> "Path":
+        return prepare_files(
+            self, self._navigation_files(), mode=0o640, group=self.get_config("DOCKER_GID", type=int))
 
     def on_check(self, context: "OperationContext") -> None:
         for name in ("apps.yml", "bookmarks.yml"):
-            yaml.safe_load(context.file_path(self, name).read_text(encoding="utf-8"))
+            yaml.safe_load((self.config_path / name).read_text(encoding="utf-8"))
 
     def _navigation_files(self) -> "dict[str, str]":
 

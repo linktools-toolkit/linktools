@@ -3,6 +3,15 @@
 """Named starts preserve explicit services; full starts include their requirements."""
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _configured_inputs(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
+
+
 def test_partial_start_does_not_expand_required_integration_providers(fresh_manager):
     operations = fresh_manager.compose_operations
     selection = operations.select(("portainer",), for_start=True)

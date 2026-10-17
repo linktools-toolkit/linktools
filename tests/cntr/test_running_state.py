@@ -26,6 +26,11 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 def _record(manager, monkeypatch, fail=False):
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
+    from linktools.cntr.artifacts import prepare_files
+    for name in ("nginx", "lldap", "authelia", "flare"):
+        container = manager.containers[name]
+        monkeypatch.setitem(container.__dict__, "config_path",
+                            prepare_files(container, {"config.yml": "routing fixture"}))
     _ready_dependencies(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
@@ -234,11 +239,11 @@ def test_failed_start_preserves_config_only_state(monkeypatch, fresh_manager, pr
     fresh_manager.running_state._set(["portainer"] if previous else [])
     _record(fresh_manager, monkeypatch)
 
-    def failed(context, services):
-        raise RuntimeError("file publication failed")
+    def failed(context):
+        raise RuntimeError("configuration check failed")
 
-    monkeypatch.setattr("linktools.cntr.artifacts.publish_prepared_files", failed)
-    with pytest.raises(ContainerError, match="publishing file references failed"):
+    monkeypatch.setattr(fresh_manager.lifecycle, "check", failed)
+    with pytest.raises(RuntimeError, match="configuration check failed"):
         cntr_main.command.on_command_up(names=["portainer", "nginx"], pull=False)
 
     assert ("portainer" in fresh_manager.running_state.get_persisted()) == previous
@@ -268,7 +273,7 @@ def test_unrunnable_config_only_selection_stays_pending(monkeypatch, fresh_manag
     monkeypatch.setattr(target, "services", {})
     monkeypatch.setattr(type(target), "dependencies", property(lambda self: []))
     for container in fresh_manager.containers.values():
-        monkeypatch.setattr(container, "services", {})
+        monkeypatch.setitem(container.__dict__, "services", {})
     _record(fresh_manager, monkeypatch)
 
     with pytest.raises(ContainerError, match="[Nn]o runnable service"):

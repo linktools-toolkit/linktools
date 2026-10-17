@@ -1,18 +1,24 @@
 services:
   nginx:
-    image: '{{ container.get_service_name("nginx") }}:{{ container.cert_image_revision }}'
     build:
-      context: '{{ container.get_docker_context_path() }}'
-      dockerfile: '{{ container.get_docker_file_destination() }}'
+      args:
+        NGINX_TAG: '{{ NGINX_TAG }}'
+#     {% if NGINX_HTTPS_ENABLE %}
+        NGINX_ROOT_DOMAIN: {{ config.get('NGINX_ROOT_DOMAIN') | tojson }}
+        NGINX_CERT_DOMAINS: {{ "\n".join(container.acme_ssl_domains) | tojson }}
+        ACME_SERVER: {{ config.get('ACME_SERVER') | tojson }}
+        ACME_DNS_API: {{ config.get('ACME_DNS_API') | tojson }}
+        ACME_ACCOUNT_EMAIL: {{ config.get('ACME_ACCOUNT_EMAIL') | tojson }}
+        ACME_DNS_CREDENTIALS_DIGEST: '{{ utils.get_hash(container.acme_dns_environment, "sha256") }}'
+#     {% endif %}
 #   {% if NGINX_HTTPS_ENABLE %}
       secrets:
         - cntr_acme_account
         - cntr_acme_dns
 #   {% endif %}
     volumes:
-      - '{{ container.get_app_path("generated", "current") }}:/etc/nginx/managed:ro'
+      - '{{ container.config_path }}:/etc/nginx/managed:ro'
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
-      - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
 #   {% if NGINX_HTTPS_ENABLE %}
       - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
 #   {% endif %}

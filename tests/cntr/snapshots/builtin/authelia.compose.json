@@ -35,8 +35,8 @@
         "AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secrets/jwt_secret",
         "AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/secrets/oidc_hmac_secret",
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS=ldap://lldap:3890",
-        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN=dc=_",
-        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,dc=_",
+        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN=dc=example,dc=test",
+        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,dc=example,dc=test",
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/authentication_backend_ldap_password",
         "X_AUTHELIA_CONFIG_FILTERS=template"
       ],
@@ -57,11 +57,11 @@
       "volumes": [
         "<APP_DATA>/authelia/config:/config",
         "<APP_DATA>/authelia/secrets:/secrets:ro",
-        "<APP_DATA>/authelia/generated/current/configuration.yml:/generated/configuration.yml:ro",
-        "<APP_DATA>/authelia/generated/current/configuration.acl.yml:/generated/configuration.acl.yml:ro",
-        "<APP_DATA>/authelia/generated/current/configuration.2fa.yml:/generated/configuration.2fa.yml:ro",
-        "<APP_DATA>/authelia/generated/current/configuration.oidc.yml:/generated/configuration.oidc.yml:ro",
-        "<APP_DATA>/authelia/generated/current/authentication_backend_ldap_password:/generated/authentication_backend_ldap_password:ro"
+        "<APP_DATA>/authelia/generated/<CONFIG_DIGEST>/configuration.yml:/generated/configuration.yml:ro",
+        "<APP_DATA>/authelia/generated/<CONFIG_DIGEST>/configuration.acl.yml:/generated/configuration.acl.yml:ro",
+        "<APP_DATA>/authelia/generated/<CONFIG_DIGEST>/configuration.2fa.yml:/generated/configuration.2fa.yml:ro",
+        "<APP_DATA>/authelia/generated/<CONFIG_DIGEST>/configuration.oidc.yml:/generated/configuration.oidc.yml:ro",
+        "<APP_DATA>/authelia/generated/<CONFIG_DIGEST>/authentication_backend_ldap_password:/generated/authentication_backend_ldap_password:ro"
       ]
     },
     "authelia-admin": {
@@ -74,7 +74,7 @@
       "environment": [
         "AAD_LOGLEVEL=DEBUG",
         "AAD_AUTHELIA_CONFIG_PATH=/generated/configuration.yml",
-        "AAD_AUTHELIA_DOMAIN=",
+        "AAD_AUTHELIA_DOMAIN=sso.example.test",
         "AAD_AUTHELIA_COOKIE_NAME=aio-auth-session",
         "AAD_AUTHELIA_MIN_AUTH_LEVEL=1",
         "AAD_DIRECTORY_TYPE=lldap-graphql",
@@ -83,8 +83,8 @@
         "AAD_DIRECTORY_LLDAP_GRAPHQL_PASSWORD=snapval",
         "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST=lldap",
         "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT=3890",
-        "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN=dc=_",
-        "TRUSTED_ORIGINS=",
+        "AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN=dc=example,dc=test",
+        "TRUSTED_ORIGINS=https://sso.example.test",
         "NODE_TLS_REJECT_UNAUTHORIZED=0"
       ],
       "hostname": "authelia-admin",
@@ -105,7 +105,7 @@
       "volumes": [
         "<APP_DATA>/authelia/config:/config",
         "<APP_DATA>/authelia/secrets:/secrets:ro",
-        "<APP_DATA>/authelia/generated/current/configuration.yml:/generated/configuration.yml:ro"
+        "<APP_DATA>/authelia/generated/<CONFIG_DIGEST>/configuration.yml:/generated/configuration.yml:ro"
       ]
     },
     "authelia-redis": {

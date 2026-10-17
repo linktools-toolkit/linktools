@@ -13,6 +13,12 @@ from linktools.cntr.doctor import Doctor
 from linktools.cntr.execution.planner import ExecutionPlanner
 
 
+@pytest.fixture(autouse=True)
+def _configured_inputs(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
+
+
 class _WriteAttempted(AssertionError):
     pass
 

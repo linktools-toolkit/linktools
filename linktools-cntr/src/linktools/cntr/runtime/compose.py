@@ -414,13 +414,13 @@ class ComposeRunner:
                 return state
             for service in pending:
                 matches = state.service_instances(service)
+                spec = context.compose_model["services"][service]
                 if not matches or any((item.state not in ("running", "restarting") and not
                                        (item.state == "exited" and item.exit_code == 0 and
                                         (service in completed or item.health is None))) or
                                       (service not in completed and item.health == "unhealthy") or item.image_id != image_ids[service]
                                       for item in matches):
                     raise ContainerError("Service {} did not reach its desired runtime state".format(service))
-                spec = context.compose_model["services"][service]
                 replicas = spec.get("scale", spec.get("deploy", {}).get("replicas", 1))
                 if len(matches) != replicas:
                     raise ContainerError("Service {} did not reach its desired replica count".format(service))
@@ -741,23 +741,25 @@ class ComposeRunner:
             service_dependencies(spec).get(service, {}).get("condition") == "service_completed_successfully"
             for name, spec in model["services"].items()
             if context.target_services is None or name in context.target_services)
-        if completed:
-            self.wait_service_completed(context, service, timeout=timeout)
-            return False
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             actual = self.manager.docker_inspector.get_project_state(context.project_containers, services=(service,))
             matches = actual.service_instances(service)
-            if matches and all(
+            if completed:
+                if self._service_completed(matches, service, timeout is None):
+                    return False
+            elif matches and all(
                     (item.state == "running" and item.health in (None, "healthy")) or
                     (item.state == "exited" and item.exit_code == 0 and item.health is None)
                     for item in matches):
                 return any(item.state == "running" for item in matches)
-            if any(item.state in ("dead", "exited") or item.health == "unhealthy" for item in matches):
+            if not completed and any(item.state in ("dead", "exited") or item.health == "unhealthy" for item in matches):
                 raise ContainerError("Service {} failed to become ready".format(service))
             if timeout is None and (not matches or any(
                     item.state not in ("running", "restarting", "exited") for item in matches)):
                 raise ContainerError("Service {} is unavailable".format(service))
             if deadline is not None and time.monotonic() >= deadline:
+                if completed:
+                    raise ContainerError("Service {} did not complete successfully".format(service))
                 raise ContainerError("Service {} did not become ready".format(service))
             time.sleep(0.5)

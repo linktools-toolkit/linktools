@@ -13,16 +13,19 @@ from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.artifacts import AppliedServiceModels
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
+from linktools.cntr.lifecycle.hooks import HookPhase, HookRegistry
 from linktools.cntr.runtime.compose import ComposeRunner, order_services
 from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
 
-class Hooks:
+class Hooks(HookRegistry):
     def __init__(self, events, owner):
-        self.events, self.owner = events, owner
+        super().__init__(owner=owner)
+        self.events, self.event_owner = events, owner
 
     def call(self, phase, context, reverse=False):
-        self.events.append((phase.value, self.owner))
+        self.events.append((phase.value, self.event_owner))
+        super().call(phase, context, reverse=reverse)
 
 
 class Index:
@@ -46,8 +49,8 @@ class Owner:
         self.docker_compose = {"services": services}
         self.hooks = Hooks(manager.events, name)
 
-    def get_runtime_requirements(self, required):
-        return {}
+    def add_start_hook(self, key, hook, **kwargs):
+        self.hooks.register(HookPhase.BEFORE_START, hook, key=key, **kwargs)
 
     def on_prepare(self):
         pass
@@ -416,14 +419,23 @@ def test_declared_running_consumer_prepares_before_checks(tmp_path):
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
 
 
-def test_completed_service_uses_compose_conditions_without_new_task_deadline():
-    calls = []
-    runner = ComposeRunner(SimpleNamespace())
-    runner.wait_service_completed = lambda context, service, timeout: calls.append((service, timeout))
+def test_completed_service_uses_compose_conditions_without_new_task_deadline(monkeypatch):
+    observations, sleeps = [], []
+
+    def inspect(containers, services=None):
+        observations.append(services)
+        state = "running" if len(observations) == 1 else "exited"
+        return ProjectRuntimeState("test", (SimpleNamespace(
+            service="job", state=state, health=None, exit_code=0, labels={}),), "docker")
+
+    monkeypatch.setattr("time.monotonic", lambda: pytest.fail("Completion must not add a task deadline"))
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=SimpleNamespace(get_project_state=inspect)))
     ctx = OperationContext(target_services=("job", "web"), compose_model={"services": {
         "job": {}, "web": {"depends_on": {"job": {"condition": "service_completed_successfully"}}}}})
     assert runner.wait_service_ready(ctx, "job") is False
-    assert calls == [("job", None)]
+    assert observations == [("job",), ("job",)]
+    assert sleeps == [0.5]
 
 
 def test_hook_cannot_change_operation_scope(tmp_path):

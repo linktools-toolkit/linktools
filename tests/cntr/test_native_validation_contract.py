@@ -13,7 +13,7 @@ def test_isolated_validation_preserves_image_env_and_mounts_without_network_iden
         "image": "nginx:target", "ports": ["80:80"],
         "depends_on": {"app": {}},
         "networks": {"private": {"ipv4_address": "10.0.0.2"}},
-        "environment": {"PASSWORD_FILE": "/generated/current/password"},
+        "environment": {"PASSWORD_FILE": "/generated/password"},
         "volumes": [{"type": "bind", "source": "/host/generated",
                      "target": "/generated", "read_only": True}],
     }}}

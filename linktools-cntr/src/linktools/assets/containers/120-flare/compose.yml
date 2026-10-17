@@ -19,8 +19,8 @@ services:
       - 'FLARE_GUIDE=1'
     volumes:
       - '{{ APP_PATH/"runtime-app" }}:/app'
-      - '{{ APP_PATH/"generated/current/apps.yml" }}:/app/apps.yml:ro'
-      - '{{ APP_PATH/"generated/current/bookmarks.yml" }}:/app/bookmarks.yml:ro'
+      - '{{ container.config_path/"apps.yml" }}:/app/apps.yml:ro'
+      - '{{ container.config_path/"bookmarks.yml" }}:/app/bookmarks.yml:ro'
     networks:
       - nginx
 

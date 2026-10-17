@@ -30,8 +30,8 @@
       "user": "<DOCKER_UID>:<DOCKER_GID>",
       "volumes": [
         "<APP_DATA>/flare/runtime-app:/app",
-        "<APP_DATA>/flare/generated/current/apps.yml:/app/apps.yml:ro",
-        "<APP_DATA>/flare/generated/current/bookmarks.yml:/app/bookmarks.yml:ro"
+        "<APP_DATA>/flare/generated/<CONFIG_DIGEST>/apps.yml:/app/apps.yml:ro",
+        "<APP_DATA>/flare/generated/<CONFIG_DIGEST>/bookmarks.yml:/app/bookmarks.yml:ro"
       ]
     }
   }

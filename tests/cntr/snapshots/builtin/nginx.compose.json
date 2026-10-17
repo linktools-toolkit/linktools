@@ -15,6 +15,15 @@
   "services": {
     "nginx": {
       "build": {
+        "args": {
+          "ACME_ACCOUNT_EMAIL": "",
+          "ACME_DNS_API": "dns_cf",
+          "ACME_DNS_CREDENTIALS_DIGEST": "1816625231d9a6cf64af1183069b1740eeb296b937032d3997741b4cad6e3f7a",
+          "ACME_SERVER": "letsencrypt",
+          "NGINX_CERT_DOMAINS": "example.test\n*.example.test",
+          "NGINX_ROOT_DOMAIN": "example.test",
+          "NGINX_TAG": "stable-alpine"
+        },
         "context": "<ASSETS>/100-nginx",
         "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
         "secrets": [
@@ -50,7 +59,7 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx:06570ea1c393326c",
+      "image": "aio-nginx",
       "logging": {
         "driver": "json-file",
         "options": {
@@ -72,9 +81,8 @@
       ],
       "restart": "unless-stopped",
       "volumes": [
-        "<APP_DATA>/nginx/generated/current:/etc/nginx/managed:ro",
+        "<APP_DATA>/nginx/generated/<CONFIG_DIGEST>:/etc/nginx/managed:ro",
         "<APP_DATA>/nginx/certs:/etc/certs",
-        "<APP_DATA>/nginx/acme:/root/.acme.sh",
         "<APP_DATA>/nginx/acme-secrets:/run/acme-secrets:ro"
       ]
     }

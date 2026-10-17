@@ -174,6 +174,8 @@ def test_load_fails_closed_on_structurally_invalid_index(tmp_path, payload):
 # -- Wired into compose/Dockerfile generation ---------------------------------
 
 def test_get_docker_compose_file_records_compose_artifact(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     nginx = fresh_manager.containers["nginx"]
     nginx.get_docker_compose_file()
     artifacts = fresh_manager.artifact_index.load()
@@ -193,6 +195,8 @@ def test_prepare_installed_containers_alone_does_not_write_dockerfile(fresh_mana
 
 
 def test_real_compose_generation_writes_the_dockerfile(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     nginx = fresh_manager.containers["nginx"]
     nginx.get_docker_compose_file()
 
@@ -261,6 +265,8 @@ def test_non_git_local_repo_container_has_no_repository_revision(fresh_manager, 
 
 
 def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     nginx = fresh_manager.containers["nginx"]
     compose_path = nginx.get_docker_compose_file()
     before = os.stat(compose_path).st_mtime_ns
@@ -269,6 +275,8 @@ def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager)
     # Re-render from a fresh container instance over the same data dir --
     # deterministic config means byte-identical output.
     fresh_manager.__dict__.pop("containers", None)
+    fresh_manager.__dict__.pop("integration_snapshot", None)
+    fresh_manager.load_installed_config_metadata()
     nginx_again = fresh_manager.containers["nginx"]
     nginx_again.get_docker_compose_file()
 

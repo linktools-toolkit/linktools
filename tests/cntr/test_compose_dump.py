@@ -10,6 +10,8 @@ import yaml
 
 
 def test_compose_write_is_safe_yaml(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     container = fresh_manager.containers["nginx"]
     path = container.get_docker_compose_file()
     assert path is not None

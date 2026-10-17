@@ -55,6 +55,8 @@ def _pick_container(fresh_manager):
 
 
 def test_cached_properties_store_on_the_container_instance(fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     container = _pick_container(fresh_manager)
     for name in ("docker_compose", "docker_file", "services", "hooks"):
         first = getattr(container, name)

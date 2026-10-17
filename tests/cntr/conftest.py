@@ -16,7 +16,9 @@ def snapshot_manager(tmp_path_factory):
     """
     data = tmp_path_factory.mktemp("data")
     temp = tmp_path_factory.mktemp("temp")
-    return _harness.make_manager(data, temp)
+    manager = _harness.make_manager(data, temp)
+    _harness.configure_builtin_snapshot(manager)
+    return manager
 
 
 @pytest.fixture(scope="session")

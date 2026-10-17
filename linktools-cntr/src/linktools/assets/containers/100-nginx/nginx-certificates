@@ -4,12 +4,12 @@ umask 077
 
 base=/etc/certs
 seed=/opt/nginx-initial
-revision=$(cat "$seed/revision")
 main=$(cat "$seed/primary")
-root="$base/$revision"
+root="$base"
 versions="$root/versions"
 owner=$(stat -c '%u:%g' "$base")
 mkdir -p "$versions"
+chown "$owner" "$versions"
 touch "$base/.acme.lock"
 chown "$owner" "$base/.acme.lock"
 exec 9>"$base/.acme.lock"
@@ -34,6 +34,13 @@ verify() (
             *) openssl x509 -in "$fullchain" -noout -checkhost "$domain" >/dev/null || return 1 ;;
         esac
     done < "$seed/domains"
+)
+
+compatible() (
+    directory=$1
+    for name in primary domains settings; do
+        cmp -s "$seed/$name" "$directory/$name" || return 1
+    done
 )
 
 configure() (
@@ -69,20 +76,35 @@ reload_tls() (
 case "$1" in
     install|check)
         action=$1
-        if test -L "$root/live" && verify "$root/live"; then
-            if test "$action" = install; then
-                test -d "$root/live/acme" || { echo 'Active certificate has no ACME state' >&2; exit 1; }
+        if test -L "$root/live" && compatible "$root/live" && verify "$root/live"; then
+            if test "$action" = check || test -d "$root/live/acme"; then
+                exit 0
             fi
+        fi
+        selected=
+        for directory in "$versions"/*; do
+            test -d "$directory" || continue
+            compatible "$directory" && verify "$directory" || continue
+            if test "$action" = install && ! test -d "$directory/acme"; then
+                continue
+            fi
+            if test -z "$selected" || test "$directory" -nt "$selected"; then
+                selected=$directory
+            fi
+        done
+        if test -n "$selected"; then
+            publish "$(basename "$selected")"
             exit 0
         fi
         source="$seed/certs"
         account="$seed/acme"
-        if test "$action" = check && test -d "$root/previous" && verify "$root/previous"; then
+        if test "$action" = check && compatible "$root/previous" && verify "$root/previous"; then
             source="$root/previous"
         fi
         verify "$source"
         destination=$(mktemp -d "$versions/initial-XXXXXXXXXX")
         id=$(basename "$destination")
+        cp "$seed/primary" "$seed/domains" "$seed/settings" "$destination/"
         for suffix in cert key fullchain; do
             if test -f "$source/${main}_${suffix}.pem"; then
                 cp "$source/${main}_${suffix}.pem" "$destination/${main}_${suffix}.pem"
@@ -93,13 +115,14 @@ case "$1" in
             cp -a "$account/." "$destination/acme/"
             configure "$destination"
         fi
-        chown -R "$owner" "$root"
+        chown -R "$owner" "$destination"
         publish "$id"
         ;;
     renew)
         test -L "$root/live" || exit 0
         previous=$(basename "$(readlink "$root/live")")
         directory="$versions/$previous"
+        compatible "$directory" || { echo 'Active certificate renewal settings changed' >&2; exit 1; }
         /usr/local/bin/nginx-acme "$directory/acme" --cron >/dev/null
         chown -R "$owner" "$directory/acme" "$directory/renewal"
         renewal="$directory/renewal"
@@ -110,6 +133,7 @@ case "$1" in
             destination=$(mktemp -d "$versions/renew-XXXXXXXXXX")
             id=$(basename "$destination")
             mkdir "$destination/renewal"
+            cp "$seed/primary" "$seed/domains" "$seed/settings" "$destination/"
             cp -a "$directory/acme" "$destination/acme"
             for suffix in cert key fullchain; do
                 if test -f "$renewal/${main}_${suffix}.pem"; then

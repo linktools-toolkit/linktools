@@ -49,6 +49,11 @@ class LifecycleDispatcher:
             yield LifecycleStep(container, HookPhase.BEFORE_START)
         yield LifecycleStep(phase=HookPhase.BEFORE_START)
 
+    def prepare_start(self, context: "OperationContext") -> None:
+        """Initialize only explicitly selected owners before comparing consumers."""
+        self._dispatch_steps((LifecycleStep(container, callback="on_starting")
+                              for container in tuple(context.target_containers)), context)
+
     @classmethod
     def iter_steps(cls, action: str, containers: "Sequence[BaseContainer]",
                    after: "bool | None" = None,
@@ -94,9 +99,21 @@ class LifecycleDispatcher:
                               for container in tuple(context.target_containers)), context)
 
     @contextlib.contextmanager
-    def notify_start(self, context: "OperationContext") -> "Iterator[None]":
+    def notify_start(self, context: "OperationContext", *, prepare: bool = True,
+                     generated_only: "Iterable[BaseContainer]" = ()) -> "Iterator[None]":
+        """Notify application targets; skip preparation after a prior prepare_start."""
         targets = tuple(context.target_containers)
-        self._dispatch_steps(self._preparation_steps(targets), context)
+        if prepare:
+            self.prepare_start(context)
+        generated_only = set(generated_only)
+        for container in targets:
+            if container in generated_only:
+                from ..artifacts import prepared_hooks
+                for hook in prepared_hooks(container):
+                    hook.callback(context)
+            else:
+                container.hooks.call(HookPhase.BEFORE_START, context)
+        self.manager.hooks.call(HookPhase.BEFORE_START, context)
         yield
         try:
             self._dispatch_steps(self.iter_steps("up", targets, after=True), context)

@@ -24,6 +24,8 @@ _SECRET_PROXY_URL = "http://user:super-secret-password@proxy.example:8080"
 
 @pytest.fixture(autouse=True)
 def _no_real_processes(monkeypatch, fresh_manager):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(fresh_manager)
     def fail(*args, **kwargs):
         raise AssertionError("Plan must not execute a compose apply command")
 
@@ -109,6 +111,8 @@ def test_plan_restart_includes_stop_and_up(fresh_manager):
     assert plan.commands[0].phase == "stop"
     assert all(c.phase == "up" for c in plan.commands[1:])
     assert plan.commands[0].args[-2:] == ("stop", "portainer")
+    assert any("related running consumers may apply changed generated mounts" in warning
+               for warning in plan.warnings)
 
 
 def test_plan_down_includes_down_command(fresh_manager):
@@ -378,6 +382,8 @@ def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager):
 
 
 def test_restart_plan_rejects_named_config_only_target_without_consumer(monkeypatch, fresh_manager):
+    monkeypatch.setattr(fresh_manager.installed_state, "get",
+                        lambda resolve=False: [fresh_manager.containers["portainer"]])
     monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
 

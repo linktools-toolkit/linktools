@@ -11,6 +11,8 @@ from linktools.types import MISSING
 
 
 def _neutralize_runtime(manager, monkeypatch):
+    from _harness import configure_builtin_inputs
+    configure_builtin_inputs(manager)
     from _harness import stub_generated_runtime
     stub_generated_runtime(manager, monkeypatch)
     manager.config.set("NGINX_ROOT_DOMAIN", "example.test")

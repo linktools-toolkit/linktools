@@ -1,8 +1,9 @@
 # Container operation lifecycle
 
-The public context is `OperationContext`. A container uses the existing
-`on_starting` and `on_check` callbacks; it does not implement a separate generated
-configuration lifecycle.
+The public context is `OperationContext`. A container uses `on_starting` for
+persistent initialization and `on_check` for validation. Derived configuration
+paths are ordinary, optional container properties. `prepare_files` registers an
+existing start hook rather than adding a configuration lifecycle callback.
 
 ## Operation context fields
 
@@ -26,16 +27,17 @@ immutable `ComposeSelection` fixes the action scope; `OperationContext` exposes
 that scope and the working inputs to callbacks, without granting hooks authority
 to select additional actions.
 
-- `context.compose_model` is the native Compose model bound to prepared files and
-  selected image revisions. The runner constructs commands from that model
+- `context.compose_model` is the native Compose model with selected image inputs.
+  Generated-file mount sources are declared directly by the template; the
+  framework does not substitute mount paths after rendering
 - `context.initial_runtime_state` owns observed services, image IDs and exact
   namespace bindings. Derived views do not introduce another state cache
 - `context.service_models` (`AppliedServiceModels`) owns immutable current and
   previous per-service YAML snapshots. `previous_model(service)` returns an
   independent decoded copy; recording and restoring retain the disk format
-- `context.prepared_dirs` owns candidate immutable file trees. Publication changes
-  their public references only after application; retained snapshots protect
-  historical running and rollback inputs from pruning
+- `context.prepared_dirs` records immutable trees materialized by start hooks.
+  Successful applied snapshots retain the actual mount paths needed by running
+  services and rollback; there is no mutable publication pointer
 
 Image preparation has one orchestration entry point. The image preparer computes
 build/pull requirements; the runner executes commands; `ComposeOperations`
@@ -45,15 +47,26 @@ inputs because those relationships require different restore actions.
 
 ## Ordering and responsibilities
 
-A named `up` or `restart` operation applies only the services belonging to the
-explicitly named containers. This boundary also controls preparation, image
-inspection, pull, build, callbacks, snapshots and recovery. Dependencies and
-integration consumers are not implicitly added. Required external services must
-already satisfy their runtime conditions; otherwise the operation explains which
-containers to include explicitly before refreshing images or stopping services.
-Successful one-shot dependencies satisfy `service_completed_successfully` without
-remaining running. Unselected services' pending configuration is not applied or
-recursively interpreted as a new prerequisite.
+A named `up` or `restart` prepares images and initializes only explicitly
+selected containers. It also generates candidates for related, already-running
+integration consumers. Current declarations and stored producer provenance both
+identify consumers, including removal of the final declaration. Stopped consumers
+are not initialized or started.
+
+Only consumers whose generated-file mount changes join service application.
+The new model must otherwise match its successful applied snapshot, including
+referenced network/volume definitions. Pending environment, image, port or other
+Compose changes require explicitly selecting that consumer when its generated
+configuration also changes. Unchanged configuration leaves the consumer alone.
+Actual running images are pinned without extra pull or build. Missing applied
+snapshots require explicit selection. Unchanged consumers receive no application
+callbacks. Additional consumers execute only the generated-file start hooks,
+not their persistent initialization or source-download hooks.
+
+There is no additional global runtime-provider discovery or readiness gate.
+Container dependencies and native Compose edges retain their existing meaning.
+Nginx performs its own validation when it is applied; an unselected nginx
+container does not impose checks on unrelated named operations.
 
 An operation without names still resolves the full project, its required
 providers and running declared consumers. Full-project generated-input metadata
@@ -64,8 +77,8 @@ both modes, and execution uses `--no-deps` with the resolved service list.
 
 A named operation on a shared Compose service requires all contributing
 containers to be named, so no unprepared contributor is silently applied. Native
-Compose resolves their merged definitions. Managed build revisions follow the
-contributing build owner; ambiguous build ownership fails before application.
+Compose resolves their merged definitions. Managed build revisions use the final
+Compose build inputs; pending rendered Dockerfiles are matched by destination path.
 
 Running outside consumers with `restart: true` edges or namespace bindings can
 need joint application or recovery when a selected provider changes. Named
@@ -83,18 +96,21 @@ reports the unresolved selection rather than guessing startup commands.
 
 The operation then runs:
 
-1. `on_starting`, container `BEFORE_START`, manager `BEFORE_START`: prepare build
-   inputs, persistent secrets and immutable configuration inputs for the selected
-   owners. Do not change a running service or another owner's lifecycle.
-2. Image preparation, using the resolved model and the existing image preparer.
-3. `on_check` and `CHECK`: validate the exact prepared inputs with the target
-   images. No service has been stopped or replaced at this point.
-4. Framework-managed service application in Compose dependency order, followed by
-   readiness confirmation and per-service applied-model recording.
-5. `on_started` and `AFTER_START`: post-application notifications. A failure here
-   reports that services were applied; it does not trigger deployment rollback.
+1. Explicit targets' `on_starting` initializes persistent state and build inputs.
+2. Read related running consumers' declared models. Their cached configuration
+   paths refer to content-addressed directories and register deferred file writes.
+   Compare those models with successful applied snapshots to choose actual targets.
+3. Explicit targets' container `BEFORE_START` hooks run normally. Additional
+   changed consumers run only their generated-file hooks. Manager `BEFORE_START`
+   runs once, followed by final model validation.
+4. Prepare explicit images, then run `on_check` and `CHECK` for actual targets.
+   All candidate files exist, but no service has been stopped or replaced.
+5. Apply services through Compose, confirm readiness and record successful models.
+   The source paths in those models identify the exact generated files used.
+6. `on_started` and `AFTER_START` run for applied owners. A failure here reports
+   that services were applied; it does not trigger deployment rollback.
 
-`restart` performs its explicit stop only after step 3. Required providers that
+`restart` performs its explicit stop only after step 4. Required providers that
 were not explicitly selected are not included in the stop set. `down` uses the stop callbacks after loading preparation and performs no
 start preparation, build or native check.
 Status reads metadata and actual state without invoking preparation callbacks.
@@ -109,8 +125,8 @@ starts, `down`, and `compose` retain project-wide preparation. The standard
 `exec <name> up/restart` entry delegates preparation to the same named operation;
 other exec commands retain their existing preparation entry. Exceptions propagate
 before the requested runtime operation starts. Custom callbacks must tolerate
-repeated calls. Generated integration files belong in `on_starting(context)`,
-which runs later for the selected targets.
+repeated calls. Generated files are prepared through deferred start hooks without
+replaying persistent initialization for collateral consumers.
 
 Metadata-only planning, status, doctor and config commands do not call
 `on_prepare()`. A hook that changes declarations can therefore change the actual
@@ -137,40 +153,84 @@ rollback artifacts and are not deleted if later validation or startup fails.
 
 ## Preparing files
 
-Use `context.write_files(self, files, mode=0o600, group=None)` once during
-`on_starting`. `files` maps relative names to UTF-8 text. The call returns an
-immutable host directory and does not publish it to running services. Generated
-files remain owner-only (`0600`) unless the producer explicitly supplies another
-mode. For a non-root reader, use `mode=0o640, group=<container group>` and make that
-group part of the service's effective or supplementary groups. New generation
-roots and nested directories are explicitly `0755`, independently of the CLI
-umask; this directory policy is part of the generation identity. Reuse checks
-both file and directory permissions and rejects drift rather than repairing an
-active generation. A group change needs no privilege when the CLI owns the file
-and the group is its effective primary or supplementary group; other changes
-retain the normal privilege path.
+Only containers that produce configuration need a path property. For example:
 
-Compose templates reference the corresponding logical sources under
-`APP_PATH / "generated/current"`. The framework resolves selected file mounts to
-immutable prepared inputs before image checks or service application. A native
-check reads the same mounts, or uses `context.file_path(self, name)` for a local
-format check. Check callbacks do not overwrite prepared inputs.
+```python
+from linktools.cntr.artifacts import prepare_files
+from linktools.decorator import cached_property
 
-Prefer an individual file bind for a service that consumes only one file. When
-another file changes, unchanged single-file consumers retain their prior mount
-source and are not forced to recreate. A directory bind consumes the complete
-prepared tree. Missing inputs or modified immutable trees cause an explicit
-failure before application.
+@cached_property
+def config_path(self):
+    return prepare_files(self, self.render_configuration())
+```
+
+The Compose template declares `{{ container.config_path }}:/etc/app:ro` directly.
+The property name is local to the container; the framework neither requires nor
+looks up `config_path`. It is fixed for the command's integration snapshot, just
+like the existing resolved-site and rendered configuration views.
+
+Compose rendering resolves configuration for installed containers, including
+installed consumers outside the selected service scope. Uninstalled consumers
+are not rendered. A missing cached config provider may initialize its persistent
+value at this boundary; an existing value is reused. The start hook writes the
+already captured content without resolving configuration again. Read-only
+Plan/Doctor resolution cannot initialize a missing cached value: it reports
+the missing configuration rather than generating a credential or a fallback.
+
+`prepare_files(container, files, mode=0o600, group=None)` copies the relative-name
+to UTF-8-content mapping, computes its immutable directory and registers a
+`BEFORE_START` callback using the existing hook registry. It performs no file
+writes. The callback materializes those same bytes through `context.write_files`;
+`context.file_path` or the declared property can locate them for validation.
+Content, filenames, file mode, group and directory mode all contribute to the
+path hash. Identical inputs retain the same path. Roots and nested directories
+use `0755`; file permissions default to `0600`. A caller may supply `0640` and its
+configured group. Existing immutable trees are checked for drift, never repaired
+in place. Native checks validate the candidate before services are changed.
+
+The successful applied model is the application baseline. Preparing files or
+recording artifact provenance is not evidence that a service applied them.
+Different services may safely retain different immutable generations; old paths
+stay available for rollback. No configuration-revision label, shared `current`
+symlink or extra revision getter is required.
 
 Persistent secrets, databases, user assets and ACME account state are not ordinary
 prepared configuration. They are not replaced by this file mechanism.
 
 ## Applying and recovering
 
-Changed file mounts or Compose definitions recreate the affected service.
+Changed generated-file source paths or other Compose definitions recreate the affected service.
 Unchanged definitions are not force-recreated. Docker Compose can still replace a
 service when its locally selected image changes. Recreating a container does not
 by itself rebuild its image or request a new certificate.
+
+Build identity comes from the final Compose inputs. The image preparer adds the
+reserved `io.linktools.cntr.build-revision` label automatically for build services,
+fingerprinting native build options (including args and ordinary labels), platform,
+and context. Local builds use the pending generated Dockerfile or visible native
+Dockerfile/inline content. An unreadable local Dockerfile fails preparation; pending
+generated Dockerfiles need not already exist on disk. Remote contexts use their
+URL and visible build data without network access. This is an input fingerprint, not a recursive
+hash of arbitrary context files or a remote branch freshness check.
+Changes that should automatically rebuild an image must be expressed through
+`build.args` or another declared input included in this fingerprint. COPY sources
+are not implicitly scanned or injected into templates to manufacture dependencies.
+
+For a local `SourceContainer` snapshot, its resolved versioned context identifies
+the immutable archive, including native Dockerfiles in that archive. A missing
+snapshot tree does not require restoration just to compute its identity. Without
+a local source pointer, ordinary `up` still reuses an existing image without
+fetching source or forcing a build. Container authors do not implement revision
+getters, inject revision args, or set the reserved label themselves; native build
+args and ordinary labels are preserved. Nginx supplies its certificate inputs as
+native build args and uses a stable image name. Its certificate storage keeps
+validated generations and a single active link, independent of the build digest.
+Startup reuses a valid generation only when its domain and ACME settings match;
+restoring an older image can reselect a retained matching generation instead of
+replacing renewed certificates with its initial image seed.
+
+An existing image without the matching automatic label may require one rebuild.
+Subsequent unchanged runs reuse it.
 
 Readiness follows effective Docker health checks and Compose dependency
 conditions. Successful finite jobs are recorded as applied, not running.
@@ -178,11 +238,12 @@ Dependency/job readiness has no newly imposed fixed task deadline. A failure
 blocks subsequent dependents.
 
 The per-service resolved applied model is the sole recovery authority. Recovery
-pins the pre-operation image ID and restores the failed service, any explicitly
-stopped services not yet reapplied, and related consumers sharing a changed file
-input. Newly started related consumers without a prior instance are stopped.
-Independent successful siblings are retained. Initial migration may read old saved Compose files, but
-new operations do not write a second container-level applied snapshot.
+pins the pre-operation image ID and restores failed or explicitly stopped
+services using their old immutable file paths. Existing recovery for changed
+shared bind inputs also applies, including transitive consumers. New services
+without a prior instance are stopped when required by recovery; confirmed
+independent successes remain applied. Initial migration may read old saved
+Compose files, but new operations do not write a second container-level snapshot.
 Live namespace consumers are rebound after a retained provider changes, even if
 an independent service later fails. During full-project recovery, restoring a live consumer may temporarily
 start its previously stopped namespace provider with the old model and image;
@@ -190,21 +251,27 @@ the provider is stopped again after recovery. Interrupting deployment runs
 recovery before propagating the interrupt; interrupting recovery itself stops
 that attempt immediately and may leave it incomplete.
 
-Running new containers bind immutable inputs, not `generated/current`. The latter
-is a convenience reference, updated after successful application and not changed
-while an unselected legacy service still dereferences it. Applied snapshots, not
-this convenience link, define the actual per-service input.
+Generated directories referenced by current or previous successful service models
+are retained. Unknown legacy running inputs are retained conservatively until an
+explicit migration establishes their exact model and generated-file provenance.
 
 A failed recovery reports both the operation and recovery errors. The framework
 never claims to undo database or external-system changes.
 
 ## Built-in services
 
-LLDAP and Authelia prepare configuration and persistent secrets in `on_starting`.
-Authelia validates with its target image. Its admin service mounts only the base
-configuration; ACL-only changes do not change that service's file mount.
+LLDAP, Authelia, Nginx and Flare retain persistent initialization in `on_starting`
+and declare their immutable generated mounts through optional cached properties.
+Authelia and its admin service reference the same generated directory; Redis does
+not mount it. A partial failure can retain successful services because no shared
+publication pointer is changed. Nginx rejects collateral changes requiring a new
+certificate image; select it explicitly to prepare and build that image.
+Authelia validates with its target image. If the main service is unavailable for
+native validation, select Authelia explicitly rather than starting it implicitly.
 
-Flare prepares navigation files with its configured group access. Initial
+Flare prepares navigation files with its configured group access and validates
+the generated YAML. Host UID/GID values are not used to infer container access,
+which depends on the runtime and its identity mapping. Initial
 migration copies other legacy application assets to `runtime-app`, leaving the
 legacy directory available to an old Compose model. Application uses normal
 file mounts and service recreation, not migration callbacks around Compose.
@@ -236,28 +303,48 @@ an alternative configuration to hide a cycle.
 Initial certificates are issued during a single-stage image build. DNS
 credentials are written to `APP_PATH/nginx/acme-secrets/dns.env` with restricted
 host permissions, used as a BuildKit secret and mounted read-only at runtime.
-Only the ACME subprocess loads them into its environment. Known DNS provider
-assignments are removed from saved ACME configuration before it is copied into
-image state, including credentials from a previously selected provider.
+Only the ACME subprocess loads them into its environment. ACME configuration
+is retained intact for account reuse and renewal. acme.sh may save DNS credentials
+in that configuration, including credentials from a previously selected provider;
+these can therefore remain in the image, persisted state and account backups.
 
-The certificate revision identifies build code and TLS inputs, excluding DNS
-credential values. Each revision has a separate TLS storage slot under
-`/etc/certs/<revision>`. The image entrypoint installs preissued material into its
-own slot; ordinary startup does not contact a CA. The restored image/configuration
-therefore references its original slot without Python code changing a TLS pointer.
+Nginx passes its base-image tag, primary domain, certificate domains and ACME
+server/provider/email through native build arguments. The framework fingerprints
+those inputs; nginx does not compute a separate revision or version its image tag.
+DNS credentials are supplied through BuildKit secret inputs; only their digest
+is a build argument. Secret mounts do not prevent acme.sh from persisting credentials
+in its output configuration.
 
-Only this revision-based layout is managed automatically. Before upgrading an old
-deployment, manually back up its container-local `/etc/certs` and `/root/.acme.sh`
-contents. The tool does not copy old writable layers, import flat `certs/live`
-directories, or add migration mounts to rollback models. Existing files and
-backups are left untouched; restoring old-layout data is a manual operation.
-An ACME account supplied in the host `nginx/acme` directory remains a build input
-when no current revision account exists. Changing the certificate script requires
-one normal image rebuild and build-time issuance; ordinary `up` adds no image pull
-or runtime issuance.
+The single nginx instance uses `/etc/certs/live`, an atomic pointer to an
+append-only directory under `/etc/certs/versions`. Each generation retains the
+actual primary/domain/ACME settings alongside its certificate and renewal state.
+Startup checks those settings, certificate validity, domain coverage and the
+public/private key pair before reuse. If the active generation does not match,
+it selects a retained valid matching generation, or installs preissued image
+material when none exists. Restoring an older image can therefore recover its
+previously renewed generation. Ordinary startup does not contact a CA.
+
+Older revision directories and unrecognized flat layouts are not imported or
+deleted. Back up old container-local certificate and account data before upgrading;
+restoring that data is a manual operation. A host `nginx/acme` account remains a
+build input when the active generation has no account state. The builtin certificate
+and ACME scripts use ordinary Dockerfile COPY instructions. Changes to these scripts
+or other COPY sources do not trigger framework automatic builds; request an explicit
+image refresh (`up --pull`) when only those sources change. Docker retains its native
+layer caching.
 
 The existing certificate script owns all TLS pointer changes and renewal reloads,
 under the shared certificate lock. Renewal verifies the served certificate and
 restores the previous served certificate on failure. Host ACME-account archival
-uses the same lock on supported Linux bind mounts. Certificate and account keys
-remain sensitive contents of the image; do not distribute it to untrusted users.
+uses the same lock on supported Linux bind mounts. Certificate keys, account keys
+and saved DNS credentials are sensitive contents of the image and backups; keep
+them private and do not distribute them to untrusted users.
+
+Nginx hashes its selected DNS provider's resolved environment payload with SHA-256
+and supplies only that digest as `ACME_DNS_CREDENTIALS_DIGEST`. The issuance RUN
+consumes this native argument so rotating credentials invalidates its build cache.
+The payload is sorted by environment variable name and uses the same shell-quoted
+UTF-8 text written to the BuildKit secret file. Account archives, certificate keys,
+and renewal output are excluded. The digest is visible in build metadata; providers
+using low-entropy passwords therefore permit offline password guessing from it.
+The generic build fingerprint does not read secret contents.

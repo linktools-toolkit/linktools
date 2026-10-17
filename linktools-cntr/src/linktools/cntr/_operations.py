@@ -132,14 +132,6 @@ class ComposeOperations:
                     providers.add(installed[name])
                     targets.add(installed[name])
                     services.update(set(installed[name].services).intersection(definitions))
-            required = {container.name for container in providers}
-            for container in selection.project_containers:
-                for name, selected in container.get_runtime_requirements(required).items():
-                    if name not in installed:
-                        raise ContainerError("Required provider {!r} is not installed".format(name))
-                    providers.add(installed[name])
-                    targets.add(installed[name])
-                    services.update(set(selected).intersection(definitions))
             if running:
                 for producer in tuple(providers):
                     exposed = {consumer.name for consumer in previous_consumers.get(producer.name, ())}
@@ -187,6 +179,32 @@ class ComposeOperations:
                               and not container.services)
         return ComposeSelection(selection.project_containers, target_order, tuple(ordered), selection.full)
 
+    def integration_consumers(self, selection: ComposeSelection,
+                              running_services: "Iterable[str]") -> "tuple[BaseContainer, ...]":
+        """Find running consumers of current and previously applied declarations."""
+        running = set(running_services)
+        installed = {container.name: container for container in selection.project_containers}
+        historical = {}
+        for entry in self.manager.artifact_index.load().values():
+            if entry.get("kind") == "generated-config":
+                for producer in entry.get("producers", ()):
+                    historical.setdefault(producer, set()).add(entry.get("container"))
+        selected = set(selection.target_containers)
+        pending = list(selection.target_containers)
+        consumers = set()
+        while pending:
+            producer = pending.pop()
+            names = set(historical.get(producer.name, ()))
+            names.update(item.consumer for item in self.manager.integration_snapshot.get(producer.name, ()))
+            for name in names:
+                consumer = installed.get(name)
+                if (consumer is None or consumer in selected or consumer in consumers
+                        or not running.intersection(consumer.services)):
+                    continue
+                consumers.add(consumer)
+                pending.append(consumer)
+        return tuple(container for container in selection.project_containers if container in consumers)
+
     def _make_context(self, commands, selection: ComposeSelection) -> OperationContext:
         return OperationContext(
             actions=[commands] if isinstance(commands, str) else list(filter(None, commands)),
@@ -209,8 +227,9 @@ class ComposeOperations:
 
     def _start(self, names, pull, report, restart):
         import os
-        from .artifacts import (AppliedServiceModels, bind_prepared_files, collect_candidates,
-                                publish_prepared_files, prune_prepared_files)
+        from copy import copy
+        from .artifacts import (AppliedServiceModels, collect_candidates, consumer_config_changes,
+                                validate_consumer_config, prune_prepared_files)
 
         manager = self.manager
         runner = manager.compose_runner
@@ -248,7 +267,42 @@ class ComposeOperations:
         context.initial_runtime_state = actual
         context.previous_compose_contents = saved_compose
 
-        with manager.lifecycle.notify_start(context):
+        image_services = selection.services
+        consumers = () if selection.full else self.integration_consumers(selection, initial)
+        manager.lifecycle.prepare_start(context)
+        if (tuple(context.target_containers) != selection.target_containers or
+                tuple(context.target_services) != selection.services):
+            raise ContainerError("Lifecycle callbacks cannot change the resolved operation targets")
+        extra_services = tuple(service for consumer in consumers
+                               for service in consumer.services if service in initial)
+        if extra_services:
+            candidate_context = copy(context)
+            candidate_context.target_services = selection.services + extra_services
+            candidate = runner.final_model(candidate_context)
+            candidate_store = AppliedServiceModels(manager, candidate, retained_services=initial)
+            extra_services = consumer_config_changes(context, candidate, candidate_store, extra_services)
+        if extra_services:
+            candidate = manager.image_preparer.with_build_revisions(candidate, selection.project_containers, extra_services)
+            extra_services = validate_consumer_config(context, candidate, candidate_store, extra_services)
+        if extra_services:
+            authors = service_owners(selection.project_containers)
+            prepared_owners = set(selection.target_containers) | set(consumers)
+            shared = {owner.name for service in extra_services for owner in authors[service]
+                      if owner not in prepared_owners}
+            if shared:
+                raise ContainerError("Shared integration consumer contributors must be explicitly selected: " +
+                                     ", ".join(sorted(shared)))
+            services = order_service_subset(selection.project_containers, {
+                name: candidate["services"][name] for name in selection.services + extra_services})
+            targets = tuple(dict.fromkeys(owner for service in services for owner in authors[service]))
+            targets += tuple(owner for owner in selection.target_containers if owner not in targets and not owner.services)
+            selection = ComposeSelection(selection.project_containers, targets, services, selection.full)
+            context.target_containers = list(selection.target_containers)
+            context.target_services = selection.services
+
+        extra_owners = tuple(consumer for consumer in consumers
+                             if set(consumer.services).intersection(extra_services))
+        with manager.lifecycle.notify_start(context, prepare=False, generated_only=extra_owners):
             if (tuple(context.target_containers) != selection.target_containers or
                     tuple(context.target_services) != selection.services):
                 raise ContainerError("Lifecycle callbacks cannot change the resolved operation targets")
@@ -257,12 +311,8 @@ class ComposeOperations:
                 raw_model = runner.final_model(context, preserve_disabled=True)
             else:
                 raw_model = runner.final_model(context)
-            ordered = (order_services(selection.project_containers, selection.services, raw_model) if selection.full else
-                       order_service_subset(selection.project_containers, {
-                           name: raw_model["services"][name] for name in selection.services}))
-            selection = ComposeSelection(selection.project_containers, selection.target_containers,
-                                         ordered, selection.full)
-            context.target_services = selection.services
+            raw_model = manager.image_preparer.with_build_revisions(
+                raw_model, selection.project_containers, selection.services)
             owners = service_owners(selection.project_containers)
             model_store = AppliedServiceModels(manager, raw_model, retained_services=initial)
             context.service_models = model_store
@@ -273,10 +323,27 @@ class ComposeOperations:
                     break
                 model_store.retain_previous(runner.saved_service_models(context, tuple(sorted(legacy))))
                 missing.difference_update(legacy)
-            model = bind_prepared_files(context, raw_model, model_store)
-            context.compose_model = manager.image_preparer.with_build_revisions(
-                model, selection.project_containers, selection.services)
-            model_store.set_model(context.compose_model)
+            if extra_services:
+                validate_consumer_config(context, raw_model, model_store, extra_services)
+            model = raw_model
+            if extra_services:
+                services = dict(model["services"])
+                for service in extra_services:
+                    image_ids = {item.image_id for item in actual.service_instances(service)
+                                 if item.state in ("running", "restarting")}
+                    if len(image_ids) != 1 or not next(iter(image_ids)):
+                        raise ContainerError("Cannot identify one running image for {}; select its container explicitly".format(service))
+                    services[service] = dict(services[service], image=next(iter(image_ids)))
+                    services[service].pop("build", None)
+                model = dict(model, services=services)
+            context.compose_model = model
+            ordered = (order_services(selection.project_containers, selection.services, context.compose_model)
+                       if selection.full else order_service_subset(selection.project_containers, {
+                           name: context.compose_model["services"][name] for name in selection.services}))
+            selection = ComposeSelection(selection.project_containers, selection.target_containers,
+                                         ordered, selection.full)
+            context.target_services = selection.services
+            model_store.set_model(raw_model)
             if not selection.full:
                 self._check_external_requirements(selection, actual, context.compose_model)
                 for service in selection.services:
@@ -287,7 +354,7 @@ class ComposeOperations:
                                                           selected_services=selection.services)
                 self._check_external_dependents(context, selection)
             image_plan = manager.image_preparer.plan(
-                context.compose_model, selection.services, force_pull=pull,
+                context.compose_model, image_services, force_pull=pull,
                 refresh_services=context.refresh_services, include_dependencies=selection.full)
             if not selection.full:
                 self._check_build_scope(context.compose_model, image_plan.build, selection)
@@ -310,7 +377,7 @@ class ComposeOperations:
                         runner.build(context, options)
             selected_images = tuple(context.compose_model["services"][name]["image"] for name in selection.services)
             images = (manager.image_preparer.inspect_images(selected_images)
-                      if image_plan.pull or image_plan.build else image_plan.images)
+                      if image_plan.pull or image_plan.build or extra_services else image_plan.images)
             manager.image_preparer.verify_builds(context.compose_model, image_plan.build, images=images)
             missing_images = [image for image in selected_images if images[image] is None]
             if missing_images:
@@ -448,8 +515,12 @@ class ComposeOperations:
                     cleanup = set()
                     if failed:
                         affected = set(failed)
-                        for service in failed:
-                            affected.update(self._shared_input_consumers(context, service, applied_services))
+                        while True:
+                            related = set().union(*(self._shared_input_consumers(context, service, applied_services)
+                                                    for service in affected))
+                            if related <= affected:
+                                break
+                            affected.update(related)
                         restore.update(affected & initial)
                         cleanup = affected - initial
                         if cleanup:
@@ -557,13 +628,8 @@ class ComposeOperations:
                     raise ContainerError("Operation failed: {}; recovery failed: {}".format(
                         str(error) or type(error).__name__, recovery_error)) from error
                 raise
-            try:
-                publish_prepared_files(context, selection.services)
-            except Exception as error:
-                raise ContainerError("Services were applied; publishing file references failed: {}".format(error)) from error
         # Configuration-only containers have no Docker instance to observe.
         # Record their application only after publication and lifecycle callbacks succeed.
-        from copy import copy
         applied = copy(context)
         applied.target_containers = [container for container in selection.target_containers
                                      if not container.services]
@@ -607,18 +673,11 @@ class ComposeOperations:
         installed = {container.name: container for container in selection.project_containers}
         selected = set(selection.services if selected_services is None else selected_services)
         required = {}
-        names = {container.name for container in selection.target_containers}
         for container in selection.target_containers:
             for name in container.dependencies:
                 if name not in installed:
                     raise ContainerError("Required dependency {!r} is not installed".format(name))
                 for service in installed[name].services:
-                    required.setdefault(service, [])
-        for container in selection.project_containers:
-            for name, services in container.get_runtime_requirements(names).items():
-                if name not in installed:
-                    raise ContainerError("Required provider {!r} is not installed".format(name))
-                for service in services:
                     required.setdefault(service, [])
         owners = service_owners(selection.project_containers)
         definitions = model["services"] if model is not None else {

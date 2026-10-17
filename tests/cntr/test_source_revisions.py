@@ -10,6 +10,7 @@ import pytest
 
 from linktools.cntr import SourceContainer
 from linktools.cntr.errors import ContainerError
+from linktools.cntr.runtime.images import ImagePreparer, LocalImage
 
 if TYPE_CHECKING:
     from typing import Type
@@ -58,20 +59,31 @@ def case(tmp_path):
     return container, source, requests
 
 
+def build_model(container):
+    prep = ImagePreparer(container.manager)
+    model = {"services": {"web": {"image": "web:local", "build": {
+        "context": str(container.get_docker_context_path()), "dockerfile_inline": "FROM scratch"}}}}
+    return prep, prep.with_build_revisions(model, (container,), ("web",))
+
+
 def test_source_revision_refresh_and_no_network_when_stable(tmp_path):
     container, archive, calls = case(tmp_path)
     path = container.get_docker_context_path()
     assert not calls
     container._prepare_source(SimpleNamespace(refresh_services=frozenset()))
     assert len(calls) == 1 and (path / "version.txt").read_text() == "first"
-    before = container.get_build_revision("web")
+    before = build_model(container)[1]
     make_archive(archive, "second")
     container._prepare_source(SimpleNamespace(refresh_services=frozenset()))
-    assert len(calls) == 1 and container.get_build_revision("web") == before
+    assert len(calls) == 1 and build_model(container)[1] == before
     container._prepare_source(SimpleNamespace(refresh_services=frozenset(("web",))))
     assert len(calls) == 2
     assert (path / "version.txt").read_text() == "second"
-    assert container.get_build_revision("web") != before
+    prep, after = build_model(container)
+    assert after != before
+    previous = before["services"]["web"]["build"]["labels"][prep.BUILD_LABEL]
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:old", previous) for image in images}
+    assert prep.plan(after).build == ("web",)
 
 
 def test_missing_source_tree_restores_from_archive_without_network(tmp_path):
@@ -119,6 +131,10 @@ def test_existing_image_never_fetches_uncached_source_during_plain_up(tmp_path):
     container._prepare_source(SimpleNamespace(refresh_services=frozenset()))
     assert calls == []
     assert container._source_digest() is None
+    prep, model = build_model(container)
+    prep.inspect_images = lambda images: {image: LocalImage("sha256:existing", "old-label") for image in images}
+    assert prep.plan(model).build == ()
+    assert calls == []
     container._prepare_source(SimpleNamespace(refresh_services=frozenset(("web",))))
     assert len(calls) == 1
 

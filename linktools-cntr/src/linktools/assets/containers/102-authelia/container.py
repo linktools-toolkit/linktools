@@ -13,11 +13,13 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.artifacts import prepare_files
 from linktools.cntr.ext import endpoint, Flare, Nginx, Authelia
 from linktools.core import ConfigField, ConfigLazy, ConfigRef, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Iterable
     from typing import Any, Mapping
     from linktools.cntr import OperationContext, Integrations
@@ -25,7 +27,6 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
-    _config_services = ("authelia", "authelia-admin")
     config_files = ("configuration.yml", "configuration.acl.yml",
                      "configuration.2fa.yml", "configuration.oidc.yml")
 
@@ -173,13 +174,20 @@ class Container(BaseContainer):
         )
 
     def on_check(self, context: "OperationContext") -> None:
-        if context.target_services is not None and not set(context.target_services).intersection(self._config_services):
+        if (context.target_services is not None and
+                not set(context.target_services).intersection(("authelia", "authelia-admin"))):
             return
+        if context.target_services is not None and "authelia" not in context.target_services:
+            raise ContainerError("Authelia configuration validation requires its service image; "
+                                 "explicitly select the authelia container.")
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
         command = ["authelia", "config", "validate"]
         command.extend("--config=/generated/" + name for name in self.config_files)
-        result = self.manager.compose_runner.validate_service(context, "authelia", command, check=False)
+        mounts = {"/generated/" + name: str(self.config_path / name)
+                  for name in (*self.config_files, "authentication_backend_ldap_password")}
+        result = self.manager.compose_runner.validate_service(
+            context, "authelia", command, mount_overrides=mounts, check=False)
         if not result.succeeded:
             match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
             location = " at {}:{}".format(*match.groups()) if match else ""
@@ -229,7 +237,8 @@ class Container(BaseContainer):
 
 
     def on_starting(self, context: "OperationContext") -> None:
-        if context.target_services is not None and not set(context.target_services).intersection(self._config_services):
+        if (context.target_services is not None and
+                not set(context.target_services).intersection(("authelia", "authelia-admin"))):
             return
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
@@ -238,6 +247,9 @@ class Container(BaseContainer):
         for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
             self._create_secret_file(secret_path / name)
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
+
+    @cached_property
+    def config_path(self) -> "Path":
         files = {name: self.render_template(self.get_source_path("templates", name)) for name in self.config_files}
         files["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
-        context.write_files(self, files)
+        return prepare_files(self, files)

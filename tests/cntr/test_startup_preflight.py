@@ -17,11 +17,14 @@ from linktools.cntr._operations import ComposeOperations, ComposeSelection
 def test_authelia_https_check_only_for_configuration_consumers(services):
     native = builtin_container_type("102-authelia")
     reads = []
-    owner = SimpleNamespace(_config_services=native._config_services,
-                            get_config=lambda key: reads.append(key) or False)
+    owner = SimpleNamespace(get_config=lambda key: reads.append(key) or False)
     context = OperationContext(target_services=services)
-    selected = services is None or bool(set(services) & set(native._config_services))
-    if selected:
+    selected = services is None or bool(set(services) & {"authelia", "authelia-admin"})
+    if selected and services is not None and "authelia" not in services:
+        with pytest.raises(ContainerError, match="explicitly select the authelia"):
+            native.on_check(owner, context)
+        assert reads == []
+    elif selected:
         with pytest.raises(ContainerError, match="Authelia requires HTTPS"):
             native.on_check(owner, context)
         assert reads == ["NGINX_HTTPS_ENABLE"]
@@ -34,7 +37,7 @@ def test_authelia_redis_only_does_not_prepare_configuration():
     native = builtin_container_type("102-authelia")
     def unexpected(*args, **kwargs):
         raise AssertionError("Redis must not create Authelia configuration")
-    owner = SimpleNamespace(_config_services=native._config_services, get_config=unexpected)
+    owner = SimpleNamespace(get_config=unexpected)
     context = OperationContext(target_services=("authelia-redis",))
     native.on_check(owner, context)
     native.on_starting(owner, context)

@@ -21,7 +21,7 @@ from ._container import template as _template
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
-    from typing import AbstractSet, Any, Mapping
+    from typing import Any
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .ext import Integrations
@@ -235,19 +235,12 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Prepare execution inputs before execution scope and service selection."""
         pass
 
-    def get_build_revision(self, service: str) -> "str | None":
-        """Optional local build identity; never refresh remote inputs."""
-        return None
-
-    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
-        """Declare native providers needed by the selected project services."""
-        return {}
-
     def on_check(self, context: "OperationContext") -> None:
         pass
 
     def on_starting(self, context: "OperationContext") -> None:
         pass
+
 
     def on_started(self, context: "OperationContext") -> None:
         pass
@@ -496,16 +489,6 @@ class SourceContainer(BaseContainer):
         if value.parent != Path("versions") or not re.fullmatch("[0-9a-f]{64}", value.name):
             raise ContainerError("Invalid source snapshot pointer: " + str(link))
         return value.name
-
-    def get_build_revision(self, service: str) -> "str | None":
-        import hashlib
-        import json
-        digest = self._source_digest()
-        if digest is None:
-            return None
-        identity = json.dumps([str(self._source_url), str(self._source_path), digest],
-                              ensure_ascii=True, separators=(",", ":"))
-        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     def _prepare_source(self, context: "OperationContext") -> None:
         root = self._source_root
