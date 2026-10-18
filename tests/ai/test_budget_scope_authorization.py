@@ -11,7 +11,8 @@ import pytest_asyncio
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, ExecutionRequest, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import _decode_enveloped_domain, encode_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._store import RecordQuery, StateTransaction

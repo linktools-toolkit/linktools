@@ -175,9 +175,8 @@ async def _open_local_runtime(
     models: "ModelRegistry | None" = None,
 ) -> "AsyncIterator[Runtime]":
     from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
-    from linktools.ai.runtime import (
-        CheckpointCapability, ConversationCapability, MetricsCapability, Runtime, TraceCapability,
-    )
+    from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+    from linktools.ai.runtime import Runtime
 
     assets = _local_runtime_assets(workspace)
     await assets.initialize()
@@ -188,12 +187,12 @@ async def _open_local_runtime(
         features.capability(ConversationCapability())
         features.capability(CheckpointCapability())
         features.capability(TraceCapability())
-        features.capability(MetricsCapability(metrics=await _local_metrics(workspace)))
         async with Runtime.open(
             "default",
             storage=_local_runtime_storage(workspace),
             models=_local_models(workspace) if models is None else models,
             features=features,
+            metrics=await _local_metrics(workspace),
         ) as runtime:
             yield runtime
     finally:

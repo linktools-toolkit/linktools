@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Completed client exchanges are readable before their execution finishes."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 import asyncio
 import base64
 import json

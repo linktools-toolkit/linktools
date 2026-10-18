@@ -25,7 +25,7 @@ from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from .test_model_interaction_lifecycle_paging import (
     _Executions, _HistoryStore, _interaction, _reader,

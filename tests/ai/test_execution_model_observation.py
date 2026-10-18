@@ -258,9 +258,8 @@ async def test_facade_forwards_metadata_mode() -> None:
 async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.capability import RuntimeFeatures
-    from linktools.ai.runtime import (
-        TraceCapability, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
-    )
+    from linktools.ai.capability import TraceCapability
+    from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
     from .test_live_history_readback_integration import _Models
     from ._runtime_test_helpers import _UsageFunctionModel
 

@@ -10,7 +10,8 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability, CheckpointCapability
+from linktools.ai.capability import ConversationCapability, CheckpointCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext

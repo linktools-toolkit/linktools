@@ -12,7 +12,8 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
-from linktools.ai.runtime import Runtime, RuntimeStorage, MetricsCapability
+
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models
 
@@ -69,7 +70,6 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
 
     backend = _CombinedCache()
     metrics = Metrics.in_memory(cache=backend)
-    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async def assert_persisted_metrics(expected: int) -> None:
@@ -87,11 +87,11 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
     owner_storage = RuntimeStorage.sqlite(path, object_store=objects, cache=backend)
     reader_storage = RuntimeStorage.sqlite(path, object_store=objects, cache=backend)
     async with Runtime.open(
-        "shared-preview", models=models, features=group,
+        "shared-preview", metrics=metrics, models=models, features=group,
         storage=owner_storage,
     ) as producer:
         async with Runtime.open(
-            "shared-preview", models=models, features=group,
+            "shared-preview", metrics=metrics, models=models, features=group,
             storage=reader_storage,
         ) as reader:
             assert await owner_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"

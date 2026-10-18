@@ -15,7 +15,8 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 
 from . import _runtime_test_helpers as helpers
 

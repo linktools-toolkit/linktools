@@ -166,10 +166,8 @@ def test_restored_history_forwards_current_features(monkeypatch, tmp_path):
 async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkeypatch, captured):
     import shutil
 
-    from linktools.ai.runtime import (
-        CheckpointCapability, ConversationCapability, RuntimeDomain, RuntimeSnapshot,
-        RuntimeStorageRoute, TraceCapability,
-    )
+    from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+    from linktools.ai.runtime import RuntimeDomain, RuntimeSnapshot, RuntimeStorageRoute
     from linktools.ai.runtime.state import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 

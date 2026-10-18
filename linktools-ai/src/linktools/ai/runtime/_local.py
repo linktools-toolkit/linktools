@@ -79,7 +79,7 @@ from ..storage import (
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
-from ._metrics import (
+from ._metrics_service import (
     _capture_execution_terminal,
     _record_metric_observation,
     _record_storage_operation,
@@ -100,7 +100,7 @@ from .recovery import (
 )
 from ._budget import RunBudgetContext
 from .service_api import ExecutionRequest
-from ._conversation_capability import ConversationCapability
+from ._conversation_service import ConversationService
 from .state import RuntimeDomain
 from .state._commands import RuntimeStateCommands
 from .state._execution_repositories import ExecutionRepositoryImpl
@@ -3475,7 +3475,7 @@ class LocalExecutionBackend:
                     history = list(accepted_context.model_messages())
                     loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
                 elif session_history_source:
-                    loaded_context = await ConversationCapability.load_session_context(
+                    loaded_context = await ConversationService.load_session_context(
                         execution=current, session=session, history_id=history_id,
                         tenant_id=self._tenant_id, run_store=self._run_store,
                         conversation_archive=self._run_stores[RuntimeDomain.CONVERSATION],
@@ -4108,7 +4108,7 @@ class LocalExecutionBackend:
         session = None if execution.session_id is None else await self._load_session(
             execution.session_id, tenant_id=self._tenant_id,
         )
-        return await ConversationCapability.load_history(
+        return await ConversationService.load_history(
             execution, session=session, namespace=self._namespace, tenant_id=self._tenant_id,
             run_store=self._run_store,
             execution_run_store=self._get_run_store(RuntimeDomain.TRACE),

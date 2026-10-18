@@ -15,10 +15,8 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.runtime import (
-    CheckpointCapability, ConversationCapability, MetricsCapability,
-    Runtime, RuntimeHistory, RuntimeStorage, TraceCapability,
-)
+from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.web import create_app
 from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
@@ -103,9 +101,8 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
     features = RuntimeFeatures("web-test")
     features.capability(ConversationCapability(), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open(
-        "web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
+        "web-test", metrics=metrics, models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
         features=features,
     ) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:

@@ -23,17 +23,8 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import (
-    CheckpointCapability,
-    TraceCapability,
-    Runtime,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-    ToolEffectApplied,
-    ToolEffectFailed,
-    ToolEffectNotApplied,
-)
+from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.service_api import CancelExecutionRequest

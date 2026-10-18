@@ -12,7 +12,8 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
-from linktools.ai.runtime import MetricsCapability, Runtime, RuntimeStorage
+
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import FilesystemObjectStore
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -51,9 +52,8 @@ class _Models:
         return _ModelBinding()
 
 
-def _agent_group(metrics: Metrics) -> RuntimeFeatures[object]:
+def _agent_group() -> RuntimeFeatures[object]:
     group = RuntimeFeatures[object]("application")
-    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -93,9 +93,9 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
         for state, label in cases:
             async with Runtime.open(
                 "default",
-                models=_Models(),  # type: ignore[arg-type]
+                metrics=metrics, models=_Models(),  # type: ignore[arg-type]
                 storage=state,
-                features=_agent_group(metrics),
+                features=_agent_group(),
             ) as runtime:
                 result = (await runtime.agents.get("default").run(
                     f"hello-{label}",

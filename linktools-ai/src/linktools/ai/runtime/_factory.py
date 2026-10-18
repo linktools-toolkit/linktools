@@ -35,6 +35,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..observe import Metrics
 from ..model import ModelRegistry
 from ..spec import (
     AgentSpec,
@@ -72,13 +73,10 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._capabilities import runtime_feature_leaves
-from ._conversation_capability import ConversationCapability
-from ._metrics_capability import MetricsCapability, MetricsRecordingBinding
+from linktools.ai.capability import ConversationCapability
+from ._metrics_service import MetricsService
 from ._persistence_configuration import persistence_storage_configuration
-from ._persistence_capabilities import (
-    TraceCapability,
-    CheckpointCapability,
-)
+from linktools.ai.capability import TraceCapability, CheckpointCapability
 from ._runtime_history import RuntimeHistory
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
@@ -111,7 +109,7 @@ class _RuntimeComponents:
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
-    metric_control: MetricsRecordingBinding | None
+    metric_control: MetricsService | None
     binding_resolver: _AgentBindingResolver
     history: object
     task_admissions: TaskAdmissionRepository
@@ -126,6 +124,7 @@ async def compose_runtime_components(
     tenant_id: "str | None" = None,
     models: ModelRegistry,
     storage: RuntimeStorage,
+    metrics: Metrics | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     auto_recover: bool = True,
 ) -> _RuntimeComponents:
@@ -183,7 +182,7 @@ async def compose_runtime_components(
         _validate_candidate_uniqueness(candidates)
         def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
             if isinstance(capability, (
-                CheckpointCapability, TraceCapability, ConversationCapability, MetricsCapability, ToolResponsesCapability,
+                CheckpointCapability, TraceCapability, ConversationCapability, ToolResponsesCapability,
             )):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
 
@@ -236,6 +235,7 @@ async def compose_runtime_components(
 
         for capability in runtime_capabilities:
             capability.apply(register_runtime_id)
+        module_routes, module_caches = persistence_storage_configuration(runtime_capabilities)
         candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -285,7 +285,6 @@ async def compose_runtime_components(
             "default" if tenant_id is None else validate_tenant_id(tenant_id)
         )
         selected_storage = storage
-        module_routes, module_caches = persistence_storage_configuration(runtime_capabilities)
         await selected_storage.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
@@ -346,6 +345,7 @@ async def compose_runtime_components(
         ownership_transferred = True
         components = await _build_local_components(
             storage=selected_storage,
+            metrics=metrics,
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
@@ -400,7 +400,7 @@ def _runtime_close_actions(
     execution: DefaultExecutionService,
     backend: LocalExecutionBackend | None,
     input_materializer: ExecutionInputMaterializer,
-    metric_buffer: MetricsRecordingBinding | None,
+    metric_buffer: MetricsService | None,
     storage: RuntimeStorage,
     session: DefaultSessionService | None = None,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
@@ -549,6 +549,7 @@ def _require_storage_identity(
 async def _build_local_components(
     *,
     storage: RuntimeStorage,
+    metrics: Metrics | None,
     catalog: AgentCatalog,
     compiler: AgentCompiler,
     authorization: AuthorizationPolicy,
@@ -574,7 +575,7 @@ async def _build_local_components(
     auto_recover: bool,
     tool_responses: ToolResponseFixture | None,
 ) -> _RuntimeComponents:
-    metric_buffer: MetricsRecordingBinding | None = None
+    metric_buffer: MetricsService | None = None
     metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
@@ -613,29 +614,8 @@ async def _build_local_components(
         conversation = any(
             isinstance(value, ConversationCapability) for value in persistence_capabilities
         )
-        metric_capabilities = tuple(
-            value for value in persistence_capabilities if isinstance(value, MetricsCapability)
-        )
-        if len(metric_capabilities) > 1:
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one Metrics dataset is allowed per Runtime")
-        automatic_metrics = bool(metric_capabilities)
-        metric_buffer = metric_capabilities[0].open_recording() if metric_capabilities else None
+        metric_buffer = None if metrics is None else MetricsService(metrics)
         metric_source_namespace = None if metric_buffer is None else namespace
-        agent_metric_buffer = metric_buffer.recorder if automatic_metrics and metric_buffer is not None else None
-        if metric_buffer is not None:
-            def bind_metrics(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]]:
-                if isinstance(capability, WrapperCapability):
-                    rebound = copy(capability)
-                    rebound.wrapped = capability.wrapped.visit_and_replace(bind_metrics)
-                    return rebound
-                if isinstance(capability, MetricsCapability):
-                    return metric_buffer.bind(capability)
-                return capability
-
-            runtime_capabilities = tuple(
-                bound for template in runtime_capabilities
-                if (bound := template.visit_and_replace(bind_metrics)) is not None
-            )
         if storage.cache is not None:
             runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(
                 storage.cache, namespace=namespace, tenant_id=tenant_id,
@@ -698,7 +678,7 @@ async def _build_local_components(
             skill_sources,
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
-            metrics=agent_metric_buffer,
+            metrics=metric_buffer,
             sandbox=sandbox,
             tool_responses=tool_responses,
         )
@@ -788,7 +768,7 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
             tool_operations=storage.recovery.tools,
-            metric_recorder=agent_metric_buffer,
+            metric_recorder=metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
             pending_turns=runtime_bridge.pending_turns,
@@ -888,7 +868,7 @@ async def _build_local_components(
             local_waiter=task_launcher,
             preflight=task_runner,
             bound_execution_recovery=task_runner,
-            metric_recorder=None if metric_buffer is None else metric_buffer.recorder,
+            metric_recorder=metric_buffer,
             metric_source_namespace=metric_source_namespace,
         )
         approval = DefaultApprovalService(

@@ -84,7 +84,7 @@ keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
 separate authorization, prompt-limit, or tool-response arguments.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
-expand the remaining candidates; explicit unavailable selections and preloads fail.
+expand the remaining candidates; explicit unavailable selections fail.
 Callback exceptions propagate and non-boolean results are rejected. Use a pure,
 deterministic callback over the captured declarations and stable application inputs.
 This is applicability filtering, not an authorization or OS isolation boundary.
@@ -127,11 +127,12 @@ state and request/usage metadata. See [Runtime-wide capabilities](docs/runtime-c
 for a runnable RPM/TPM example, streaming/cancellation behavior, quota accounting
 and provider retry boundaries.
 
-Conversation, interrupted-run recovery, detailed trace and automatic Agent metrics
-are explicit, independent Runtime-scoped capabilities: `ConversationCapability`,
-`CheckpointCapability`, `TraceCapability`, and `MetricsCapability`. Durable storage
-alone enables none of them. `MetricsCapability(metrics=dataset)` supplies the shared
-recording dataset for automatic Agent, Task and Evaluation observations. Task, Evaluation and Artifact remain
+Conversation, interrupted-run recovery and detailed trace are explicit,
+independent Runtime-scoped capabilities: `ConversationCapability`,
+`CheckpointCapability`, and `TraceCapability`. Durable storage alone enables none
+of them. `Runtime.open(..., metrics=dataset)` independently enables automatic
+Agent and Task observations, including evaluation work in that Runtime. The
+shared dataset remains caller-owned. Task, Evaluation and Artifact remain
 services and need no capability wrappers. See [feature guarantees and commit
 boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
@@ -679,7 +680,7 @@ upstream tool names. For example, `security/audit` and `scan:file` become
 `mcp:security%2Faudit:scan%3Afile`. The `mcp__` prefix is reserved for
 model-visible transport names and is not an authoring selector.
 
-Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog/preloads, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
+Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
 
 The fixed prefix is not appended as a new conversation message on each model call. Lazy Skill bodies/resources, Memory contents, the current-plan reminder, user input, tool and Subagent results, attachments, and retry/error feedback remain dynamic request or conversation context. Memory guidance is fixed only for an Execution that enables Memory; Memory contents stay pull-based through the Memory tools, so updates from another Execution are observed when the Agent reads/searches Memory again rather than being pushed into the standing prompt. Workspace instruction text describes stable usage constraints only; authorization and approval remain Runtime-enforced behavior. Recorded requests may therefore contain the same fixed instruction parts repeatedly without representing repeated historical messages.
 
@@ -723,7 +724,7 @@ This example requires `ConversationCapability()` registered at Runtime scope
 on the same declaration before opening the Runtime:
 
 ```python
-from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 
 application.capability(ConversationCapability())
 # Open with Runtime.open(..., features=application) after registration.

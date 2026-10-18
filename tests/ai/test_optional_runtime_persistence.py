@@ -20,14 +20,8 @@ from pydantic_ai.models.function import AgentInfo
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    ConversationCapability,
-    MetricsCapability,
-    TraceCapability,
-    CheckpointCapability,
-    Runtime,
-    RuntimeStorage,
-)
+from linktools.ai.capability import ConversationCapability, TraceCapability, CheckpointCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -1035,14 +1029,13 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(ConversationCapability(), scope="runtime")
-    group.capability(MetricsCapability(metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     if restart:
         group.capability(CheckpointCapability(), scope="runtime")
     storage_factory = _split_sqlite_storage if split_storage else RuntimeStorage.sqlite
     storage = storage_factory(tmp_path / "terminal.db")
     async with Runtime.open(
-        _NAMESPACE, models=_Models(_UsageFunctionModel(model)), storage=storage, features=group,
+        _NAMESPACE, metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE), models=_Models(_UsageFunctionModel(model)), storage=storage, features=group,
     ) as runtime:
         await runtime.agents.get().create_session("session")
         session = runtime.agents.get().session("session")

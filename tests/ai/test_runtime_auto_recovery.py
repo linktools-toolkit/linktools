@@ -14,7 +14,7 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import ExecutionRequest
 from linktools.ai.runtime.state._contracts import ExecutionRecord

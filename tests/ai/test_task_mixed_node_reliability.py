@@ -33,7 +33,7 @@ from ._task_test_helpers import (
     task_result,
 )
 from linktools.ai.agent import restore_output
-from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 from linktools.ai.core import (
     JsonValue,
     OperationKind,

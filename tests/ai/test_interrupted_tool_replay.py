@@ -20,7 +20,7 @@ from pydantic_ai.tools import ToolDefinition
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._snapshot_validation import (

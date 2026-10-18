@@ -23,7 +23,7 @@ from linktools.ai.runtime._model_interaction import StagedContextInline, StagedC
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_incremental_projection_boundaries import _storage

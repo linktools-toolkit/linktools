@@ -13,7 +13,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import TaskGraph, TaskNode
 from ._runtime_test_helpers import _RuntimeUsageModelBinding, _UsageFunctionModel

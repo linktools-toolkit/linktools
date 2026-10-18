@@ -24,7 +24,7 @@ from linktools.ai.runtime import Execution, ExecutionInputContext, Runtime, Runt
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from .test_model_client_request_capture import _agents, _model, _registry, _response
 from .test_model_client_response_capture import _DONE, _EVENT, _Stream, _invoke

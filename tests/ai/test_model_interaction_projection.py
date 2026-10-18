@@ -49,7 +49,7 @@ from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
-from linktools.ai.runtime import ConversationCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability, TraceCapability
 
 
 class _TextModelBinding:

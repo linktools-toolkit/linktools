@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Run-local transcript identities and terminal boundary facts."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 from datetime import datetime, timezone
 from functools import partial
 

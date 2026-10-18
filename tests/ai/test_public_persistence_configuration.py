@@ -13,12 +13,12 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import (
-    CheckpointCapability, ConversationCapability, MetricsCapability, Runtime,
-    RuntimeDomain, RuntimeHistory, RuntimeSnapshot, RuntimeStorage, RuntimeStorageRoute, TraceCapability,
-)
+from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeHistory, RuntimeSnapshot, RuntimeStorage, RuntimeStorageRoute
 from linktools.ai.runtime.state import SnapshotLimits
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef
+
+from linktools.ai.runtime._metrics_service import MetricsService
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 from .test_runtime_snapshot_strict_decode import _SnapshotGuard
@@ -53,10 +53,9 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         ConversationCapability(storage=routes[RuntimeDomain.CONVERSATION]),
         CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
         TraceCapability(storage=routes[RuntimeDomain.TRACE]),
-        MetricsCapability(metrics=Metrics.in_memory()),
     ).capture()
     state = RuntimeStorage.filesystem(root)
-    async with Runtime.open("module-routes", storage=state, models=_FeatureModels(), features=features) as runtime:
+    async with Runtime.open("module-routes", metrics=Metrics.in_memory(), storage=state, models=_FeatureModels(), features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -76,7 +75,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
 
     monkeypatch.setattr(TraceCapability, "before_run", unexpected_hook)
     monkeypatch.setattr(CheckpointCapability, "before_model_request", unexpected_hook)
-    monkeypatch.setattr(MetricsCapability, "open_recording", unexpected_recording)
+    monkeypatch.setattr(MetricsService, "__init__", unexpected_recording)
     monkeypatch.setattr(_FeatureModels, "materialize", unexpected_recording)
     reopened = RuntimeStorage.filesystem(root)
     async with RuntimeHistory.open("module-routes", storage=reopened, features=features) as history:

@@ -17,7 +17,8 @@ from sqlalchemy import event
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage, ConversationCapability
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import _decode_step, _encode_step
 from linktools.ai.workspace import Workspace

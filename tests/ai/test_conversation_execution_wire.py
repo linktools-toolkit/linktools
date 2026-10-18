@@ -7,7 +7,8 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,

@@ -43,7 +43,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import MetricsCapability, TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
 
@@ -1481,12 +1481,11 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
         group.agent("default", model="default", allow_tools=("complete",))
         metric_store = InMemoryMetricStore()
         metrics = Metrics.from_store(metric_store, namespace="model-lifecycle-fallback")
-        group.capability(MetricsCapability(metrics=metrics), scope="runtime")
         metric_start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         async with Runtime.open(
             "default",
-            models=models,  # type: ignore[arg-type]
+            metrics=metrics, models=models,  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
             features=group,
         ) as runtime:

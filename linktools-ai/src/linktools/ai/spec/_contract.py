@@ -212,7 +212,6 @@ class AgentSpec:
     tool_retries: int | None = None
     output_retries: int | None = None
     description: "str | None" = None
-    preload_skills: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     revision: int = field(default=1, kw_only=True)
 
@@ -248,30 +247,16 @@ class AgentSpec:
             raise ValueError("agent description must contain 1..1024 characters")
         thinking = normalize_thinking(self.thinking)
         allow_skills = canonical_selectors(self.allow_skills, field_name="allow_skills")
-        preload_skills = canonical_selectors(self.preload_skills, field_name="preload_skills")
         allow_capabilities = canonical_selectors(
             self.allow_capabilities,
             field_name="allow_capabilities",
         )
-        if "*" in preload_skills:
-            raise AIError(
-                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                "preload_skills requires exact skill ids",
-            )
-        if "*" not in allow_skills and any(
-            skill_id not in allow_skills for skill_id in preload_skills
-        ):
-            raise AIError(
-                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                "preload_skills must be selected by allow_skills",
-            )
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_selectors(self.allow_tools, field_name="allow_tools", mcp=True))
         object.__setattr__(self, "allow_skills", allow_skills)
         object.__setattr__(self, "allow_subagents", canonical_selectors(self.allow_subagents, field_name="allow_subagents"))
         object.__setattr__(self, "allow_capabilities", allow_capabilities)
         object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "preload_skills", preload_skills)
         object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
 
 

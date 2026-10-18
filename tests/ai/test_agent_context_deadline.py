@@ -5,7 +5,7 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
-from linktools.ai.runtime import ConversationCapability, CheckpointCapability
+from linktools.ai.capability import ConversationCapability, CheckpointCapability
 
 import pytest
 from pydantic_ai import RunContext

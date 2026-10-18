@@ -14,7 +14,8 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage, ConversationCapability
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest, ListSessionRequest
 from linktools.ai.runtime.state._store import active_state_scope, record_key_digest
 from linktools.ai.storage import InMemoryCacheBackend

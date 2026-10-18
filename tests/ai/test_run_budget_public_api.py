@@ -9,7 +9,8 @@ import pytest
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, AgentTaskInput, TraceCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 from ._runtime_test_helpers import RuntimeUsageModels
 

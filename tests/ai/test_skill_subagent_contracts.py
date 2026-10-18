@@ -307,11 +307,10 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     capability = SkillCapability(
         (definition,),
         SkillSourceRegistry(),
-        preloaded_skill_ids=(definition.id,),
     )
     instructions = capability.get_instructions()
     assert instructions is not None
-    assert "Do the review." in instructions
+    assert "Do the review." not in instructions
     assert "author: Mei" not in instructions
     root = await capability.load_skill(definition.id)
     assert root["instructions"] == definition.model_content

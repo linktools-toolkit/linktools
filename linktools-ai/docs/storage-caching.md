@@ -110,8 +110,8 @@ finally:
     await recorder.close()
 ```
 
-Automatic Agent, Task and Evaluation observations require Runtime-scoped
-`MetricsCapability(metrics=dataset)`. The capability owns one per-Runtime recorder;
+Automatic Agent and Task observations, including evaluation work in a Runtime,
+require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
 All Metrics constructors and factories accept `cache`. Only automatic recorders

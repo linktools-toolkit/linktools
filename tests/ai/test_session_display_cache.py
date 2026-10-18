@@ -12,7 +12,8 @@ from sqlalchemy import event
 import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope

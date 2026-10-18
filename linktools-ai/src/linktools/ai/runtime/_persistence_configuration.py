@@ -7,8 +7,8 @@ from collections.abc import Sequence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
 from ..errors import AIError, ErrorCode
-from ._conversation_capability import ConversationCapability
-from ._persistence_capabilities import CheckpointCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import CheckpointCapability, TraceCapability
 from .state import RuntimeDomain, RuntimeStorageRoute
 
 
@@ -37,6 +37,8 @@ def persistence_storage_configuration(
         if domain in caches:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one persistence feature is allowed per module")
         if feature.storage is not None:
+            if not isinstance(feature.storage, RuntimeStorageRoute):
+                raise TypeError("storage must be RuntimeStorageRoute")
             routes[domain] = feature.storage
         caches[domain] = feature.cache if isinstance(feature, (ConversationCapability, TraceCapability)) else None
 

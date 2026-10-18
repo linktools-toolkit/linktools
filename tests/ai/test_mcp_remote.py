@@ -8,7 +8,7 @@ import socket
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from typing import Any
 
 import pytest

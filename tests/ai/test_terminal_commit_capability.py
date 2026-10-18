@@ -11,13 +11,8 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    TraceCapability,
-    CheckpointCapability,
-    Runtime,
-    RuntimeStorage,
-    ConversationCapability,
-)
+from linktools.ai.capability import TraceCapability, CheckpointCapability, ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,

@@ -69,7 +69,7 @@ from ..storage import (
     TurnCoordination,
     payload_fits_inline,
 )
-from ._conversation_capability import ConversationCapability
+from ._conversation_service import ConversationService
 from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._handoff import HandoffGate, HandoffState
@@ -2499,7 +2499,7 @@ class DefaultExecutionService:
             try:
                 if (execution.conversation and dependency_hold_id is None
                         and self._runtime_bridge.pending_start is not None):
-                    pending_id = await ConversationCapability.prepare_turn(
+                    pending_id = await ConversationService.prepare_turn(
                         request, proposed_reservation, session, coordination,
                         start_pending=self._runtime_bridge.pending_start,
                         dependency_hold_id=dependency_hold_id,

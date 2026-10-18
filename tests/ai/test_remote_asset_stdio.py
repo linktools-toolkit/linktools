@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pinned non-file Asset packages execute as isolated, run-owned stdio trees."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 import asyncio
 import json

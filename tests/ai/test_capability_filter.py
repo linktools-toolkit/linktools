@@ -81,9 +81,8 @@ async def test_filter_narrows_every_supported_kind_without_filtering_root(contri
     {"allow_skills": ("guide",)},
     {"allow_subagents": ("child",)},
     {"allow_capabilities": ("extra",)},
-    {"preload_skills": ("guide",)},
 ])
-async def test_explicit_filtered_selection_or_preload_is_a_configuration_error(contributions, options):
+async def test_explicit_filtered_selection_is_a_configuration_error(contributions, options):
     with pytest.raises(AIError) as error:
         _compiler(contributions, lambda agent, item: False).compile(AgentSpec("root", **options))
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Attachment acceptance survives request preparation and archive pagination."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 import asyncio
 import hashlib
 from pathlib import Path

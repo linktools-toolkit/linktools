@@ -13,7 +13,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, CheckpointCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import CheckpointCapability
+from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
 from linktools.ai.task import TaskGraph, TaskNode
 

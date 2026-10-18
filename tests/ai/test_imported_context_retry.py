@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Retry preserves imported pre-input context and its memory isolation."""
 
-from linktools.ai.runtime import ConversationCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability, TraceCapability
 from pathlib import Path
 
 import pytest

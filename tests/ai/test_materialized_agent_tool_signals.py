@@ -19,7 +19,8 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage, TraceCapability, MetricsCapability
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -110,13 +111,12 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     )
     metric_store = InMemoryMetricStore()
     metrics = Metrics.from_store(metric_store, namespace="composition")
-    application.capability(MetricsCapability(metrics=metrics), scope="runtime")
     state = RuntimeStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async with Runtime.open(
         "default",
-        models=_CompositionModels(),  # type: ignore[arg-type]
+        metrics=metrics, models=_CompositionModels(),  # type: ignore[arg-type]
         storage=state,
         features=application,
     ) as runtime:

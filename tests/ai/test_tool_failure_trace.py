@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from linktools.ai.capability import AgentContext, RuntimeFeatures, ToolCallFailed, ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models

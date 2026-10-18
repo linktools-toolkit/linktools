@@ -25,7 +25,7 @@ from linktools.ai.core import HmacCursorSigner, agent_run_id, agent_conversation
 from linktools.ai.runtime import RuntimeDomain
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge

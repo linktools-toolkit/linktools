@@ -6,9 +6,10 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.runtime._persistence_services import TraceService
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime._run_hooks import (
     AgentRunCapture,
 )
@@ -138,7 +139,7 @@ def _persistence(
         journal=journal,
         interaction_recorder=run_recorder,
     )
-    capabilities = [observation, persistence, TraceCapability().bind(persistence)]
+    capabilities = [observation, persistence, TraceCapability().bind(TraceService(persistence))]
     if reverse_registration:
         capabilities.reverse()
     return CombinedCapability(capabilities)

@@ -87,8 +87,8 @@ from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
-from ..observe import MetricRecorderStatus, MetricFlushResult
-from ._metrics import _disabled_metric_status
+from ..observe import Metrics, MetricRecorderStatus, MetricFlushResult
+from ._metrics_service import _disabled_metric_status
 from .service_api import (
     ExecutionView,
     ApprovalService,
@@ -380,6 +380,7 @@ class Runtime(Generic[AppT]):
         *,
         models: ModelRegistry,
         storage: RuntimeStorage,
+        metrics: Metrics | None = None,
         context: None = None,
         features: "RuntimeFeatures[None] | RuntimeFeaturesCapture[None] | None" = None,
         auto_recover: bool = True,
@@ -393,6 +394,7 @@ class Runtime(Generic[AppT]):
         *,
         models: ModelRegistry,
         storage: RuntimeStorage,
+        metrics: Metrics | None = None,
         context: RuntimeContext[AppT],
         features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
         auto_recover: bool = True,
@@ -405,6 +407,7 @@ class Runtime(Generic[AppT]):
         *,
         models: ModelRegistry,
         storage: RuntimeStorage,
+        metrics: Metrics | None = None,
         context: "RuntimeContext[object] | None" = None,
         features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None" = None,
         auto_recover: bool = True,
@@ -414,11 +417,18 @@ class Runtime(Generic[AppT]):
         Explicit graph and execution recovery remain available when disabled.
         Closing still drains work owned by this Runtime.
 
+        Optional metrics supplies a borrowed Metrics dataset. One Runtime-owned
+        recorder collects Agent, Task and Evaluation observations; closing the
+        Runtime drains that recorder without closing the dataset. Omitted metrics
+        leaves automatic recording disabled.
+
         Runtime-scoped RuntimeFeatures registrations apply to every agent run,
         independently of Agent capability selection. They use native hooks and
         lifecycle. Persistence guarantees are fixed on each admitted execution;
         reopening under different feature declarations does not reinterpret them.
         """
+        if metrics is not None and not isinstance(metrics, Metrics):
+            raise TypeError("metrics must be Metrics or None")
         if not isinstance(auto_recover, bool):
             raise TypeError("auto_recover must be bool")
         resolved_namespace = validate_persistence_namespace(namespace)
@@ -430,6 +440,7 @@ class Runtime(Generic[AppT]):
             context=root_context,
             models=models,
             storage=storage,
+            metrics=metrics,
             features=features,
             auto_recover=auto_recover,
         )
@@ -1442,6 +1453,7 @@ async def _open_runtime(
     models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
+    metrics: Metrics | None = None,
     auto_recover: bool = True,
 ):
     from ._factory import compose_runtime_components
@@ -1452,6 +1464,7 @@ async def _open_runtime(
         tenant_id=context.tenant_id,
         models=models,
         storage=storage,
+        metrics=metrics,
         features=features,
         auto_recover=auto_recover,
     )

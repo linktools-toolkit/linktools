@@ -23,7 +23,8 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,

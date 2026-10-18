@@ -35,7 +35,7 @@ from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime.state import RuntimeDomain
 
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 
 class _ObservedHttpClient(DefaultAsyncHttpxClient):

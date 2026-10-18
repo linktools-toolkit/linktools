@@ -214,7 +214,7 @@ def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
-    from linktools.ai.runtime import ConversationCapability
+    from linktools.ai.capability import ConversationCapability
 
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ConversationCapability(), scope="runtime")

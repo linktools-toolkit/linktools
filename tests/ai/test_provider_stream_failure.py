@@ -16,7 +16,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequestRecorder
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._metric_capability import _PreparedRequestModel
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models

@@ -131,8 +131,6 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         sources: SkillSourceRegistry,
         *,
         resource_paths: Mapping[str, "str | None"] | None = None,
-        preloaded_skill_ids: Sequence[str] = (),
-        max_preloaded_bytes: int = 256 * 1024,
     ) -> None:
         self.id = "linktools.ai.skills"
         if not isinstance(sources, SkillSourceRegistry):
@@ -147,19 +145,6 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         self._by_id = {item.id: item for item in ordered}
         self._sources = sources
         self._resource_paths = dict(resource_paths or {})
-        preload_ids = tuple(sorted(preloaded_skill_ids))
-        if len(preload_ids) != len(set(preload_ids)):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if any(skill_id not in self._by_id for skill_id in preload_ids):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if (
-            not isinstance(max_preloaded_bytes, int)
-            or isinstance(max_preloaded_bytes, bool)
-            or max_preloaded_bytes < 0
-        ):
-            raise ValueError("max_preloaded_bytes must be a non-negative integer")
-        self._preloaded = tuple(self._by_id[skill_id] for skill_id in preload_ids)
-        self._max_preloaded_bytes = max_preloaded_bytes
 
     def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
@@ -244,25 +229,6 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         lines.extend(
             f"- {item.id}: {_skill_description(item.spec)}" for item in self._skills
         )
-        if self._preloaded:
-            lines.extend(
-                (
-                    "The following skill instructions are preloaded for this agent run.",
-                    *(
-                        f"[skill: {item.id}]\n{item.model_content}"
-                        for item in self._preloaded
-                    ),
-                )
-            )
-            try:
-                preloaded = "\n\n".join(
-                    f"[skill: {item.id}]\n{item.model_content}"
-                    for item in self._preloaded
-                ).encode("utf-8", errors="strict")
-            except UnicodeEncodeError as error:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-            if len(preloaded) > self._max_preloaded_bytes:
-                raise AIError(ErrorCode.PROMPT_TOO_LARGE)
         return "\n".join(lines)
 
     async def list_skills(self) -> "list[dict[str, str]]":

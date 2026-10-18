@@ -239,7 +239,7 @@ class ACPApplication:
         return cls(workspace, models, storage)
 
     async def serve(self, *, memory_scope: str) -> None:
-        from .runtime import ConversationCapability
+        from linktools.ai.capability import ConversationCapability
 
         features = RuntimeFeatures("workspace")
         features.capability(WorkspaceCapability(self.workspace))

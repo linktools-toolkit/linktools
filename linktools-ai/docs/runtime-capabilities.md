@@ -32,17 +32,38 @@ applied to direct Agent runs, Sessions, delegated Agents, Agent-backed Tasks and
 resumed/recovered runs. Plain Python Task bodies and external SDK calls do not
 pass through these hooks.
 
+## Capability and service ownership
+
+All public capability declarations are imported from `linktools.ai.capability`,
+including `ConversationCapability`, `CheckpointCapability`, and `TraceCapability`.
+`linktools.ai.runtime` owns Runtime entry points and services; it does not provide duplicate capability exports.
+
+A captured declaration can be reused across Runtime instances. Runtime binds
+isolated `ConversationService`, `CheckpointService` and `TraceService` instances
+for each run without changing the declaration or its custom native hooks.
+`MetricsService` owns one Runtime recording lifetime shared by Agent, Task and
+Evaluation, over a borrowed Metrics dataset, and enriches observations without
+creating a second recording queue.
+Conversation, Checkpoint and Trace persistence owners keep their existing
+module-specific reads, buffers and commit boundaries.
+
+Module storage routes are validated during Runtime or read-only assembly,
+before storage initialization. Invalid route values do not start storage I/O.
+Session identity and combined execution-history queries remain owned by
+`SessionService` and `ExecutionHistoryService` respectively.
+
 ## Optional execution persistence
 
-Conversation, interrupted-execution recovery, detailed trace and automatic Agent
-metrics are separate, explicit Runtime-scoped capabilities. Passing durable
-storage alone does not enable them. Supply one `RuntimeFeatures` declaration or
+Conversation, interrupted-execution recovery and detailed trace are separate,
+explicit Runtime-scoped capabilities. Passing durable storage alone does not
+enable them. Automatic metrics use the independent `Runtime.open(metrics=...)`
+resource described below. Supply one `RuntimeFeatures` declaration or
 its `RuntimeFeaturesCapture` through `features`; complete registrations
 before capture or opening the Runtime.
 
 ```python
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.runtime import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
 
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
@@ -77,20 +98,20 @@ Shared storage provisioning is independent of service activation.
 ### Automatic Runtime metrics
 
 `Metrics` remains the shared dataset for Agent, Task, Evaluation and application
-recording. Register its sole Runtime entry point explicitly:
+recording. Supply the borrowed dataset at the sole Runtime entry point:
 
 ```python
-from linktools.ai.runtime import MetricsCapability
-
-group.capability(MetricsCapability(metrics=metrics))
-# Runtime.open(..., features=group)
+async with Runtime.open("app", models=models, storage=storage, features=group, metrics=metrics) as runtime:
+    ...
 ```
 
-The Runtime-scoped capability selects automatic Agent, Task and Evaluation
-recording, independently of Agent filtering. Without it, Runtime creates no
+The optional `Runtime.open(metrics=...)` resource enables automatic Agent and Task
+recording, including evaluation work in that Runtime, independently of Agent filtering. Without it, Runtime creates no
 automatic recorder. Application calls on the dataset remain available directly.
-One per-Runtime binding owns the shared recorder and drain lifecycle. Metrics
-retain their own batching; a conversation turn does not force a metrics flush.
+One per-Runtime service owns its recorder and drain lifecycle. Closing Runtime
+does not close the shared dataset, engine or cache. `metrics=None` disables
+automatic recording. Read-only history and snapshots never activate recording.
+Metrics retain their own batching; a conversation turn does not force a metrics flush.
 
 ### Module storage and cache configuration
 

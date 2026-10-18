@@ -6,14 +6,15 @@ from ._runtime_test_helpers import workspace_features
 
 from collections.abc import Mapping
 from pathlib import Path
-from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 
 import pytest
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal
-from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, TraceCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state import RuntimeDomain
 from .test_task_mixed_node_reliability import _TaskTestModels, _TaskTestModelBinding

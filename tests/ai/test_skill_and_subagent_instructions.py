@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill preload and subagent instruction contracts."""
+"""Skill discovery and subagent instruction contracts."""
 
 import pytest
 
@@ -27,7 +27,7 @@ def _skill(identity: str, content: str) -> SkillDefinition:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("available", (False, True))
-async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
+async def test_group_agent_skill_requirements_survive_capture(
     available: bool,
 ) -> None:
     backend = InMemoryAssetBackend()
@@ -42,13 +42,13 @@ async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
         group: RuntimeFeatures[object] = RuntimeFeatures("application")
         group_assets = AssetCapability(store)
         group.capability(group_assets, scope="runtime")
-        preloads = ["guide", "guide"]
-        declared = group.agent("agent", preload_skills=preloads)
-        preloads.clear()
+        selections = ["guide", "guide"]
+        declared = group.agent("agent", allow_skills=selections)
+        selections.clear()
         capture = await group.capture()
         captured = next(item.value for item in capture.contributions if item.kind == "agent")
         assert isinstance(captured, AgentSpec)
-        assert captured.preload_skills == declared.preload_skills == ("guide",)
+        assert captured.allow_skills == declared.allow_skills == ("guide",)
         compiler = AgentCompiler(
             model_resolver=ModelRegistry.openai(model="unused-offline-model").capture(),
             candidates=capture.contributions,
@@ -56,7 +56,7 @@ async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
         )
         if available:
             compiled = compiler.compile(captured)
-            assert compiled.spec.preload_skills == ("guide",)
+            assert compiled.spec.allow_skills == ("guide",)
             assert tuple(skill.id for skill in compiled.skill_definitions) == ("guide",)
         else:
             with pytest.raises(AIError) as raised:
@@ -66,107 +66,37 @@ async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
         await store.close()
 
 
-@pytest.mark.parametrize("preloads", (("*",), ("other",)))
-def test_group_agent_validates_preload_selectors(preloads: tuple[str, ...]) -> None:
-    with pytest.raises(AIError) as raised:
-        RuntimeFeatures("application").agent(
-            "agent", allow_skills=("guide",), preload_skills=preloads,
-        )
-    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-def test_agent_spec_preload_codec_keeps_v1_and_omits_empty_field() -> None:
+def test_agent_spec_skill_selection_codec_round_trips() -> None:
     codec = AgentSpecCodec()
-    default = AgentSpec("agent")
-    payload = codec.to_contract_payload(default)
-    assert payload["version"] == 1
-    assert "preload_skills" not in payload
-    assert codec.from_payload(payload).preload_skills == ()
-
-    explicit_empty = codec.from_payload({**payload, "preload_skills": []})
-    assert explicit_empty.preload_skills == ()
-    assert "preload_skills" not in codec.to_contract_payload(explicit_empty)
-
-
-def test_agent_spec_preload_codec_canonicalizes_non_empty_ids() -> None:
-    codec = AgentSpecCodec()
-    spec = AgentSpec(
-        "agent",
-        allow_skills=("z", "a", "z"),
-        preload_skills=("z", "a", "z"),
-    )
-    assert spec.preload_skills == ("a", "z")
+    spec = AgentSpec("agent", allow_skills=("z", "a", "z"))
+    assert spec.allow_skills == ("a", "z")
     payload = codec.to_contract_payload(spec)
     assert payload["version"] == 1
-    assert payload["preload_skills"] == ["a", "z"]
+    assert payload["allow_skills"] == ["a", "z"]
     assert codec.from_payload(payload) == spec
 
 
-def test_agent_spec_preload_rejects_invalid_type_wildcard_and_not_allowed() -> None:
-    codec = AgentSpecCodec()
-    base = codec.to_contract_payload(AgentSpec("agent"))
-    with pytest.raises(AIError) as invalid_type:
-        codec.from_payload({**base, "preload_skills": "skill"})
-    assert invalid_type.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-
-    with pytest.raises(AIError) as wildcard:
-        AgentSpec("agent", preload_skills=("*",))
-    assert wildcard.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-    with pytest.raises(AIError) as not_allowed:
-        AgentSpec("agent", allow_skills=("allowed",), preload_skills=("other",))
-    assert not_allowed.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-def test_agent_spec_preload_rejects_unknown_version() -> None:
+def test_agent_spec_codec_rejects_unknown_version() -> None:
     payload = AgentSpecCodec().to_contract_payload(AgentSpec("agent"))
     with pytest.raises(AIError) as error:
         AgentSpecCodec().from_payload({**payload, "version": 2})
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_preloaded_skills_are_eager_instructions_on_the_skill_capability() -> None:
+@pytest.mark.asyncio
+async def test_skill_catalog_defers_instruction_bodies_until_requested() -> None:
     capability = SkillCapability(
         (_skill("z", "z-content"), _skill("a", "a-content")),
         SkillSourceRegistry(),
-        preloaded_skill_ids=("z", "a"),
-        max_preloaded_bytes=1024,
     )
     instructions = capability.get_instructions()
     assert instructions is not None
-    assert "<preloaded-skills>" not in instructions
-    assert instructions.index("[skill: a]\na-content") < instructions.index(
-        "[skill: z]\nz-content"
-    )
-
-
-def test_preloaded_skill_instructions_reject_unpaired_surrogates() -> None:
-    definition = _skill("skill", "bad\ud800content")
-    capability = SkillCapability(
-        (definition,),
-        SkillSourceRegistry(),
-        preloaded_skill_ids=(definition.id,),
-    )
-    with pytest.raises(AIError) as error:
-        capability.get_instructions()
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-    with pytest.raises(ValueError):
-        _skill("bad\ud800id", "content")
-
-
-def test_preloaded_skill_instructions_enforce_total_byte_limit() -> None:
-    definition = _skill("skill", "content")
-    content_size = len("[skill: skill]\ncontent".encode("utf-8"))
-    capability = SkillCapability(
-        (definition,),
-        SkillSourceRegistry(),
-        preloaded_skill_ids=("skill",),
-        max_preloaded_bytes=content_size - 1,
-    )
-    with pytest.raises(AIError) as error:
-        capability.get_instructions()
-    assert error.value.code is ErrorCode.PROMPT_TOO_LARGE
+    assert "load_skill" in instructions
+    assert instructions.index("- a:") < instructions.index("- z:")
+    assert "a-content" not in instructions
+    assert "z-content" not in instructions
+    assert (await capability.load_skill("a"))["instructions"] == "a-content"
+    assert (await capability.load_skill("z"))["instructions"] == "z-content"
 
 
 def test_skill_capability_without_skills_has_no_instructions() -> None:

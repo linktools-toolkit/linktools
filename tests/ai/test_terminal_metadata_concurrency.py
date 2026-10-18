@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Terminal ownership preserves concurrent dependency retention metadata."""
 
-from linktools.ai.runtime import ConversationCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability, TraceCapability
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path

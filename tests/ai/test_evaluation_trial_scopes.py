@@ -34,7 +34,7 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import (
     EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine, TaskGraphRun,
 )

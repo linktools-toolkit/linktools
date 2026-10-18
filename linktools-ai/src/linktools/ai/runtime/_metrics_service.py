@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime observation enrichment without owning a write queue."""
+"""Runtime-owned metric recording and observation enrichment."""
 
 from __future__ import annotations
 
@@ -14,7 +14,12 @@ from linktools.core import environ
 from ..core import CorrelationData, UsageMetrics, normalize_correlation
 from ..errors import AIError, ErrorCode
 from ..observe import (
-    MetricRecorderStatus, MetricFlushResult, MetricMeasurement, MetricRecorder, Observation,
+    MetricFlushResult,
+    MetricMeasurement,
+    MetricRecorder,
+    MetricRecorderStatus,
+    Metrics,
+    Observation,
 )
 from ._metric_id import _stable_observation_id
 from .state._contracts import ExecutionTerminalCommitResult
@@ -53,11 +58,17 @@ def _metric_correlation(
     return values
 
 
-class RuntimeMetricRecorder:
-    """Enrich one Runtime's observations and delegate its recording lifetime."""
+class MetricsService:
+    """Own one recording lifetime over a borrowed dataset and enrich observations.
 
-    def __init__(self, recorder: MetricRecorder) -> None:
-        self._recorder = recorder
+    Closing drains this Runtime's recorder without closing its dataset, cache or
+    engine. Agent, Task and Evaluation producers share the same recording scope.
+    """
+
+    def __init__(self, metrics: Metrics) -> None:
+        if not isinstance(metrics, Metrics):
+            raise TypeError("metrics must be Metrics")
+        self._recorder = metrics.recorder()
         self._execution_contexts: dict[str, CorrelationData] = {}
         self._runtime_dimensions: dict[str, str] = {}
         self._runtime_dimensions_configured = False
@@ -185,7 +196,7 @@ def _bind_metric_execution_context(
     execution_id: str,
     correlation: CorrelationData,
 ) -> None:
-    if isinstance(recorder, RuntimeMetricRecorder):
+    if isinstance(recorder, MetricsService):
         recorder.bind_execution_context(execution_id, correlation)
 
 
@@ -193,7 +204,7 @@ def _release_metric_execution_context(
     recorder: MetricRecorder | None,
     execution_id: str,
 ) -> None:
-    if not isinstance(recorder, RuntimeMetricRecorder):
+    if not isinstance(recorder, MetricsService):
         return
     try:
         recorder.release_execution_context(execution_id)
@@ -378,7 +389,7 @@ def _capture_metric_observation(
         return None
     try:
         observation = factory()
-        if isinstance(recorder, RuntimeMetricRecorder):
+        if isinstance(recorder, MetricsService):
             return recorder.capture(observation)
         return observation
     except Exception:
@@ -405,4 +416,4 @@ async def _try_record(
         return False
 
 
-__all__ = ["RuntimeMetricRecorder"]
+__all__ = ["MetricsService"]

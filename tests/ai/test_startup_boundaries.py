@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage._database import SqlStorageContext
 from pydantic_ai.messages import ModelResponse, TextPart
 

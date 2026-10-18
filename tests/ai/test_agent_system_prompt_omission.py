@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Absent system prompts never become empty provider or history messages."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 from pathlib import Path
 
 import pytest

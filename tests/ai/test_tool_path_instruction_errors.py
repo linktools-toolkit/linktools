@@ -6,7 +6,7 @@ from ._runtime_test_helpers import workspace_features
 
 from contextlib import nullcontext
 from pathlib import Path
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 import pytest
 from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart

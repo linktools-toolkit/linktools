@@ -18,8 +18,8 @@ from pydantic_ai.settings import ModelSettings
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
-                                 ConversationCapability, CheckpointCapability, TraceCapability)
+from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 

@@ -12,7 +12,8 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import CheckpointCapability, ConversationCapability, Runtime, RuntimeStorage, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -57,7 +58,7 @@ async def test_wrapped_features_keep_native_order_and_isolate_concurrent_runs(ne
             transcript = await execution.transcript(include_content=True)
             assert [item.text for item in transcript.items] == [f"input {index}", "done"]
     assert inner.wrapped is trace
-    assert trace._capture is None
+    assert trace._service is None
 
 
 @dataclass(kw_only=True, eq=False)
@@ -101,4 +102,4 @@ async def test_bound_features_preserve_public_types_and_subclass_hooks_for_nativ
         for execution in executions:
             assert [label for owner, label in events if owner == execution.execution_id] == ["requires", "trace"]
             assert len((await execution.model_interactions()).items) == 1
-    assert trace._capture is checkpoint._capture is conversation._capture is None
+    assert trace._service is checkpoint._service is conversation._service is None

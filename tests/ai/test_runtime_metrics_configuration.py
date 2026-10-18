@@ -7,7 +7,8 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.observe import Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage, MetricsCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend
 from .test_explicit_runtime_features import _FeatureModels, _features, _definitions
 
@@ -24,11 +25,11 @@ class _RecordingStore(InMemoryMetricStore):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", (False, True))
 @pytest.mark.parametrize("cached", (False, True))
-async def test_agent_metrics_require_capability_and_keep_batching(enabled, cached):
+async def test_agent_metrics_require_resource_and_keep_batching(enabled, cached):
     store = _RecordingStore()
     metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20) if cached else None)
-    features = _features(MetricsCapability(metrics=metrics)) if enabled else _definitions()
-    async with Runtime.open("metrics-explicit", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=features) as runtime:
+    features = _definitions()
+    async with Runtime.open("metrics-explicit", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=features, metrics=metrics if enabled else None) as runtime:
         execution = await runtime.agents.get().start("question")
         await execution.wait(timeout_seconds=5)
         if cached or not enabled:
@@ -44,11 +45,9 @@ async def test_agent_metrics_require_capability_and_keep_batching(enabled, cache
         assert len(ids) == len(set(ids))
 
 
-def test_metrics_capability_requires_sink():
-    with pytest.raises(TypeError):
-        MetricsCapability()
-    with pytest.raises(TypeError, match="metrics must be Metrics"):
-        MetricsCapability(metrics=None)
+def test_runtime_metrics_requires_dataset():
+    with pytest.raises(TypeError, match="metrics"):
+        Runtime.open("invalid", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=object())
 
 
 @pytest.mark.asyncio
@@ -67,7 +66,7 @@ async def test_shared_metrics_survive_other_runtime_close():
     store = _RecordingStore()
     metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20))
     for namespace in ("first", "second"):
-        async with Runtime.open(namespace, storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=_features(MetricsCapability(metrics=metrics))) as runtime:
+        async with Runtime.open(namespace, storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=_definitions(), metrics=metrics) as runtime:
             execution = await runtime.agents.get().start("question")
             await execution.wait(timeout_seconds=5)
     assert {item.source_namespace for item in store.observations} == {"first", "second"}
@@ -82,8 +81,7 @@ async def test_tool_metrics_are_not_duplicated():
     features = RuntimeFeatures("tool-metrics")
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
-    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
-    async with Runtime.open("tool-metrics", storage=RuntimeStorage.in_memory(), models=_FeatureModels(TestModel(call_tools=["lookup"])), features=features) as runtime:
+    async with Runtime.open("tool-metrics", storage=RuntimeStorage.in_memory(), models=_FeatureModels(TestModel(call_tools=["lookup"])), features=features, metrics=metrics) as runtime:
         execution = await runtime.agents.get().start("lookup")
         await execution.wait(timeout_seconds=5)
     tools = [item for item in store.observations if item.kind == "linktools.tool.execution"]
@@ -94,7 +92,7 @@ async def test_tool_metrics_are_not_duplicated():
 async def test_concurrent_runs_keep_metric_execution_identity():
     store = _RecordingStore()
     metrics = Metrics.from_store(store)
-    async with Runtime.open("concurrent", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=_features(MetricsCapability(metrics=metrics))) as runtime:
+    async with Runtime.open("concurrent", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=_definitions(), metrics=metrics) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(str(i)) for i in range(3)))
         await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
     models = [item for item in store.observations if item.kind == "linktools.model.request"]
@@ -104,13 +102,13 @@ async def test_concurrent_runs_keep_metric_execution_identity():
 
 
 @pytest.mark.asyncio
-async def test_absent_capability_does_not_open_recording_and_business_metrics_stay_independent(monkeypatch):
+async def test_absent_metrics_does_not_open_recording_and_business_metrics_stay_independent(monkeypatch):
     from datetime import datetime, timezone
     from linktools.ai.observe import Observation
 
     metrics = Metrics.in_memory()
     def forbidden_recorder(self):
-        pytest.fail("Runtime without MetricsCapability must not initialize recording")
+        pytest.fail("Runtime without metrics must not initialize recording")
     monkeypatch.setattr(Metrics, "recorder", forbidden_recorder)
     async with Runtime.open(
         "no-metric-owner", storage=RuntimeStorage.in_memory(), models=_FeatureModels(),
@@ -128,30 +126,23 @@ async def test_absent_capability_does_not_open_recording_and_business_metrics_st
     assert await metrics.get_observation("business") == observation
 
 
-def test_runtime_open_has_no_second_metrics_configuration_source():
+def test_runtime_open_is_the_only_metrics_configuration_source():
     import inspect
-    assert "metrics" not in inspect.signature(Runtime.open).parameters
-    with pytest.raises(TypeError, match="metrics"):
-        Runtime.open("duplicate", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=Metrics.in_memory())
+    import linktools.ai.capability as capability
+    assert "metrics" in inspect.signature(Runtime.open).parameters
+    assert "metrics" not in inspect.signature(RuntimeFeatures).parameters
+    assert "MetricsCapability" not in capability.__all__
+    assert not hasattr(capability, "MetricsCapability")
 
 
 @pytest.mark.asyncio
-async def test_two_metrics_dataset_capabilities_are_rejected_before_recording(monkeypatch):
-    from linktools.ai.errors import AIError, ErrorCode
-
-    first = MetricsCapability(metrics=Metrics.in_memory())
-    second = MetricsCapability(metrics=Metrics.in_memory())
-    first.id, second.id = "metrics-first", "metrics-second"
-    features = _definitions()
-    features.capability(first, scope="runtime")
-    features.capability(second, scope="runtime")
+async def test_invalid_metrics_is_rejected_before_recording(monkeypatch):
     def forbidden_recorder(self):
-        pytest.fail("conflicting datasets must be rejected before opening a recorder")
+        pytest.fail("invalid datasets must be rejected before opening a recorder")
     monkeypatch.setattr(Metrics, "recorder", forbidden_recorder)
-    with pytest.raises(AIError) as duplicate:
+    with pytest.raises(TypeError, match="metrics"):
         async with Runtime.open(
-            "duplicate-metric-datasets", models=_FeatureModels(),
-            storage=RuntimeStorage.in_memory(), features=features,
+            "invalid-metric-dataset", models=_FeatureModels(),
+            storage=RuntimeStorage.in_memory(), features=_definitions(), metrics=object(),
         ):
-            pytest.fail("multiple metric datasets accepted")
-    assert duplicate.value.code is ErrorCode.CAPABILITY_CONFLICT
+            pytest.fail("invalid metric dataset accepted")

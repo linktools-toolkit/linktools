@@ -441,7 +441,7 @@ def _candidate_parts(candidate: CandidateContract) -> dict[str, JsonValue]:
                 "selected": binding.pop("selected"), "subagents": binding.pop("subagents"),
                 "subagent_bindings": binding.pop("subagent_bindings", []),
                 "selectors": {key: agent.pop(key, []) for key in (
-                    "allow_tools", "allow_skills", "allow_subagents", "allow_capabilities", "preload_skills")},
+                    "allow_tools", "allow_skills", "allow_subagents", "allow_capabilities")},
             })
             parameters.append({key: agent.pop(key) for key in (
                 "usage_limits", "planning", "thinking", "tool_retries", "output_retries")})
