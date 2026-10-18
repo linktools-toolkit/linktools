@@ -3,12 +3,11 @@
 """Input attachment display metadata preserves admission and capture provenance."""
 
 import json
-from dataclasses import replace
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelRequest, TextContent, UserPromptPart
 
-from linktools.ai.core import PromptLimits, WorkspaceFileInput, canonical_json_bytes
+from linktools.ai.core import PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._attachment import request_attachment_facts
 from linktools.ai.runtime._input import (
@@ -184,42 +183,6 @@ async def test_equal_bytes_keep_distinct_occurrences_after_files_move_before_pro
 
 
 @pytest.mark.asyncio
-async def test_legacy_captured_labels_restore_without_rewriting_payload_or_positions() -> None:
-    materializer = ExecutionInputMaterializer(_Files(), PromptLimits())
-    binary = BinaryContent(b"DIRECT", media_type="text/plain", identifier="direct")
-    original = ("Before", binary, WorkspaceFileInput("inline.txt", identifier="inline"))
-    accepted = await materializer.materialize(original, ("suffix.txt",))
-    legacy = MaterializedUserContent((
-        "Before", binary, 'Workspace file path: "inline.txt"', accepted[6],
-        'Workspace file path: "suffix.txt"', accepted[1],
-    ), {
-        **accepted.view,
-        "attachments": sorted(accepted.view["attachments"], key=lambda item: item["position"]),
-    })
-    stored = await materializer.store(legacy, tenant_id="tenant")
-    original_bytes = canonical_json_bytes(stored.payload.value)
-
-    restored = await materializer.restore(stored)
-    assert restored == legacy
-    assert await materializer.materialize(restored, ()) is restored
-    assert captured_input_prompt(original, restored) == legacy[:4]
-    assert captured_input_files(restored, 1) == legacy[4:]
-    assert merge_captured_input_files(
-        captured_input_prompt(original, restored), captured_input_files(restored, 1),
-    ) == legacy
-    facts = request_attachment_facts(
-        (ModelRequest(parts=[UserPromptPart(content=restored)]),), restored.view["attachments"],
-        accepted_attachment_ids=set(),
-    )
-    assert [fact["position"] for fact in facts] == [0, 1, 2]
-    rewritten = await materializer.store(restored, tenant_id="tenant")
-    assert canonical_json_bytes(rewritten.payload.value) == original_bytes
-    assert rewritten.view == stored.view
-    no_view = replace(stored, view=None)
-    assert await materializer.restore(no_view) == legacy
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("field", ("path", "attachment", "size", "mime_type"))
 async def test_capture_rejects_metadata_that_disagrees_with_accepted_file(field: str) -> None:
     materializer = ExecutionInputMaterializer(_Files(), PromptLimits())
@@ -231,6 +194,23 @@ async def test_capture_rejects_metadata_that_disagrees_with_accepted_file(field:
     corrupt = MaterializedUserContent((
         TextContent(json.dumps(altered), metadata=text.metadata), accepted[1], accepted[2],
     ), accepted.view)
+
+    with pytest.raises(AIError) as raised:
+        captured_input_files(corrupt, 1)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformation", ("untyped_label", "misplaced_files"))
+async def test_capture_requires_typed_metadata_at_the_file_prefix(malformation: str) -> None:
+    materializer = ExecutionInputMaterializer(_Files(), PromptLimits())
+    accepted = await materializer.materialize("Inspect", ("suffix.txt",))
+    if malformation == "untyped_label":
+        parts = (accepted[0].content, accepted[1], accepted[2])
+    else:
+        parts = (accepted[2], accepted[0], accepted[1])
+    corrupt = MaterializedUserContent(parts, accepted.view)
 
     with pytest.raises(AIError) as raised:
         captured_input_files(corrupt, 1)

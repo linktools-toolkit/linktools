@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Canonical events remain authoritative when derived locators are incomplete."""
+"""History indexes preserve captured cuts and reject incomplete coverage."""
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -29,14 +29,12 @@ async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("partial", (False, True))
-async def test_legacy_trace_merges_partial_indexes_and_keeps_cursor_cut(
-    tmp_path: Path, partial: bool,
+async def test_trace_indexes_keep_cursor_cut(
+    tmp_path: Path,
 ) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "trace.db")
     try:
         archive, run_id = await _seed_trace(storage, 4)
-        await _discard_locators(archive, run_id, 4 if partial else None)
         timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
         await archive.append_event(StepEvent(
             run_id, "TOOL_CALL_STARTED", 5, timestamp=timestamp,
@@ -45,7 +43,7 @@ async def test_legacy_trace_merges_partial_indexes_and_keeps_cursor_cut(
         marker = await archive.state_store.read(lambda tx: tx.get_record(
             archive._history_association_key(run_id, "coverage", "event"),
         ))
-        assert marker is None, "a newly indexed suffix does not certify an old prefix"
+        assert marker is not None and marker.data == {"sequence": 5}
         first = await archive.list_trace_events(
             agent_run_id=run_id, event_high_water=4,
             after_timestamp=None, after_sequence=0, limit=2,
@@ -66,9 +64,8 @@ async def test_legacy_trace_merges_partial_indexes_and_keeps_cursor_cut(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("partial", (False, True))
-async def test_legacy_associations_find_response_request_and_tools(
-    tmp_path: Path, partial: bool,
+async def test_associations_find_response_request_and_tools_at_captured_cut(
+    tmp_path: Path,
 ) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "associations.db")
     try:
@@ -86,7 +83,6 @@ async def test_legacy_associations_find_response_request_and_tools(
                 run_id, kind, 1, timestamp=timestamp + timedelta(seconds=index),
                 metadata=metadata, tool_call_id=tool_id,
             ), execution_id="execution")
-        await _discard_locators(archive, run_id, 2 if partial else None)
         await archive.append_event(StepEvent(
             run_id, "TOOL_CALL_SUCCEEDED", 1, timestamp=timestamp + timedelta(seconds=4),
             tool_call_id="call",
@@ -106,12 +102,10 @@ async def test_legacy_associations_find_response_request_and_tools(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target", ("trace", "association", "coverage"))
-async def test_malformed_present_locator_is_not_hidden_by_fallback(tmp_path: Path, target: str) -> None:
+async def test_malformed_present_locator_is_rejected(tmp_path: Path, target: str) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "invalid.db")
     try:
         archive, run_id = await _seed_trace(storage, 2)
-        if target != "coverage":
-            await _discard_locators(archive, run_id, 2)
         family, identity = {
             "trace": ("trace", "2"),
             "association": ("TOOL_CALL_STARTED", "call-1"),
@@ -134,6 +128,68 @@ async def test_malformed_present_locator_is_not_hidden_by_fallback(tmp_path: Pat
                     agent_run_id=run_id, event_high_water=2,
                     after_timestamp=None, after_sequence=0, limit=10,
                 )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", (False, True))
+async def test_incomplete_event_index_coverage_rejects_reads_and_append(tmp_path: Path, partial: bool) -> None:
+    storage = RuntimeStorage.sqlite(tmp_path / "incomplete.db")
+    try:
+        archive, run_id = await _seed_trace(storage, 2)
+        await _discard_locators(archive, run_id, 2 if partial else None)
+        with pytest.raises(AIError) as trace:
+            await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=2,
+                after_timestamp=None, after_sequence=0, limit=10,
+            )
+        assert trace.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with pytest.raises(AIError) as associations:
+            await archive.read_history_associations(
+                agent_run_id=run_id, message_seqs=(), tool_call_ids=("call-1",), event_high_water=2,
+            )
+        assert associations.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with pytest.raises(AIError) as append:
+            await archive.append_event(StepEvent(
+                run_id, "TOOL_CALL_STARTED", 3, tool_call_id="new", tool_name="tool",
+            ), execution_id="execution")
+        assert append.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert len(await archive.list_events(agent_run_id=run_id)) == 2
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_trace_does_not_require_index_coverage(tmp_path: Path) -> None:
+    storage = RuntimeStorage.sqlite(tmp_path / "empty.db")
+    try:
+        archive, run_id = await _seed_trace(storage, 0)
+        assert await archive.list_trace_events(
+            agent_run_id=run_id, event_high_water=0,
+            after_timestamp=None, after_sequence=0, limit=10,
+        ) == []
+        assert await archive.read_history_associations(
+            agent_run_id=run_id, message_seqs=(1,), tool_call_ids=(), event_high_water=0,
+        ) == []
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_filtered_trace_rejects_missing_locator_under_complete_coverage(tmp_path: Path) -> None:
+    storage = RuntimeStorage.sqlite(tmp_path / "missing.db")
+    try:
+        archive, run_id = await _seed_trace(storage, 2)
+        await archive.state_store.mutate(lambda tx: tx.delete_record(
+            archive._history_association_key(run_id, "trace", "2"),
+        ))
+        with pytest.raises(AIError) as raised:
+            await archive.list_trace_events(
+                agent_run_id=run_id, event_high_water=2,
+                after_timestamp=None, after_sequence=0, limit=10, tool_call_id="call-1",
+            )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()

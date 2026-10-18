@@ -853,12 +853,13 @@ async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backe
         await state.close()
 
 
-async def test_metadata_batch_reads_legacy_fact_with_same_ownership_validation(tmp_path: Path) -> None:
+async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_path: Path) -> None:
     from .test_model_interaction_lifecycle_paging import _terminal
-    from linktools.ai.runtime.state._step_archive import _encode_step, _step_subject
+    from linktools.ai.runtime.state._step_archive import _encode_step
     from linktools.ai.runtime.state._store import StoredFact
+    from linktools.ai.core import canonical_sha256
 
-    state = RuntimeStorage.sqlite(tmp_path / "legacy-metadata.db")
+    state = RuntimeStorage.sqlite(tmp_path / "missing-record-metadata.db")
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
@@ -868,7 +869,7 @@ async def test_metadata_batch_reads_legacy_fact_with_same_ownership_validation(t
         fact = StoredFact(
             archive._stream(run.agent_run_id, "interaction"), 1,
             archive._agent_run_key(run.agent_run_id), "model_interaction",
-            _step_subject(terminal), terminal.status, _encode_step(terminal),
+            bytes.fromhex(canonical_sha256({"agent_run_id": terminal.agent_run_id, "model_request_seq": 1})), terminal.status, _encode_step(terminal),
         )
         async def seed(transaction):
             owner = await transaction.get_record(fact.owner_key_digest)
@@ -877,8 +878,9 @@ async def test_metadata_batch_reads_legacy_fact_with_same_ownership_validation(t
             await transaction.delete_record(archive._interaction_key(run.agent_run_id, 1))
             await transaction.insert_fact(fact)
         await archive.state_store.mutate(seed)
-        page = await _metadata(_service(state))
-        assert [(item.model_request_seq, item.status) for item in page] == [(1, "CANCELLED")]
+        with pytest.raises(AIError) as raised:
+            await _metadata(_service(state))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 

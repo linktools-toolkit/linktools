@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime persistence compatibility contracts."""
+"""Runtime persistence wire contracts."""
 
 import copy
 from datetime import datetime, timezone
@@ -12,7 +12,6 @@ from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_persisted_domain,
-    wire_type_id,
     wire_type_id,
 )
 from linktools.ai.runtime.state import RuntimeDomain
@@ -198,7 +197,7 @@ def test_persisted_task_node_rejects_unknown_field() -> None:
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_persisted_model_interaction_accepts_legacy_attachment_without_identifier() -> None:
+def test_persisted_model_interaction_requires_attachment_identifier_field() -> None:
     attachment_id = "a" * 64
     digest = "b" * 64
     interaction = ModelInteractionRecord(
@@ -242,16 +241,15 @@ def test_persisted_model_interaction_accepts_legacy_attachment_without_identifie
         pair for pair in encoded_attachment if pair[0] != "input_identifier"
     ]
 
-    decoded = _decode_enveloped_domain(
-        _envelope(payload, wire_id="model_interaction"),
-        ModelInteractionRecord,
-    )
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            _envelope(payload, wire_id="model_interaction"),
+            ModelInteractionRecord,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-    assert decoded.attachments[0]["attachment_id"] == attachment_id
-    assert decoded.attachments[0]["input_identifier"] is None
 
-
-@pytest.mark.parametrize("field_name", ("started_at", "finished_at", "attachments"))
+@pytest.mark.parametrize("field_name", ("started_at", "finished_at", "attachments", "client_requests"))
 def test_persisted_model_interaction_requires_current_fields(field_name: str) -> None:
     interaction = ModelInteractionRecord(
         agent_run_id="run",

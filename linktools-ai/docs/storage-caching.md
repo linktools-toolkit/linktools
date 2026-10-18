@@ -460,7 +460,7 @@ for at most three seconds from the start of its original capture. `max_age` must
 be finite and non-negative; it is a caller-selected maximum, not a fixed SDK TTL.
 A shorter later maximum is respected, and a longer one never extends an existing
 entry's original expiry. The default zero does not read or publish display cache
-entries, including when a custom `SessionService` still has the earlier signature.
+entries. Custom `SessionService` implementations accept the same `max_age` argument.
 
 The Runtime borrows its existing `RuntimeStorage.cache`; no extra cache
 configuration or backend lifecycle is introduced. Standard assembly enables

@@ -25,14 +25,14 @@ from linktools.ai.runtime.state._contracts import ExecutionRecord
 from . import _runtime_test_helpers as helpers
 
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_4609177e.json"
+_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_current.json"
 
 
 def _restore_fixture(tmp_path: Path) -> tuple[Path, str, str]:
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
     assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
-    assert b"budget_scope_id" not in sql
+    assert b"budget_scope_id" in sql
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
@@ -72,7 +72,7 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_sqlite_retry_preserves_historical_agent_usage_limit(
+async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path, _session_execution_id, execution_id = _restore_fixture(tmp_path)

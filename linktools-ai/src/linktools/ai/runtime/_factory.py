@@ -37,7 +37,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..spec import (
-    DEFAULT_AGENT_RETRIES,
     AgentSpec,
     RuleInstructionResolver,
     RepositoryInstructionResolver,
@@ -266,8 +265,7 @@ async def compose_runtime_components(
             else:
                 agents["default"] = AgentSpec("default")
         compiler = AgentCompiler(
-            tool_retries=(captures[0].tool_retries if captures else DEFAULT_AGENT_RETRIES),
-            output_retries=(captures[0].output_retries if captures else DEFAULT_AGENT_RETRIES),
+            defaults=(captures[0].defaults if captures else None),
             model_resolver=resolver,
             candidates=tuple(
                 candidate

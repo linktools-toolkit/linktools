@@ -175,18 +175,7 @@ class EvidenceBundle:
 
     @property
     def digest(self) -> str:
-        # Public projections use mime_type; existing evidence identity retains
-        # the original media_type wire key without rewriting stored bundles.
-        content = self.content_mapping()
-        content["attachments"] = [
-            {"kind": "runtime_content", "attachment_id": item.attachment_id,
-             "media_type": item.mime_type, "digest": item.object_ref.digest,
-             "size": item.object_ref.size}
-            if isinstance(item, EvidenceAttachmentRef)
-            else {"kind": "asset", "ref": item.to_payload()}
-            for item in self.attachments
-        ]
-        return canonical_sha256(content)
+        return canonical_sha256(self.content_mapping())
 
 
 class ScoreNotApplicable(BaseModel):

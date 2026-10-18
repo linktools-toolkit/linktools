@@ -32,7 +32,7 @@ def _reference(name: str = "case-a") -> AssetVersionRef:
 
 
 def _execution_without_fixture() -> ExecutionRecord:
-    path = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_4609177e.json"
+    path = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_current.json"
     fixture = json.loads(path.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
     assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
@@ -41,20 +41,22 @@ def _execution_without_fixture() -> ExecutionRecord:
         row = connection.execute("SELECT payload_json FROM ai_state_records WHERE kind = 'execution'").fetchone()
     payload = json.loads(row[0])
     fields = payload["value"]["payload"]["fields"]
-    assert "tool_response_ref" not in fields
+    assert fields["tool_response_ref"] is None
     assert fields["restart_checkpoints"] is True and fields["durable_trace"] is True
     return _decode_enveloped_domain(payload, ExecutionRecord)
 
 
 def test_fixture_reference_is_optional_with_explicit_persistence_flags() -> None:
-    historical = _execution_without_fixture()
-    assert historical.tool_response_ref is None
+    accepted = _execution_without_fixture()
+    assert accepted.tool_response_ref is None
     for reference in (None, _reference()):
-        current = replace(historical, tool_response_ref=reference)
+        current = replace(accepted, tool_response_ref=reference)
         assert decode_domain(encode_domain(current), ExecutionRecord) == current
-    wire = encode_domain(historical)
+    wire = encode_domain(accepted)
     wire["fields"].pop("tool_response_ref")
-    assert decode_domain(wire, ExecutionRecord) == historical
+    with pytest.raises(AIError) as missing:
+        decode_domain(wire, ExecutionRecord)
+    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     wire["fields"]["tool_response_ref"] = "not-an-asset-version"
     with pytest.raises(AIError) as invalid:
         decode_domain(wire, ExecutionRecord)
@@ -258,7 +260,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
     )
     from linktools.ai.storage import StoredPayload
 
-    historical = _execution_without_fixture()
+    accepted = _execution_without_fixture()
     status = {
         "pending_admission": ExecutionStatus.PENDING_START,
         "explicit_recovery": ExecutionStatus.RECOVERY_REQUIRED,
@@ -270,7 +272,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
     state = (RecoveryCheckpointState.ADMITTED if path in {"pending_admission", "admitted_first_attempt"}
              else RecoveryCheckpointState.WAITING if path in {"ready_deferred", "pending_deferred"}
              else RecoveryCheckpointState.ACTIVE)
-    execution = replace(historical, session_id=None, status=status, tool_response_ref=_reference())
+    execution = replace(accepted, session_id=None, status=status, tool_response_ref=_reference())
     pending = (PendingToolContinuation("run", calls=(
         PendingDeferredCall("call", "lookup", StoredPayload.inline_json({})),
     )) if state is RecoveryCheckpointState.WAITING else None)

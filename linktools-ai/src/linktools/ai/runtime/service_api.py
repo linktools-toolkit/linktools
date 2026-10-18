@@ -1129,7 +1129,7 @@ class TaskModelProjection:
 class ExecutionObservationEvent:
     """Execution-tree or metadata delivery with an independent observation cursor.
 
-    The nested tree cursor remains a legacy tree-only checkpoint. Model metadata
+    The nested tree cursor is a tree-only checkpoint. Model metadata
     reuses the outer cursor and is compensated again on every reconnection.
     """
 

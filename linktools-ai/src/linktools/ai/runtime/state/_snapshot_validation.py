@@ -246,8 +246,13 @@ def validate_snapshot_domain(
     for fact in facts:
         if fact.kind == "step_event":
             event_counts[fact.owner_key_digest] = max(event_counts.get(fact.owner_key_digest, 0), fact.sequence)
-    # Associations are derived indexes; older stores contain only their facts.
-    # Any stored index must still agree exactly with its authoritative event.
+    if domain is RuntimeDomain.TRACE:
+        covered_owners = {
+            record.parent_digest for record in records
+            if record.kind == "history_association" and record.sort_key == "coverage:event"
+        }
+        if set(event_counts) != covered_owners:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for record in records:
         if record.kind == "history_association":
             if record.sort_key == "coverage:event":
@@ -317,11 +322,6 @@ def validate_snapshot_references(
                 transcript_heads[domain, head.owner_id] = head
             elif record.kind == "model_interaction":
                 interactions.append(_decode_enveloped_domain(record.data, ModelInteractionRecord))
-    for domain_facts in facts.values():
-        interactions.extend(
-            _decode_enveloped_domain(fact.data, ModelInteractionRecord)
-            for fact in domain_facts if fact.kind == "model_interaction"
-        )
     for interaction in interactions:
         for context in (interaction.request_context, interaction.response_context):
             if context is None:
@@ -511,7 +511,7 @@ def _validate_history_association_coverage(
         None, record.parent_digest, "history_association", "coverage:event",
         None, record.storage_revision, None, 0, None, {"sequence": covered},
     )
-    if covered > event_count or record.storage_revision < 1 or not _same_physical_identity(record, expected):
+    if covered != event_count or record.storage_revision < 1 or not _same_physical_identity(record, expected):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for key, association in associations.items():
         if association.data["sequence"] <= covered:
@@ -1027,8 +1027,7 @@ def _validate_facts(
                 checkpoint.agent_run_id != owner.agent_run_id
                 or checkpoint.state != fact.state
                 or not isinstance(head, TranscriptHeadRecord)
-                or (checkpoint.transcript_message_count is not None
-                    and checkpoint.transcript_message_count > head.message_count)
+                or checkpoint.transcript_message_count > head.message_count
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, TranscriptHeadRecord):
@@ -1138,21 +1137,6 @@ def _fact_storage_identity(
         )
         return relation, owner.owner_id
     if isinstance(owner, AgentRunRecord):
-        if fact.kind == "model_interaction":
-            interaction = _decode_enveloped_domain(fact.data, ModelInteractionRecord)
-            expected_subject = bytes.fromhex(canonical_sha256({
-                "agent_run_id": interaction.agent_run_id,
-                "model_request_seq": interaction.model_request_seq,
-            }))
-            if (
-                interaction.agent_run_id != owner.agent_run_id
-                or interaction.model_request_seq != fact.sequence
-                or interaction.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
-                or interaction.status != fact.state
-                or fact.subject_digest != expected_subject
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return "interaction", owner.agent_run_id
         relation = {
             "step_event": "event",
             "step_checkpoint": "checkpoint",
@@ -1182,15 +1166,6 @@ def _canonical_sequences(
             if value.model_request_seq in admitted:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             admitted[value.model_request_seq] = value
-    for fact in facts:
-        if fact.kind != "model_interaction":
-            continue
-        value = _decode_enveloped_domain(fact.data, ModelInteractionRecord)
-        admitted = interactions.setdefault(value.agent_run_id, {})
-        previous = admitted.get(value.model_request_seq)
-        if previous is not None and previous != value:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        admitted[value.model_request_seq] = value
     for agent_run_id, admitted in interactions.items():
         if set(admitted) != set(range(1, len(admitted) + 1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

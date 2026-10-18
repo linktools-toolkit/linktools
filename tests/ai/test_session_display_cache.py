@@ -338,16 +338,17 @@ async def test_display_cache_outer_transaction_never_reads_or_publishes_cache():
         await state.close()
 
 
-async def test_display_cache_default_facade_keeps_custom_service_signature():
+async def test_display_cache_facade_passes_max_age_to_custom_service():
     calls = []
 
     class Custom:
-        async def refresh(self, session_id, *, principal, cursor, limit):
-            calls.append((session_id, principal, cursor, limit))
+        async def refresh(self, session_id, *, principal, cursor, limit, max_age):
+            calls.append((session_id, principal, cursor, limit, max_age))
             return "custom"
     facade = RuntimeSessions(Custom(), object(), ensure_open=lambda: None)
     assert await facade.refresh("session", principal=_PRINCIPAL, max_age=0) == "custom"
-    assert calls == [("session", _PRINCIPAL, None, 100)]
+    assert await facade.refresh("session", principal=_PRINCIPAL, max_age=3) == "custom"
+    assert calls == [("session", _PRINCIPAL, None, 100, 0), ("session", _PRINCIPAL, None, 100, 3)]
 
 
 async def test_display_cache_split_routes_keep_strong_fallback(tmp_path):

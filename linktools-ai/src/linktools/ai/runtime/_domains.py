@@ -298,9 +298,6 @@ class RuntimeSessions(Generic[AppT]):
     async def refresh(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100, max_age: float = 0) -> SessionDetail:
         """Refresh a session; opt in to bounded stale display with positive max_age."""
         self._ensure_open()
-        if max_age == 0 and not isinstance(max_age, bool):
-            # Keep the default call compatible with existing custom services.
-            return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit)
         return await self._service.refresh(session_id, principal=principal, cursor=cursor, limit=limit, max_age=max_age)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:

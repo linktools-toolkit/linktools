@@ -393,7 +393,7 @@ async def test_runtime_sessions_refresh_delegates_to_the_injected_service() -> N
     calls = []
     result = object()
     class Service:
-        async def refresh(self, session_id, *, principal, cursor, limit):
+        async def refresh(self, session_id, *, principal, cursor, limit, max_age):
             calls.append((session_id, principal, cursor, limit))
             return result
     facade = RuntimeSessions(Service(), object(), ensure_open=lambda: calls.append("open"))

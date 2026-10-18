@@ -91,10 +91,10 @@ async def test_program_scorer_uses_frozen_case_context_for_identical_inputs_and_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy", (True, False), ids=("earlier-input", "current-input"))
+@pytest.mark.parametrize("include_case_context", (False, True), ids=("without-case-context", "with-case-context"))
 @pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
 async def test_scoring_intent_replays_original_input_and_rejects_changed_context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool, backend: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_case_context: bool, backend: str,
 ) -> None:
     target_calls: list[JsonValue] = []
     received: list[ScoringInput] = []
@@ -126,7 +126,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
                     sample: ScoringInput) -> TaskGraph:
             captured.append(sample)
             payload = sample.to_mapping()
-            if legacy:
+            if not include_case_context:
                 payload.pop("case_ref")
                 payload.pop("label_provenance")
             return build_graph(record, trial, contract, ScoringInput.from_mapping(payload))
@@ -158,7 +158,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
             assert (await repository.register_launch_intent(experiment_id, saved, capacity=1)) == record
 
             alternate = captured[0].to_mapping()
-            if not legacy:
+            if include_case_context:
                 alternate.pop("case_ref")
                 alternate.pop("label_provenance")
             graph = build_graph(record, saved.trial, record.manifest.scorers[0], ScoringInput.from_mapping(alternate))
@@ -187,8 +187,8 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
         assert (await recovered.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert target_calls == ["yes"] and len(received) == 1
         sample = received[0]
-        assert sample.case_ref == (None if legacy else case.ref)
-        assert sample.label_provenance == (None if legacy else case.label_provenance)
+        assert sample.case_ref == (case.ref if include_case_context else None)
+        assert sample.label_provenance == (case.label_provenance if include_case_context else None)
         record = await reopened.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         restored = next(intent for intent in record.intents if intent.scorer_slot_id is not None)
         assert canonical_json_bytes(encode_domain(restored.submission)) == original_bytes

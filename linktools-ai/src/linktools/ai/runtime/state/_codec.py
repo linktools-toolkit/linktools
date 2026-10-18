@@ -9,7 +9,7 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -1068,57 +1068,9 @@ def _decode_v1_execution_start_reservation(
     )
 
 
-def _encode_v1_artifact_record(value: object, codec: "_VersionCodec", persisted: bool) -> Mapping[str, JsonValue]:
-    # Keep v1 wire and digest bytes stable while exposing mime_type in Python.
-    if not isinstance(value, ArtifactRecord):
-        raise TypeError("V1 artifact_record encoder received the wrong type")
-    return {
-        "artifact_id": _encode_domain(value.artifact_id, codec, persisted=persisted),
-        "execution_id": _encode_domain(value.execution_id, codec, persisted=persisted),
-        "producer": _encode_domain(value.producer, codec, persisted=persisted),
-        "media_type": _encode_domain(value.mime_type, codec, persisted=persisted),
-        "object_ref": _encode_domain(value.object_ref, codec, persisted=persisted),
-        "created_at": _encode_domain(value.created_at, codec, persisted=persisted),
-    }
-
-
-def _decode_v1_artifact_record(raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool) -> ArtifactRecord:
-    _require_required_keys(raw_fields, frozenset({'artifact_id', 'execution_id', 'producer', 'media_type', 'object_ref', 'created_at'}))
-    return ArtifactRecord(
-        artifact_id=cast(str, _decode_domain(raw_fields["artifact_id"], str, codec, persisted=persisted)),
-        execution_id=cast(str, _decode_domain(raw_fields["execution_id"], str, codec, persisted=persisted)),
-        producer=cast(str, _decode_domain(raw_fields["producer"], str, codec, persisted=persisted)),
-        mime_type=cast(str, _decode_domain(raw_fields["media_type"], str, codec, persisted=persisted)),
-        object_ref=cast(ObjectRef, _decode_domain(raw_fields["object_ref"], ObjectRef, codec, persisted=persisted)),
-        created_at=cast(datetime, _decode_domain(raw_fields["created_at"], datetime, codec, persisted=persisted)),
-    )
-
-
-def _encode_v1_evaluation_attachment_ref(value: object, codec: "_VersionCodec", persisted: bool) -> Mapping[str, JsonValue]:
-    # Keep v1 wire and digest bytes stable while exposing mime_type in Python.
-    if not isinstance(value, EvidenceAttachmentRef):
-        raise TypeError("V1 evaluation_attachment_ref encoder received the wrong type")
-    return {
-        "attachment_id": _encode_domain(value.attachment_id, codec, persisted=persisted),
-        "media_type": _encode_domain(value.mime_type, codec, persisted=persisted),
-        "object_ref": _encode_domain(value.object_ref, codec, persisted=persisted),
-    }
-
-
-def _decode_v1_evaluation_attachment_ref(raw_fields: Mapping[str, object], codec: "_VersionCodec", persisted: bool) -> EvidenceAttachmentRef:
-    _require_required_keys(raw_fields, frozenset({'attachment_id', 'media_type', 'object_ref'}))
-    return EvidenceAttachmentRef(
-        attachment_id=cast(str, _decode_domain(raw_fields["attachment_id"], str, codec, persisted=persisted)),
-        mime_type=cast(str, _decode_domain(raw_fields["media_type"], str, codec, persisted=persisted)),
-        object_ref=cast(ObjectRef, _decode_domain(raw_fields["object_ref"], ObjectRef, codec, persisted=persisted)),
-    )
-
-
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v1_object_ref,
-        "artifact_record": _encode_v1_artifact_record,
-        "evaluation_attachment_ref": _encode_v1_evaluation_attachment_ref,
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _encode_v1_task_node,
@@ -1130,8 +1082,6 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
         "object_ref": _decode_v1_object_ref,
-        "artifact_record": _decode_v1_artifact_record,
-        "evaluation_attachment_ref": _decode_v1_evaluation_attachment_ref,
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _decode_v1_task_node,
@@ -1483,7 +1433,7 @@ def _decode_external(
         _require_required_keys(value, frozenset(declared))
         return target(**{
             name: _decode_domain(value[name], field_type, codec)
-            for name, (field_type, _init, _required) in declared.items()
+            for name, (field_type, _init) in declared.items()
         })
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
@@ -2107,15 +2057,13 @@ def _decode_enum(
 @lru_cache(maxsize=None)
 def _dataclass_fields(
     target: type[object],
-) -> Mapping[str, tuple[object, bool, bool]]:
+) -> Mapping[str, tuple[object, bool]]:
     # Registered wire classes have stable declarations; payloads remain uncached.
     hints = get_type_hints(target)
     return MappingProxyType({
         field.name: (
             hints.get(field.name, Any),
             field.init,
-            not field.init or field.default is MISSING
-            or field.metadata.get("wire_optional") is not True,
         )
         for field in fields(target)
     })
@@ -2169,12 +2117,9 @@ def _decode_dataclass(
         declared = _dataclass_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    # Constructor defaults do not make durable facts optional. Only explicit
-    # wire defaults may fill omissions; factories and computed fields remain
-    # required so recovery cannot invent timestamps or integrity evidence.
+    # Constructor defaults author new values; durable records carry every field.
     missing_fields = sorted(
-        name for name, (_type, _init, required) in declared.items()
-        if required and name not in raw_fields
+        name for name in declared if name not in raw_fields
     )
     if missing_fields:
         raise AIError(
@@ -2183,9 +2128,7 @@ def _decode_dataclass(
         )
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
-    for field_name, (field_type, field_init, _required) in declared.items():
-        if field_name not in raw_fields:
-            continue
+    for field_name, (field_type, field_init) in declared.items():
         try:
             decoded = _decode_domain(
                 raw_fields[field_name],

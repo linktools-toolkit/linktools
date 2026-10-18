@@ -744,7 +744,7 @@ class EvaluationManifest:
     policy: EvaluationPolicy
     input_mode: Literal["fixed_input", "reproject_input"]
     principal: Principal
-    trial_scope_required: bool = field(default=False, metadata={"wire_optional": True})
+    trial_scope_required: bool = False
 
     def __post_init__(self) -> None:
         _name(self.experiment_id)

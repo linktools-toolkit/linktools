@@ -108,8 +108,9 @@ def _normalize_model_attachment_fact(
         "content_key",
         "position",
         "call_id",
+        "input_identifier",
     }
-    allowed = required | {"input_identifier"}
+    allowed = required
     fields = set(value)
     if not required.issubset(fields) or not fields.issubset(allowed):
         raise ValueError("model attachment fact fields are invalid")
@@ -144,9 +145,7 @@ def _normalize_model_attachment_fact(
         and (not isinstance(call_id, str) or not call_id)
     ):
         raise ValueError("model attachment fact is invalid")
-    normalized = dict(value)
-    normalized.setdefault("input_identifier", None)
-    return normalized
+    return dict(value)
 
 
 def _validate_tool_arguments_payload(
@@ -431,8 +430,8 @@ class TranscriptHeadRecord:
     message_count: int
     chunk_count: int
     quality: HistoryQuality
-    pending: RuntimePayloadRef | None = field(default=None, metadata={"wire_optional": True})
-    pending_part_count: int = field(default=0, metadata={"wire_optional": True})
+    pending: RuntimePayloadRef | None = None
+    pending_part_count: int = 0
 
     def __post_init__(self) -> None:
         if self.message_count < 0 or self.chunk_count < 0:
@@ -639,9 +638,7 @@ class ModelInteractionRecord:
     started_at: datetime
     finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
-    client_requests: tuple[ModelClientRequestRef, ...] | None = field(
-        default=None, metadata={"wire_optional": True},
-    )
+    client_requests: tuple[ModelClientRequestRef, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -741,14 +738,12 @@ class StoredAgentRunCheckpoint:
     timestamp: datetime
     state: str
     projection_digest: str
-    # Older checkpoints use the owner's authoritative transcript head rather
-    # than an explicit per-checkpoint boundary.
-    transcript_message_count: int | None = field(default=None, metadata={"wire_optional": True})
+    transcript_message_count: int
     has_context_projection: bool = False
     pending_request_index: int | None = None
 
     def __post_init__(self) -> None:
-        if self.transcript_message_count is not None and (
+        if (
             isinstance(self.transcript_message_count, bool)
             or not isinstance(self.transcript_message_count, int)
             or self.transcript_message_count < 0
@@ -889,12 +884,12 @@ class ExecutionRecord:
     requires_task_invocation_capture: bool = False
     retention_closed: bool = False
     started_at: datetime | None = None
-    budget_scope_id: str | None = field(default=None, metadata={"wire_optional": True})
-    tool_response_ref: AssetVersionRef | None = field(default=None, metadata={"wire_optional": True})
+    budget_scope_id: str | None = None
+    tool_response_ref: AssetVersionRef | None = None
     restart_checkpoints: bool = False
     durable_trace: bool = False
-    # Earlier writers always retained conversation/fork context.
-    conversation: bool = field(default=True, metadata={"wire_optional": True})
+    # Whether this execution retains conversation and fork context.
+    conversation: bool = True
 
     def __post_init__(self) -> None:
         if any(not isinstance(value, bool) for value in (
@@ -1117,8 +1112,8 @@ class ExecutionHistoryHeadRecord:
     state: ExecutionHistoryState
     revision: int
     seal_digest: str | None
-    producer_generation: int = field(default=0, metadata={"wire_optional": True})
-    producer_claim_id: str | None = field(default=None, metadata={"wire_optional": True})
+    producer_generation: int = 0
+    producer_claim_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1336,7 +1331,7 @@ class ExecutionTerminalCommit:
     terminal_event_payload: Mapping[str, JsonValue]
     idempotency: IdempotencyTerminalUpdate | None = None
     operation: OperationTerminalUpdate | None = None
-    producer_generation: int | None = field(default=None, metadata={"wire_optional": True})
+    producer_generation: int | None = None
 
     def __post_init__(self) -> None:
         if self.producer_generation is not None and (
@@ -2197,7 +2192,7 @@ class ToolOperationAdmission:
     owner: str
     lease_seconds: int
     arguments_payload: StoredPayload | None = None
-    producer_generation: int | None = field(default=None, metadata={"wire_optional": True})
+    producer_generation: int | None = None
 
     def __post_init__(self) -> None:
         if self.producer_generation is not None and (

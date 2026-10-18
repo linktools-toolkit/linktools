@@ -339,3 +339,41 @@ async def test_projection_keeps_custom_private_override_and_public_none_result(t
         assert await custom.sync_prepared_projection(run, events=(), checkpoints=()) is None
         assert calls == [True]
         assert await custom.get_agent_run(agent_run_id=run.agent_run_id) == run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_checkpoint_null_boundary_rejects_reads_instead_of_using_current_head(
+    tmp_path: Path, backend: str,
+) -> None:
+    from linktools.ai.runtime.state._codec import _encode_step_envelope
+    from linktools.ai.runtime.state._store import FactQuery
+
+    async with _archive(tmp_path, backend) as (_state, archive, run):
+        message = ModelResponse(parts=[TextPart("checkpoint")])
+        checkpoint = AgentRunCheckpoint("run", 1, [message], transcript_message_count_before=0)
+        prepared, = (await archive.prepare_checkpoints(run, (checkpoint,))).checkpoints
+        assert prepared.stored.transcript_message_count == 1
+        await archive.sync_prepared_projection(
+            run, events=(), checkpoints=(prepared,),
+            execution_id="execution", producer_generation=1,
+        )
+        encoded = _encode_step_envelope(prepared.stored)
+        encoded["value"]["payload"]["fields"]["transcript_message_count"] = None
+
+        async def corrupt(transaction) -> None:
+            facts = await transaction.list_facts(FactQuery(archive._stream("run", "checkpoint")))
+            assert len(facts) == 1
+            owner = await transaction.get_record(archive._agent_run_key("run"))
+            assert owner is not None
+            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.delete_fact_streams(owner.key_digest)
+            await transaction.insert_fact(replace(facts[0], data=encoded))
+
+        await archive.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as latest:
+            await archive.latest_checkpoint(agent_run_id="run")
+        assert latest.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with pytest.raises(AIError) as verify:
+            await archive.verify_checkpoint_projection(agent_run_id="run", checkpoint=checkpoint)
+        assert verify.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

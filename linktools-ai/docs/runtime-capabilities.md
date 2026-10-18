@@ -122,8 +122,18 @@ Unselected modules do not write new business archives or start observation worke
 
 `AgentSpec.tool_retries` and `AgentSpec.output_retries` default to `None`, as do
 omitted fields in declaration payloads. `RuntimeFeatures` supplies defaults of
-`3` for both; configure them with `RuntimeFeatures("application",
-tool_retries=5, output_retries=2)`. Explicit Agent values, including `0`, win.
+`3` for both; configure them through the namespaced defaults map:
+
+```python
+features = RuntimeFeatures("application", defaults={
+    "agent": {"tool_retries": 5, "output_retries": 2},
+    "custom.search": {"timeout": 10},
+})
+```
+
+Custom namespaces are retained for their owning consumers. Agent retry defaults
+are validated when the compiler consumes the `agent` namespace. Omitted keys
+use the shared default of `3`; explicit Agent values, including `0`, win.
 The compiler resolves these values before creating a durable binding. Captures
 freeze the configured defaults, and restoring an execution uses its saved
 resolved values even if a later Runtime has different defaults.

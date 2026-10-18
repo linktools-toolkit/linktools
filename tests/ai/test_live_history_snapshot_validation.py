@@ -153,15 +153,10 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", (None, "owner", "sequence", "state", "subject", "conflict", "gap"))
-async def test_snapshot_fact_backed_model_interactions_validate_identity_and_sequence(
+@pytest.mark.parametrize("corruption", (None, "owner", "sequence", "state", "identity", "conflict", "gap"))
+async def test_snapshot_model_interaction_records_validate_identity_and_sequence(
     tmp_path: Path, corruption: str | None,
 ) -> None:
-    from linktools.ai.runtime.state._codec import _encode_step_envelope
-    from linktools.ai.runtime.state._repository_common import project_record
-    from linktools.ai.runtime.state._step_archive import _step_subject
-    from linktools.ai.runtime.state._store import StoredFact
-
     from .test_model_interaction_lifecycle_paging import _interaction
     from .test_step_archive_read_boundaries import _archive
 
@@ -170,36 +165,27 @@ async def test_snapshot_fact_backed_model_interactions_validate_identity_and_seq
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         first = _interaction("run", 1)
         second = _interaction("run", 3 if corruption == "gap" else 2)
-        fact = StoredFact(
-            archive._stream("run", "interaction"), 1, archive._agent_run_key("run"),
-            "model_interaction", _step_subject(first), first.status, _encode_step_envelope(first),
-        )
+        record = archive._stored_interaction(first)
         if corruption == "owner":
-            fact = replace(fact, owner_key_digest=b"x" * 32)
+            record = replace(record, parent_digest=b"x" * 32)
         elif corruption == "sequence":
-            fact = replace(fact, sequence=2)
+            record = replace(record, sort_key="m:00000000000000000002")
         elif corruption == "state":
-            fact = replace(fact, state="SUCCEEDED")
-        elif corruption == "subject":
-            fact = replace(fact, subject_digest=b"x" * 32)
-        if corruption == "conflict":
+            record = replace(record, state="SUCCEEDED")
+        elif corruption == "identity":
+            record = replace(record, key_digest=b"x" * 32)
+        elif corruption == "conflict":
             second = replace(first, duration_ns=first.duration_ns + 1)
-        record = project_record(
-            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
-            kind="model_interaction", identity=["run", second.model_request_seq], value=second,
-            parent=archive._agent_run_key("run"), state=second.status,
-            sort_key=f"m:{second.model_request_seq:020d}", storage_revision=1,
-        )
-        records = (*records, record)
+        records = (*records, record, archive._stored_interaction(second))
 
         def validate() -> None:
             aliases, sequences = canonical_snapshot_indexes(
                 namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
-                records=records, facts=(fact,), operations=(),
+                records=records, facts=(), operations=(),
             )
             validate_snapshot_domain(
                 namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
-                records=records, aliases=aliases, facts=(fact,), operations=(), sequences=sequences,
+                records=records, aliases=aliases, facts=(), operations=(), sequences=sequences,
             )
 
         if corruption is None:
@@ -211,7 +197,7 @@ async def test_snapshot_fact_backed_model_interactions_validate_identity_and_seq
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", (None, "missing-index", "ahead", "wrong-owner"))
+@pytest.mark.parametrize("corruption", (None, "missing-index", "missing-coverage", "ahead", "wrong-owner"))
 async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
     tmp_path: Path, corruption: str | None,
 ) -> None:
@@ -233,6 +219,8 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
             missing = next(record for record in records
                            if record.kind == "history_association" and record is not marker)
             records.remove(missing)
+        elif corruption == "missing-coverage":
+            records.remove(marker)
         elif corruption == "ahead":
             records[records.index(marker)] = replace(marker, data={"sequence": 2})
         elif corruption == "wrong-owner":

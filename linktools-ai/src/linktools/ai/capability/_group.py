@@ -15,10 +15,9 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..asset import AssetStoreReader
-from ..core import AuthorizationPolicy, JsonValue, PromptLimits
+from ..core import AuthorizationPolicy, ImmutableJsonMapping, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
 from ..spec import (
-    DEFAULT_AGENT_RETRIES,
     AgentSpec,
     AgentUsageLimits,
     MCPServerSpec,
@@ -70,8 +69,7 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
     authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
     limits: PromptLimits = field(default_factory=PromptLimits)
-    tool_retries: int = DEFAULT_AGENT_RETRIES
-    output_retries: int = DEFAULT_AGENT_RETRIES
+    defaults: Mapping[str, JsonValue] = field(default_factory=dict)
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
         default=None, repr=False, compare=False,
     )
@@ -82,7 +80,7 @@ class RuntimeFeaturesCapture(Generic[AppT]):
         if not isinstance(self.limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
         _validate_filter(self.filter)
-        _validate_retry_defaults(self.tool_retries, self.output_retries)
+        object.__setattr__(self, "defaults", _freeze_defaults(self.defaults))
         contributions = tuple(self.contributions)
         if any(
             not isinstance(value, CapabilityContribution)
@@ -125,21 +123,18 @@ class RuntimeFeatures(Generic[AppT]):
         sandbox: "Sandbox | None" = None,
         authorization: AuthorizationPolicy | None = None,
         limits: PromptLimits | None = None,
-        tool_retries: int = DEFAULT_AGENT_RETRIES,
-        output_retries: int = DEFAULT_AGENT_RETRIES,
+        defaults: Mapping[str, JsonValue] | None = None,
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
-        _validate_retry_defaults(tool_retries, output_retries)
+        self._defaults = _freeze_defaults({} if defaults is None else defaults)
         _validate_filter(filter)
         self._authorization = authorization
         self._limits = PromptLimits() if limits is None else limits
         if not isinstance(self._limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
         self._filter = filter
-        self._tool_retries = tool_retries
-        self._output_retries = output_retries
         self._id = group_id
         self._asset_capability: AssetCapability[AppT] | None = None
         self._tool_responses_registered = False
@@ -150,6 +145,11 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def defaults(self) -> Mapping[str, JsonValue]:
+        """Return frozen, namespaced settings for declaration-time consumers."""
+        return self._defaults
 
     @property
     def authorization(self) -> AuthorizationPolicy | None:
@@ -374,8 +374,7 @@ class RuntimeFeatures(Generic[AppT]):
             sandbox=self._sandbox,
             authorization=authorization,
             limits=limits,
-            tool_retries=self._tool_retries,
-            output_retries=self._output_retries,
+            defaults=self._defaults,
             filter=self._filter,
         )
         _logger.info(
@@ -394,12 +393,11 @@ def _validate_filter(value: object) -> None:
         raise TypeError("filter must be callable or None")
 
 
-def _validate_retry_defaults(tool_retries: int, output_retries: int) -> None:
-    for name, value in (("tool_retries", tool_retries), ("output_retries", output_retries)):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise TypeError(f"runtime {name} must be an integer")
-        if value < 0:
-            raise ValueError(f"runtime {name} cannot be negative")
+def _freeze_defaults(value: Mapping[str, JsonValue]) -> ImmutableJsonMapping:
+    frozen = ImmutableJsonMapping(value)
+    if any(not isinstance(section, dict) for section in frozen.values()):
+        raise TypeError("defaults namespaces must contain JSON objects")
+    return frozen
 
 
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:

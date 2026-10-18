@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Execution conversation promises are explicit and retain earlier-writer meaning."""
+"""Execution conversation promises are explicit in the durable wire."""
 
 from dataclasses import replace
 
@@ -23,7 +23,7 @@ from .test_explicit_runtime_features import _FeatureModels, _features
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
 @pytest.mark.parametrize("conversation", (False, True), ids=("minimal", "conversation"))
-async def test_execution_writer_fixes_conversation_with_safe_earlier_writer_default(
+async def test_execution_writer_requires_explicit_conversation(
     persisted: bool, conversation: bool,
 ) -> None:
     storage = RuntimeStorage.in_memory()
@@ -47,10 +47,10 @@ async def test_execution_writer_fixes_conversation_with_safe_earlier_writer_defa
             return decode_domain(value, ExecutionRecord)
 
         assert decode(payload) == record
-        earlier = {key: value for key, value in payload["fields"].items() if key != "conversation"}
-        # The old terminal policy flag did not define whether a run could fork.
-        earlier["terminal_commit"] = False
-        assert decode({**payload, "fields": earlier}) == replace(record, conversation=True)
+        missing = {key: value for key, value in payload["fields"].items() if key != "conversation"}
+        with pytest.raises(AIError) as rejected:
+            decode({**payload, "fields": missing})
+        assert rejected.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         for invalid in (None, 0, "true"):
             with pytest.raises(TypeError, match="persistence guarantees"):
                 replace(record, conversation=invalid)

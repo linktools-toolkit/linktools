@@ -16,7 +16,7 @@ from typing import Protocol, TypeVar, runtime_checkable
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
-from ...core import ExecutionStatus, canonical_json_bytes
+from ...core import ExecutionStatus
 from ...errors import AIError, ErrorCode
 from ...model import ModelClientRequest
 from ...storage import ObjectRef, ObjectStore, StoredPayload
@@ -2482,11 +2482,10 @@ class StateStepArchive(AgentRunStore):
             ),
         )
         stream = self._stream(run.agent_run_id, "checkpoint")
-        subject = _step_subject(checkpoint.stored)
         data = _encode_step(checkpoint.stored)
         # A newly inserted run cannot own committed checkpoint facts.
         existing = () if created else await transaction.list_facts(
-            FactQuery(stream, subject_digest=subject, latest=True)
+            FactQuery(stream, latest=True)
         )
         if any(
             fact.data == data and fact.state == checkpoint.stored.state
@@ -2495,7 +2494,7 @@ class StateStepArchive(AgentRunStore):
             return
         owner = self._agent_run_key(run.agent_run_id)
         checkpoint_fact = StoredFact(
-            stream, 0, owner, "step_checkpoint", subject,
+            stream, 0, owner, "step_checkpoint", None,
             checkpoint.stored.state, data,
         )
         batch_new_owner = created and bool(checkpoint.chunks) and type(self._history) is TranscriptRepository
@@ -2865,9 +2864,6 @@ class StateStepArchive(AgentRunStore):
             if checkpoint.context_messages is None
             else checkpoint.context_messages
         )
-        transcript_message_count = stored.transcript_message_count
-        if transcript_message_count is None and self._runtime_domain is not RuntimeDomain.CONVERSATION:
-            transcript_message_count = await self._history.transcript_message_count(owner_id)
         return (
             stored.agent_run_id == checkpoint.agent_run_id
             and stored.step_index == checkpoint.step_index
@@ -2877,7 +2873,7 @@ class StateStepArchive(AgentRunStore):
             == (checkpoint.context_messages is not None)
             and stored.pending_request_index == checkpoint.pending_request_index
             and (self._runtime_domain is RuntimeDomain.CONVERSATION
-                 or transcript_message_count == len(checkpoint.messages))
+                 or stored.transcript_message_count == len(checkpoint.messages))
             and context.model_messages() == tuple(expected_messages)
         )
 
@@ -2913,13 +2909,10 @@ class StateStepArchive(AgentRunStore):
             if self._runtime_domain is RuntimeDomain.CONVERSATION
             else agent_run_id
         )
-        transcript_message_count = latest.transcript_message_count
-        if transcript_message_count is None:
-            transcript_message_count = await self._history.transcript_message_count(owner_id)
         with runtime_object_source_reads():
             messages = (await self._history.load_model_context(owner_id)).model_messages()
             raw_messages = await self._history.load_message_span(
-                owner_id, 0, transcript_message_count,
+                owner_id, 0, latest.transcript_message_count,
             )
         if not raw_messages and not latest.has_context_projection:
             raw_messages = tuple(messages)
@@ -2990,7 +2983,6 @@ class StateStepArchive(AgentRunStore):
         require_no_run_history_lock("StateStepArchive._append")
         stream = self._stream(agent_run_id, family)
         owner = self._agent_run_key(agent_run_id)
-        subject = _step_subject(value)
         fact_kind = {
             "event": "step_event",
             "checkpoint": "step_checkpoint",
@@ -3006,19 +2998,13 @@ class StateStepArchive(AgentRunStore):
                 execution_id,
                 None,
             )
-            if subject is not None:
-                existing = await transaction.list_facts(
-                    FactQuery(stream, subject_digest=subject, latest=True)
-                )
-                if any(fact.data == data and fact.state == kind for fact in existing):
-                    return
             if await transaction.guard_record(
                 owner,
                 expected_storage_revision=owner_record.storage_revision,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             sequence = await transaction.next_sequence(self._sequence(agent_run_id, family))
-            await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, subject, kind, data))
+            await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, None, kind, data))
             if isinstance(value, StepEvent):
                 run = _decode_step(owner_record.data)
                 if not isinstance(run, AgentRunRecord):
@@ -3126,18 +3112,19 @@ class StateStepArchive(AgentRunStore):
             elif previous.data != record.data:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sequences = tuple(sequence for sequence, _ in events)
-        if sequences == tuple(range(coverage + 1, coverage + 1 + len(events))):
-            if coverage_record is None:
-                inserts.append(StoredRecord(
-                    coverage_key, None, self._agent_run_key(run.agent_run_id), "history_association",
-                    "coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
-                ))
-            elif not await transaction.replace_record(
-                replace(coverage_record, storage_revision=coverage_record.storage_revision + 1,
-                        data={"sequence": sequences[-1]}),
-                expected_storage_revision=coverage_record.storage_revision,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if sequences != tuple(range(coverage + 1, coverage + 1 + len(events))):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if coverage_record is None:
+            inserts.append(StoredRecord(
+                coverage_key, None, self._agent_run_key(run.agent_run_id), "history_association",
+                "coverage:event", None, 1, None, 0, None, {"sequence": sequences[-1]},
+            ))
+        elif not await transaction.replace_record(
+            replace(coverage_record, storage_revision=coverage_record.storage_revision + 1,
+                    data={"sequence": sequences[-1]}),
+            expected_storage_revision=coverage_record.storage_revision,
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         if inserts:
             await transaction.insert_records(tuple(inserts))
 
@@ -3177,11 +3164,8 @@ class StateStepArchive(AgentRunStore):
             coverage_key = self._history_association_key(agent_run_id, "coverage", "event")
             records = await transaction.get_records((*keys, coverage_key))
             coverage = self._history_association_coverage(agent_run_id, records.get(coverage_key))
-            captured = (
-                dict(await self._captured_history_events(transaction, agent_run_id, event_high_water))
-                if coverage < event_high_water else None
-            )
-            derived = self._history_association_records(agent_run_id, tuple(captured.items())) if captured is not None else {}
+            if coverage < event_high_water:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
             async def resolve(
                 index_keys: Sequence[bytes], indexed: Mapping[bytes, StoredRecord] | None = None,
@@ -3191,32 +3175,24 @@ class StateStepArchive(AgentRunStore):
                 for key in index_keys:
                     record = indexed.get(key)
                     if record is None:
-                        record = derived.get(key)
-                    if record is None:
                         continue
                     sequence = record.data.get("sequence")
                     if record.kind != "history_association" or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if captured is not None and (key in derived or sequence <= event_high_water):
-                        if derived.get(key) != record:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if sequence > event_high_water:
                         continue
-                    if captured is not None:
-                        event = captured[sequence]
-                    else:
-                        event = selected.get(sequence)
-                        if event is None:
-                            facts = await transaction.list_facts(FactQuery(
-                                self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
-                            ))
-                            if len(facts) != 1 or facts[0].sequence != sequence:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            event = _decode_step(facts[0].data)
-                            if not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        if self._history_association_records(agent_run_id, ((sequence, event),)).get(key) != record:
+                    event = selected.get(sequence)
+                    if event is None:
+                        facts = await transaction.list_facts(FactQuery(
+                            self._stream(agent_run_id, "event"), after_sequence=sequence - 1, limit=1,
+                        ))
+                        if len(facts) != 1 or facts[0].sequence != sequence:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        event = _decode_step(facts[0].data)
+                        if not isinstance(event, StepEvent) or event.agent_run_id != agent_run_id:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if self._history_association_records(agent_run_id, ((sequence, event),)).get(key) != record:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     selected[sequence] = event
 
             await resolve(keys, records)
@@ -3272,8 +3248,8 @@ class StateStepArchive(AgentRunStore):
             records = await transaction.get_records(tuple(
                 key for key, record in expected.items() if record.sort_key.startswith("trace:")
             ))
-            for key, record in records.items():
-                if expected.get(key) != record:
+            for key, record in expected.items():
+                if record.sort_key.startswith("trace:") and records.get(key) != record:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result: list[tuple[int, StepEvent]] = []
             for sequence, event in events:
@@ -3287,7 +3263,9 @@ class StateStepArchive(AgentRunStore):
                 self._history_association_key(agent_run_id, "coverage", "event"),
             )
             coverage = self._history_association_coverage(agent_run_id, coverage_record)
-            if filtered or coverage < event_high_water:
+            if coverage < event_high_water:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if filtered:
                 return await scan_captured(transaction)
             records = await transaction.list_records(RecordQuery(
                 parent_digest=self._agent_run_key(agent_run_id), kind="history_association",
@@ -3516,19 +3494,6 @@ async def _materialize_checkpoint(
 
 def _encode_step(value: object) -> dict[str, object]:
     return _encode_step_envelope(value)
-
-
-def _step_subject(value: object) -> bytes | None:
-    if isinstance(value, ModelInteractionRecord):
-        return hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "agent_run_id": value.agent_run_id,
-                    "model_request_seq": value.model_request_seq,
-                }
-            )
-        ).digest()
-    return None
 
 
 def _step_event_type(value: StepEvent) -> str:
