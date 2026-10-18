@@ -19,7 +19,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 
@@ -175,7 +175,7 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     async def ping(_context: AgentContext[object]) -> str:
         return "pong"
 
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.tool(ping, effect_policy="none")
     group.agent("default", instructions="Be brief", allow_tools=("ping",), allow_capabilities=())
     group.capability(limiter, id="host.rate-limit", scope="runtime")
@@ -183,7 +183,7 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     app = {"quota": "project-a"}
     async with Runtime.open(
         "quota-metadata", models=_Models(model), context=RuntimeContext(app),
-        storage=RuntimeStorage.in_memory(), capabilities=(await group.capture(),),
+        storage=RuntimeStorage.in_memory(), runtime_features=await group.capture(),
         capability_filter=lambda _agent, item: item.kind != "capability",
     ) as runtime:
         execution = await runtime.agents.get().start("question", correlation={"request": "one"})

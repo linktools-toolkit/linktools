@@ -5,17 +5,18 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
+from linktools.ai.runtime import ConversationCapability, CheckpointCapability
 
 import pytest
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget, TaskStatus
 from linktools.ai.runtime import AgentTaskInput, ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
-from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
+from ._runtime_test_helpers import RuntimeUsageModels
 
 
 _DEADLINE = datetime(2099, 1, 1, tzinfo=timezone.utc)
@@ -31,10 +32,11 @@ class _Capture(AbstractCapability[AgentContext[None]]):
         self.contexts.append(ctx.deps)
 
 
-def _group(contexts: list[AgentContext[None]]) -> CapabilityGroup[None]:
-    group: CapabilityGroup[None] = CapabilityGroup("deadline")
+def _group(contexts: list[AgentContext[None]]) -> RuntimeFeatures[None]:
+    group: RuntimeFeatures[None] = RuntimeFeatures("deadline")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.capability(_Capture(contexts), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
     return group
 
 
@@ -53,7 +55,7 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
     contexts: list[AgentContext[None]] = []
     storage = RuntimeStorage.in_memory()
     async with Runtime.open("context-deadline", models=RuntimeUsageModels(), storage=storage,
-                            capabilities=(_group(contexts),)) as runtime:
+                            runtime_features=_group(contexts)) as runtime:
         reads: list[str] = []
         read = storage.execution.budgets.read
 
@@ -105,9 +107,11 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
 @pytest.mark.asyncio
 async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, monkeypatch) -> None:
     contexts: list[AgentContext[None]] = []
+    features = _group(contexts)
+    features.capability(CheckpointCapability(), scope="runtime")
     async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(),
                             storage=RuntimeStorage.filesystem(tmp_path),
-                            capabilities=(_group(contexts), _persistence_capabilities(restart=True))) as runtime:
+                            runtime_features=features) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass
         with monkeypatch.context() as fault:
@@ -117,7 +121,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     assert not contexts
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(), storage=storage,
-                            capabilities=(_group(contexts), _persistence_capabilities(restart=True)),
+                            runtime_features=features,
                             auto_recover=False) as runtime:
         reads: list[str] = []
         read = storage.execution.budgets.read

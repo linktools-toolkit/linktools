@@ -755,7 +755,7 @@ async def test_storage_exposes_borrowed_cache_without_closing_it():
 @pytest.mark.parametrize("retention", ("durable", "volatile", "transient"))
 async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tmp_path, retention):
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.runtime import Runtime, RuntimeContext
     from ._runtime_test_helpers import _Models
 
@@ -766,10 +766,10 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
         storage = RuntimeStorage.in_memory(cache=cache)
     else:
         storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache)
-    group = CapabilityGroup[None]("display")
+    group = RuntimeFeatures[None]("display")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
-        "display", storage=storage, models=_Models(TestModel()), capabilities=(group,),
+        "display", storage=storage, models=_Models(TestModel()), runtime_features=group,
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
         await storage.conversation.sessions.create(_session())
@@ -855,13 +855,13 @@ async def test_display_cache_rejects_execution_dependencies_outside_authorized_t
 @pytest.mark.parametrize("cancel_read", (False, True))
 async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(tmp_path, monkeypatch, phase, cancel_read):
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.runtime import Runtime, RuntimeContext
     from ._runtime_test_helpers import _Models
 
     cache = _Cache()
     storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache=cache)
-    group = CapabilityGroup[None]("display")
+    group = RuntimeFeatures[None]("display")
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)
@@ -874,7 +874,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
         finally:
             exited.set()
     async with Runtime.open(
-        "display", storage=storage, models=_Models(TestModel()), capabilities=(group,),
+        "display", storage=storage, models=_Models(TestModel()), runtime_features=group,
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
         await storage.conversation.sessions.create(_session())

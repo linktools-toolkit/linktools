@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 import pytest_asyncio
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest, Runtime, RuntimeStorage
@@ -26,11 +26,11 @@ _TASK = TaskBindingContract("adapter.task", 1, "none", {}, None, 1, 0)
 
 @pytest_asyncio.fixture
 async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
-    group = CapabilityGroup("scope-authorization")
+    group = RuntimeFeatures("scope-authorization")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open("scope-authorization", models=RuntimeUsageModels(),
-                            storage=storage, capabilities=(group,)) as runtime:
+                            storage=storage, runtime_features=group) as runtime:
         root = await runtime.agents.get().start("root", budget=RunBudget(model_requests=20))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(root.execution_id, tenant_id="default")

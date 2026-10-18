@@ -18,7 +18,7 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.runtime._tool_metrics import (
     ToolMetricsCapability,
-    _ToolMetricContext,
+    ToolMetricContext,
 )
 from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 from pydantic_ai.exceptions import CallDeferred, SkipToolExecution
@@ -80,8 +80,8 @@ class _Bridge:
         self.calls.append("unknown")
 
 
-def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
-    return _ToolMetricContext(
+def _metric_context(recorder: _Recorder) -> ToolMetricContext:
+    return ToolMetricContext(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",

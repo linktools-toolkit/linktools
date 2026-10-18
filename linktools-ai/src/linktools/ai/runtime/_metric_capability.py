@@ -38,7 +38,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
-from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
+from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
@@ -681,7 +681,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 error_code=error_code,
             )
 
-        interrupted = await _await_request_handoff(handoff())
+        interrupted = await await_request_handoff(handoff())
         await self._record_model(observation)
         if interrupted:
             raise asyncio.CancelledError
@@ -802,7 +802,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 error_code=error_code,
             )
 
-        interrupted = await _await_request_handoff(handoff())
+        interrupted = await await_request_handoff(handoff())
         await self._record_model(observation)
         return interrupted
 
@@ -1011,4 +1011,4 @@ def _model_error_code(error: Exception) -> str:
     return ErrorCode.INTERNAL_ERROR.value
 
 
-__all__: list[str] = []
+__all__ = ["ModelInteractionRecorder", "ModelObservationCapability", "ModelRequestEventSink"]

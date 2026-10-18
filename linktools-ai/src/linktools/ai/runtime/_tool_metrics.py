@@ -36,7 +36,7 @@ TOOL_METRICS_MANAGED_METADATA_KEY = "linktools.tool_metrics_managed"
 
 
 @dataclass(frozen=True, slots=True)
-class _ToolMetricContext:
+class ToolMetricContext:
     recorder: MetricRecorder
     source_namespace: str
     tenant_id: str
@@ -200,7 +200,7 @@ class ToolMetricsCapability(
 ):
     """Observe capability tools before the outer Pydantic control boundary."""
 
-    def __init__(self, context: _ToolMetricContext) -> None:
+    def __init__(self, context: ToolMetricContext) -> None:
         self.id = "linktools.ai.tool-metrics"
         self._context = context
 
@@ -242,6 +242,7 @@ def _tool_error_code(error: Exception) -> str:
 
 
 __all__ = [
+    "ToolMetricContext",
     "ToolMetricsCapability",
     "TOOL_METRICS_MANAGED_METADATA_KEY",
 ]

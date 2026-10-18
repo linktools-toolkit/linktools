@@ -368,7 +368,7 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
 
     monkeypatch.setattr(assets, "read_versions", read_fixture)
     async with Runtime.open("fixture-repair", models=RuntimeUsageModels(), storage=storage,
-                            capabilities=(_persistence_capabilities(restart=True),),
+                            runtime_features=_persistence_capabilities(restart=True),
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         reserve = storage.execution.executions.reserve_start
 

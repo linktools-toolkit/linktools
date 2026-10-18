@@ -40,7 +40,7 @@ from ._journal import (
     MODEL_USAGE_INPUT_METADATA_KEY,
     MODEL_USAGE_OUTPUT_METADATA_KEY,
     ModelRequestFact,
-    _await_request_handoff,
+    await_request_handoff,
 )
 from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
 from ._model_interaction import (
@@ -472,7 +472,7 @@ class AgentRunRecorder:
     async def record_tool_result_boundary(
         self, part: ToolReturnPart | RetryPromptPart, step_index: int
     ) -> None:
-        interrupted = await _await_request_handoff(
+        interrupted = await await_request_handoff(
             self._record_tool_result_boundary(part, step_index)
         )
         if interrupted:

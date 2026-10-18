@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 from linktools.ai.agent import OutputBinding
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup, AgentContext
+from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, AgentContext
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability, PrepareTools, SelectModel
@@ -112,9 +112,9 @@ class _OutputTransformCapability(AbstractCapability[AgentContext[None]]):
 
 @pytest.mark.asyncio
 async def test_capability_identity_is_id_and_revision() -> None:
-    first = CapabilityGroup[None]("first")
+    first = RuntimeFeatures[None]("first")
     first.capability(_Capability(), revision=1)
-    second = CapabilityGroup[None]("second")
+    second = RuntimeFeatures[None]("second")
     second.capability(_Capability(), revision=2)
 
     first_candidate = (await first.capture()).contributions[0]
@@ -131,9 +131,9 @@ async def test_capability_identity_is_id_and_revision() -> None:
 
 @pytest.mark.asyncio
 async def test_config_is_contract_data_not_a_second_identity() -> None:
-    strict = CapabilityGroup[None]("strict")
+    strict = RuntimeFeatures[None]("strict")
     strict.capability(_Capability(), revision=1, config={"mode": "strict"})
-    relaxed = CapabilityGroup[None]("relaxed")
+    relaxed = RuntimeFeatures[None]("relaxed")
     relaxed.capability(_Capability(), revision=1, config={"mode": "relaxed"})
 
     strict_candidate = (await strict.capture()).contributions[0]
@@ -155,7 +155,7 @@ def test_opaque_contribution_factory_rejects_declarations() -> None:
 
 @pytest.mark.parametrize("revision", [0, -1, True])
 def test_invalid_capability_revision_is_rejected(revision: object) -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     with pytest.raises(AIError) as error:
         group.capability(_Capability(), revision=revision)  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -166,7 +166,7 @@ async def test_deferred_generic_capability_keeps_native_behavior() -> None:
     capability = _Capability()
     capability.defer_loading = True
     capability.description = "load on demand"
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     group.capability(capability)
 
     candidate = (await group.capture()).contributions[0]
@@ -177,7 +177,7 @@ async def test_deferred_generic_capability_keeps_native_behavior() -> None:
 
 @pytest.mark.parametrize("capability_id", ["linktools.custom", "linktools.workspace"])
 def test_custom_capability_cannot_claim_runtime_namespace(capability_id: str) -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     with pytest.raises(AIError) as error:
         group.capability(_Capability(capability_id))
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -185,7 +185,7 @@ def test_custom_capability_cannot_claim_runtime_namespace(capability_id: str) ->
 
 @pytest.mark.asyncio
 async def test_duplicate_capability_id_is_rejected_when_group_freezes() -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     group.capability(_Capability(), revision=1)
     group.capability(_Capability(), revision=1)
     with pytest.raises(AIError) as error:
@@ -195,7 +195,7 @@ async def test_duplicate_capability_id_is_rejected_when_group_freezes() -> None:
 
 @pytest.mark.asyncio
 async def test_capability_config_defaults_to_empty() -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     group.capability(_Capability())
     candidate = (await group.capture()).contributions[0]
     assert candidate.contract["config"] == {}
@@ -203,9 +203,9 @@ async def test_capability_config_defaults_to_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_capability_implementation_class_is_not_identity() -> None:
-    first = CapabilityGroup[None]("first")
+    first = RuntimeFeatures[None]("first")
     first.capability(_Capability(), revision=1)
-    second = CapabilityGroup[None]("second")
+    second = RuntimeFeatures[None]("second")
     second.capability(_OtherCapability(), revision=1)
 
     first_candidate = (await first.capture()).contributions[0]
@@ -231,7 +231,7 @@ async def test_capability_implementation_class_is_not_identity() -> None:
 async def test_external_capability_keeps_native_pydantic_extension_surface(
     capability: AbstractCapability[AgentContext[None]],
 ) -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     group.capability(capability)
     candidate = (await group.capture()).contributions[0]
     assert candidate.value is capability
@@ -240,7 +240,7 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
 
 @pytest.mark.asyncio
 async def test_external_capability_keeps_output_transformation_hooks() -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     group.capability(_OutputTransformCapability(), config={"mode": "identity"})
     candidate = (await group.capture()).contributions[0]
     assert candidate.id == "output-transform-capability"
@@ -266,7 +266,7 @@ def test_output_binding_revalidates_final_payload() -> None:
 async def test_anonymous_native_capabilities_require_explicit_ids() -> None:
     select_model = SelectModel(lambda ctx: ctx.model)
     prepare_tools = PrepareTools(lambda _ctx, tool_defs: tool_defs)
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
 
     group.capability(select_model, id="select-model")
     group.capability(prepare_tools, id="prepare-tools")
@@ -282,7 +282,7 @@ async def test_anonymous_native_capabilities_require_explicit_ids() -> None:
 
 @pytest.mark.parametrize("scope", [None, "global", "", 1])
 def test_capability_scope_rejects_unsupported_values(scope: object) -> None:
-    group = CapabilityGroup[None]("group")
+    group = RuntimeFeatures[None]("group")
     with pytest.raises(AIError) as raised:
         group.capability(_Capability(), scope=scope)  # type: ignore[arg-type]
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

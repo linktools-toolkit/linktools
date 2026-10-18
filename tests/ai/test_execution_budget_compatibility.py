@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
@@ -89,11 +89,11 @@ async def test_sqlite_retry_preserves_historical_agent_usage_limit(
         return ModelResponse(parts=[TextPart("over limit")], usage=RequestUsage(output_tokens=303))
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
     application.agent("default", revision=2, model="default", allow_tools=())
     async with Runtime.open(
         "older-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), runtime_features=application,
     ) as runtime:
         original = await runtime.executions.get(execution_id)
         assert await original.budget_usage() is None

@@ -10,7 +10,7 @@ from pydantic_ai.messages import BinaryContent, ToolReturn
 from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.capability import (
-    CapabilityGroup,
+    RuntimeFeatures,
     ToolCallRetry,
     workspace_capabilities,
 )
@@ -25,7 +25,7 @@ from linktools.ai.workspace import Workspace
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace)._contributions
+        RuntimeFeatures("workspace", workspace=workspace)._contributions
     )
 
 

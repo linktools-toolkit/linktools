@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, TerminalCommitCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
@@ -19,10 +19,10 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 
 def _group(terminal: bool = True):
-    group = CapabilityGroup('shared-pending')
+    group = RuntimeFeatures('shared-pending')
     group.agent('default', model='default', allow_tools=())
     if terminal:
-        group.capability(TerminalCommitCapability(), scope='runtime')
+        group.capability(ConversationCapability(), scope='runtime')
     return group
 
 
@@ -38,7 +38,7 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
         return ModelResponse(parts=[TextPart('answer')])
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
-    async with Runtime.open('shared-pending', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as owner, Runtime.open('shared-pending', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as reader:
+    async with Runtime.open('shared-pending', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as owner, Runtime.open('shared-pending', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as reader:
         session = await owner.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -88,7 +88,7 @@ async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path) 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = RuntimeStorage.sqlite(database, cache=cache)
-    async with Runtime.open('shared-cancel', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as owner, Runtime.open('shared-cancel', storage=reader_storage, models=models, capabilities=(_group(),)) as reader:
+    async with Runtime.open('shared-cancel', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as owner, Runtime.open('shared-cancel', storage=reader_storage, models=models, runtime_features=_group()) as reader:
         session = await owner.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='request')
         await asyncio.wait_for(entered.wait(), 5)
@@ -119,7 +119,7 @@ async def test_shared_pending_early_preview_and_canonical_result(tmp_path: Path,
         yield 'world'
     models = _Models(FunctionModel(stream_function=model))
     database = tmp_path / 'state.db'
-    async with Runtime.open('shared-stream', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as owner, Runtime.open('shared-stream', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as reader:
+    async with Runtime.open('shared-stream', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as owner, Runtime.open('shared-stream', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as reader:
         execution = await owner.agents.get().start('question')
         remote = await reader.executions.get(execution.execution_id)
         observed = remote.watch(include_content=True)
@@ -158,12 +158,12 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
         entered.set()
         await finish.wait()
         return ModelResponse(parts=[ToolCallPart('effect', {}, tool_call_id='call')])
-    group = CapabilityGroup('lost-pending')
+    group = RuntimeFeatures('lost-pending')
     group.tool(effect, effect_policy='replay_safe')
     group.agent('default', model='default', allow_tools=('effect',))
-    group.capability(TerminalCommitCapability(), scope='runtime')
+    group.capability(ConversationCapability(), scope='runtime')
     storage = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache)
-    opened = Runtime.open('lost-pending', storage=storage, models=_Models(_UsageFunctionModel(model)), capabilities=(group,))
+    opened = Runtime.open('lost-pending', storage=storage, models=_Models(_UsageFunctionModel(model)), runtime_features=group)
     runtime = await opened.__aenter__()
     try:
         execution = await runtime.agents.get().start('question')
@@ -189,7 +189,7 @@ async def test_release_failure_does_not_undo_confirmed_success(tmp_path: Path) -
     cache = ReleaseFailure(max_bytes=2**20)
     async def model(messages, info):
         return ModelResponse(parts=[TextPart('answer')])
-    async with Runtime.open('release-failure', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache), models=_Models(_UsageFunctionModel(model)), capabilities=(_group(),)) as runtime:
+    async with Runtime.open('release-failure', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache), models=_Models(_UsageFunctionModel(model)), runtime_features=_group()) as runtime:
         execution = await runtime.agents.get().start('question')
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert (await runtime.executions.result(execution.execution_id, principal=runtime.default_principal)).output == {'text': 'answer'}
@@ -207,7 +207,7 @@ async def test_live_dependency_hold_promotes_before_acquisition(tmp_path: Path, 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = RuntimeStorage.sqlite(database, cache=cache)
-    async with Runtime.open('shared-hold', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as owner, Runtime.open('shared-hold', storage=reader_storage, models=models, capabilities=(_group(),)) as reader:
+    async with Runtime.open('shared-hold', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as owner, Runtime.open('shared-hold', storage=reader_storage, models=models, runtime_features=_group()) as reader:
         execution = await owner.agents.get().start('question')
         await asyncio.wait_for(entered.wait(), 5)
         service = reader.executions._service if remote else owner.executions._service
@@ -236,7 +236,7 @@ async def test_remote_public_capture_promotes_before_source_input_read(tmp_path:
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = RuntimeStorage.sqlite(database, cache=cache)
-    async with Runtime.open('shared-capture', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as owner, Runtime.open('shared-capture', storage=reader_storage, models=models, capabilities=(_group(),)) as reader:
+    async with Runtime.open('shared-capture', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as owner, Runtime.open('shared-capture', storage=reader_storage, models=models, runtime_features=_group()) as reader:
         principal = Principal('user', owner.tenant_id)
         execution = await owner.agents.get().start('question', principal=principal)
         await asyncio.wait_for(entered.wait(), 5)
@@ -263,7 +263,7 @@ async def test_mixed_writers_share_live_session_admission(tmp_path: Path, first_
         return ModelResponse(parts=[TextPart('answer')])
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
-    async with Runtime.open('mixed-admission', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(first_terminal),)) as first, Runtime.open('mixed-admission', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(not first_terminal),)) as second:
+    async with Runtime.open('mixed-admission', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group(first_terminal)) as first, Runtime.open('mixed-admission', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group(not first_terminal)) as second:
         session = await first.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='request')
         await asyncio.wait_for(entered.wait(), 5)
@@ -297,7 +297,7 @@ async def test_lost_promotion_hint_does_not_claim_dependency(tmp_path: Path) -> 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / 'state.db'
     reader_storage = RuntimeStorage.sqlite(database, cache=cache)
-    async with Runtime.open('lost-hint', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, capabilities=(_group(),)) as owner, Runtime.open('lost-hint', storage=reader_storage, models=models, capabilities=(_group(),)) as reader:
+    async with Runtime.open('lost-hint', storage=RuntimeStorage.sqlite(database, cache=cache), models=models, runtime_features=_group()) as owner, Runtime.open('lost-hint', storage=reader_storage, models=models, runtime_features=_group()) as reader:
         execution = await owner.agents.get().start('question')
         await asyncio.wait_for(entered.wait(), 5)
         try:
@@ -357,7 +357,7 @@ async def test_source_replay_release_failure_keeps_confirmed_identity(tmp_path: 
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
-    async with Runtime.open('replay-release', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache), models=_Models(_UsageFunctionModel(model)), capabilities=(_group(),)) as runtime:
+    async with Runtime.open('replay-release', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache), models=_Models(_UsageFunctionModel(model)), runtime_features=_group()) as runtime:
         execution = await runtime.agents.get().start('question', idempotency_key='request')
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         backend, request, reservation = captured[0]

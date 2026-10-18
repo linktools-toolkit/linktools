@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Terminal ownership preserves concurrent dependency retention metadata."""
 
+from linktools.ai.runtime import ConversationCapability, TraceCapability
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionStatus,
@@ -37,7 +38,6 @@ from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from .test_history_projection_conformance import _record
 from .test_session_admission import _session
 from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
-from ._runtime_test_helpers import _persistence_capabilities
 
 
 def _storage(tmp_path: Path, backend: str, split_session: bool) -> RuntimeStorage:
@@ -136,17 +136,20 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         "_commit_execution_terminal_checkpoint_locked_body",
         interleave,
     )
-    group = CapabilityGroup("terminal-metadata")
+    group = RuntimeFeatures("terminal-metadata")
     group.agent(
         "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
     )
     state = _storage(tmp_path, backend, split_session)
+    group.capability(TraceCapability(), scope="runtime")
+    if split_session:
+        group.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open(
         "terminal-metadata",
         models=FixtureModels(),
         storage=state,
         context=CONTEXT,
-        capabilities=(_persistence_capabilities(trace=True), group,),
+        runtime_features=group,
     ) as runtime:
         agent = runtime.agents.get()
         if split_session:

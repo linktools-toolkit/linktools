@@ -18,8 +18,8 @@ from ..capability import (
     AgentContext,
     AssetSkillSource,
     CapabilityContribution,
-    CapabilityGroup,
-    CapabilityGroupCapture,
+    RuntimeFeatures,
+    RuntimeFeaturesCapture,
     SkillSourceRegistry,
 )
 from ..core import (
@@ -41,7 +41,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import InMemoryCacheBackend, ObjectStore, PayloadPolicy, StreamBackend
+from ..storage import ObjectStore, PayloadPolicy, StreamBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -71,10 +71,12 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricRecorder
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
+from ._capabilities import runtime_feature_leaves
+from ._conversation_capability import ConversationCapability
+from ._metrics_capability import MetricsCapability
 from ._persistence_capabilities import (
-    DurableTraceCapability,
-    RestartCheckpointCapability,
-    TerminalCommitCapability,
+    TraceCapability,
+    CheckpointCapability,
 )
 from ._runtime_history import RuntimeHistory
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
@@ -123,7 +125,7 @@ async def compose_runtime_components(
     tenant_id: "str | None" = None,
     models: ModelRegistry,
     storage: RuntimeStorage,
-    capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
+    runtime_features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
     authorization: "AuthorizationPolicy | None" = None,
@@ -142,19 +144,19 @@ async def compose_runtime_components(
     selected_limits = PromptLimits() if limits is None else limits
     if not isinstance(selected_limits, PromptLimits):
         raise TypeError("limits must be PromptLimits")
-    sources = tuple(capabilities)
+    sources = () if runtime_features is None else (runtime_features,)
     if any(
-        not isinstance(source, (CapabilityGroup, CapabilityGroupCapture))
+        not isinstance(source, (RuntimeFeatures, RuntimeFeaturesCapture))
         for source in sources
     ):
         raise TypeError(
-            "capabilities must contain CapabilityGroup or CapabilityGroupCapture"
+            "runtime_features must be RuntimeFeatures or RuntimeFeaturesCapture"
         )
-    captures: list[CapabilityGroupCapture[AppT]] = []
+    captures: list[RuntimeFeaturesCapture[AppT]] = []
     for source in sources:
         capture = (
             await source.capture()
-            if isinstance(source, CapabilityGroup)
+            if isinstance(source, RuntimeFeatures)
             else source
         )
         await capture.verify_source_revision()
@@ -187,15 +189,16 @@ async def compose_runtime_components(
             if group.asset_reader is not None:
                 asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
-        def require_runtime_persistence_scope(capability: AbstractCapability[object]) -> None:
+        def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
             if isinstance(capability, (
-                RestartCheckpointCapability, DurableTraceCapability, TerminalCommitCapability,
+                CheckpointCapability, TraceCapability, ConversationCapability, MetricsCapability,
             )):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "persistence capabilities require Runtime scope")
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
 
         for candidate in candidates:
             if candidate.kind == "capability" and candidate.scope != "runtime":
-                candidate.value.apply(require_runtime_persistence_scope)
+                for leaf in runtime_feature_leaves(candidate.value):
+                    require_runtime_feature_scope(leaf)
         runtime_capabilities = tuple(
             candidate.value for candidate in candidates
             if candidate.scope == "runtime"
@@ -239,6 +242,8 @@ async def compose_runtime_components(
             else:
                 agents["default"] = AgentSpec("default")
         compiler = AgentCompiler(
+            tool_retries=(captures[0].tool_retries if captures else RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES),
+            output_retries=(captures[0].output_retries if captures else RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES),
             model_resolver=resolver,
             candidates=tuple(
                 candidate
@@ -576,20 +581,25 @@ async def _build_local_components(
             history_reader.bind_pending_execution_reader(runtime_bridge.pending_turns.read_execution)
         persistence_capabilities: list[AbstractCapability[object]] = []
         for capability in runtime_capabilities:
-            capability.apply(persistence_capabilities.append)
+            persistence_capabilities.extend(runtime_feature_leaves(capability))
         restart_checkpoints = any(
-            isinstance(value, RestartCheckpointCapability) for value in persistence_capabilities
+            isinstance(value, CheckpointCapability) for value in persistence_capabilities
         )
         durable_trace = any(
-            isinstance(value, DurableTraceCapability) for value in persistence_capabilities
+            isinstance(value, TraceCapability) for value in persistence_capabilities
         )
-        terminal_commit = not (restart_checkpoints or durable_trace) and any(
-            isinstance(value, TerminalCommitCapability) for value in persistence_capabilities
+        conversation = any(
+            isinstance(value, ConversationCapability) for value in persistence_capabilities
         )
-        if terminal_commit or storage.cache is not None:
-            coordination_cache = storage.cache if storage.cache is not None else InMemoryCacheBackend(max_bytes=0)
+        automatic_metrics = any(
+            isinstance(value, MetricsCapability) for value in persistence_capabilities
+        )
+        if automatic_metrics and metric_buffer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "MetricsCapability requires metrics")
+        agent_metric_buffer = metric_buffer if automatic_metrics else None
+        if storage.cache is not None:
             runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(
-                coordination_cache, namespace=namespace, tenant_id=tenant_id,
+                storage.cache, namespace=namespace, tenant_id=tenant_id,
             ))
         stream_cache = (
             storage.cache
@@ -636,7 +646,7 @@ async def _build_local_components(
             object_reader=storage.read_object,
             restart_checkpoints=restart_checkpoints,
             durable_trace=durable_trace,
-            terminal_commit=terminal_commit,
+            conversation=conversation,
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -649,7 +659,7 @@ async def _build_local_components(
             skill_sources,
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
-            metrics=metric_buffer,
+            metrics=agent_metric_buffer,
             sandbox=sandbox,
             tool_responses=tool_responses,
         )
@@ -739,7 +749,7 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
             tool_operations=storage.recovery.tools,
-            metric_recorder=metric_buffer,
+            metric_recorder=agent_metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
             pending_turns=runtime_bridge.pending_turns,
@@ -760,6 +770,7 @@ async def _build_local_components(
             authorization,
             execution,
             HmacCursorSigner("session", runtime_token_seed),
+            conversation_enabled=conversation,
             history_reader=session_history_reader,
             cache=(
                 storage.cache

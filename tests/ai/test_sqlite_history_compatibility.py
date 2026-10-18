@@ -13,7 +13,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 
@@ -111,11 +111,11 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
         return await original_model(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), runtime_features=application,
     ) as runtime:
         session = runtime.agents.get("default").session("session")
         old = await session.history()
@@ -138,7 +138,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
 
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), runtime_features=application,
     ) as reopened:
         restored = await reopened.agents.get("default").session("session").history()
         assert restored.items == appended.items
@@ -208,11 +208,11 @@ async def test_sqlite_old_history_survives_snapshot_restore(tmp_path: Path) -> N
     await RuntimeStorage.restore_snapshot(
         snapshot, object_store=objects, root=restored_root, limits=limits,
     )
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.from_root(restored_root),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), runtime_features=application,
     ) as runtime:
         assert await _old_execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
         history = await runtime.agents.get("default").session("session").history()

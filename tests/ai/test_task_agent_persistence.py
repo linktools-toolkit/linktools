@@ -8,9 +8,9 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import TaskStatus
-from linktools.ai.runtime import AgentTaskInput, DurableTraceCapability, RestartCheckpointCapability, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, TraceCapability, CheckpointCapability, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
@@ -38,7 +38,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
             return ModelResponse(parts=[TextPart("root answer")])
         return ModelResponse(parts=[TextPart("answer")])
 
-    group: CapabilityGroup[None] = CapabilityGroup("application")
+    group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",) if delegated else ())
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     models = _Models(_UsageFunctionModel(model))
@@ -46,7 +46,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
     identities: list[str] = []
     storage = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        "task-agent-persistence", models=models, capabilities=(group,), storage=storage,
+        "task-agent-persistence", models=models, runtime_features=group, storage=storage,
     ) as runtime:
         task = runtime.tasks.from_agent("answer", runtime.agents.get())
         graph_definition = TaskGraph("durable-agent", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
@@ -90,7 +90,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
             await waiting
     count = len(requests)
     async with Runtime.open(
-        "task-agent-persistence", models=models, capabilities=(group,), storage=RuntimeStorage.sqlite(database),
+        "task-agent-persistence", models=models, runtime_features=group, storage=RuntimeStorage.sqlite(database),
     ) as reopened:
         for execution_id in identities:
             page = await reopened.history.model_interactions(execution_id, principal=reopened.default_principal)
@@ -116,23 +116,23 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
         await release.wait()
         return ModelResponse(parts=[TextPart(prompt)])
 
-    def capabilities(with_guarantees: bool) -> CapabilityGroup[None]:
-        group: CapabilityGroup[None] = CapabilityGroup("application")
+    def capabilities(with_guarantees: bool) -> RuntimeFeatures[None]:
+        group: RuntimeFeatures[None] = RuntimeFeatures("application")
         group.agent("default", model="default", allow_tools=())
         if with_guarantees and restart:
-            group.capability(RestartCheckpointCapability(), scope="runtime")
+            group.capability(CheckpointCapability(), scope="runtime")
         if with_guarantees and trace:
-            group.capability(DurableTraceCapability(), scope="runtime")
+            group.capability(TraceCapability(), scope="runtime")
         return group
 
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "inherited-guarantees.db"
     original, delegated = RuntimeStorage.sqlite(database), RuntimeStorage.sqlite(database)
-    async with Runtime.open("inheritance", models=models, storage=original, capabilities=(capabilities(True),)) as owner:
+    async with Runtime.open("inheritance", models=models, storage=original, runtime_features=capabilities(True)) as owner:
         root = await owner.agents.get().start("root", idempotency_key="root")
         try:
             await asyncio.wait_for(entered["root"].wait(), 5)
-            async with Runtime.open("inheritance", models=models, storage=delegated, capabilities=(capabilities(False),)) as borrower:
+            async with Runtime.open("inheritance", models=models, storage=delegated, runtime_features=capabilities(False)) as borrower:
                 child_id = await _start_delegated_execution(borrower, delegated, root.execution_id, "child")
                 await asyncio.wait_for(entered["child"].wait(), 5)
                 grandchild_id = await _start_delegated_execution(borrower, delegated, child_id, "grandchild")
@@ -150,7 +150,7 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
         finally:
             release.set()
     reopened_storage = RuntimeStorage.sqlite(database)
-    async with Runtime.open("inheritance", models=models, storage=reopened_storage, capabilities=(capabilities(False),)) as reopened:
+    async with Runtime.open("inheritance", models=models, storage=reopened_storage, runtime_features=capabilities(False)) as reopened:
         for execution_id in identities:
             record = await reopened_storage.execution.executions.get(execution_id, tenant_id=reopened.tenant_id)
             assert record is not None

@@ -19,7 +19,8 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._openai import _RetryingModel
@@ -101,8 +102,8 @@ class _Unselected(AbstractCapability[AgentContext[None]]):
         raise AssertionError("Agent-selectable capability must remain excluded")
 
 
-def _group() -> CapabilityGroup[None]:
-    group: CapabilityGroup[None] = CapabilityGroup("application")
+def _group() -> RuntimeFeatures[None]:
+    group: RuntimeFeatures[None] = RuntimeFeatures("application")
     for name in ("default", "worker"):
         group.agent(name, model="default", allow_tools=(), allow_skills=(),
                     allow_subagents=(), allow_capabilities=())
@@ -110,8 +111,7 @@ def _group() -> CapabilityGroup[None]:
     return group
 
 
-def _policies(*capabilities: AbstractCapability[AgentContext[None]]) -> CapabilityGroup[None]:
-    group: CapabilityGroup[None] = CapabilityGroup("policies")
+def _policies(group: RuntimeFeatures[None], *capabilities: AbstractCapability[AgentContext[None]]) -> RuntimeFeatures[None]:
     for index, capability in enumerate(capabilities):
         group.capability(capability, id=getattr(capability, "id", None) or f"host.policy.{index}", scope="runtime")
     return group
@@ -135,10 +135,10 @@ async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_w
         ordinary_ran.set()
         return "ordinary"
 
-    policies = _policies(_GlobalPolicy(backend))
+    policies = _policies(_group(), _GlobalPolicy(backend))
     async with Runtime.open(
         "runtime_capability", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(), policies),
+        storage=RuntimeStorage.in_memory(), runtime_features=policies,
         capability_filter=lambda _agent, item: item.kind != "capability",
     ) as runtime:
         late = _Unselected()
@@ -184,7 +184,7 @@ async def test_stream_permit_spans_consumption_and_releases_on_every_exit(outcom
 
     async with Runtime.open(
         "runtime_capability-stream", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(_GlobalPolicy(backend))),
+        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), _GlobalPolicy(backend)),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         await asyncio.wait_for(streamed.wait(), 3)
@@ -214,7 +214,7 @@ async def test_queued_cancellation_does_not_release_another_executions_permit() 
 
     async with Runtime.open(
         "runtime_capability-queue", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(_GlobalPolicy(backend))),
+        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), _GlobalPolicy(backend)),
     ) as runtime:
         first = await runtime.agents.get().start("first")
         await backend.requested(1)
@@ -239,10 +239,10 @@ async def test_shared_host_backend_spans_runtime_instances() -> None:
 
     async with Runtime.open(
         "first", models=_Models(_UsageFunctionModel(blocked)), storage=RuntimeStorage.in_memory(),
-        capabilities=(_group(), _policies(runtime_capability)),
+        runtime_features=_policies(_group(), runtime_capability),
     ) as first_runtime, Runtime.open(
         "second", models=_Models(_UsageFunctionModel(_immediate)), storage=RuntimeStorage.in_memory(),
-        capabilities=(_group(), _policies(runtime_capability)),
+        runtime_features=_policies(_group(), runtime_capability),
     ) as second_runtime:
         first = await first_runtime.agents.get().start("first")
         await backend.requested(1)
@@ -270,7 +270,7 @@ async def test_runtime_capability_sees_logical_model_call_not_each_transport_ret
     model = _RetryingModel(_UsageFunctionModel(transient), max_retries=2, retry_delay=0)
     async with Runtime.open(
         "runtime_capability-retry", models=_Models(model), storage=RuntimeStorage.in_memory(),
-        capabilities=(_group(), _policies(_GlobalPolicy(backend))),
+        runtime_features=_policies(_group(), _GlobalPolicy(backend)),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -291,13 +291,13 @@ async def test_runtime_capability_covers_delegated_agents_and_tool_hooks() -> No
     async def ping(_context: AgentContext[None]) -> str:
         return "pong"
 
-    group: CapabilityGroup[None] = CapabilityGroup("delegation")
+    group: RuntimeFeatures[None] = RuntimeFeatures("delegation")
     group.tool(ping, effect_policy="none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=("ping",), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "runtime_capability-delegation", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group, _policies(_GlobalPolicy(backend))),
+        storage=RuntimeStorage.in_memory(), runtime_features=_policies(group, _GlobalPolicy(backend)),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -324,21 +324,21 @@ async def test_runtime_capability_rejects_invalid_or_not_always_on_entries(kind:
     with pytest.raises((TypeError, AIError)):
         async with Runtime.open(
             "runtime-policy-invalid", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(*entries)),
+            storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), *entries),
         ):
             raise AssertionError("invalid runtime capability was accepted")
 
 
 async def test_selected_capability_cannot_silently_replace_runtime_capability_with_the_same_id() -> None:
     backend = _Backend()
-    group: CapabilityGroup[None] = CapabilityGroup("collision")
+    group: RuntimeFeatures[None] = RuntimeFeatures("collision")
     group.capability(_GlobalPolicy(_Backend()))
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=(), allow_capabilities=("host.runtime_capability",))
     with pytest.raises(AIError) as raised:
         async with Runtime.open(
             "runtime-policy-collision", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), capabilities=(group, _policies(_GlobalPolicy(backend))),
+            storage=RuntimeStorage.in_memory(), runtime_features=_policies(group, _GlobalPolicy(backend)),
         ):
             raise AssertionError("conflicting runtime capability was accepted")
     assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
@@ -351,7 +351,7 @@ async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime
     first.id = second.id = None
     async with Runtime.open(
         "runtime_capability-anonymous", models=_Models(_UsageFunctionModel(_immediate)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(CombinedCapability([first, second]))),
+        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), CombinedCapability([first, second])),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -361,9 +361,10 @@ async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime
 async def test_reopened_session_and_historical_retry_use_current_host_runtime_capability(tmp_path: Path) -> None:
     first_backend, next_backend = _Backend(), _Backend()
     models = _Models(_UsageFunctionModel(_immediate))
+    first_features = _policies(_group(), _GlobalPolicy(first_backend), ConversationCapability())
     async with Runtime.open(
         "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(_group(), _policies(_GlobalPolicy(first_backend))),
+        runtime_features=first_features,
     ) as runtime:
         first = await runtime.agents.get().start("standalone")
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -373,7 +374,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     current.id = "host.replacement"
     async with Runtime.open(
         "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(_group(), _policies(current)),
+        runtime_features=_policies(_group(), current, ConversationCapability()),
     ) as runtime:
         historical = await runtime.executions.get(first.execution_id)
         retry = await historical.retry("retry")
@@ -402,7 +403,7 @@ async def test_runtime_capability_acquisition_failure_does_not_call_provider() -
 
     async with Runtime.open(
         "runtime_capability-unavailable", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_group(), _policies(Unavailable())),
+        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), Unavailable()),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.FAILED
@@ -415,10 +416,10 @@ async def test_nested_native_id_conflict_cannot_replace_selected_capability() ->
     group.capability(_GlobalPolicy(_Backend()))
     group.agent("selected", allow_tools=(), allow_skills=(), allow_subagents=(),
                 allow_capabilities=("host.runtime_capability",))
-    policies = _policies(CombinedCapability([_GlobalPolicy(backend)]))
+    policies = _policies(group, CombinedCapability([_GlobalPolicy(backend)]))
     async with Runtime.open(
         "runtime-policy-nested-collision", models=_Models(_UsageFunctionModel(_immediate)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group, policies),
+        storage=RuntimeStorage.in_memory(), runtime_features=policies,
     ) as runtime:
         execution = await runtime.agents.get("selected").start("go")
         result = (await execution.wait(timeout_seconds=5)).result
@@ -428,7 +429,7 @@ async def test_nested_native_id_conflict_cannot_replace_selected_capability() ->
 
 
 async def test_runtime_native_ids_are_unique_across_named_combined_registrations() -> None:
-    policies = CapabilityGroup("policies")
+    policies = _group()
     for name in ("first", "second"):
         policies.capability(
             CombinedCapability([_GlobalPolicy(_Backend())]), id=name, scope="runtime",
@@ -436,7 +437,7 @@ async def test_runtime_native_ids_are_unique_across_named_combined_registrations
     with pytest.raises(AIError) as raised:
         async with Runtime.open(
             "runtime-policy-native-duplicates", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), capabilities=(_group(), policies),
+            storage=RuntimeStorage.in_memory(), runtime_features=policies,
         ):
             raise AssertionError("duplicate native runtime IDs were accepted")
     assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
@@ -447,5 +448,5 @@ async def test_runtime_combined_capability_rejects_malformed_native_leaf_ids(nat
     policy = _GlobalPolicy(_Backend())
     policy.id = native_id
     with pytest.raises(AIError) as raised:
-        _policies(CombinedCapability([policy]))
+        _policies(_group(), CombinedCapability([policy]))
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

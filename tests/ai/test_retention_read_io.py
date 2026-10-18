@@ -17,10 +17,14 @@ from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._store import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
-from .test_step_projection import _execution
+from .test_step_projection import _execution as _projection_execution
 
 pytestmark = pytest.mark.asyncio
 _NAMESPACE = "retention-io"
+
+
+def _execution():
+    return replace(_projection_execution(), conversation=False)
 
 
 def _controller(repository, calls):
@@ -172,13 +176,13 @@ async def test_retention_unknown_commit_does_not_clean_until_retry(
         await state.close()
 
 
-@pytest.mark.parametrize("terminal_commit,closed,held", (
+@pytest.mark.parametrize("conversation,closed,held", (
     (False, False, False), (False, True, False), (False, False, True),
     (True, False, False), (True, True, False), (True, False, True),
 ))
 async def test_terminal_policy_hint_still_requires_source_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    terminal_commit: bool, closed: bool, held: bool,
+    conversation: bool, closed: bool, held: bool,
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
@@ -186,7 +190,7 @@ async def test_terminal_policy_hint_still_requires_source_closure(
         repository = state.execution.executions
         await repository.create_with_history_head(replace(
             _execution(), session_id=None, status=ExecutionStatus.SUCCEEDED,
-            terminal_commit=terminal_commit, retention_closed=closed,
+            conversation=conversation, retention_closed=closed,
             dependency_hold_ids=("hold",) if held else (),
         ))
         calls = []
@@ -203,7 +207,7 @@ async def test_terminal_policy_hint_still_requires_source_closure(
             "execution", tenant_id="tenant", terminal_commit=True,
         )
         assert released is not held
-        assert bool(mutations) is not (terminal_commit and closed)
+        assert bool(mutations) is not (conversation and closed)
         assert calls == ([] if held else [("staging", "execution")])
         current = await repository.get("execution", tenant_id="tenant")
         assert current is not None

@@ -893,11 +893,12 @@ class ExecutionRecord:
     tool_response_ref: AssetVersionRef | None = field(default=None, metadata={"wire_optional": True})
     restart_checkpoints: bool = False
     durable_trace: bool = False
-    terminal_commit: bool = field(default=False, metadata={"wire_optional": True})
+    # Earlier writers always retained conversation/fork context.
+    conversation: bool = field(default=True, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if any(not isinstance(value, bool) for value in (
-            self.restart_checkpoints, self.durable_trace, self.terminal_commit,
+            self.restart_checkpoints, self.durable_trace, self.conversation,
         )):
             raise TypeError("execution persistence guarantees must be bool")
         if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):

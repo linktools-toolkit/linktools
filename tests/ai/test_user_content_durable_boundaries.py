@@ -18,7 +18,7 @@ from linktools.ai.storage import StoredPayload
 
 def _binding() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),

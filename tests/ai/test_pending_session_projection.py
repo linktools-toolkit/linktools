@@ -11,10 +11,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage, TerminalCommitCapability
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage, ConversationCapability
 from linktools.ai.runtime.service_api import CancelExecutionRequest, ListSessionRequest
 from linktools.ai.runtime.state._store import active_state_scope, record_key_digest
 from linktools.ai.storage import InMemoryCacheBackend
@@ -39,10 +39,10 @@ async def _runtimes(tmp_path, *, cache, terminal=True):
         return ModelResponse(parts=[TextPart("answer")])
 
     def group():
-        value = CapabilityGroup("pending-session-display")
+        value = RuntimeFeatures("pending-session-display")
         value.agent("default", model="default", allow_tools=())
         if terminal:
-            value.capability(TerminalCommitCapability(), scope="runtime")
+            value.capability(ConversationCapability(), scope="runtime")
         return value
 
     def block_next():
@@ -55,7 +55,7 @@ async def _runtimes(tmp_path, *, cache, terminal=True):
         for _ in range(1 if cache is None else 2):
             storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
             runtime = await stack.enter_async_context(Runtime.open(
-                "pending-session-display", storage=storage, models=models, capabilities=(group(),),
+                "pending-session-display", storage=storage, models=models, runtime_features=group(),
             ))
             values.append((runtime, storage))
         try:

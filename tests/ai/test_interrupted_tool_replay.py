@@ -19,7 +19,8 @@ from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime import TraceCapability
 from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._snapshot_validation import (
@@ -216,15 +217,16 @@ async def test_only_typed_unknown_effect_errors_are_unfinished_attempts(error: E
     store = StagingAgentRunStore()
     recorder = AgentRunRecorder(store, execution_id=None, agent_run_id="run")
     await recorder.register_agent_run(AgentRunRecord("run"))
-    capability = _AgentRunPersistenceCapability(
+    capability = AgentRunCapture(
         recorder=recorder, agent_id="agent", agent_run_id="run",
     )
+    trace = TraceCapability().bind(capability)
     call = ToolCallPart("echo", {}, tool_call_id="call")
     definition = ToolDefinition(name="echo")
     context = SimpleNamespace(run_step=1)
-    await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
+    await trace.before_tool_execute(context, call=call, tool_def=definition, args={})
     with pytest.raises(type(error)):
-        await capability.on_tool_execute_error(
+        await trace.on_tool_execute_error(
             context, call=call, tool_def=definition, args={}, error=error,
         )
     events = await store.list_events(agent_run_id="run")

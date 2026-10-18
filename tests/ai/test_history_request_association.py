@@ -40,7 +40,8 @@ from linktools.ai.core import (
 )
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime import CheckpointCapability
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
@@ -389,7 +390,7 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
 
     class FailAfterResponse(AbstractCapability[None]):
         def get_ordering(self) -> CapabilityOrdering:
-            return CapabilityOrdering(position="innermost", wrapped_by=(_AgentRunPersistenceCapability,))
+            return CapabilityOrdering(position="innermost", wrapped_by=(CheckpointCapability,))
 
         async def after_node_run(
             self, ctx: RunContext[None], *, node: AgentNode[None], result: NodeResult[None],
@@ -402,10 +403,10 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
         None, source_namespace="history", tenant_id="tenant", execution_id="execution",
         session_id=None, agent_run_id="run", agent_id="default", interaction_recorder=recorder,
     )
-    persistence = _AgentRunPersistenceCapability(
+    persistence = AgentRunCapture(
         recorder=recorder, agent_id="default", agent_run_id="run",
     )
-    agent = Agent(FunctionModel(model), capabilities=[observation, persistence, FailAfterResponse()])
+    agent = Agent(FunctionModel(model), capabilities=[observation, persistence, CheckpointCapability().bind(persistence), FailAfterResponse()])
     if fail_after_node:
         with pytest.raises(RuntimeError, match="after-node failure"):
             await agent.run("question")

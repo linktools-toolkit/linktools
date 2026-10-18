@@ -5,10 +5,10 @@
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
-from linktools.ai.capability import AgentContext, CapabilityGroup, ToolCallFailed, ToolCallRetry
+from linktools.ai.capability import AgentContext, RuntimeFeatures, ToolCallFailed, ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from ._runtime_test_helpers import _persistence_capabilities
+from linktools.ai.runtime import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models
@@ -33,12 +33,13 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
             return ModelResponse(parts=[ToolCallPart("broken", {}, tool_call_id="broken-call")])
         return ModelResponse(parts=[TextPart("Recovered")])
 
-    group = CapabilityGroup("tool-failure-trace")
+    group = RuntimeFeatures("tool-failure-trace")
+    group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("broken",))
     async with Runtime.open(
         "tool-failure-trace", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_persistence_capabilities(trace=True), group,),
+        storage=RuntimeStorage.in_memory(), runtime_features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("Call the tool")
         if failure == "fatal":
@@ -85,12 +86,13 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
             raise ValueError("provider failed")
         return ModelResponse(parts=[TextPart("finished")])
 
-    group = CapabilityGroup("observation-terminal-drain")
+    group = RuntimeFeatures("observation-terminal-drain")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "observation-terminal-drain", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, capabilities=(_persistence_capabilities(trace=True), group,),
+        storage=storage, runtime_features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("finish")
         try:
@@ -160,13 +162,14 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(
         (ToolPermissionRule("ask", tool_name="read_file"),), default="allow",
     )))
-    group = CapabilityGroup("parallel-handoff")
+    group = RuntimeFeatures("parallel-handoff", workspace=workspace)
+    group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "broken"))
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "parallel-handoff", models=_Models(_UsageFunctionModel(model)), storage=storage,
-        capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=workspace), group),
+        runtime_features=group,
     ) as runtime:
         held = await runtime.agents.get("default").start("hold this run")
         try:

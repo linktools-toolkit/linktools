@@ -16,7 +16,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     AssetSkillSource,
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillDefinition,
     SkillSourceRef,
 )
@@ -42,7 +42,7 @@ async def _captured_local_skill(
     )))
     await store.initialize()
     try:
-        capture = await CapabilityGroup("local", assets=store).capture()
+        capture = await RuntimeFeatures("local", assets=store).capture()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
@@ -105,7 +105,7 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
     )
     await store.initialize()
     try:
-        capture = await CapabilityGroup("application", assets=store).capture()
+        capture = await RuntimeFeatures("application", assets=store).capture()
         binding = next(
             item.value for item in capture.contributions if item.kind == "skill"
         )
@@ -306,7 +306,7 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
     )
     await store.initialize()
     try:
-        group: CapabilityGroup[object] = CapabilityGroup(
+        group: RuntimeFeatures[object] = RuntimeFeatures(
             "workspace",
             assets=store,
         )
@@ -406,7 +406,7 @@ async def test_captured_local_skill_keeps_resources_from_distinct_overlay_roots(
     ))
     await store.initialize()
     try:
-        capture = await CapabilityGroup("local", assets=store).capture()
+        capture = await RuntimeFeatures("local", assets=store).capture()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None

@@ -10,7 +10,7 @@ from ._resource_path import (
     validate_resource_tree,
 )
 from ._contribution import CapabilityContribution
-from ._group import CapabilityGroup, CapabilityGroupCapture
+from ._group import RuntimeFeatures, RuntimeFeaturesCapture
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
@@ -59,8 +59,8 @@ __all__ = [
     "AgentContext",
     "AgentDeclarationLoader",
     "CapabilityContribution",
-    "CapabilityGroup",
-    "CapabilityGroupCapture",
+    "RuntimeFeatures",
+    "RuntimeFeaturesCapture",
     "CapabilityLoadContext",
     "CapabilityLoadEntry",
     "CapabilityLoader",

@@ -3,7 +3,7 @@
 """Host-owned, single-event-loop admission limits for logical model requests.
 
 Run this file with Pydantic AI installed for an offline demonstration. In a
-LinkTools application, register the same instance with a CapabilityGroup:
+LinkTools application, register the same instance with a RuntimeFeatures:
 
     limits = GlobalRateLimit(
         quota_key="provider-project-a", rpm=60, tpm=60_000,
@@ -11,7 +11,7 @@ LinkTools application, register the same instance with a CapabilityGroup:
     )
     group.capability(limits, id="host.rate-limit", scope="runtime")
 
-Pass that group in Runtime.open(..., capabilities=(group,)). The quota key is an
+Pass that group in Runtime.open(..., runtime_features=group). The quota key is an
 explicit host label for the project/account bucket, not a model or credential
 lookup. Share this instance to share its counters; two instances with the same
 key do not coordinate. Multiple processes need an application-owned service.

@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """Run-local transcript identities and terminal boundary facts."""
 
+from linktools.ai.runtime import TraceCapability
 from datetime import datetime, timezone
 from functools import partial
 
 import pytest
 from pydantic_ai.messages import (
-    ModelRequest,
     ModelResponse,
     RetryPromptPart,
     ToolCallPart,
@@ -31,7 +31,6 @@ from linktools.ai.runtime.state._step_contracts import (
 )
 
 from .test_history_projection_conformance import _record
-from ._runtime_test_helpers import _persistence_capabilities
 
 
 @pytest.mark.asyncio
@@ -269,7 +268,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     from pydantic_ai.messages import BinaryContent, FilePart, TextPart
     from pydantic_ai.models import CompletedStreamedResponse
     from pydantic_ai.models.function import FunctionModel
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
     from linktools.ai.runtime import Runtime
     from .test_live_history_readback_integration import _Models
@@ -303,13 +302,14 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     async def unused(messages, info):
         return ModelResponse(parts=[TextPart("unused")])
 
-    group = CapabilityGroup("partial")
+    group = RuntimeFeatures("partial")
     group.agent("default", model="default")
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "partial",
         models=_Models(Model(unused)),
         storage=RuntimeStorage.in_memory(),
-        capabilities=(group, _persistence_capabilities(trace=True)),
+        runtime_features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None

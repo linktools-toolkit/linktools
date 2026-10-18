@@ -15,7 +15,7 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import Principal, RunBudget, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder
@@ -24,7 +24,7 @@ from linktools.ai.runtime import Execution, ExecutionInputContext, Runtime, Runt
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from ._runtime_test_helpers import _persistence_capabilities
+from linktools.ai.runtime import TraceCapability
 
 from .test_model_client_request_capture import _agents, _model, _registry, _response
 from .test_model_client_response_capture import _DONE, _EVENT, _Stream, _invoke
@@ -113,7 +113,9 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
             ModelResponse(parts=[TextPart(f"answer-{index} " + "y" * 240)]),
         ))
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("default", models=models, storage=storage, capabilities=(_persistence_capabilities(trace=True), _agents(),)) as runtime:
+    features = _agents()
+    features.capability(TraceCapability(), scope="runtime")
+    async with Runtime.open("default", models=models, storage=storage, runtime_features=features) as runtime:
         execution = await runtime.agents.get("default").start(
             "continue", input_context=ExecutionInputContext.from_messages(history),
             budget=RunBudget(model_requests=2) if budgeted else None,
@@ -166,7 +168,9 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
 
     models, _clients = _registry(monkeypatch, handler, retries=int(outcome == "retry"))
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "state.db")
-    async with Runtime.open("default", models=models, storage=storage, capabilities=(_persistence_capabilities(trace=True), _agents(),)) as runtime:
+    features = _agents()
+    features.capability(TraceCapability(), scope="runtime")
+    async with Runtime.open("default", models=models, storage=storage, runtime_features=features) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
             await asyncio.wait_for(stream.blocked.wait(), 5)
@@ -234,12 +238,13 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
         return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
 
     models, _clients = _registry(monkeypatch, handler)
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     principal = Principal("owner", "default")
-    async with Runtime.open("default", models=models, storage=storage, capabilities=(_persistence_capabilities(trace=True), group,)) as runtime:
+    async with Runtime.open("default", models=models, storage=storage, runtime_features=group) as runtime:
         parents = await asyncio.gather(*(runtime.agents.get("default").start(f"root-{i}", principal=principal) for i in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=15) for execution in parents))
         assert all(value.result.status == "SUCCEEDED" for value in results)

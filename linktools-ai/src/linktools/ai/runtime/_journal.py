@@ -163,7 +163,7 @@ class ModelRequestJournal:
             raise RuntimeError("model request fact is missing") from error
 
 
-async def _await_request_handoff(awaitable: Awaitable[None]) -> bool:
+async def await_request_handoff(awaitable: Awaitable[None]) -> bool:
     task = asyncio.create_task(awaitable)
     interrupted = False
     while not task.done():
@@ -180,6 +180,7 @@ async def _await_request_handoff(awaitable: Awaitable[None]) -> bool:
 
 
 __all__ = [
+    "await_request_handoff",
     "DURATION_NS_METADATA_KEY",
     "MODEL_USAGE_CACHE_READ_METADATA_KEY",
     "MODEL_USAGE_CACHE_WRITE_METADATA_KEY",

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Execution, Runtime, RuntimeStorage
@@ -34,11 +34,11 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
         await release_model.wait()
         return ModelResponse(parts=[TextPart("done")])
 
-    group = CapabilityGroup("wait-cleanup-ack")
+    group = RuntimeFeatures("wait-cleanup-ack")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "wait-cleanup-ack", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), runtime_features=group,
     ) as runtime:
         execution = await runtime.agents.get().start("hello")
         await asyncio.wait_for(model_started.wait(), 10)

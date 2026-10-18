@@ -1736,7 +1736,7 @@ class RuntimeStateCommands:
         self, reservation: ExecutionStartReservation, *, expected_session: SessionRecord | None,
     ) -> ExecutionTerminalCommitResult | None:
         """Confirm a terminal turn from source without retrying its write."""
-        if (not reservation.execution.terminal_commit
+        if (not reservation.execution.conversation
                 or reservation.execution.session_id != (None if expected_session is None else expected_session.session_id)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         stores = [self._execution.state_store, self._recovery.state_store]
@@ -1762,7 +1762,7 @@ class RuntimeStateCommands:
         if result is None:
             return None
         execution = result.execution
-        if (not execution.terminal_commit or not execution.retention_closed
+        if (not execution.conversation or not execution.retention_closed
                 or execution.session_id != reservation.execution.session_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         recovery = await self._recovery.get_in_transaction(
@@ -2000,7 +2000,7 @@ class RuntimeStateCommands:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         execution = commit.execution
         for candidate in (reservation.execution, execution):
-            if (not candidate.terminal_commit or candidate.binding_kind != "agent"
+            if (not candidate.conversation or candidate.binding_kind != "agent"
                     or candidate.parent_execution_id is not None
                     or candidate.parent_invocation_id is not None or candidate.requires_task_invocation_capture
                     or candidate.budget_scope_id is not None or candidate.restart_checkpoints

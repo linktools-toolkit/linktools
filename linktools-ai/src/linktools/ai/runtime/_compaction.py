@@ -40,7 +40,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder
 from ..workspace import validate_workspace_path
 from ._budget import RunBudgetContext
-from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
+from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
 from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
@@ -281,7 +281,7 @@ class _ObservedCompactionModel(WrapperModel):
             if phase == "started":
                 await observation
             else:
-                interrupted = await _await_request_handoff(observation)
+                interrupted = await await_request_handoff(observation)
         if self._recorder is not None:
             await self._recorder(
                 self._ctx,

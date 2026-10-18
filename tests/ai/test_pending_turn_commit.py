@@ -79,7 +79,7 @@ def _pending_turn(
         _record(ExecutionStatus.PENDING_START, 0),
         execution_id=execution_id, root_execution_id=execution_id,
         session_id=state.session.session_id, conversation_agent_run_id=run_id,
-        created_at=now, updated_at=now, durable_trace=False, terminal_commit=True,
+        created_at=now, updated_at=now, durable_trace=False, conversation=True,
     )
     reservation = ExecutionStartReservation(pending, IdempotencyRecord(
         "execution.start", key, request_digest, ResourceKind.EXECUTION,
@@ -473,11 +473,11 @@ async def test_pending_turn_requires_opt_in_on_both_records(
         turn = _pending_turn(state)
         if disabled in {"reservation", "both"}:
             turn = replace(turn, reservation=replace(
-                turn.reservation, execution=replace(turn.reservation.execution, terminal_commit=False),
+                turn.reservation, execution=replace(turn.reservation.execution, conversation=False),
             ))
         if disabled in {"terminal", "both"}:
             turn = replace(turn, commit=replace(
-                turn.commit, execution=replace(turn.commit.execution, terminal_commit=False),
+                turn.commit, execution=replace(turn.commit.execution, conversation=False),
             ))
         await _assert_rejected_without_writes(state, turn)
 

@@ -382,7 +382,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     delegated: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStoragePlan, RuntimeStorageRoute
     from linktools.ai.task import TaskGraph, TaskNode
@@ -400,7 +400,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
         return ModelResponse(parts=[TextPart("answer")])
 
     monkeypatch.setattr(ExecutionRepositoryImpl, "observe_execution_control", unexpected)
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",) if delegated else ())
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = RuntimeStorage.from_plan(
@@ -409,7 +409,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     )
     async with Runtime.open(
         "transient-task-control", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, capabilities=(group,),
+        storage=storage, runtime_features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("answer", runtime.agents.get())
         definition = TaskGraph("graph", (TaskNode("answer", task=task, input=AgentTaskInput("question")),))
@@ -424,7 +424,7 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
 ) -> None:
     from pydantic import BaseModel
     from pydantic_ai.messages import ModelResponse, ToolCallPart
-    from linktools.ai.capability import AgentContext, CapabilityGroup
+    from linktools.ai.capability import AgentContext, RuntimeFeatures
     from linktools.ai.runtime import Runtime
     from linktools.ai.runtime.service_api import CancelExecutionRequest
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -450,16 +450,16 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
             "work" if tool_boundary else info.output_tools[0].name, {}, tool_call_id="call",
         )])
 
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.tool(work, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("work",))
     database = tmp_path / "cancel.db"
     models = _Models(_UsageFunctionModel(model))
     async with Runtime.open(
-        "model-pair-cancel", models=models, capabilities=(group,),
+        "model-pair-cancel", models=models, runtime_features=group,
         storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000)),
     ) as owner, Runtime.open(
-        "model-pair-cancel", models=models, capabilities=(group,),
+        "model-pair-cancel", models=models, runtime_features=group,
         storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000)),
     ) as other:
         execution = await owner.agents.get().start("question", output=Answer, idempotency_key="once")

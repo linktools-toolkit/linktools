@@ -66,7 +66,7 @@ class RuntimeRetentionController:
         if type(repository) is ExecutionRepositoryImpl:
             async def read_closed(_transaction: "StateTransaction") -> "ExecutionRecord | None":
                 current = await repository.get(execution_id, tenant_id=tenant_id)
-                if (current is not None and current.terminal_commit and current.retention_closed
+                if (current is not None and current.conversation and current.retention_closed
                         and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED,
                                                ExecutionStatus.CANCELLED}):
                     return current
@@ -89,8 +89,8 @@ class RuntimeRetentionController:
             async def read_session(_transaction: "StateTransaction"):
                 return await sessions.get(execution.session_id, tenant_id=tenant_id)
 
-            session = await sessions.state_store.read(read_session) if execution.terminal_commit else None
-            if session is None or session.active_execution_id == execution_id or not execution.terminal_commit:
+            session = await sessions.state_store.read(read_session) if execution.conversation else None
+            if session is None or session.active_execution_id == execution_id or not execution.conversation:
                 await sessions.release_execution(
                     execution.session_id,
                     tenant_id=tenant_id,

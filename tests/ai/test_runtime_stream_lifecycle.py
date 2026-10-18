@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryStreamBackend, StreamBatch, StreamWriter
 from ._runtime_test_helpers import _Models
@@ -54,14 +54,14 @@ async def _runtimes(tmp_path, cache):
         await release.wait()
         yield "last"
 
-    group = CapabilityGroup[None]("stream-lifecycle")
+    group = RuntimeFeatures[None]("stream-lifecycle")
     group.agent("default", model="default", allow_tools=())
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
-    async with Runtime.open("stream-lifecycle", models=models, capabilities=(group,),
+    async with Runtime.open("stream-lifecycle", models=models, runtime_features=group,
                             storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
         storage = RuntimeStorage.sqlite(path, cache=cache)
-        async with Runtime.open("stream-lifecycle", models=models, capabilities=(group,), storage=storage) as reader:
+        async with Runtime.open("stream-lifecycle", models=models, runtime_features=group, storage=storage) as reader:
             execution = await owner.agents.get().start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -241,14 +241,14 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed_run)
     cache = _Streams()
-    group = CapabilityGroup("early-preview")
+    group = RuntimeFeatures("early-preview")
     group.agent("default", model="default", allow_tools=())
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
-    async with Runtime.open("early-preview", models=models, capabilities=(group,),
+    async with Runtime.open("early-preview", models=models, runtime_features=group,
                             storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
         reader_storage = RuntimeStorage.sqlite(path, cache=cache)
-        async with Runtime.open("early-preview", models=models, capabilities=(group,),
+        async with Runtime.open("early-preview", models=models, runtime_features=group,
                                 storage=reader_storage) as reader:
             execution = await owner.agents.get().start("question")
             repository = reader_storage.execution.executions

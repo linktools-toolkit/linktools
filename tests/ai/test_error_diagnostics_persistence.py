@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingContract
-from linktools.ai.capability import CapabilityGroup, ToolCallFailed
+from linktools.ai.capability import RuntimeFeatures, ToolCallFailed
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -79,7 +79,7 @@ class _DiagnosticModels:
 
 def _binding_contract() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("default", model="default"),
+        agent_spec=AgentSpec("default", model="default", tool_retries=3, output_retries=3),
         model_contract=dict(_DiagnosticModelBinding.contract),
         selected=(),
         subagents=(),

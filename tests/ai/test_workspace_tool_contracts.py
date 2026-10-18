@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import (
-    CapabilityGroup,
+    RuntimeFeatures,
     ToolCallRetry,
     workspace_capabilities,
 )
@@ -17,7 +17,7 @@ from linktools.ai.workspace import LocalSandbox, Workspace
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace)._contributions
+        RuntimeFeatures("workspace", workspace=workspace)._contributions
     )
 
 from linktools.ai.workspace._sandbox_protocol import (

@@ -35,7 +35,7 @@ from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding(agent_id: str = "agent") -> AgentBindingContract:
-    spec = AgentSpec(agent_id)
+    spec = AgentSpec(agent_id, tool_retries=3, output_retries=3)
     return AgentBindingContract(
         agent_spec=spec,
         model_contract={},

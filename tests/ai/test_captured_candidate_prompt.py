@@ -5,13 +5,13 @@
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, StartEvaluationRequest,
 )
-from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, DurableTraceCapability, ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, TraceCapability, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode
 
 from .test_evaluation_consumers import (
@@ -33,15 +33,15 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
     source_kind: str, input_mode: str, target_kind: str,
 ) -> None:
     models = FixtureModels()
-    group = CapabilityGroup("fork-candidate")
-    group.capability(DurableTraceCapability(), scope="runtime")
+    group = RuntimeFeatures("fork-candidate")
+    group.capability(TraceCapability(), scope="runtime")
     original_prompt = "Original Agent behavior."
     candidate_prompt = "Selected candidate behavior."
     for name, prompt in (("default", original_prompt), ("candidate", candidate_prompt)):
         group.agent(name, model="default", system_prompt=prompt,
                     allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("fork-candidate", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.in_memory(), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.in_memory(), runtime_features=group) as runtime:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED

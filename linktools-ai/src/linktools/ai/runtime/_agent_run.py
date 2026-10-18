@@ -214,22 +214,3 @@ class _AgentRunRunner:
         if isinstance(result, DeferredToolRequests):
             return _AgentRunDeferred(result)
         return _AgentRunCompleted(result)
-
-
-async def _agent_run_messages(
-    store: AgentRunStore,
-    agent_run_id: str,
-    *,
-    include_interrupted: bool = False,
-) -> list[ModelMessage]:
-    checkpoint = await store.latest_checkpoint(
-        agent_run_id=agent_run_id,
-        include_interrupted=include_interrupted,
-    )
-    if checkpoint is None:
-        raise LookupError(agent_run_id)
-    return list(
-        checkpoint.messages
-        if checkpoint.context_messages is None
-        else checkpoint.context_messages
-    )

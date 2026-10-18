@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, JsonValue, Principal, ResourceKind, ResourceRef,
     TenantAuthorizationPolicy, service_principal,
@@ -118,7 +118,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     tmp_path: Path, backend: str, input_kind: str,
 ) -> None:
     models = FixtureModels()
-    group = CapabilityGroup[None]("shared-agent")
+    group = RuntimeFeatures[None]("shared-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     ref = DatasetRef("system-data", 1)
     case_ref = CaseRef(ref.id, "one", 1)
@@ -132,7 +132,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     ))
     async with Runtime.open(
         "shared-data", models=models, storage=storage_for(backend, tmp_path), context=CONTEXT,
-        capabilities=(group,),
+        runtime_features=group,
     ) as runtime:
         await runtime.evaluations.publish_dataset(spec, principal=PUBLISHER, idempotency_key="system")
         await runtime.evaluations.publish_dataset(private, principal=PUBLISHER, idempotency_key="private")
@@ -145,7 +145,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     storage = storage_for(backend, tmp_path)
     async with Runtime.open(
         "shared-data", models=models, storage=storage, context=CONTEXT,
-        capabilities=(group,), authorization=authorization,
+        runtime_features=group, authorization=authorization,
     ) as runtime:
         assert (await runtime.evaluations.get_dataset(ref, principal=OPERATOR)).ref == ref
         cases = await runtime.evaluations.list_cases(ref, principal=OPERATOR)
@@ -208,7 +208,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
 
     async with Runtime.open(
         "shared-data", models=models, storage=storage_for(backend, tmp_path), context=CONTEXT,
-        capabilities=(group,),
+        runtime_features=group,
     ) as runtime:
         with pytest.raises(AIError) as denied:
             await runtime.evaluations.get_dataset(ref, principal=OPERATOR)

@@ -1329,7 +1329,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_tenant(commit.execution, self._tenant_id)
         self._idempotency._require_resource_kind(reservation.idempotency)
         execution_id = reservation.execution.execution_id
-        if (not reservation.execution.terminal_commit or not commit.execution.terminal_commit
+        if (not reservation.execution.conversation or not commit.execution.conversation
                 or commit.execution.execution_id != execution_id
                 or reservation.idempotency.resource_id != execution_id
                 or reservation.idempotency.status is not IdempotencyStatus.RESERVED
@@ -1342,7 +1342,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                      "fork_base_execution_id", "lineage_kind", "created_at", "mode", "planning", "thinking",
                      "memory_scope", "repository_instructions", "context_imported", "correlation",
                      "requires_task_invocation_capture", "budget_scope_id", "restart_checkpoints", "durable_trace",
-                     "terminal_commit"):
+                     "conversation"):
             if getattr(reservation.execution, name) != getattr(commit.execution, name):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         events = (ExecutionEventAppend(ExecutionEventType.EXECUTION_STARTED, {}), *audit_events,

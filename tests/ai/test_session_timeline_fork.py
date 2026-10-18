@@ -29,7 +29,7 @@ from linktools.ai.storage import StoredPayload
 
 def _binding() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
@@ -160,6 +160,7 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
             _ExecutionService(),  # type: ignore[arg-type]
             HmacCursorSigner("session", b"session-timeline-key"),
             history_reader=object(),  # type: ignore[arg-type]
+            conversation_enabled=True,
             transcript_store=object(),  # type: ignore[arg-type]
         )
         principal = Principal("owner", "tenant")

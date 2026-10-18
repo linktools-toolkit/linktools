@@ -61,7 +61,7 @@ from ._tool_boundary import (
     BoundaryToolset,
     managed_tool_descriptor_from_metadata,
 )
-from ._tool_metrics import _ToolMetricContext
+from ._tool_metrics import ToolMetricContext
 from ._mcp_transport import _create_mcp_transport
 from ._tool_response_fixture import _FixtureToolset, _ToolResponseManifest
 
@@ -493,7 +493,7 @@ async def materialize_mcp_capabilities(
     bindings: Mapping[str, _MCPBinding],
     projections: Mapping[str, _MCPProjection],
     tool_operations: "ToolOperationBridge | None",
-    tool_metrics: "_ToolMetricContext | None",
+    tool_metrics: "ToolMetricContext | None",
     budget: "RunBudgetContext | None" = None,
     response_fixture: "_ToolResponseManifest | None" = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:

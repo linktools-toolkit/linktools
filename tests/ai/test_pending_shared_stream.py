@@ -33,7 +33,7 @@ _PRINCIPAL = Principal(principal_id="reader", tenant_id="tenant")
 
 class _PendingStore:
     def __init__(self) -> None:
-        self.pending = replace(_execution(), event_seq=1, terminal_commit=True)
+        self.pending = replace(_execution(), event_seq=1, conversation=True)
         self.execution = None
         self.head = None
         self.owner = "pending-owner"

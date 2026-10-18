@@ -126,6 +126,8 @@ class AgentBindingContract:
     def __post_init__(self) -> None:
         if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self.agent_spec.tool_retries is None or self.agent_spec.output_retries is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "agent retry limits must be resolved")
         try:
             model_contract = ImmutableJsonMapping(self.model_contract)
             output_schema = ImmutableJsonMapping(self.output_schema)

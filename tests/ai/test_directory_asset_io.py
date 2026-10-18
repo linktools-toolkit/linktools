@@ -20,7 +20,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     AssetSkillSource,
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillDefinition,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -95,7 +95,7 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
     )
     await store.initialize()
     try:
-        capture = await CapabilityGroup("application", assets=store).capture()
+        capture = await RuntimeFeatures("application", assets=store).capture()
         definition = next(
             item.value
             for item in capture.contributions

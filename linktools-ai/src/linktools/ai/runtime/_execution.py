@@ -69,6 +69,7 @@ from ..storage import (
     TurnCoordination,
     payload_fits_inline,
 )
+from ._conversation_capability import ConversationCapability
 from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._handoff import HandoffGate, HandoffState
@@ -391,15 +392,15 @@ class DefaultExecutionService:
         object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
         restart_checkpoints: bool = False,
         durable_trace: bool = False,
-        terminal_commit: bool = False,
+        conversation: bool = False,
     ) -> None:
         if any(not isinstance(value, bool) for value in (
-            restart_checkpoints, durable_trace, terminal_commit,
+            restart_checkpoints, durable_trace, conversation,
         )):
             raise TypeError("execution persistence guarantees must be bool")
         self._restart_checkpoints = restart_checkpoints
         self._durable_trace = durable_trace
-        self._terminal_commit = terminal_commit
+        self._conversation = conversation
         self._state = state
         self._object_store = object_store
         self._object_reader = object_reader
@@ -722,7 +723,7 @@ class DefaultExecutionService:
             ExecutionStatus.CANCELLED,
         }:
             await self.request_terminal_handoff(
-                execution_id, tenant_id=tenant_id, terminal_commit=current.terminal_commit,
+                execution_id, tenant_id=tenant_id, terminal_commit=current.conversation,
             )
 
     async def _run_handoff_cleanup(
@@ -854,6 +855,7 @@ class DefaultExecutionService:
             budget_scope_id=budget_scope_id,
             restart_checkpoints=True,
             durable_trace=True,
+            conversation=False,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -2001,6 +2003,8 @@ class DefaultExecutionService:
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
+        if not self._conversation and (session_id is not None or fork_base_execution_id is not None):
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         metric_delivery: _TerminalMetricDelivery | None = None
 
         def capture_metric(delivery: _TerminalMetricDelivery) -> None:
@@ -2423,9 +2427,7 @@ class DefaultExecutionService:
                                  or parent is not None and parent.restart_checkpoints),
             durable_trace=(self._durable_trace or requires_task_invocation_capture
                            or parent is not None and parent.durable_trace),
-            terminal_commit=(self._terminal_commit and not requires_task_invocation_capture
-                             and not (parent is not None and (
-                                 parent.restart_checkpoints or parent.durable_trace))),
+            conversation=self._conversation,
         )
         proposed_reservation = ExecutionStartReservation(
                 execution,
@@ -2495,10 +2497,12 @@ class DefaultExecutionService:
                     )
             transferred = False
             try:
-                if (self._terminal_commit and dependency_hold_id is None
+                if (execution.conversation and dependency_hold_id is None
                         and self._runtime_bridge.pending_start is not None):
-                    pending_id = await self._runtime_bridge.pending_start(
+                    pending_id = await ConversationCapability.prepare_turn(
                         request, proposed_reservation, session, coordination,
+                        start_pending=self._runtime_bridge.pending_start,
+                        dependency_hold_id=dependency_hold_id,
                     )
                     if pending_id is not None:
                         transferred = True
@@ -3130,7 +3134,7 @@ class DefaultExecutionService:
             await self._request_handoff_if_terminal(execution.execution_id, tenant_id=tenant_id)
         else:
             await self.request_terminal_handoff(
-                execution.execution_id, tenant_id=tenant_id, terminal_commit=execution.terminal_commit,
+                execution.execution_id, tenant_id=tenant_id, terminal_commit=execution.conversation,
             )
         return result
 
@@ -3228,7 +3232,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if type(repository) is ExecutionRepositoryImpl:
             await self.request_terminal_handoff(
-                execution_id, tenant_id=principal.tenant_id, terminal_commit=execution.terminal_commit,
+                execution_id, tenant_id=principal.tenant_id, terminal_commit=execution.conversation,
             )
         else:
             await self._request_handoff_if_terminal(execution_id, tenant_id=principal.tenant_id)
@@ -3401,6 +3405,8 @@ class DefaultExecutionService:
     async def fork(
         self, execution_id: str, request: ForkExecutionRequest
     ) -> ExecutionHandle:
+        if not self._conversation:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
@@ -3409,6 +3415,8 @@ class DefaultExecutionService:
             or not isinstance(previous.binding, AgentBindingContract)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not previous.conversation:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
         if binding.binding_digest != binding_digest:

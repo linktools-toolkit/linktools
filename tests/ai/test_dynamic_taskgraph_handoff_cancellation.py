@@ -64,7 +64,7 @@ async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -
         return execution
 
     binding = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -152,7 +152,7 @@ async def test_cancelled_start_defers_binding_to_idempotent_recovery() -> None:
         del args, kwargs
 
     binding = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -283,7 +283,7 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         raise AssertionError("literal Agent Task does not use this callback")
 
     binding = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),

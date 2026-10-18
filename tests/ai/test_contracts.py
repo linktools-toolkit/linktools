@@ -61,7 +61,7 @@ class _JsonIntEnum(IntEnum):
 
 def _binding_contract(*, agent_id: str = "default") -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec(agent_id, model="route"),
+        agent_spec=AgentSpec(agent_id, model="route", tool_retries=3, output_retries=3),
         model_contract={"version": 1, "id": "route"},
         selected=(),
         subagents=(),

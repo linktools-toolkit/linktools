@@ -17,7 +17,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     AssetSkillSource,
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillResource,
     SkillCapability,
     SkillDefinition,
@@ -198,7 +198,7 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     )))
     await store.initialize()
     try:
-        capture = await CapabilityGroup("local", assets=store).capture()
+        capture = await RuntimeFeatures("local", assets=store).capture()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
@@ -511,7 +511,7 @@ async def test_rule_catalog_ignores_hidden_and_cache_discovery_paths(tmp_path: P
     )
     await store.initialize()
     try:
-        capture = await CapabilityGroup("rules", assets=store).capture()
+        capture = await RuntimeFeatures("rules", assets=store).capture()
     finally:
         await store.close()
 

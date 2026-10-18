@@ -459,7 +459,7 @@ select results. A successful null is `{"status": "succeeded", "value": None,
 
 ## Agent candidates and model judges
 
-Open the Runtime with your application's `ModelRegistry` and `CapabilityGroup`.
+Open the Runtime with your application's `ModelRegistry` and `RuntimeFeatures`.
 An existing Agent becomes a candidate or scorer through the same Task adapter:
 
 ```python

@@ -12,19 +12,18 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 
-from linktools.ai.capability import AgentContext, CapabilityGroup, ToolCallFailed
+from linktools.ai.capability import AgentContext, RuntimeFeatures, ToolCallFailed
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeStorage, TraceCapability, MetricsCapability
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
     ToolPermissionPolicy,
 )
 
-from ._runtime_test_helpers import _persistence_capabilities
 
 
 class _CompositionModelBinding:
@@ -86,7 +85,16 @@ class _FailingCapability(AbstractCapability[AgentContext[None]]):
 async def test_materialized_agent_converts_all_model_facing_tool_signals(
     tmp_path: Path,
 ) -> None:
-    application = CapabilityGroup[None]("application")
+    workspace = Workspace.load(
+        tmp_path,
+
+        policy=WorkspacePolicy(
+            tool_permissions=ToolPermissionPolicy(default="deny")
+        ),
+    )
+    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application.capability(TraceCapability(), scope="runtime")
+    application.capability(MetricsCapability(), scope="runtime")
     application.tool(_business_tool, name="business", effect_policy="replay_safe")
     application.capability(_FailingCapability())
     application.agent(
@@ -101,13 +109,6 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     )
     metric_store = InMemoryMetricStore()
     metrics = Metrics.from_store(metric_store, namespace="composition")
-    workspace = Workspace.load(
-        tmp_path,
-
-        policy=WorkspacePolicy(
-            tool_permissions=ToolPermissionPolicy(default="deny")
-        ),
-    )
     state = RuntimeStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
@@ -115,7 +116,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         "default",
         models=_CompositionModels(),  # type: ignore[arg-type]
         storage=state,
-        capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=workspace), application),
+        runtime_features=application,
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run(

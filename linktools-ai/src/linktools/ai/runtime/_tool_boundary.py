@@ -40,7 +40,7 @@ from ._attachment import bind_tool_return_attachments
 from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
-    _ToolMetricContext,
+    ToolMetricContext,
 )
 
 
@@ -118,7 +118,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         permission_policy: ToolPermissionPolicy | None = None,
         sandbox_session: SandboxSession | None = None,
         tool_operations: ToolOperationBridge | None = None,
-        tool_metrics: _ToolMetricContext | None = None,
+        tool_metrics: ToolMetricContext | None = None,
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
     ) -> None:

@@ -3,6 +3,7 @@
 """Deterministic Agent selection, binding, and exact historical recovery."""
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from inspect import iscoroutine
 from types import MappingProxyType
 from typing import Literal, TypeAlias
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 
 from ..capability import (
     CapabilityContribution,
+    RuntimeFeaturesCapture,
     SkillDefinition,
     workspace_tool_declarations,
 )
@@ -48,9 +50,16 @@ class AgentCompiler:
         candidates: Sequence[CapabilityContribution[object]],
         agents: Mapping[str, AgentSpec],
         capability_filter: CapabilityFilter | None = None,
+        tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
+        output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        for name, value in (("tool_retries", tool_retries), ("output_retries", output_retries)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        self._tool_retries = tool_retries
+        self._output_retries = output_retries
         candidates = tuple(item for item in candidates if item.scope == "agent")
         generic = tuple(item for item in candidates if item.kind == "capability")
         declarations = tuple(
@@ -89,6 +98,11 @@ class AgentCompiler:
         """Compile one current declaration from the captured candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
+        spec = replace(
+            spec,
+            tool_retries=self._tool_retries if spec.tool_retries is None else spec.tool_retries,
+            output_retries=self._output_retries if spec.output_retries is None else spec.output_retries,
+        )
         model = self._models.resolve(spec.model)
         declarations = tuple(item for item in self._candidates if item.kind != "agent")
         delegates = tuple(

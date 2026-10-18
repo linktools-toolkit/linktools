@@ -60,7 +60,7 @@ pytestmark = pytest.mark.asyncio
 
 def _binding_contract() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="default"),
+        agent_spec=AgentSpec("agent", model="default", tool_retries=3, output_retries=3),
         model_contract={"version": 1, "id": "default"},
         selected=(),
         subagents=(),

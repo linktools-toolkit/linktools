@@ -24,7 +24,7 @@ from ..agent import (
     OutputBinding,
     restore_output,
 )
-from ..capability import CapabilityGroup, CapabilityGroupCapture
+from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
     AuthorizationPolicy,
     RunBudget,
@@ -389,7 +389,7 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         storage: RuntimeStorage,
         context: None = None,
-        capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupCapture[None]]" = (),
+        runtime_features: "RuntimeFeatures[None] | RuntimeFeaturesCapture[None] | None" = None,
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
@@ -407,7 +407,7 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         storage: RuntimeStorage,
         context: RuntimeContext[AppT],
-        capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
+        runtime_features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
@@ -424,7 +424,7 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         storage: RuntimeStorage,
         context: "RuntimeContext[object] | None" = None,
-        capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]" = (),
+        runtime_features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None" = None,
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
@@ -437,9 +437,10 @@ class Runtime(Generic[AppT]):
         Explicit graph and execution recovery remain available when disabled.
         Closing still drains work owned by this Runtime.
 
-        Runtime-scoped CapabilityGroup registrations apply to every agent run,
+        Runtime-scoped RuntimeFeatures registrations apply to every agent run,
         independently of Agent capability selection. They use native hooks and
-        lifecycle and are not persisted in execution bindings.
+        lifecycle. Persistence guarantees are fixed on each admitted execution;
+        reopening under different feature declarations does not reinterpret them.
         """
         if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
             raise TypeError("tool_responses must be ToolResponseFixture")
@@ -455,7 +456,7 @@ class Runtime(Generic[AppT]):
             context=root_context,
             models=models,
             storage=storage,
-            capabilities=capabilities,
+            runtime_features=runtime_features,
             metrics=metrics,
             limits=selected_limits,
             authorization=authorization,
@@ -1471,7 +1472,7 @@ async def _open_runtime(
     context: RuntimeContext[object],
     models: ModelRegistry,
     storage: RuntimeStorage,
-    capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]",
+    runtime_features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
     metrics: "Metrics | None",
     limits: PromptLimits,
     authorization: "AuthorizationPolicy | None",
@@ -1487,7 +1488,7 @@ async def _open_runtime(
         tenant_id=context.tenant_id,
         models=models,
         storage=storage,
-        capabilities=capabilities,
+        runtime_features=runtime_features,
         metrics=metrics,
         limits=limits,
         authorization=authorization,

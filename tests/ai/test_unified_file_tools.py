@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ToolReturn
 
-from linktools.ai.capability import CapabilityGroup, ToolCallRetry, workspace_capabilities
+from linktools.ai.capability import RuntimeFeatures, ToolCallRetry, workspace_capabilities
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -186,7 +186,7 @@ async def test_unified_file_selection_keeps_scenarios_minimal(tmp_path: Path) ->
 
 
 def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: Path) -> None:
-    contributions = CapabilityGroup("workspace", workspace=Workspace.load(tmp_path))._contributions
+    contributions = RuntimeFeatures("workspace", workspace=Workspace.load(tmp_path))._contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
         "read_file": 3, "write_file": 2, "search_files": 2,

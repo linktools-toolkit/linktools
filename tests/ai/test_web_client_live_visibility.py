@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Completed client exchanges are readable before their execution finishes."""
 
+from linktools.ai.runtime import TraceCapability
 import asyncio
 import base64
 import json
@@ -14,7 +15,7 @@ import pytest
 
 pytest.importorskip("starlette")
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeStorage, TaskModelProjection
 from linktools.ai.runtime.state._step_archive import (
@@ -22,7 +23,6 @@ from linktools.ai.runtime.state._step_archive import (
 )
 from linktools.ai.web import create_app
 
-from ._runtime_test_helpers import _persistence_capabilities
 from .test_model_client_request_capture import _registry, _response
 from .test_model_client_response_capture import _DONE, _Stream
 from .test_web_console_viewers import _client
@@ -70,12 +70,13 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
 
     models, clients = _registry(monkeypatch, handler)
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
-    group = CapabilityGroup[None]("web-client-live")
+    group = RuntimeFeatures[None]("web-client-live")
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "web-client-live", models=models, storage=storage,
-        capabilities=(group, _persistence_capabilities(trace=True)),
+        runtime_features=group,
     ) as runtime:
         commit = storage.run_store.commit_captured_execution_projection
 

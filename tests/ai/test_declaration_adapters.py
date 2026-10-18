@@ -21,7 +21,7 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AgentDeclarationLoader,
     CapabilityContribution,
-    CapabilityGroup,
+    RuntimeFeatures,
     CapabilityLoadContext,
     SkillDefinition,
     SkillResource,
@@ -160,7 +160,7 @@ def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
     assert spec.model == "worker-model"
     assert spec.allow_tools == ()
     assert spec.planning is False
-    assert spec.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
+    assert spec.tool_retries is None
     assert spec.usage_limits is None
 
 
@@ -256,7 +256,7 @@ def test_agent_markdown_ignores_unrelated_author_fields() -> None:
     )
     assert explicit.model == "explicit"
     assert explicit.planning is False
-    assert explicit.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
+    assert explicit.tool_retries is None
 
 
 @pytest.mark.asyncio
@@ -272,7 +272,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
         AssetKey("worker", "team/AGENT.md"),
         b"---\n{}\n---\nworker prompt",
     )
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", loader)
 
     snapshot = await group.capture()
@@ -282,7 +282,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     assert isinstance(spec, AgentSpec)
     assert spec.id == "team"
     assert spec.model == "configured"
-    assert spec.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
+    assert spec.tool_retries is None
     await store.close()
 
 
@@ -314,7 +314,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
                 ),
             )
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
 
     snapshot = await group.capture()
@@ -351,7 +351,7 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
                 ),
             )
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
@@ -392,7 +392,7 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
                 ),
             )
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
@@ -452,7 +452,7 @@ async def test_prebound_mcp_loader_preserves_resources_and_execution_policy() ->
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
@@ -510,7 +510,7 @@ async def test_prebound_mcp_loader_rejects_wrong_source_or_resource(
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
@@ -554,7 +554,7 @@ async def test_prebound_mcp_loader_rejects_stale_resource_versions() -> None:
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
@@ -598,7 +598,7 @@ async def test_prebound_mcp_loader_reports_deleted_resource_as_snapshot_conflict
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
@@ -630,7 +630,7 @@ async def test_prebound_mcp_without_resources_keeps_execution_policy() -> None:
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
@@ -660,7 +660,7 @@ async def test_capture_rejects_asset_change_during_loader() -> None:
             await store.put(late, b"late")
             return (AgentSpec("team"),)
 
-    group = CapabilityGroup("application", assets=store)
+    group = RuntimeFeatures("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
@@ -710,7 +710,7 @@ async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        snapshot = await CapabilityGroup("application", assets=store).capture()
+        snapshot = await RuntimeFeatures("application", assets=store).capture()
         reader = snapshot.asset_reader
         assert reader is not None
         refs = await reader.resolve_versions((key,))
@@ -809,7 +809,7 @@ async def test_declaration_loaders_are_backend_agnostic(
     try:
         results = []
         for store, _engine in stores:
-            snapshot = await CapabilityGroup("assets", assets=store).capture()
+            snapshot = await RuntimeFeatures("assets", assets=store).capture()
             results.append(
                 tuple(
                     (item.kind, item.id, item.value)
@@ -842,7 +842,7 @@ async def test_mcp_package_resource_reserves_declaration_filename() -> None:
             b'{"command":"python","args":["resource:mcp.json"]}',
         )
         with pytest.raises(AIError) as error:
-            await CapabilityGroup("application", assets=store).capture()
+            await RuntimeFeatures("application", assets=store).capture()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
@@ -859,6 +859,6 @@ async def test_builtin_loader_rejects_multiple_mcp_package_declarations() -> Non
             b"version: 1\ncommand: python\n",
         )
     with pytest.raises(AIError) as error:
-        await CapabilityGroup("application", assets=store).capture()
+        await RuntimeFeatures("application", assets=store).capture()
     assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     await store.close()

@@ -315,7 +315,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     from pydantic_ai.toolsets import FunctionToolset
 
     from linktools.ai.asset import AssetMaterializer
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import ExecutionStatus, JsonValue, ToolOperationStatus
     from linktools.ai.runtime import Runtime, RuntimeStorage
     from linktools.ai.runtime._mcp import _MCPModelToolset, prepare_mcp_projections
@@ -398,7 +398,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     assets, fixture = await _store(payload)
     try:
         await assets.put(AssetKey("mcp", "server/server.py"), b"raise AssertionError('must not run')")
-        group = CapabilityGroup("fixture-native-runtime", assets=assets)
+        group = RuntimeFeatures("fixture-native-runtime", assets=assets)
         group.mcp(MCPServerSpec(
             "server", "fixture-server-must-not-start", ("resource:server.py",),
             AssetKey("mcp", "server"), revision=3,
@@ -407,7 +407,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
         storage = RuntimeStorage.in_memory()
         async with Runtime.open(
             "fixture-native-runtime", models=_Models(_UsageFunctionModel(model)),
-            storage=storage, capabilities=(group,), tool_responses=fixture,
+            storage=storage, runtime_features=group, tool_responses=fixture,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result

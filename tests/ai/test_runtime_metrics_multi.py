@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
@@ -51,8 +51,8 @@ class _Models:
         return _ModelBinding()
 
 
-def _agent_group() -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("application")
+def _agent_group() -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("application")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -94,7 +94,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 "default",
                 models=_Models(),  # type: ignore[arg-type]
                 storage=state,
-                capabilities=(_agent_group(),),
+                runtime_features=_agent_group(),
                 metrics=metrics,
             ) as runtime:
                 result = (await runtime.agents.get("default").run(

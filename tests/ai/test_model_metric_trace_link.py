@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import (
-    _AgentRunPersistenceCapability,
+from linktools.ai.runtime import TraceCapability
+from pydantic_ai.capabilities import CombinedCapability
+from linktools.ai.runtime._run_hooks import (
+    AgentRunCapture,
 )
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime._history_projection import _trace_item
@@ -43,12 +45,13 @@ async def _text_model(
 def _persistence(
     run_recorder: AgentRunRecorder,
     agent_run_id: str,
-) -> _AgentRunPersistenceCapability:
-    return _AgentRunPersistenceCapability(
+) -> CombinedCapability:
+    capture = AgentRunCapture(
         recorder=run_recorder,
         agent_id="agent",
         agent_run_id=agent_run_id,
     )
+    return CombinedCapability([capture, TraceCapability().bind(capture)])
 
 
 def _model_metrics(

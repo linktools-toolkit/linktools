@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._execution_context import ExecutionInputContext
@@ -28,7 +28,7 @@ async def test_changes_after_launch_are_observed_before_provider(
         calls.append(messages)
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = CapabilityGroup("launch-change")
+    group = RuntimeFeatures("launch-change")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / "state.db")
@@ -41,8 +41,8 @@ async def test_changes_after_launch_are_observed_before_provider(
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Runtime.open("launch-change", storage=first_state, models=models, capabilities=(group,)) as first, Runtime.open(
-        "launch-change", storage=second_state, models=models, capabilities=(group,),
+    async with Runtime.open("launch-change", storage=first_state, models=models, runtime_features=group) as first, Runtime.open(
+        "launch-change", storage=second_state, models=models, runtime_features=group,
     ) as second:
         session = await first.agents.get().create_session("session", metadata={"marker": "before"})
         execution = await session.start("question", idempotency_key="same")
@@ -88,7 +88,7 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         await release_provider.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = CapabilityGroup("launch-winner")
+    group = RuntimeFeatures("launch-winner")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / "state.db")
@@ -103,8 +103,8 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return await original(worker, *args, **kwargs)
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", delayed)
-    async with Runtime.open("launch-winner", storage=first_state, models=models, capabilities=(group,)) as first, Runtime.open(
-        "launch-winner", storage=second_state, models=models, capabilities=(group,),
+    async with Runtime.open("launch-winner", storage=first_state, models=models, runtime_features=group) as first, Runtime.open(
+        "launch-winner", storage=second_state, models=models, runtime_features=group,
     ) as second:
         await first.agents.get().create_session("session")
         one = await first.agents.get().session("session").start("question", idempotency_key="same")

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -28,7 +28,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage, RunUsage
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
@@ -43,7 +43,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 from linktools.ai.observe._memory import InMemoryMetricStore
-from ._runtime_test_helpers import _persistence_capabilities
+from linktools.ai.runtime import MetricsCapability, TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
 
@@ -1179,7 +1179,8 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
 ) -> None:
     async def scenario() -> None:
         models = _BlockingModels()
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
         group.agent("default", model="default", allow_tools=())
         storage_path = tmp_path / "runtime-storage"
         storage = (
@@ -1192,7 +1193,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(_persistence_capabilities(trace=True), group,),
+            runtime_features=group,
             metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("TOP_SECRET_PROMPT")
@@ -1248,7 +1249,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
                 "default",
                 models=models,  # type: ignore[arg-type]
                 storage=RuntimeStorage.filesystem(storage_path),
-                capabilities=(_persistence_capabilities(trace=True), group,),
+                runtime_features=group,
                 metrics=Metrics.in_memory(),
             ) as reopened:
                 assert reopened.history is not None
@@ -1272,7 +1273,8 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
 ) -> None:
     async def scenario() -> None:
         models = _BlockingModels(first_tool=True)
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
 
         def complete(_context: object) -> str:
             return "tool completed"
@@ -1285,7 +1287,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(_persistence_capabilities(trace=True), group,),
+            runtime_features=group,
             metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
@@ -1375,7 +1377,8 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
 ) -> None:
     async def scenario() -> None:
         models = _BlockingModels()
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
         group.agent("default", model="default", allow_tools=())
         storage = RuntimeStorage.filesystem(tmp_path / "content-storage")
 
@@ -1383,7 +1386,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(_persistence_capabilities(trace=True), group,),
+            runtime_features=group,
             metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")
@@ -1472,13 +1475,15 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
             note_replay,
         )
         models = _BlockingModels(first_tool=True)
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
 
         def complete(_context: object) -> str:
             return "tool completed"
 
         group.tool(complete, effect_policy="none")
         group.agent("default", model="default", allow_tools=("complete",))
+        group.capability(MetricsCapability(), scope="runtime")
         metric_store = InMemoryMetricStore()
         metrics = Metrics.from_store(metric_store, namespace="model-lifecycle-fallback")
         metric_start = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -1487,7 +1492,7 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            capabilities=(_persistence_capabilities(trace=True), group,),
+            runtime_features=group,
             metrics=metrics,
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")

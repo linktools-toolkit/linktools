@@ -2,10 +2,11 @@
 
 Observation events identify progress; the corresponding Runtime domain owns
 its recorded content. Live progress can arrive before its history is persisted.
-Detailed execution persistence requires `DurableTraceCapability()` registered
+Detailed execution persistence requires `TraceCapability()` registered
 at Runtime scope; storage retention alone does not select it. Without this
 capability, the owning Runtime exposes its existing live staging content while
-retained locally; Session history and final results remain durable. See
+retained locally. Final results follow execution retention; Session history
+requires `ConversationCapability()` and follows conversation retention. See
 [optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
 
 For runs with restart checkpoints disabled, model-boundary control checks may
@@ -436,18 +437,19 @@ another Runtime does not take over an admitted or running execution, or finish
 an unhanded-off cancellation. Separate sessions can run concurrently; one
 session's active-execution admission still uses its existing optimistic claim.
 The ordinary durable path does not add an ownership heartbeat or a
-namespace-wide database lock. `TerminalCommitCapability` instead uses the
-optional cache turn-coordination lease while a turn has no database record;
-see [terminal-only commit](runtime-capabilities.md#terminal-only-commit-for-ordinary-agent-runs).
+namespace-wide database lock. Eligible deferred turns use the optional cache
+turn-coordination lease while a turn has no database record; see
+[independent commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
 
-With non-transient execution storage, successful standalone executions retain
+With `ConversationCapability()` and non-transient conversation storage,
+successful standalone executions retain
 their actual final model context for
 `execution.fork`, including imported history and tool calls and returns, even
 without durable trace. This single canonical terminal checkpoint follows the
-execution storage route and remains available after reopening durable storage;
+conversation storage route and remains available after reopening durable storage;
 it does not retain the full intermediate trace or enable restart checkpoints.
-Older no-trace executions without this context cannot reconstruct it from their
-prompt and result: fork reports `EXECUTION_HISTORY_UNAVAILABLE`.
+An execution without the admitted conversation guarantee cannot gain fork support
+from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
 For eligible terminal-only source turns, this context joins the existing final
 owner batch in one database write transaction. Object bodies still have their
@@ -502,8 +504,9 @@ derive from the graph recovery request, so retrying a partly recovered graph
 does not take over an already recovered child again. A later recovery boundary
 requires a new graph recovery key.
 
-Filesystem execution storage retains automatic crash recovery because its
-existing writer lock supplies exclusive ownership. SQL startup can still finish
+Filesystem execution storage can automatically recover admitted checkpoint-enabled
+executions because its existing writer lock supplies exclusive ownership.
+Storage alone does not grant restart recovery. SQL startup can still finish
 durably handed-off work, including deferred continuations, prepared terminal
 handoffs, and terminal cleanup. A plain `FINALIZING` status alone is not proof
 that an active producer relinquished ownership.

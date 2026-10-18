@@ -24,7 +24,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import HmacCursorSigner, agent_run_id, agent_conversation_id
 from linktools.ai.runtime import RuntimeDomain
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime import CheckpointCapability
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
@@ -189,7 +190,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
         recorder = recorder_for(
             restored, 2, initial_messages=sdk_input, initial_context=loaded
         )
-        capability = _AgentRunPersistenceCapability(
+        capability = AgentRunCapture(
             recorder=recorder,
             agent_id="agent",
             agent_run_id=run_id,
@@ -209,7 +210,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             agent_run_id=run_id,
             next_model_request_seq=high_water + 1,
         )
-        await capability.before_model_request(ctx, SimpleNamespace())
+        await CheckpointCapability().bind(capability).before_model_request(ctx, SimpleNamespace())
         received = []
         b = ModelResponse(
             parts=[

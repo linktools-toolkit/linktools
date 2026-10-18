@@ -134,7 +134,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._preflight = False
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
         self._execution_producers: dict[str, tuple[str, int]] = {}
-        self._execution_persistence: dict[str, tuple[bool, bool]] = {}
+        self._execution_persistence: dict[str, tuple[bool, bool, bool]] = {}
         self._projection_dirty: set[str] = set()
         self._observation_task: asyncio.Task[None] | None = None
         self._observation_wake = asyncio.Event()
@@ -154,7 +154,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     def bind_execution_producer(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
-        restart_checkpoints: bool = True, durable_trace: bool = True,
+        conversation: bool = True, restart_checkpoints: bool = True, durable_trace: bool = True,
     ) -> None:
         if not agent_run_id or not execution_id or isinstance(producer_generation, bool) or producer_generation < 0:
             raise ValueError("execution producer identity is invalid")
@@ -162,7 +162,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         previous = self._execution_producers.get(agent_run_id)
         if previous is not None and (previous[0] != execution_id or previous[1] > producer_generation):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        persistence = (restart_checkpoints, durable_trace)
+        persistence = (conversation, restart_checkpoints, durable_trace)
         if any(not isinstance(value, bool) for value in persistence):
             raise TypeError("execution persistence guarantees must be bool")
         previous_persistence = self._execution_persistence.get(agent_run_id)
@@ -171,9 +171,15 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._execution_producers[agent_run_id] = value
         self._execution_persistence[agent_run_id] = persistence
 
+    def execution_persistence(self, agent_run_id: str) -> tuple[bool, bool, bool]:
+        """Return the run's fixed Conversation, Checkpoint and Trace guarantees."""
+        return self._execution_persistence.get(agent_run_id, (True, True, True))
+
     def _archive_for_run(self, domain: RuntimeDomain, agent_run_id: str) -> AgentRunStore | None:
-        restart, trace = self._execution_persistence.get(agent_run_id, (True, True))
-        if domain is RuntimeDomain.RECOVERY and not restart or domain is RuntimeDomain.EXECUTION and not trace:
+        conversation, restart, trace = self.execution_persistence(agent_run_id)
+        if (domain is RuntimeDomain.CONVERSATION and not conversation
+                or domain is RuntimeDomain.RECOVERY and not restart
+                or domain is RuntimeDomain.EXECUTION and not trace):
             return None
         return self._archives.get(domain)
 
@@ -520,7 +526,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             execution = await repository.get(execution_id, tenant_id=self._tenant_id)
             return execution, head
 
-        restart, _trace = self._execution_persistence.get(agent_run_id, (True, True))
+        _conversation, restart, _trace = self.execution_persistence(agent_run_id)
         if not restart and type(repository) is ExecutionRepositoryImpl:
             execution, head = await repository.observe_execution_control(execution_id, tenant_id=self._tenant_id)
         else:
@@ -1059,7 +1065,7 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def materialize_conversation(self, *, agent_run_id: str) -> None:
         run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
         checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id)
-        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        archive = self._archive_for_run(RuntimeDomain.CONVERSATION, agent_run_id)
         if run is None or checkpoint is None or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(archive, StateStepArchive):

@@ -14,7 +14,8 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime import CheckpointCapability
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime.state._plan import RuntimeRetentionMode
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
@@ -101,7 +102,7 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
         await second.initialize()
         second.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         recorder = recorder_for(second)
-        capability = _AgentRunPersistenceCapability(recorder=recorder, agent_id="agent", agent_run_id="run")
+        capability = AgentRunCapture(recorder=recorder, agent_id="agent", agent_run_id="run")
         ctx = SimpleNamespace(messages=[user, response], conversation_id="conversation", run_step=1)
         await capability.before_run(ctx)
         replayed = replace(
@@ -116,7 +117,7 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
         await recorder.record_tool_result_boundary(replayed, 1)
         await recorder.record_tool_result_boundary(slow, 1)
         ctx.messages.append(ModelRequest(parts=[replayed, slow]))
-        await capability.before_model_request(ctx, SimpleNamespace())
+        await CheckpointCapability().bind(capability).before_model_request(ctx, SimpleNamespace())
         recorder.append_transcript_message(ModelResponse(parts=[TextPart("done")]))
         await recorder.commit_history_boundary()
         messages = [message async for message in archive.iter_messages(agent_run_id="run")]

@@ -6,16 +6,17 @@ from copy import deepcopy
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, TerminalCommitCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability, TraceCapability
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime._message import encode_model_messages
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel, _persistence_capabilities
+from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ("ordinary", "terminal", "trace"))
+@pytest.mark.parametrize("mode", ("ordinary", "pending", "trace"))
 @pytest.mark.parametrize("later", (False, True))
 async def test_session_execution_fork_preserves_committed_cursor_and_rejects_changed_head(tmp_path, mode, later):
     calls = []
@@ -24,11 +25,12 @@ async def test_session_execution_fork_preserves_committed_cursor_and_rejects_cha
         calls.append(deepcopy(messages))
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = CapabilityGroup("session-execution-fork")
+    group = RuntimeFeatures("session-execution-fork")
     group.agent("default", model="default", allow_tools=())
-    if mode == "terminal":
-        group.capability(TerminalCommitCapability(), scope="runtime")
-    async with Runtime.open("session-execution-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db"), models=_Models(_UsageFunctionModel(model)), capabilities=(_persistence_capabilities(trace=mode == "trace"), group)) as runtime:
+    group.capability(ConversationCapability(), scope="runtime")
+    if mode == "trace":
+        group.capability(TraceCapability(), scope="runtime")
+    async with Runtime.open("session-execution-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == "pending" else None), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session("session")
         first = await session.start("first")
         await first.wait(timeout_seconds=5)

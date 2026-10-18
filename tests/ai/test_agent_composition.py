@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from linktools import ai
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup, SkillDefinition
+from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, SkillDefinition
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
@@ -27,7 +27,7 @@ from pydantic_ai.capabilities import AbstractCapability
 def test_top_level_public_surface_is_exact() -> None:
     assert ai.__all__ == [
         "Agent",
-        "CapabilityGroup",
+        "RuntimeFeatures",
         "Execution",
         "AgentContext",
         "Runtime",
@@ -38,7 +38,7 @@ def test_top_level_public_surface_is_exact() -> None:
 
     expected = {
         "Agent": runtime.Agent,
-        "CapabilityGroup": capability.CapabilityGroup,
+        "RuntimeFeatures": capability.RuntimeFeatures,
         "Execution": runtime.Execution,
         "AgentContext": capability.AgentContext,
         "Runtime": runtime.Runtime,
@@ -56,7 +56,7 @@ def test_top_level_public_surface_is_exact() -> None:
 
 def test_agent_binding_contract_persists_binding_inputs() -> None:
     binding_contract = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
@@ -112,7 +112,7 @@ def test_capability_pin_persists_contract_once() -> None:
 
 def test_agent_binding_contract_preserves_unknown_fields() -> None:
     payload = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
@@ -129,7 +129,7 @@ def test_agent_binding_contract_preserves_unknown_fields() -> None:
 @pytest.mark.parametrize("mode", ([], {}))
 def test_binding_decoder_rejects_non_scalar_output_modes(mode: object) -> None:
     payload = AgentBindingContract(
-        agent_spec=AgentSpec("agent"),
+        agent_spec=AgentSpec("agent", tool_retries=3, output_retries=3),
         model_contract={"model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -149,7 +149,7 @@ class _OrderedCapability(AbstractCapability[object]):
 
 @pytest.mark.asyncio
 async def test_binding_preserves_declaration_order_and_capability_registration_order() -> None:
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.capability(_OrderedCapability("z-capability"), revision=2)
     group.capability(_OrderedCapability("a-capability"), revision=3)
 

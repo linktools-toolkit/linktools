@@ -18,7 +18,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     CapabilityContribution,
-    CapabilityGroup,
+    RuntimeFeatures,
     CapabilityLoadContext,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -53,7 +53,7 @@ async def _memory_store() -> AssetStore:
 async def test_resource_free_registration_needs_no_asset_store(
     transport: Literal["stdio", "streamable-http", "sse"],
 ) -> None:
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     server = (
         MCPServerSpec("server", "python", ("-m", "server"), env={"MODE": "safe"})
         if transport == "stdio"
@@ -81,7 +81,7 @@ async def test_resource_free_registration_needs_no_asset_store(
 
 @pytest.mark.asyncio
 async def test_resource_registration_requires_an_explicit_asset_store() -> None:
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.mcp(
         MCPServerSpec(
             "server", "python", ("resource:server.py",), AssetKey("mcp", "server")
@@ -112,8 +112,8 @@ async def test_mcp_entries_share_the_captured_resource_binding(entry: str) -> No
     try:
         await store.put(resource, b"original resource")
         await store.put(declaration, codec.encode(server))
-        loaded = await CapabilityGroup("application", assets=store).capture()
-        group = CapabilityGroup("application", assets=store)
+        loaded = await RuntimeFeatures("application", assets=store).capture()
+        group = RuntimeFeatures("application", assets=store)
         if entry == "registration":
             group.loader("mcp", _MCPLoader())
             group.mcp(server)
@@ -153,7 +153,7 @@ async def test_mcp_entries_share_the_captured_resource_binding(entry: str) -> No
 async def test_registered_resource_arguments_are_validated_during_capture() -> None:
     store = await _memory_store()
     try:
-        group = CapabilityGroup("application", assets=store)
+        group = RuntimeFeatures("application", assets=store)
         group.mcp(
             MCPServerSpec(
                 "server", "python", ("resource:missing.py",), AssetKey("mcp", "server")
@@ -178,7 +178,7 @@ async def test_duplicate_mcp_registration_preserves_conflict_semantics(
         server = MCPServerSpec(
             "server", transport="streamable-http", url="https://example.test/service"
         )
-        group = CapabilityGroup("application", assets=store)
+        group = RuntimeFeatures("application", assets=store)
         group.mcp(server)
         if duplicate_source == "registration":
             group.mcp(server)
@@ -246,7 +246,7 @@ async def test_remote_packages_do_not_bind_or_read_sibling_resources(
             await store.put(declaration, raw)
             await store.put(sibling, b"private sibling contents")
 
-        capture = await CapabilityGroup("application", assets=store).capture()
+        capture = await RuntimeFeatures("application", assets=store).capture()
 
         assert len(capture.contributions) == 1
         contribution = capture.contributions[0]
@@ -277,7 +277,7 @@ async def test_shared_config_registration_freezes_expanded_connections(
             }
         }
     ).encode()
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     for server in MCPServerSpecAdapter().decode_config(config):
         group.mcp(server)
 
@@ -289,7 +289,7 @@ async def test_shared_config_registration_freezes_expanded_connections(
     assert dict(captured.headers) == {"Authorization": "Bearer first-token"}
     assert "first-token" not in json.dumps(capture.contributions[0].contract)
 
-    refreshed = CapabilityGroup("application")
+    refreshed = RuntimeFeatures("application")
     for server in MCPServerSpecAdapter().decode_config(config):
         refreshed.mcp(server)
     refreshed_capture = await refreshed.capture()

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Attachment acceptance survives request preparation and archive pagination."""
 
+from linktools.ai.runtime import TraceCapability
 import asyncio
 import hashlib
 from pathlib import Path
@@ -24,7 +25,7 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, HmacCursorSigner
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionInputContext, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
@@ -32,7 +33,7 @@ from linktools.ai.runtime._attachment import bind_tool_return_attachments
 from linktools.ai.runtime._history_projection import _attachment_fact_cursor
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 
-from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed, _persistence_capabilities
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_history_request_association import _history
 from .test_live_history_readback_integration import _Models
 
@@ -238,16 +239,17 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
         _attachment_request("call"),
         _attachment_request("second-call"),
     ])
-    group = CapabilityGroup("attachment-pagination")
+    group = RuntimeFeatures("attachment-pagination")
     group.capability(PausePreparation(), id="pause-preparation")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     models.contract = {**models.contract, "vision": True}
     first = None
     started_items = ()
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "attachment-pagination", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(group, _persistence_capabilities(trace=True)),
+        runtime_features=group,
     ) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"

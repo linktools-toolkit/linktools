@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import CapabilityGroup
+from .capability import RuntimeFeatures
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -239,11 +239,15 @@ class ACPApplication:
         return cls(workspace, models, storage)
 
     async def serve(self, *, memory_scope: str) -> None:
+        from .runtime import ConversationCapability
+
+        features = RuntimeFeatures("workspace", workspace=self.workspace)
+        features.capability(ConversationCapability(), scope="runtime")
         async with Runtime.open(
             "default",
             models=self.models,
             storage=self.storage,
-            capabilities=(CapabilityGroup("workspace", workspace=self.workspace),),
+            runtime_features=features,
         ) as runtime:
             await serve_stdio(
                 ACPAgent(

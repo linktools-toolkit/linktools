@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup
+from linktools.ai.capability import CapabilityContribution, RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,
@@ -127,7 +127,7 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
 
 @pytest.mark.asyncio
 async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -> None:
-    group = CapabilityGroup[None]("durable")
+    group = RuntimeFeatures[None]("durable")
     group.capability(_RegisteredCapability(), revision=3)
     candidates = (await group.capture()).contributions
     compiler = _compiler(candidates=candidates)
@@ -142,7 +142,7 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
         _compiler().restore(binding.binding_contract)
     assert missing.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
-    changed_group = CapabilityGroup[None]("changed")
+    changed_group = RuntimeFeatures[None]("changed")
     changed_group.capability(_RegisteredCapability(), revision=4)
     changed_candidates = (await changed_group.capture()).contributions
     with pytest.raises(AIError) as changed:

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime composition and ownership invariants."""
 
+from linktools.ai.runtime import TraceCapability
 import json
 import os
 import runpy
@@ -16,7 +17,7 @@ import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output, restore_output
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
@@ -35,7 +36,7 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
 from pydantic import BaseModel
 
-from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
+from ._runtime_test_helpers import RuntimeUsageModels
 
 
 def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: Path) -> None:
@@ -138,7 +139,7 @@ class _UncertainExecution:
 def _binding() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model="model", tool_retries=3, output_retries=3),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -184,12 +185,12 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
-    group = CapabilityGroup("workspace", assets=store)
+    group = RuntimeFeatures("workspace", assets=store)
     components = await compose_runtime_components(
         "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=RuntimeStorage.in_memory(),
-        capabilities=(group,),
+        runtime_features=group,
     )
 
     await components.close_callback()
@@ -224,7 +225,7 @@ async def test_runtime_rejects_source_change_during_assembly(
                 "workspace",
                 models=RuntimeUsageModels(),  # type: ignore[arg-type]
                 storage=RuntimeStorage.in_memory(),
-                capabilities=(CapabilityGroup("workspace", assets=store),),
+                runtime_features=RuntimeFeatures("workspace", assets=store),
             )
 
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
@@ -300,14 +301,15 @@ async def test_subagent_unknown_cancel_requires_recovery() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_persists_model_usage_through_history_views() -> None:
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
     application.agent("default", model="default", allow_tools=())
 
+    application.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_persistence_capabilities(trace=True), application,),
+        runtime_features=application,
     ) as runtime:
         result = (await runtime.agents.get("default").run(
             "hello",

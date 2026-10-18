@@ -1,25 +1,25 @@
 # Runtime-wide capabilities
 
-`CapabilityGroup.capability(capability, scope="runtime")` registers a native
+`RuntimeFeatures.capability(capability, scope="runtime")` registers a native
 Pydantic AI `AbstractCapability[AgentContext[AppT]]` as host policy. The same
-`capabilities=(group,)` argument to `Runtime.open` supplies both Agent-selected
+`runtime_features=group` argument to `Runtime.open` supplies both Agent-selected
 behavior and Runtime-wide policy; there is no separate registration system.
 
 ```python
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.runtime import Runtime
 
 # GlobalRateLimit is owned by the application; see the executable example below.
 quota = GlobalRateLimit(
     quota_key="provider-project-a", rpm=60, tpm=60_000, token_reservation=4_000,
 )
-group = CapabilityGroup("application")
+group = RuntimeFeatures("application")
 group.capability(quota, id="host.rate-limit", scope="runtime")
 group.agent("default", allow_capabilities=())
 
 capture = await group.capture()
 async with Runtime.open(
-    "application", models=models, storage=storage, capabilities=(capture,),
+    "application", models=models, storage=storage, runtime_features=capture,
 ) as runtime:
     ...
 ```
@@ -33,48 +33,83 @@ pass through these hooks.
 
 ## Optional execution persistence
 
-Persistent Sessions retain committed conversation context and final results by
-default. Intermediate restart checkpoints and detailed execution trace are
-independent opt-ins using the same native Runtime registration:
+Conversation, interrupted-execution recovery, detailed trace and automatic Agent
+metrics are separate, explicit Runtime-scoped capabilities. Passing durable
+storage alone does not enable them. Supply one `RuntimeFeatures` declaration or
+its `RuntimeFeaturesCapture` through `runtime_features`; complete registrations
+before capture or opening the Runtime.
 
 ```python
-from linktools.ai.capability import CapabilityGroup
-from linktools.ai.runtime import DurableTraceCapability, RestartCheckpointCapability
+from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import ConversationCapability, CheckpointCapability, TraceCapability
 
-chat = CapabilityGroup("chat")
+chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
-# Runtime.open(..., capabilities=(chat,)) keeps conversation and control state.
+chat.capability(ConversationCapability(), scope="runtime")
+# Runtime.open(..., runtime_features=chat) supports Sessions and conversation forks.
 
-persistent_work = CapabilityGroup("persistent-work")
+persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
-persistent_work.capability(RestartCheckpointCapability(), scope="runtime")
-persistent_work.capability(DurableTraceCapability(), scope="runtime")
-# Runtime.open(..., capabilities=(persistent_work,)) additionally retains both.
+persistent_work.capability(CheckpointCapability(), scope="runtime")
+persistent_work.capability(TraceCapability(), scope="runtime")
+# Runtime.open(..., runtime_features=persistent_work) supports recovery and audit.
 ```
 
-`RestartCheckpointCapability()` retains before-request and after-node context
-checkpoints for explicit recovery or enabled startup recovery. It does not retain
-public detailed history. `DurableTraceCapability()` retains execution transcript,
-step facts and model interactions; trace alone cannot resume an interrupted run.
-Register either, both, or neither. Both require Runtime scope. Neither capability
-adds a backend, storage route, profile or parameter to `Runtime.open`.
+`ConversationCapability()` retains committed conversation context and Session
+projections. Creating or continuing a Session, or forking conversation, requires
+this capability; missing support fails with `CAPABILITY_REQUIRED_MISSING` before
+side effects. Checkpoint or trace data alone does not grant conversation access.
+`CheckpointCapability()` retains before-request and after-node recovery context.
+`TraceCapability()` retains execution transcript, step facts and model interactions;
+trace alone cannot resume an interrupted run. Register the combination required
+by the application. Each capability requires Runtime scope; duplicate registrations
+of the same built-in feature are rejected.
 
-Admission freezes these two guarantees in the execution record. Reopening with a
-different capability set does not upgrade, downgrade or reinterpret an existing
-execution, including an idempotent start replay. Both fields are required in the
-stored record. Runtime-wide request policies, such as rate limits, still use
-current host configuration. Task admissions retain their existing guarantees;
-these opt-ins select Agent run checkpoint and trace persistence.
+Admission freezes the execution's conversation, checkpoint and trace guarantees.
+Reopening with a different capability set does not upgrade, downgrade or
+reinterpret that execution, including idempotent start replay. Runtime-wide
+request policies, such as rate limits, still use current host configuration.
+Task, Evaluation and Artifact remain Runtime services; they activate business
+work on actual use or required recovery, not through capability wrappers.
+Shared storage provisioning is independent of service activation.
+
+### Automatic Agent metrics
+
+`Metrics` remains the shared dataset for Agent, Task, Evaluation and application
+recording. Supplying `metrics=` alone does not enable automatic Agent observations:
+
+```python
+from linktools.ai.runtime import MetricsCapability
+
+group.capability(MetricsCapability(), scope="runtime")
+# metrics is an application-owned Metrics instance.
+# Runtime.open(..., runtime_features=group, metrics=metrics)
+```
+
+`MetricsCapability()` requires `metrics=` and selects automatic Agent model,
+tool, attempt and execution observations. Task/Evaluation and explicit business
+recording use the dataset independently. Metrics retain their own batching and
+flush/close lifecycle; a conversation turn does not force a metrics flush.
+
+### Retry defaults
+
+`AgentSpec.tool_retries` and `AgentSpec.output_retries` default to `None`, as do
+omitted fields in declaration payloads. `RuntimeFeatures` supplies defaults of
+`3` for both; configure them with `RuntimeFeatures("application",
+tool_retries=5, output_retries=2)`. Explicit Agent values, including `0`, win.
+The compiler resolves these values before creating a durable binding. Captures
+freeze the configured defaults, and restoring an execution uses its saved
+resolved values even if a later Runtime has different defaults.
 
 Drain active work and upgrade all Runtime readers and writers sharing a namespace
 before admitting executions with the new defaults. Superseded pre-release record
 shapes and mixed-version operation are not supported.
 
-With neither capability, ordinary execution keeps authorization, idempotency,
+Without conversation, checkpoint or trace capabilities, ordinary execution keeps authorization, idempotency,
 producer ownership, cancellation, terminal results and durable tool-effect
 records. Model and tool progress still streams. Local history is available while
 its existing staging owner is retained, and is unavailable after release or in
-an independent reader. Read committed conversation through Session history.
+an independent reader. With Conversation enabled, read committed conversation through Session history.
 Intentional approval/deferred waits retain the continuation needed to resume;
 prepared cross-store terminal handoffs also retain their required evidence.
 These boundaries do not enable arbitrary restart after a process crash.
@@ -101,80 +136,30 @@ must accept `cancel(execution, *, force=False)`. An implementation that does not
 support explicit revocation can ignore the keyword and keep returning its
 existing confirmation outcome. It must not claim completion from force alone.
 
-### Terminal-only commit for ordinary Agent runs
+### Independent commit boundaries
 
-`TerminalCommitCapability()` opts ordinary Agent runs into deferred persistence:
+There is no public terminal-commit capability or global commit-mode option.
+Conversation commits its final context, Session cursor and corresponding
+Execution outcome at the turn boundary. Checkpoint commits recovery-critical
+context at its model/tool boundaries. Trace publishes completed observation
+batches and drains its queued records on completion or close. Metrics use their
+separate batching lifecycle. One module does not force unrelated modules to
+flush at every boundary.
 
-```python
-from linktools.ai.capability import CapabilityGroup
-from linktools.ai.runtime import TerminalCommitCapability
+With Conversation enabled and an explicitly configured cache supporting the
+required groups, eligible ordinary native execution can defer its initial state
+until the terminal boundary. Before side effects, Task ownership or another durable dependency
+requires state, Runtime establishes the necessary durable facts. Authorization,
+idempotency, producer fencing, tool-effect ownership and unknown-commit readback
+remain part of the execution core in every combination. A process crash cannot
+recover an uncommitted turn merely because conversation or trace was enabled.
 
-chat = CapabilityGroup("chat")
-chat.agent("default", model="default")
-chat.capability(TerminalCommitCapability(), scope="runtime")
-# Runtime.open(..., capabilities=(chat,))
-```
-
-The capability has no arguments and uses the existing native registration path,
-including combined native capabilities. Agent-scope registration is rejected.
-`session.start`, execution watching and waiting keep their existing API.
-
-Ordinary work buffers its execution state until terminal commit. Successful native
-runs on one shared durable storage group commit their execution, result, session
-cursor and conversation history in one database write transaction. This is a
-batch of SQL statements, not one SQL statement or one network operation. Cold
-loads, object storage, cache coordination and preview streaming have their own
-I/O. Metrics retain their separate 60-second batch policy. A process crash before
-the terminal commit cannot recover the uncommitted turn. Before admitting a tool
-with side effects, Task ownership or a Task dependency, Runtime first switches
-the execution to its existing durable path. Those runs do not promise one write
-at completion. Task admissions themselves retain their existing durability and
-do not opt into terminal commit.
-
-`RestartCheckpointCapability()` and `DurableTraceCapability()` each take
-precedence: registering either alongside terminal commit selects the existing
-durable execution path from admission. The resolved policy is captured with the
-Runtime's capability declarations and written to each execution record. Reopening
-or replaying an execution does not reinterpret its admitted policy.
-
-An ordinary terminal-commit result does not retain a window for another Task to
-attach a dependency after execution finishes but before the caller consumes its
-result. Applications requiring that window should use the existing durable path.
-
-Current writers always emit the boolean `terminal_commit` field. Omission in an
-earlier record means `False`, preserving the existing durable path; malformed
-values fail closed. This is a safe additive wire default, with no format-version
-change or legacy adapter. There is no additional storage profile or
-`Runtime.open` parameter. Distributed operation borrows the optional turn
-coordination group from the same cache; the SDK does not implement Redis.
-
-Without an injected cache, native terminal commit uses a private in-memory
-coordinator for that Runtime owner. Multiple Runtime instances or pods must share
-a cache implementing both the complete hot-content and turn-coordination groups
-to coordinate live turns. A configured cache without these groups keeps the
-existing durable admission path; it is never silently replaced with a local
-coordinator. Split storage, custom execution backends, budgets, memory capture,
-forks and retries retain their existing durable paths.
-
-With shared coordination, ordinary and durable admissions both respect a live
-session claim. Durable admission releases that temporary claim after its source
-record is established; a terminal-only owner retains it until source settlement.
-Remote status and preview use owner-bound provisional data and are subject to
-cache availability. They do not prove a committed result. Explicit results and
-wait completion use authoritative storage. Loss or partition of the shared lease
-may cause duplicate model work, but the database accepts only one canonical
-result. An unknown commit is confirmed from source before reporting success; it
-is not retried by running the model again.
-
-A live dependency or input capture may ask the current owner to establish durable
-state. This request is a best-effort, owner-bound cache hint. The caller must still
-observe the source record and complete the original authorization and dependency
-operation. A lost hint, changed owner, or terminal commit winning the race cannot
-reopen the terminal dependency window.
-
-Upgrade all readers and writers sharing a namespace before enabling terminal
-commit. Readers that predate this capability do not enforce its terminal
-dependency boundary; mixed-version operation is not supported.
+Multiple Runtime instances need shared cache turn coordination for provisional
+live turns. Without an injected cache, or when its required groups are absent,
+Runtime retains ordinary durable admission. It does not silently substitute
+private coordination. Remote preview remains
+provisional. Result completion and unknown-commit resolution use authoritative
+storage, and a lost lease never permits two canonical terminal results.
 
 ## Capture, identity and lifecycle
 
@@ -192,6 +177,10 @@ dependency boundary; mixed-version operation is not supported.
 - Runtime policies are current host configuration, outside durable Agent binding
   identity. Reopening uses the newly supplied host policies while restoring
   historical Agent behavior. Put model-visible, versioned behavior in Agent scope.
+- For the per-run Conversation, Checkpoint and Trace features, use capability
+  types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
+  References to an original instance do not survive per-run copies, as described
+  by the native SDK ordering contract.
 - Native hook ordering, `for_agent` and `for_run` remain in effect. Instances are
   shared by default; per-run copies should retain the shared backend. Acquire
   owned resources in `wrap_run`, not `for_run`. Runtime does not close an
@@ -279,7 +268,7 @@ model permit across a whole run or a delegating tool while a child waits for the
 same permit. Use separate pools or limit the actual leaf work.
 
 Runtime-scoped capabilities remain trusted host Python, not an authorization or
-sandbox boundary. Use managed `CapabilityGroup` tools/MCP when LinkTools
+sandbox boundary. Use managed `RuntimeFeatures` tools/MCP when LinkTools
 selection, effect tracking, authorization and sandbox lifecycle are required.
 
 See the native [custom capability documentation](https://ai.pydantic.dev/capabilities/custom/)

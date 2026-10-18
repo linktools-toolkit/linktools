@@ -7,7 +7,7 @@ import inspect
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Generic, Literal, TypeVar, get_type_hints
+from typing import ClassVar, Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
 from pydantic_ai import Tool
@@ -57,8 +57,11 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityGroupCapture(Generic[AppT]):
+class RuntimeFeaturesCapture(Generic[AppT]):
     """Declarations and a versioned Asset reader captured from one revision."""
+
+    DEFAULT_TOOL_RETRIES: ClassVar[int] = 3
+    DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
 
     group_id: str
     contributions: tuple[CapabilityContribution[AppT], ...]
@@ -67,10 +70,13 @@ class CapabilityGroupCapture(Generic[AppT]):
     instructions: RepositoryInstructions
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
+    tool_retries: int = DEFAULT_TOOL_RETRIES
+    output_retries: int = DEFAULT_OUTPUT_RETRIES
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
             raise ValueError("capture group_id must be non-empty")
+        _validate_retry_defaults(self.tool_retries, self.output_retries)
         contributions = tuple(self.contributions)
         if any(
             not isinstance(value, CapabilityContribution)
@@ -103,7 +109,7 @@ class CapabilityGroupCapture(Generic[AppT]):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
 
-class CapabilityGroup(Generic[AppT]):
+class RuntimeFeatures(Generic[AppT]):
     """Register and capture one named set of runtime candidate definitions."""
 
     def __init__(
@@ -113,6 +119,8 @@ class CapabilityGroup(Generic[AppT]):
         assets: "AssetStore | None" = None,
         workspace: "Workspace | None" = None,
         sandbox: "Sandbox | None" = None,
+        tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
+        output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
@@ -120,6 +128,9 @@ class CapabilityGroup(Generic[AppT]):
             raise TypeError("assets must be AssetStore")
         if workspace is not None and not isinstance(workspace, Workspace):
             raise TypeError("workspace must be Workspace")
+        _validate_retry_defaults(tool_retries, output_retries)
+        self._tool_retries = tool_retries
+        self._output_retries = output_retries
         self._id = group_id
         self._store = assets
         self._workspace = workspace
@@ -233,8 +244,8 @@ class CapabilityGroup(Generic[AppT]):
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
-        tool_retries: int = AgentSpec.DEFAULT_TOOL_RETRIES,
-        output_retries: int = AgentSpec.DEFAULT_OUTPUT_RETRIES,
+        tool_retries: int | None = None,
+        output_retries: int | None = None,
         description: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
@@ -286,7 +297,7 @@ class CapabilityGroup(Generic[AppT]):
         self._loaders[kind] = loader
         return loader
 
-    async def capture(self) -> "CapabilityGroupCapture[AppT]":
+    async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
@@ -331,7 +342,7 @@ class CapabilityGroup(Generic[AppT]):
             key=lambda item: (item.kind, item.id, item.revision),
         )
         capture_contributions = tuple((*declarations, *generic))
-        capture = CapabilityGroupCapture(
+        capture = RuntimeFeaturesCapture(
             self._id,
             capture_contributions,
             source_revision,
@@ -339,6 +350,8 @@ class CapabilityGroup(Generic[AppT]):
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
             sandbox=self._sandbox,
+            tool_retries=self._tool_retries,
+            output_retries=self._output_retries,
         )
         _logger.info(
             "capability group captured: group=%s contributions=%d instructions=%d "
@@ -349,6 +362,14 @@ class CapabilityGroup(Generic[AppT]):
             None if source_revision is None else source_revision.value,
         )
         return capture
+
+
+def _validate_retry_defaults(tool_retries: int, output_retries: int) -> None:
+    for name, value in (("tool_retries", tool_retries), ("output_retries", output_retries)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f"runtime {name} must be an integer")
+        if value < 0:
+            raise ValueError(f"runtime {name} cannot be negative")
 
 
 def _validate_skill_source(
@@ -470,4 +491,4 @@ def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
         seen.add(identity)
 
 
-__all__ = ["CapabilityGroup", "CapabilityGroupCapture"]
+__all__ = ["RuntimeFeatures", "RuntimeFeaturesCapture"]

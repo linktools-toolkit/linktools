@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from linktools.ai import Runtime
 from linktools.ai.agent import AgentBindingContract, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup, SkillCapability, SkillDefinition, SkillSourceRegistry
+from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, SkillCapability, SkillDefinition, SkillSourceRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeStorage
@@ -26,7 +26,7 @@ class _ExtraCapability(AbstractCapability[object]):
 
 @pytest_asyncio.fixture
 async def contributions():
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.agent("root")
     group.agent("child", metadata={"business": "captured"}, description="Delegate work", revision=3)
     group.mcp(MCPServerSpec("server", "python"))
@@ -143,13 +143,13 @@ async def test_restore_keeps_pins_and_does_not_execute_current_filter(contributi
 
 @pytest.mark.asyncio
 async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     group.agent("root")
     capture = await group.capture()
     capture = replace(capture, contributions=(*capture.contributions, CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions")))))
     async with Runtime.open(
         "capability-filter-test", models=ModelRegistry.openai(model="test"),
-        storage=RuntimeStorage.from_root(tmp_path), capabilities=(capture,),
+        storage=RuntimeStorage.from_root(tmp_path), runtime_features=capture,
         capability_filter=lambda agent, item: item.kind != "skill",
     ) as runtime:
         root = runtime.agents.get("root")
@@ -168,14 +168,14 @@ async def test_custom_asset_capture_filter_and_historical_resources():
         key = AssetKey("skill", "guide/SKILL.md")
         await store.put(key, b"---\nname: guide\ndescription: Guide\nmetadata:\n  audience: [analyst]\n---\nOld instructions")
         await store.put(AssetKey("skill", "guide/reference.txt"), b"Old reference")
-        capture = await CapabilityGroup("custom", assets=store).capture()
+        capture = await RuntimeFeatures("custom", assets=store).capture()
         include = lambda agent, item: item.kind != "skill" or agent.metadata.get("role") in item.contract["metadata"]["audience"]
         compiler = _compiler(capture.contributions, include)
         agent = AgentSpec("custom-investigator", metadata={"role": "analyst"})
         binding = compiler.bind(compiler.compile(agent))
         assert binding.compiled_agent.skill_definitions[0].source_ref.resources
         await store.put(key, b"---\nname: guide\ndescription: Guide\nmetadata:\n  linktools-revision: 2\n  audience: [reporter]\n---\nNew instructions")
-        newer = await CapabilityGroup("custom", assets=store).capture()
+        newer = await RuntimeFeatures("custom", assets=store).capture()
         current = _compiler(newer.contributions, include)
         assert current.compile(agent).skill_definitions == ()
         assert current.restore(binding.binding_contract).compiled_agent.skill_definitions == binding.compiled_agent.skill_definitions
@@ -212,7 +212,7 @@ async def test_delegation_filter_keeps_captured_agent_metadata_and_named_referen
 
 @pytest.mark.asyncio
 async def test_runtime_scope_is_captured_but_never_agent_selected_or_filtered():
-    group = CapabilityGroup("application")
+    group = RuntimeFeatures("application")
     spec = group.agent("root")
     group.capability(_ExtraCapability("selected"))
     group.capability(_ExtraCapability("host"), scope="runtime", revision=2)

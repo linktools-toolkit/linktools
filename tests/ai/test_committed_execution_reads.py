@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest
@@ -35,14 +35,14 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
             await release.wait()
         yield "finished"
 
-    group = CapabilityGroup("committed-read")
+    group = RuntimeFeatures("committed-read")
     group.agent("default", model="default", allow_tools=())
     database = tmp_path / "runtime.db"
     models = _Models(FunctionModel(stream_function=model))
     owner_storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
     reader_storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1000000))
-    async with Runtime.open("committed-read", models=models, storage=owner_storage, capabilities=(group,)) as owner, Runtime.open(
-        "committed-read", models=models, storage=reader_storage, capabilities=(group,),
+    async with Runtime.open("committed-read", models=models, storage=owner_storage, runtime_features=group) as owner, Runtime.open(
+        "committed-read", models=models, storage=reader_storage, runtime_features=group,
     ) as reader:
         principal = owner.default_principal
         await owner.agents.get().create_session("session")
@@ -85,11 +85,11 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
     async def model(messages, info):
         yield "finished"
 
-    group = CapabilityGroup("terminal-consumption")
+    group = RuntimeFeatures("terminal-consumption")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "terminal-consumption", models=_Models(FunctionModel(stream_function=model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), capabilities=(group,),
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), runtime_features=group,
     ) as runtime:
         await runtime.agents.get().create_session("session")
         execution = await runtime.agents.get().session("session").start(

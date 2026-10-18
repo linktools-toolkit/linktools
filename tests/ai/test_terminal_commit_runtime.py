@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
-from linktools.ai.runtime import Runtime, RuntimeStorage, TerminalCommitCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -29,12 +30,12 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         entered.set()
         await release.wait()
         return ModelResponse(parts=[TextPart('answer')])
-    group = CapabilityGroup('pending')
+    group = RuntimeFeatures('pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
+    group.capability(ConversationCapability(), scope='runtime')
     database = tmp_path / 'state.db'
-    storage = RuntimeStorage.sqlite(database)
-    async with Runtime.open('pending', storage=storage, models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    storage = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Runtime.open('pending', storage=storage, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -72,7 +73,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert len(commits) == 1
         assert set(commits[0].removeprefix('runtime.state.group[').removesuffix(']').split(',')) == {'execution', 'conversation', 'recovery'}
         stored = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-        assert stored is not None and stored.retention_closed and stored.terminal_commit
+        assert stored is not None and stored.retention_closed and stored.conversation
         replay = await session.start('first', idempotency_key='first')
         assert replay.execution_id == execution.execution_id
         assert (await replay.wait()).result.output == result.output
@@ -83,7 +84,7 @@ async def test_pending_session_commits_once_and_retains_canonical_replay(
         assert [part.content for message in calls[-1] for part in message.parts if isinstance(part, UserPromptPart)] == ['first', 'second']
         assert len(commits) == 2
         assert commits[0] == commits[1]
-    async with Runtime.open('pending', storage=RuntimeStorage.sqlite(database), models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as reopened:
+    async with Runtime.open('pending', storage=RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as reopened:
         replay = await reopened.agents.get().session('session').start('first', idempotency_key='first')
         assert (await replay.wait()).result.output == {'text': 'answer'}
         assert len(calls) == 2
@@ -96,7 +97,7 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
 ) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
     calls = []
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     owner = {}
     async def lookup(context: AgentContext[None]) -> str:
         record = await state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
@@ -107,11 +108,11 @@ async def test_actual_effect_promotes_before_invocation_but_read_only_tool_stays
             assert await state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
-    group = CapabilityGroup('tool-pending')
+    group = RuntimeFeatures('tool-pending')
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    group.capability(TerminalCommitCapability(), scope='runtime')
-    async with Runtime.open('pending-tool', storage=state, models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    group.capability(ConversationCapability(), scope='runtime')
+    async with Runtime.open('pending-tool', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -142,11 +143,11 @@ async def test_pending_cancel_promotes_and_quiesces_before_cancelled(tmp_path: P
             await asyncio.Event().wait()
         finally:
             stopped.set()
-    group = CapabilityGroup('cancel-pending')
+    group = RuntimeFeatures('cancel-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('pending-cancel', storage=state, models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    group.capability(ConversationCapability(), scope='runtime')
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Runtime.open('pending-cancel', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -169,11 +170,11 @@ async def test_pending_watch_observes_progress_and_confirmed_terminal(tmp_path: 
         entered.set()
         await release.wait()
         return ModelResponse(parts=[TextPart('answer')])
-    group = CapabilityGroup('watch-pending')
+    group = RuntimeFeatures('watch-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('pending-watch', storage=state, models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    group.capability(ConversationCapability(), scope='runtime')
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Runtime.open('pending-watch', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -208,11 +209,11 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
     from linktools.ai.workspace import Workspace, WorkspacePolicy, ToolPermissionPolicy
     from .test_runtime_approval_composition import _ToolModels
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default='ask')))
-    group = CapabilityGroup('approval-pending')
+    group = RuntimeFeatures('approval-pending', workspace=workspace)
     group.agent('default', model='default', allow_tools=('read_file',))
-    group.capability(TerminalCommitCapability(), scope='runtime')
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('pending-approval', storage=state, models=_ToolModels(), capabilities=(CapabilityGroup('workspace', workspace=workspace), group)) as runtime:
+    group.capability(ConversationCapability(), scope='runtime')
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Runtime.open('pending-approval', storage=state, models=_ToolModels(), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('read a file')
         record = None
@@ -228,15 +229,15 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_pending_sessionless_agent_commits_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    group = CapabilityGroup('standalone-pending')
+    group = RuntimeFeatures('standalone-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
+    group.capability(ConversationCapability(), scope='runtime')
     commits = []
     async def model(messages, info):
         assert commits == []
         return ModelResponse(parts=[TextPart('answer')])
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('standalone-pending', storage=state, models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Runtime.open('standalone-pending', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         original = SqlStorageContext.run_mutation
         async def count(context, callback, **kwargs):
             result = await original(context, callback, **kwargs)
@@ -259,10 +260,10 @@ async def test_pending_session_force_close_promotes_before_closing(tmp_path: Pat
     async def model(messages, info):
         entered.set()
         await asyncio.Event().wait()
-    group = CapabilityGroup('close-pending')
+    group = RuntimeFeatures('close-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
-    async with Runtime.open('close-pending', storage=RuntimeStorage.sqlite(tmp_path / 'state.db'), models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    group.capability(ConversationCapability(), scope='runtime')
+    async with Runtime.open('close-pending', storage=RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -278,15 +279,15 @@ async def test_pending_session_force_close_promotes_before_closing(tmp_path: Pat
 async def test_pending_unknown_commit_reconciles_without_replaying_model_or_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    group = CapabilityGroup('unknown-pending')
+    group = RuntimeFeatures('unknown-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
+    group.capability(ConversationCapability(), scope='runtime')
     calls = []
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    async with Runtime.open('unknown-pending', storage=state, models=_Models(_UsageFunctionModel(model)), capabilities=(group,)) as runtime:
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    async with Runtime.open('unknown-pending', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         storage_group = state.execution.executions.state_store.storage_group
         original_mutate = type(storage_group).mutate
@@ -330,13 +331,13 @@ async def test_pending_unknown_commit_reconciles_without_replaying_model_or_comm
 async def test_pending_confirmed_rollback_releases_session_without_fabricating_corruption(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    group = CapabilityGroup('rollback-pending')
+    group = RuntimeFeatures('rollback-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(TerminalCommitCapability(), scope='runtime')
+    group.capability(ConversationCapability(), scope='runtime')
     async def model(messages, info):
         return ModelResponse(parts=[TextPart('answer')])
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
-    context = Runtime.open('rollback-pending', storage=state, models=_Models(_UsageFunctionModel(model)), capabilities=(group,))
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    context = Runtime.open('rollback-pending', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group)
     runtime = await context.__aenter__()
     try:
         session = await runtime.agents.get().create_session('session')

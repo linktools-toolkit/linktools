@@ -10,12 +10,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import (
     Runtime,
+    ConversationCapability,
+    CheckpointCapability,
+    TraceCapability,
     RuntimeStorage,
     RuntimeStoragePlan,
     RuntimeStorageRoute,
@@ -29,7 +32,6 @@ from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
-from ._runtime_test_helpers import _persistence_capabilities
 
 
 class _ToolModelBinding:
@@ -78,8 +80,9 @@ def _application(
     effect_log: Path | None = None,
     started: asyncio.Event | None = None,
     release: asyncio.Event | None = None,
-) -> CapabilityGroup[None]:
-    application: CapabilityGroup[None] = CapabilityGroup("application")
+) -> RuntimeFeatures[None]:
+    application: RuntimeFeatures[None] = RuntimeFeatures("application")
+    application.capability(ConversationCapability(), scope="runtime")
 
     async def lookup(_ctx: AgentContext[None]) -> str:
         calls.append("lookup")
@@ -237,11 +240,13 @@ def _crash_session_process(
         application = _application(
             [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
         )
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            capabilities=(_persistence_capabilities(restart=True, trace=True), application,),
+            runtime_features=application,
         ) as runtime:
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
@@ -298,11 +303,13 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
     calls: list[str] = []
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            capabilities=(_persistence_capabilities(restart=True, trace=True), application,),
+            runtime_features=application,
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             before_replay = await state.execution.executions.get(

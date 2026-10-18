@@ -2,20 +2,20 @@
 # -*- coding: utf-8 -*-
 """Retry preserves imported pre-input context and its memory isolation."""
 
+from linktools.ai.runtime import ConversationCapability, TraceCapability
 from pathlib import Path
 
 import pytest
 from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state import RuntimeDomain
 
-from ._runtime_test_helpers import _persistence_capabilities
 from .test_captured_execution_context import _NoToolsModels
 
 
@@ -23,7 +23,7 @@ from .test_captured_execution_context import _NoToolsModels
 @pytest.mark.parametrize("metadata_size", [16, 80_000], ids=["inline", "object"])
 @pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
 async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, metadata_size: int, trace: bool) -> None:
-    group = CapabilityGroup("retry-context")
+    group = RuntimeFeatures("retry-context")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     context = ExecutionInputContext.from_messages(
         (ModelRequest(parts=[UserPromptPart("earlier question")]),
@@ -32,7 +32,9 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         replace_history_system_prompt=True,
     )
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, capabilities=(_persistence_capabilities(trace=trace), group,)) as runtime:
+    if trace:
+        group.capability(TraceCapability(), scope="runtime")
+    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, runtime_features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
@@ -57,9 +59,12 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
 async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path, trace: bool) -> None:
-    group = CapabilityGroup("retry-parity")
+    group = RuntimeFeatures("retry-parity")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_persistence_capabilities(trace=trace), group,)) as runtime:
+    if trace:
+        group.capability(TraceCapability(), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         first = await agent.start("historical question", principal=principal)
@@ -86,13 +91,13 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -> None:
-    group = CapabilityGroup("retry-memory")
+    group = RuntimeFeatures("retry-memory")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path)
     context = ExecutionInputContext.from_messages((), memory={
         "facts.txt": {"content": "accepted memory", "version": "m1:" + "1" * 64},
     })
-    async with Runtime.open("retry-memory", models=_NoToolsModels(), storage=storage, capabilities=(group,)) as runtime:
+    async with Runtime.open("retry-memory", models=_NoToolsModels(), storage=storage, runtime_features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         with pytest.raises(AIError) as raised:

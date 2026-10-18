@@ -257,9 +257,9 @@ async def test_facade_forwards_metadata_mode() -> None:
 @pytest.mark.parametrize("durable_trace", [False, True])
 async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.runtime import (
-        DurableTraceCapability, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
+        TraceCapability, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
     )
     from .test_live_history_readback_integration import _Models
     from ._runtime_test_helpers import _UsageFunctionModel
@@ -275,13 +275,13 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, durable_t
         "sqlite": lambda: RuntimeStorage.sqlite(tmp_path / "state.db"),
         "transient": lambda: RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient())),
     }[backend]()
-    group = CapabilityGroup[None]("execution-observation")
+    group = RuntimeFeatures[None]("execution-observation")
     if durable_trace:
-        group.capability(DurableTraceCapability(), scope="runtime")
+        group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "execution-observation", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, capabilities=(group,),
+        storage=storage, runtime_features=group,
     ) as runtime:
         execution = await runtime.agents.get().start("private prompt")
         rows = []
@@ -620,7 +620,7 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
 @pytest.mark.asyncio
 async def test_transient_task_model_observation_keeps_canonical_success_after_staging_release() -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
     from linktools.ai.task import TaskGraph, TaskNode
@@ -633,12 +633,12 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
         await release.wait()
         return ModelResponse(parts=[TextPart("answer")])
 
-    group = CapabilityGroup[None]("transient-task-observation")
+    group = RuntimeFeatures[None]("transient-task-observation")
     group.agent("default", model="default", allow_tools=())
     storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
     async with Runtime.open(
         "transient-task-observation", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, capabilities=(group,),
+        storage=storage, runtime_features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("answer", runtime.agents.get())
         graph = await runtime.tasks.bind(task).start(TaskGraph(

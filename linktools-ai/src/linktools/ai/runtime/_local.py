@@ -100,6 +100,7 @@ from .recovery import (
 )
 from ._budget import RunBudgetContext
 from .service_api import ExecutionRequest
+from ._conversation_capability import ConversationCapability
 from .state import RuntimeDomain
 from .state._commands import RuntimeStateCommands
 from .state._execution_repositories import ExecutionRepositoryImpl
@@ -207,7 +208,6 @@ from ._agent_run import (
     _AgentRunFailed,
     _AgentRunLifecycle,
     _WorkerFailure,
-    _agent_run_messages,
 )
 from ._recovery_coordinator import _DeferredResume, _RecoveryCoordinator
 from ._repository_instructions import (
@@ -932,7 +932,7 @@ class LocalExecutionBackend:
     ) -> str | None:
         execution = reservation.execution
         if (coordination is None or self._pending_turns.coordination is None
-                or not execution.terminal_commit or not self._can_prepare_initial_attempt(execution)
+                or not execution.conversation or not self._can_prepare_initial_attempt(execution)
                 or execution.budget_scope_id is not None or execution.memory_scope is not None
                 or not self._conversation_durable or not self._execution_objects_durable
                 or not isinstance(self._run_store, RuntimeAgentRunStore)):
@@ -2362,19 +2362,20 @@ class LocalExecutionBackend:
                         agent_run_id=handoff.source_agent_run_id,
                         execution_id=checkpoint.execution_id,
                     )
-                checkpoint_domain = (
-                    RuntimeDomain.EXECUTION
-                    if execution.durable_trace
-                    else RuntimeDomain.RECOVERY
-                )
-                agent_run_checkpoint = await self._run_stores[checkpoint_domain].latest_checkpoint(
-                    agent_run_id=handoff.source_agent_run_id,
-                )
-                if (
-                    agent_run_checkpoint is None
-                    or agent_run_checkpoint.state != "complete"
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if execution.conversation or execution.restart_checkpoints or execution.durable_trace:
+                    checkpoint_domain = (
+                        RuntimeDomain.EXECUTION
+                        if execution.durable_trace
+                        else RuntimeDomain.RECOVERY
+                    )
+                    agent_run_checkpoint = await self._run_stores[checkpoint_domain].latest_checkpoint(
+                        agent_run_id=handoff.source_agent_run_id,
+                    )
+                    if (
+                        agent_run_checkpoint is None
+                        or agent_run_checkpoint.state != "complete"
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if outcome.output is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._validate_handoff_output(outcome)
@@ -3461,15 +3462,6 @@ class LocalExecutionBackend:
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
                 and history_id is not None
             )
-            session_history_owner: str | None = None
-            if session_history_source:
-                if isinstance(
-                    self._run_stores[RuntimeDomain.CONVERSATION],
-                    StateStepArchive,
-                ):
-                    session_history_owner = history_id
-                elif session is not None and session.continuation is not None:
-                    session_history_owner = session.continuation.agent_run_id
             with runtime_object_source_reads():
                 if source_replay_history is not None:
                     history = source_replay_history
@@ -3483,26 +3475,11 @@ class LocalExecutionBackend:
                     history = list(accepted_context.model_messages())
                     loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
                 elif session_history_source:
-                    if session_history_owner is not None:
-                        if (
-                            isinstance(self._run_store, RuntimeAgentRunStore)
-                            and session is not None
-                            and session.continuation is not None
-                            and history_id is not None
-                        ):
-                            loaded_context = (
-                                await self._run_store.load_committed_conversation_context(
-                                    history_id=history_id,
-                                    agent_run_id=session.continuation.agent_run_id,
-                                    message_count=session.continuation.message_count,
-                                    tenant_id=self._tenant_id,
-                                )
-                            )
-                        else:
-                            loaded_context = await self._run_store.load_loaded_model_context(
-                                RuntimeDomain.CONVERSATION,
-                                session_history_owner,
-                            )
+                    loaded_context = await ConversationCapability.load_session_context(
+                        execution=current, session=session, history_id=history_id,
+                        tenant_id=self._tenant_id, run_store=self._run_store,
+                        conversation_archive=self._run_stores[RuntimeDomain.CONVERSATION],
+                    )
                     history = list(loaded_context.model_messages())
                 else:
                     history = cast("list[ModelMessage]", await self._history(current))
@@ -3635,6 +3612,7 @@ class LocalExecutionBackend:
                     agent_run_id,
                     execution_id=execution_id,
                     producer_generation=producer_generation,
+                    conversation=current.conversation,
                     restart_checkpoints=current.restart_checkpoints,
                     durable_trace=current.durable_trace,
                 )
@@ -4126,122 +4104,18 @@ class LocalExecutionBackend:
             ):
                 raise
 
-    async def _history(
-        self,
-        execution: ExecutionRecord,
-        recovery_agent_run_id: str | None = None,
-    ) -> list[object]:
-        execution_run_store = self._get_run_store(RuntimeDomain.EXECUTION)
-        conversation_run_store = self._get_run_store(RuntimeDomain.CONVERSATION)
-        if recovery_agent_run_id is not None:
-            try:
-                recovery_archive = self._get_run_store(RuntimeDomain.RECOVERY)
-                if isinstance(recovery_archive, StateStepArchive):
-                    return list(
-                        (
-                            await recovery_archive.load_loaded_model_context(
-                                owner_id=recovery_agent_run_id,
-                            )
-                        ).model_messages()
-                    )
-                return list(
-                    await _agent_run_messages(
-                        self._get_run_store(RuntimeDomain.RECOVERY),
-                        recovery_agent_run_id,
-                        include_interrupted=True,
-                    )
-                )
-            except LookupError as error:
-                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
-        session = (
-            None
-            if execution.session_id is None
-            else await self._load_session(
-                execution.session_id,
-                tenant_id=self._tenant_id,
-            )
+    async def _history(self, execution: ExecutionRecord) -> list[object]:
+        session = None if execution.session_id is None else await self._load_session(
+            execution.session_id, tenant_id=self._tenant_id,
         )
-        if (
-            execution.lineage_kind is ExecutionLineageKind.SESSION_RESUME
-            and session is not None
-            and (
-                session.history_id is not None
-                or (
-                    session.continuation is not None
-                    and session.continuation.history_id is not None
-                )
-            )
-        ):
-            history_id = session.history_id or session.continuation.history_id
-            try:
-                return [
-                    message
-                    async for message in self._run_store.iter_session_messages(
-                        history_id,
-                        tenant_id=self._tenant_id,
-                    )
-                ]
-            except AIError as error:
-                if error.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE:
-                    raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
-                raise
-        if execution.conversation_agent_run_id is not None:
-            try:
-                return list(
-                    await _agent_run_messages(
-                        conversation_run_store,
-                        execution.conversation_agent_run_id,
-                        include_interrupted=True,
-                    )
-                )
-            except LookupError as error:
-                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
-        if execution.fork_base_execution_id is None:
-            return []
-        base = await self.load_execution(
-            execution.fork_base_execution_id, tenant_id=self._tenant_id
+        return await ConversationCapability.load_history(
+            execution, session=session, namespace=self._namespace, tenant_id=self._tenant_id,
+            run_store=self._run_store,
+            execution_run_store=self._get_run_store(RuntimeDomain.EXECUTION),
+            conversation_run_store=self._get_run_store(RuntimeDomain.CONVERSATION),
+            recovery_run_store=self._get_run_store(RuntimeDomain.RECOVERY),
+            load_execution=lambda execution_id: self.load_execution(execution_id, tenant_id=self._tenant_id),
         )
-        if base is None or base.agent_run_seq < 1:
-            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-        agent_run_id = make_agent_run_id(
-            namespace=self._namespace,
-            tenant_id=self._tenant_id,
-            execution_id=base.execution_id,
-            agent_run_seq=base.agent_run_seq,
-        )
-        if not base.durable_trace and base.session_id is None:
-            execution_run_store = self._get_run_store(RuntimeDomain.RECOVERY)
-            if isinstance(execution_run_store, StateStepArchive):
-                checkpoint = await execution_run_store.latest_checkpoint(agent_run_id=agent_run_id)
-                if checkpoint is None:
-                    raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-                run = await execution_run_store.get_agent_run(agent_run_id=agent_run_id)
-                if (run is None or checkpoint.agent_run_id != agent_run_id
-                        or not await execution_run_store.verify_checkpoint_projection(
-                            agent_run_id=agent_run_id, checkpoint=checkpoint,
-                        )
-                        or await execution_run_store.transcript_message_count_for_run(run) != len(checkpoint.messages)):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return list(checkpoint.messages if checkpoint.context_messages is None else checkpoint.context_messages)
-        elif not base.durable_trace and isinstance(conversation_run_store, StateStepArchive):
-            cursor = None if session is None else session.continuation
-            if (cursor is None or cursor.history_id is None or cursor.message_count is None
-                    or cursor.agent_run_id != agent_run_id):
-                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-            try:
-                context = await conversation_run_store.load_committed_session_model_context(
-                    cursor.history_id, agent_run_id=agent_run_id,
-                    message_count=cursor.message_count, tenant_id=self._tenant_id,
-                )
-                return list(context.model_messages())
-            except AIError as error:
-                if error.code is ErrorCode.SESSION_HISTORY_UNAVAILABLE:
-                    raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
-                raise
-        try:
-            return list(await _agent_run_messages(execution_run_store, agent_run_id))
-        except LookupError as error:
-            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 
     async def _append_event(
         self,
@@ -5418,10 +5292,11 @@ class LocalExecutionBackend:
                 if status is ExecutionStatus.SUCCEEDED and agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if agent_run_id is not None:
-                    await self._agent_run_lifecycle.materialize_recovery_checkpoint(
-                        agent_run_id=agent_run_id,
-                        require_complete=status is ExecutionStatus.SUCCEEDED,
-                    )
+                    if current.conversation or current.restart_checkpoints or current.durable_trace:
+                        await self._agent_run_lifecycle.materialize_recovery_checkpoint(
+                            agent_run_id=agent_run_id,
+                            require_complete=status is ExecutionStatus.SUCCEEDED,
+                        )
                     if producer_generation is not None:
                         await self._agent_run_lifecycle.flush_execution_projection(
                             agent_run_id, execution_id=current.execution_id,
@@ -5780,7 +5655,7 @@ class LocalExecutionBackend:
         recovery_run = None
         recovery_agent_run_checkpoint = None
         retain_fork_context = (
-            status is ExecutionStatus.SUCCEEDED and current.session_id is None
+            current.conversation and status is ExecutionStatus.SUCCEEDED and current.session_id is None
             and current.parent_execution_id is None and not current.durable_trace
             and isinstance(self._run_stores[RuntimeDomain.RECOVERY], StateStepArchive)
         )
@@ -6018,6 +5893,7 @@ class LocalExecutionBackend:
                                 != commit.execution.error_code
                                 or observed.restart_checkpoints != current.restart_checkpoints
                                 or observed.durable_trace != current.durable_trace
+                                or observed.conversation != current.conversation
                             ):
                                 raise AIError(
                                     ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -6126,7 +6002,7 @@ class LocalExecutionBackend:
         else:
             execution_projections = ()
         next_cursor = None
-        if agent_run_id is not None:
+        if current.conversation and agent_run_id is not None:
             history_id = None
             if current.session_id is not None:
                 session = await self._load_session(
@@ -6187,8 +6063,9 @@ class LocalExecutionBackend:
         await self._agent_run_lifecycle.verify_terminal_attempts(
             candidate_agent_run_ids=candidates,
             required_agent_run_id=agent_run_id
-            if status is ExecutionStatus.SUCCEEDED
-            else None,
+            if status is ExecutionStatus.SUCCEEDED and (
+                execution.conversation or execution.restart_checkpoints or execution.durable_trace
+            ) else None,
         )
 
 

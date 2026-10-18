@@ -86,7 +86,7 @@ class _SchemaTwinB(BaseModel):
 def _binding_contract() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent"),
+        agent_spec=AgentSpec("agent", tool_retries=3, output_retries=3),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),

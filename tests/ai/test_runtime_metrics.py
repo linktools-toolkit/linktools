@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page, Principal, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
@@ -47,7 +47,7 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.usage import RunUsage
 
 
-from ._runtime_test_helpers import _persistence_capabilities
+from linktools.ai.runtime import MetricsCapability, TraceCapability
 
 
 class _TextModelBinding:
@@ -179,8 +179,9 @@ class _CommitUnknownOnceMetricStore(_FailingMetricStore):
         return None
 
 
-def _agent_group() -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("application")
+def _agent_group() -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("application")
+    group.capability(MetricsCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -212,7 +213,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
+        runtime_features=_agent_group(),
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
@@ -260,7 +261,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
+        runtime_features=_agent_group(),
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
@@ -846,9 +847,11 @@ async def test_terminal_metric_cancellation_preserves_published_success_and_hist
 
     store = BlockingTerminalStore()
     metrics = Metrics.from_store(store, namespace="terminal-order")
+    features = _agent_group()
+    features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "terminal-order", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        capabilities=(_persistence_capabilities(trace=True), _agent_group(),), metrics=metrics,
+        runtime_features=features, metrics=metrics,
     ) as runtime:
         execution = await runtime.agents.get("default").start("hello")
         try:
@@ -923,7 +926,7 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
     store = Store()
     async with Runtime.open(
         "pending-cancel-metric", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),), metrics=Metrics.from_store(store),
+        runtime_features=_agent_group(), metrics=Metrics.from_store(store),
     ) as runtime:
         starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
         cancellation: asyncio.Task[object] | None = None

@@ -110,6 +110,10 @@ finally:
     await recorder.close()
 ```
 
+Automatic Agent observations require Runtime-scoped `MetricsCapability()` plus
+the shared `Metrics` instance passed through `metrics=`. Task, Evaluation and
+explicit application recording use that dataset independently.
+
 All Metrics constructors and factories accept `cache`. Only automatic recorders
 use its complete buffer group; otherwise they await the source in the caller,
 without a hidden local queue. `record`, `record_observations`, and queries keep

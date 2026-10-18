@@ -25,7 +25,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.agent._output import bind_output, canonicalize_output_schema_v1
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _thinking_capability
 from linktools.ai.runtime._tool import ToolOperationDecision
@@ -354,10 +354,10 @@ print(json.dumps({
         assert digests[0][contract] == digests[1][contract], contract
 
 
-def test_agent_tool_retry_default_matches_v1_contract() -> None:
-    assert AgentSpec("agent").tool_retries == 10
-    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 10
-    assert CapabilityGroup("group").agent("agent").tool_retries == 10
+def test_agent_tool_retry_declarations_defer_runtime_default() -> None:
+    assert AgentSpec("agent").tool_retries is None
+    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries is None
+    assert RuntimeFeatures("group").agent("agent").tool_retries is None
 
 
 def _request_context(model: TestModel) -> ModelRequestContext:

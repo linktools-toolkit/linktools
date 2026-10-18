@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
-from typing import Protocol, cast
+from typing import Protocol
 
 from linktools.core import environ
 
@@ -82,7 +82,6 @@ from .state._plan import RuntimeDomain
 from .state._step_archive import StateStepArchive
 from .state._steps import RuntimeAgentRunStore
 from .state._store import StateGroupTransaction, active_state_scope
-from .state._views import project_session_history_message
 
 _SESSION_CURSOR_KIND = "SESSION"
 
@@ -162,6 +161,7 @@ class DefaultSessionService:
         cursor_signer: CursorSigner,
         *,
         history_reader: SessionHistoryReader,
+        conversation_enabled: bool = False,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
         workspace_access: _InputFileSource | None = None,
@@ -169,6 +169,9 @@ class DefaultSessionService:
         pending_session_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
     ) -> None:
         self._conversation = conversation
+        if not isinstance(conversation_enabled, bool):
+            raise TypeError("conversation_enabled must be bool")
+        self._conversation_enabled = conversation_enabled
         self._executions = executions
         self._authorization = authorization
         self._execution = execution
@@ -184,6 +187,8 @@ class DefaultSessionService:
         self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
+        if not self._conversation_enabled:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         try:
             agent_id = validate_agent_id(agent_id)
         except AIError:
@@ -733,6 +738,8 @@ class DefaultSessionService:
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
+        if not self._conversation_enabled:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         return await self._resume(
             agent_id,
             binding_digest,
@@ -803,6 +810,8 @@ class DefaultSessionService:
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
     ) -> SessionView:
+        if not self._conversation_enabled:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         async with self._session_consumer(session_id, request.principal.tenant_id):
             source = await self._authorized(
                 session_id, request.principal, AuthorizationAction.SESSION_READ

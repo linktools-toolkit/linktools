@@ -7,7 +7,7 @@ import pytest
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillCapability,
     SkillDefinition,
     SubagentCapability,
@@ -38,7 +38,7 @@ async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
                 AssetKey("skill", "guide/SKILL.md"),
                 b"---\nname: guide\ndescription: Follow the guide.\n---\nguide instructions",
             )
-        group: CapabilityGroup[object] = CapabilityGroup("application", assets=store)
+        group: RuntimeFeatures[object] = RuntimeFeatures("application", assets=store)
         preloads = ["guide", "guide"]
         declared = group.agent("agent", preload_skills=preloads)
         preloads.clear()
@@ -66,7 +66,7 @@ async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
 @pytest.mark.parametrize("preloads", (("*",), ("other",)))
 def test_group_agent_validates_preload_selectors(preloads: tuple[str, ...]) -> None:
     with pytest.raises(AIError) as raised:
-        CapabilityGroup("application").agent(
+        RuntimeFeatures("application").agent(
             "agent", allow_skills=("guide",), preload_skills=preloads,
         )
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

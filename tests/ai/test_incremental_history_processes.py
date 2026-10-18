@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Independent readers observe committed model and tool boundaries."""
 
+from linktools.ai.runtime import TraceCapability
 import asyncio
 import multiprocessing
 import traceback
@@ -12,11 +13,11 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, Principal
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 
-from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed, _persistence_capabilities
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_live_history_readback_integration import _Models
 
 
@@ -45,13 +46,14 @@ def _writer_process(root: str, pipe: Connection) -> None:
                 ToolCallPart("slow", {}, tool_call_id="slow"),
             ])
 
-        group = CapabilityGroup("process-history")
+        group = RuntimeFeatures("process-history")
         group.tool(quick, effect_policy="replay_safe")
         group.tool(slow, effect_policy="replay_safe")
         group.agent("default", model="default", allow_tools=("quick", "slow"))
+        group.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "process-history", storage=RuntimeStorage.filesystem(Path(root)),
-            models=_Models(_UsageFunctionModel(model)), capabilities=(_persistence_capabilities(trace=True), group,),
+            models=_Models(_UsageFunctionModel(model)), runtime_features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("process prompt")
             principal = runtime.default_principal

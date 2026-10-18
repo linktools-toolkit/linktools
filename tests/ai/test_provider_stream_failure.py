@@ -11,12 +11,12 @@ from pydantic_ai.models import CompletedStreamedResponse, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequestRecorder
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._metric_capability import _PreparedRequestModel
-from ._runtime_test_helpers import _persistence_capabilities
+from linktools.ai.runtime import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models
@@ -57,11 +57,12 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
             if boundary == "exit":
                 fail()
 
-    group = CapabilityGroup("provider-stream-failure")
+    group = RuntimeFeatures("provider-stream-failure")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "provider-stream-failure", models=_Models(ExitModel(stream_function=stream)),
-        storage=RuntimeStorage.in_memory(), capabilities=(_persistence_capabilities(trace=True), group,),
+        storage=RuntimeStorage.in_memory(), runtime_features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("respond")
         result = (await execution.wait(timeout_seconds=10)).result

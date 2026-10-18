@@ -23,7 +23,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 
@@ -35,7 +35,7 @@ from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime.state import RuntimeDomain
 
 
-from ._runtime_test_helpers import _persistence_capabilities
+from linktools.ai.runtime import TraceCapability
 
 
 class _ObservedHttpClient(DefaultAsyncHttpxClient):
@@ -338,8 +338,8 @@ class _ModelBinding:
         return self.model
 
 
-def _agents() -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("application")
+def _agents() -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("application")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -361,8 +361,10 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
 
     registry, clients = _registry(monkeypatch, handler)
     storage = RuntimeStorage.in_memory()
+    features = _agents()
+    features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "default", models=registry, storage=storage, capabilities=(_persistence_capabilities(trace=True), _agents(),),
+        "default", models=registry, storage=storage, runtime_features=features,
     ) as runtime:
         with ModelClientRequestRecorder() as recorder:
             execution = await runtime.agents.get("default").start("hello")
@@ -437,7 +439,7 @@ async def test_model_client_request_capture_runtime_preserves_custom_model_lifec
     registry = ModelRegistry()
     registry.register(_ModelBinding(model))
     async with Runtime.open(
-        "default", models=registry, storage=RuntimeStorage.in_memory(), capabilities=(_agents(),),
+        "default", models=registry, storage=RuntimeStorage.in_memory(), runtime_features=_agents(),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
     assert result.status is ExecutionStatus.FAILED
@@ -458,7 +460,7 @@ async def test_model_client_request_capture_runtime_leaves_borrowed_client_open(
         registry = ModelRegistry()
         registry.register(_ModelBinding(model))
         async with Runtime.open(
-            "default", models=registry, storage=RuntimeStorage.in_memory(), capabilities=(_agents(),),
+            "default", models=registry, storage=RuntimeStorage.in_memory(), runtime_features=_agents(),
         ) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
