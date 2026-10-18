@@ -26,6 +26,7 @@ from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.capability import TraceCapability
+from linktools.ai.storage import InMemoryCacheBackend
 
 from .test_model_interaction_lifecycle_paging import (
     _Executions, _HistoryStore, _interaction, _reader,
@@ -379,7 +380,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         return ModelResponse(parts=[TextPart("published answer")])
 
     group = RuntimeFeatures("scheduled-history")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     storage_path = tmp_path / "scheduled"
     async with Runtime.open(

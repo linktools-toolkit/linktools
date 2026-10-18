@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Observation batching requires a cache with an actual write buffer."""
 
+import asyncio
+from collections.abc import Hashable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
@@ -120,4 +123,65 @@ async def test_required_drain_repeated_cancellation_waits_for_source_confirmatio
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+        await state.close()
+
+
+class _WriteOnlyCache:
+    """Expose only ordered buffer operations, with no hot-content API."""
+
+    def __init__(self) -> None:
+        self._queue = InMemoryCacheBackend(max_bytes=65536)
+        self.acknowledged = asyncio.Event()
+        self.accepted = 0
+
+    async def append(
+        self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool,
+    ) -> bool:
+        accepted = await self._queue.append(scope, id, key, content, wait=wait)
+        self.accepted += int(accepted)
+        return accepted
+
+    async def read_batch(self, scope: str, *, limit: int) -> tuple[tuple[str, Hashable, bytes | None], ...]:
+        return await self._queue.read_batch(scope, limit=limit)
+
+    async def ack(self, scope: str, ids: Sequence[str]) -> None:
+        await self._queue.ack(scope, ids)
+        self.acknowledged.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("source_fails", (False, True))
+async def test_write_only_cache_batches_trace_without_hot_content_operations(
+    tmp_path: Path, backend: str, source_fails: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = _WriteOnlyCache()
+    state = await _setup(tmp_path, backend, cache)
+    store = state.run_store
+    store.trace_persistence.configure("run", cache=cache, batch_size=2, flush_interval=60.0)
+    archive = store.read_store(RuntimeDomain.TRACE)
+    original = archive.sync_prepared_projection
+    source_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    async def fail_source(*args, **kwargs):
+        raise source_error
+
+    if source_fails:
+        monkeypatch.setattr(archive, "sync_prepared_projection", fail_source)
+    try:
+        await _observe(state, 1)
+        assert await archive.list_events(agent_run_id="run") == []
+        await _observe(state, 2)
+        await asyncio.wait_for(cache.acknowledged.wait(), 2)
+        assert cache.accepted == 2
+        if source_fails:
+            assert await archive.list_events(agent_run_id="run") == []
+            with pytest.raises(AIError) as caught:
+                await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
+            assert caught.value is source_error
+            assert "run" in store.trace_persistence.dirty
+        else:
+            assert [event.tool_call_id for event in await archive.list_events(agent_run_id="run")] == ["1", "2"]
+    finally:
+        monkeypatch.setattr(archive, "sync_prepared_projection", original)
         await state.close()
