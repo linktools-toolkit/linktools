@@ -72,7 +72,7 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
-    ), revision=2),
+    ), revision=1),
     WorkspaceToolDeclaration("create_directory", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
@@ -112,19 +112,19 @@ _WORKSPACE_TOOL_DECLARATIONS = (
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-        context_dedupe="workspace_file_read_v2",
-    ), revision=3),
+        context_dedupe="workspace_file_read_v1",
+    ), revision=1),
     WorkspaceToolDeclaration("search_files", tool_metadata(
         effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-    ), revision=2),
+    ), revision=1),
     WorkspaceToolDeclaration("write_file", tool_metadata(
         effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
-    ), revision=2),
+    ), revision=1),
     WorkspaceToolDeclaration("check_command", tool_metadata(
         effect_policy="none",
         plan_safe=True,

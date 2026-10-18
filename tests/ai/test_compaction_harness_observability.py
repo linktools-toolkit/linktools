@@ -193,7 +193,11 @@ def _duplicate_file_history() -> list[ModelMessage]:
             parts=[
                 ToolReturnPart(
                     "inspect_document",
-                    "old content",
+                    {"files": [], "texts": [{
+                        "path": "same.txt", "hash": "a" * 64, "content": "same content",
+                        "offset": 0, "end_offset": 12, "byte_offset": 0, "end_byte_offset": 12,
+                        "line_offset": 0, "end_line_offset": 1, "lossy": False,
+                    }]},
                     tool_call_id="read-1",
                 )
             ]
@@ -211,7 +215,11 @@ def _duplicate_file_history() -> list[ModelMessage]:
             parts=[
                 ToolReturnPart(
                     "inspect_document",
-                    "new content",
+                    {"files": [], "texts": [{
+                        "path": "same.txt", "hash": "a" * 64, "content": "same content",
+                        "offset": 0, "end_offset": 12, "byte_offset": 0, "end_byte_offset": 12,
+                        "line_offset": 0, "end_line_offset": 1, "lossy": False,
+                    }]},
                     tool_call_id="read-2",
                 )
             ]

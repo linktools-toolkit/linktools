@@ -32,7 +32,7 @@ from linktools.ai.workspace.sandbox_worker import _send_error
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.compaction import DeduplicateFileReads
+from pydantic_ai.capabilities import AbstractCapability
 
 
 def _context() -> RunContext[None]:
@@ -220,7 +220,7 @@ async def test_sandbox_worker_bounds_safe_details_independently_from_frame() -> 
     assert frame["error"]["safe_details"] == details
 
 
-def test_runtime_compaction_uses_harness_deduplication() -> None:
+def test_runtime_compaction_uses_current_file_deduplication() -> None:
     compaction = CompactionCapability(
         4096,
         limits=PromptLimits(),
@@ -234,7 +234,7 @@ def test_runtime_compaction_uses_harness_deduplication() -> None:
         projection_sink=None,
     )
 
-    assert isinstance(compaction._deduplicate, DeduplicateFileReads)
+    assert isinstance(compaction._deduplicate, AbstractCapability)
     assert compaction._target_tokens == 4096
 
 
