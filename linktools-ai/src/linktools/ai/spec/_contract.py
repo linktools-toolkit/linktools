@@ -23,6 +23,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 
+DEFAULT_AGENT_RETRIES = 3
+
+
 _SELECTOR_SAFE_BYTES = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 )
@@ -460,6 +463,7 @@ def _validated_string_mapping(value: object, field_name: str) -> Mapping[str, st
 
 
 __all__ = [
+    "DEFAULT_AGENT_RETRIES",
     "AgentSpec",
     "AgentUsageLimits",
     "MCPServerSpec",

@@ -10,10 +10,10 @@ from linktools.ai.agent import AgentBindingContract, AgentCompiler
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import DEFAULT_AGENT_RETRIES, AgentSpec, AgentSpecCodec
 
 
-def _compiler(*, tool_retries: int = 3, output_retries: int = 3) -> AgentCompiler:
+def _compiler(*, tool_retries: int = DEFAULT_AGENT_RETRIES, output_retries: int = DEFAULT_AGENT_RETRIES) -> AgentCompiler:
     return AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(), agents={}, tool_retries=tool_retries, output_retries=output_retries,
@@ -100,3 +100,16 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
         restored = runtime._compiler.restore(AgentBindingContract.from_payload(payload))
         assert (restored.compiled_agent.spec.tool_retries, restored.compiled_agent.spec.output_retries) == (6, 4)
         assert restored.binding_contract.to_payload() == payload
+
+
+@pytest.mark.asyncio
+async def test_runtime_and_direct_agent_resolution_share_one_default() -> None:
+    assert DEFAULT_AGENT_RETRIES == 3
+    features = RuntimeFeatures("shared-default")
+    capture = await features.capture()
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(), candidates=(), agents={},
+    )
+    compiled = compiler.compile(AgentSpec("agent"))
+    assert capture.tool_retries == capture.output_retries == DEFAULT_AGENT_RETRIES
+    assert compiled.spec.tool_retries == compiled.spec.output_retries == DEFAULT_AGENT_RETRIES

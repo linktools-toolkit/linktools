@@ -12,13 +12,13 @@ from pydantic import BaseModel
 
 from ..capability import (
     CapabilityContribution,
-    RuntimeFeaturesCapture,
     SkillDefinition,
     workspace_tool_declarations,
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
 from ..spec import (
+    DEFAULT_AGENT_RETRIES,
     AgentSpec,
     AgentSpecCodec,
     MCPServerSpec,
@@ -50,8 +50,8 @@ class AgentCompiler:
         candidates: Sequence[CapabilityContribution[object]],
         agents: Mapping[str, AgentSpec],
         capability_filter: CapabilityFilter | None = None,
-        tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
-        output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
+        tool_retries: int = DEFAULT_AGENT_RETRIES,
+        output_retries: int = DEFAULT_AGENT_RETRIES,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

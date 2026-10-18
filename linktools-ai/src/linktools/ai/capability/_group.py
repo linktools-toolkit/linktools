@@ -7,7 +7,7 @@ import inspect
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import ClassVar, Generic, Literal, TypeVar, get_type_hints
+from typing import Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
 from pydantic_ai import Tool
@@ -18,6 +18,7 @@ from ..asset import AssetStoreReader
 from ..core import AuthorizationPolicy, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
 from ..spec import (
+    DEFAULT_AGENT_RETRIES,
     AgentSpec,
     AgentUsageLimits,
     MCPServerSpec,
@@ -60,9 +61,6 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 class RuntimeFeaturesCapture(Generic[AppT]):
     """Declarations and a versioned Asset reader captured from one revision."""
 
-    DEFAULT_TOOL_RETRIES: ClassVar[int] = 3
-    DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
-
     group_id: str
     contributions: tuple[CapabilityContribution[AppT], ...]
     source_revision: "StorageRevision | None"
@@ -72,8 +70,8 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
     authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
     limits: PromptLimits = field(default_factory=PromptLimits)
-    tool_retries: int = DEFAULT_TOOL_RETRIES
-    output_retries: int = DEFAULT_OUTPUT_RETRIES
+    tool_retries: int = DEFAULT_AGENT_RETRIES
+    output_retries: int = DEFAULT_AGENT_RETRIES
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
         default=None, repr=False, compare=False,
     )
@@ -127,8 +125,8 @@ class RuntimeFeatures(Generic[AppT]):
         sandbox: "Sandbox | None" = None,
         authorization: AuthorizationPolicy | None = None,
         limits: PromptLimits | None = None,
-        tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
-        output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
+        tool_retries: int = DEFAULT_AGENT_RETRIES,
+        output_retries: int = DEFAULT_AGENT_RETRIES,
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
