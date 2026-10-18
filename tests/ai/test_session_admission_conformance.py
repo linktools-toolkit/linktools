@@ -281,7 +281,7 @@ class _RejectingBackend:
         del request, execution
         raise AssertionError("rejected start must not launch")
 
-    async def cancel(self, execution: object) -> CancelEffectOutcome:
+    async def cancel(self, execution: object, *, force: bool = False) -> CancelEffectOutcome:
         del execution
         return CancelEffectOutcome.CONFIRMED
 

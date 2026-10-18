@@ -32,6 +32,7 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import RestartCheckpointCapability
 from linktools.ai.runtime import (
     EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine, TaskGraphRun,
 )
@@ -364,6 +365,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     model_prompts: list[str] = []
     interrupted = True
     group = CapabilityGroup[Path]("recoverable-scoped-agent")
+    group.capability(RestartCheckpointCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     class RecoveringModels(FixtureModels):

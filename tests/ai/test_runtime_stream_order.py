@@ -82,6 +82,8 @@ def _execution(
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
+        restart_checkpoints=True,
+        durable_trace=True,
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,

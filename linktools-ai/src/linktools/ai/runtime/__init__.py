@@ -16,6 +16,7 @@ from ._evaluation_scope import EvaluationTrialScope, EvaluationTrialScopeCallbac
 from ._input_capture import AgentInputCapture, CaptureInputRequest, CaptureGraphRequest, ExecutionInputCaptureRef
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
+from ._persistence_capabilities import DurableTraceCapability, RestartCheckpointCapability
 from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._runtime_history import ExecutionInfo, RuntimeHistory
@@ -185,6 +186,8 @@ __all__ = [
     "RetryExecutionRequest",
     "RuntimeDomain",
     "RuntimeContext",
+    "RestartCheckpointCapability",
+    "DurableTraceCapability",
     "RuntimeHistory",
     "RuntimeRetentionMode",
     "RuntimeStorage",

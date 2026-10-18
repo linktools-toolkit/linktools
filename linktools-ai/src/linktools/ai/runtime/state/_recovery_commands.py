@@ -64,6 +64,11 @@ class RuntimeRecoveryCommands:
         self._tools = tools
         self._background_tasks = background_tasks
 
+    async def _load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+        return await self._execution.state_store.read(
+            lambda _transaction: self._execution.get(execution_id, tenant_id=tenant_id)
+        )
+
     async def commit_recovery_required(
         self,
         execution: ExecutionRecord,
@@ -217,7 +222,7 @@ class RuntimeRecoveryCommands:
 
         async def readback() -> CommitObservation[ExecutionRecord]:
             try:
-                current = await self._execution.get(
+                current = await self._load_execution(
                     execution.execution_id,
                     tenant_id=self._execution.tenant_id,
                 )
@@ -358,7 +363,7 @@ class RuntimeRecoveryCommands:
                         DurableCommitState.NOT_COMMITTED,
                         error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
                     )
-                current_execution = await self._execution.get(
+                current_execution = await self._load_execution(
                     execution.execution_id,
                     tenant_id=self._execution.tenant_id,
                 )
@@ -541,7 +546,7 @@ class RuntimeRecoveryCommands:
                                 DurableCommitState.NOT_COMMITTED,
                                 error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
                             )
-                        current = await self._execution.get(
+                        current = await self._load_execution(
                             execution.execution_id, tenant_id=self._execution.tenant_id,
                         )
                         if current is None:
@@ -549,7 +554,7 @@ class RuntimeRecoveryCommands:
                         return CommitObservation(DurableCommitState.COMMITTED, value=current)
                     # A producer transition cannot commit without its receipt.
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                current = await self._execution.get(
+                current = await self._load_execution(
                     execution.execution_id,
                     tenant_id=self._execution.tenant_id,
                 )

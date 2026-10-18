@@ -30,6 +30,7 @@ from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime._model_interaction import StagedContextInline, model_identity, request_envelope
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from ._runtime_test_helpers import _persistence_capabilities
 
 from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_model_interaction_regressions import _interaction
@@ -124,7 +125,7 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
     async with Runtime.open("prepared-input", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            capabilities=(group,), metrics=metrics) as runtime:
+                            capabilities=(_persistence_capabilities(trace=True), group,), metrics=metrics) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

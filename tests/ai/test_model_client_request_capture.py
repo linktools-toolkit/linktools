@@ -35,6 +35,9 @@ from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime.state import RuntimeDomain
 
 
+from ._runtime_test_helpers import _persistence_capabilities
+
+
 class _ObservedHttpClient(DefaultAsyncHttpxClient):
     close_calls = 0
 
@@ -359,7 +362,7 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
     registry, clients = _registry(monkeypatch, handler)
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "default", models=registry, storage=storage, capabilities=(_agents(),),
+        "default", models=registry, storage=storage, capabilities=(_persistence_capabilities(trace=True), _agents(),),
     ) as runtime:
         with ModelClientRequestRecorder() as recorder:
             execution = await runtime.agents.get("default").start("hello")

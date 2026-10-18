@@ -121,7 +121,7 @@ async def materialize_runtime_storage(
                 sql_routes[key] = route
                 continue
             if route.kind == "memory":
-                stores[domain] = InMemoryStateStore(memory_group)
+                stores[domain] = InMemoryStateStore(memory_group, cache=cache)
             elif route.kind == "filesystem":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -169,6 +169,7 @@ async def materialize_runtime_storage(
                     runtime_domain=domain.value,
                     _range_index=domain is RuntimeDomain.MEMORY,
                     group=group,
+                    cache=cache,
                 )
                 stores[domain] = store
                 cleanups.append(store.close)
@@ -241,6 +242,7 @@ async def materialize_runtime_storage(
                         context=context,
                         runtime_domain=domain,
                         group=group,
+                        cache=cache,
                         store_digest=state_store_digest(
                             namespace,
                             tenant_id,

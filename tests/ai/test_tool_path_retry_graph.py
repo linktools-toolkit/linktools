@@ -17,6 +17,7 @@ from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.workspace import Workspace
+from ._runtime_test_helpers import _persistence_capabilities
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -75,7 +76,7 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     async with Runtime.open(
         "path-correction", models=_Models(_UsageFunctionModel(model)),
         storage=RuntimeStorage.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
+        capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
     ) as runtime:
         task = runtime.tasks.from_agent("path.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("path-graph", (

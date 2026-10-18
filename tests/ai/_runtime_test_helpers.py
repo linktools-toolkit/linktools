@@ -20,15 +20,25 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage, RunUsage
 
-from linktools.ai.capability import tool_metadata
+from linktools.ai.capability import CapabilityGroup, tool_metadata
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import DurableTraceCapability, RestartCheckpointCapability
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 
 
 _ReadT = TypeVar("_ReadT")
+
+
+def _persistence_capabilities(*, restart: bool = False, trace: bool = False) -> CapabilityGroup:
+    group = CapabilityGroup("persistence")
+    if restart:
+        group.capability(RestartCheckpointCapability(), scope="runtime")
+    if trace:
+        group.capability(DurableTraceCapability(), scope="runtime")
+    return group
 
 
 class _Models:

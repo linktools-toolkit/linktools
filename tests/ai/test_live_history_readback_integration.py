@@ -14,6 +14,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, Page
 from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
+from ._runtime_test_helpers import _persistence_capabilities
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
 
@@ -100,7 +101,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 system_prompt="Coordinate system prompt", instructions=("Coordinate instructions",))
     async with Runtime.open(
         "live-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), capabilities=(_persistence_capabilities(trace=True), group,),
     ) as runtime:
         execution = await runtime.agents.get("default").start("run both tools")
         principal = runtime.default_principal
@@ -269,7 +270,7 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
     group.agent("child", model="default", allow_tools=("echo",), allow_subagents=())
     async with Runtime.open(
         "child-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), capabilities=(_persistence_capabilities(trace=True), group,),
     ) as runtime:
         execution = await runtime.agents.get("default").start("delegate")
         principal = runtime.default_principal
@@ -328,7 +329,7 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
     group.agent("default", model="default", system_prompt="Coordinate system prompt",
                 instructions=("Coordinate instructions",))
     async with Runtime.open("raw-parts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_persistence_capabilities(trace=True), group,)) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get("default").start("run both tools")
         try:

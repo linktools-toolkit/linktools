@@ -851,6 +851,12 @@ class _RecoveryCoordinator:
                 await self._port._release_session_execution(execution)
             await self._port._finish_checkpoint(checkpoint)
             return False
+        if (not execution.restart_checkpoints
+                and checkpoint.state in {RecoveryCheckpointState.ADMITTED, RecoveryCheckpointState.ACTIVE}
+                and execution.status is not ExecutionStatus.CANCELLING):
+            # Paused continuations and prepared terminal handoffs have their own
+            # durable boundaries; interrupted work requires an opted-in checkpoint.
+            return False
         if (execution.status is not ExecutionStatus.CANCELLING
                 and self._relaunch_guard is not None and not await self._relaunch_guard(execution)):
             _logger.info("recovery relaunch deferred by task deadline: execution=%s", execution.execution_id)
@@ -1011,6 +1017,15 @@ class _RecoveryCoordinator:
                     "execution_id": execution_id,
                     "phase": "execution_recover_tool_claims_active",
                     "active_tool_claim_count": active_claims,
+                },
+            )
+        if not current.restart_checkpoints:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                retryable=False,
+                safe_details={
+                    "execution_id": execution_id,
+                    "capability": "runtime.restart-checkpoints",
                 },
             )
         checkpoint = await self._port.load_recovery_checkpoint(

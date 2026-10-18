@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, DurableTraceCapability, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 from ._runtime_test_helpers import RuntimeUsageModels
 
@@ -22,8 +22,10 @@ def _capabilities() -> CapabilityGroup:
 
 @pytest.mark.asyncio
 async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork_does_not() -> None:
+    capabilities = _capabilities()
+    capabilities.capability(DurableTraceCapability(), scope="runtime")
     async with Runtime.open("budget-lineage", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.in_memory(), capabilities=(_capabilities(),)) as runtime:
+                            storage=RuntimeStorage.in_memory(), capabilities=(capabilities,)) as runtime:
         agent = runtime.agents.get()
         root = await agent.start("root", budget=RunBudget(model_requests=10), idempotency_key="budget-root")
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED

@@ -131,6 +131,7 @@ def _record(execution_id: str, *, child: bool = False) -> object:
         (),
         {
             "execution_id": execution_id,
+            "durable_trace": True,
             "parent_execution_id": "root" if child else None,
             "root_execution_id": "root",
             "lineage_kind": (

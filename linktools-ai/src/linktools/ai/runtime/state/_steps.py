@@ -12,6 +12,7 @@ from uuid import uuid4
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
+from ...core import ExecutionStatus
 from ...errors import AIError, ErrorCode
 from .._message import decode_model_messages, encode_model_messages
 from .._transcript_staging import StagedTranscript
@@ -21,6 +22,10 @@ from .._model_interaction import (
     StagedModelInteraction,
 )
 from ._contracts import (
+    ExecutionHistoryHeadRecord,
+    ExecutionHistoryState,
+    ExecutionRecord,
+    ExecutionRepository,
     ExecutionRunSealHead,
     LoadedContextMessage,
     LoadedModelContext,
@@ -28,6 +33,7 @@ from ._contracts import (
     TranscriptMessageRef,
     TranscriptSpanRef,
 )
+from ._execution_repositories import ExecutionRepositoryImpl
 from ._durability import CommitObservation, DurableCommitState, _await_owned_task, run_durable_commit
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_archive import (
@@ -59,8 +65,8 @@ if TYPE_CHECKING:
     from ..service_api import ModelInteractionSubscription
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
-_OBSERVATION_FLUSH_SECONDS = 1.0
-_OBSERVATION_FLUSH_BOUNDARIES = 16
+_OBSERVATION_FLUSH_SECONDS = 3.0
+_OBSERVATION_FLUSH_BOUNDARIES = 128
 _BoundaryResult = TypeVar("_BoundaryResult")
 
 
@@ -111,9 +117,13 @@ class RuntimeAgentRunStore(AgentRunStore):
         conversation_retention: RuntimeRetentionMode,
         execution_retention: RuntimeRetentionMode,
         recovery_retention: RuntimeRetentionMode,
+        execution_repository: ExecutionRepository | None = None,
+        tenant_id: str | None = None,
     ) -> None:
         del conversation_retention, execution_retention, recovery_retention
         self._staging = staging
+        self._execution_repository = execution_repository
+        self._tenant_id = tenant_id
         self._archives = {
             RuntimeDomain.CONVERSATION: conversation_archive,
             **({RuntimeDomain.EXECUTION: execution_archive} if execution_archive is not None else {}),
@@ -123,6 +133,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._preflight = False
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
         self._execution_producers: dict[str, tuple[str, int]] = {}
+        self._execution_persistence: dict[str, tuple[bool, bool]] = {}
         self._projection_dirty: set[str] = set()
         self._observation_task: asyncio.Task[None] | None = None
         self._observation_wake = asyncio.Event()
@@ -138,6 +149,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     def bind_execution_producer(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
+        restart_checkpoints: bool = True, durable_trace: bool = True,
     ) -> None:
         if not agent_run_id or not execution_id or isinstance(producer_generation, bool) or producer_generation < 0:
             raise ValueError("execution producer identity is invalid")
@@ -145,7 +157,20 @@ class RuntimeAgentRunStore(AgentRunStore):
         previous = self._execution_producers.get(agent_run_id)
         if previous is not None and (previous[0] != execution_id or previous[1] > producer_generation):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        persistence = (restart_checkpoints, durable_trace)
+        if any(not isinstance(value, bool) for value in persistence):
+            raise TypeError("execution persistence guarantees must be bool")
+        previous_persistence = self._execution_persistence.get(agent_run_id)
+        if previous_persistence is not None and previous_persistence != persistence:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._execution_producers[agent_run_id] = value
+        self._execution_persistence[agent_run_id] = persistence
+
+    def _archive_for_run(self, domain: RuntimeDomain, agent_run_id: str) -> AgentRunStore | None:
+        restart, trace = self._execution_persistence.get(agent_run_id, (True, True))
+        if domain is RuntimeDomain.RECOVERY and not restart or domain is RuntimeDomain.EXECUTION and not trace:
+            return None
+        return self._archives.get(domain)
 
     def execution_producer_generation(self, agent_run_id: str, *, execution_id: str) -> int | None:
         producer = self._execution_producers.get(agent_run_id)
@@ -191,7 +216,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         execution_id: str | None = None,
     ) -> None:
         await self._ensure_business()
-        recovery = self._archives.get(RuntimeDomain.RECOVERY)
+        recovery = self._archive_for_run(RuntimeDomain.RECOVERY, record.agent_run_id)
         restored: AgentRunCheckpoint | None = None
         observed_transcript: StagedTranscript | None = None
         events: Sequence[StepEvent] = ()
@@ -205,7 +230,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 restored = await recovery.latest_checkpoint(
                     agent_run_id=record.agent_run_id, include_interrupted=True,
                 )
-        execution = self._archives.get(RuntimeDomain.EXECUTION)
+        execution = self._archive_for_run(RuntimeDomain.EXECUTION, record.agent_run_id)
         if execution is not None and execution_id is not None:
             public_run = await execution.get_agent_run(agent_run_id=record.agent_run_id)
             if restored is not None and self._staging.get_agent_run_local(record.agent_run_id) is None:
@@ -318,9 +343,17 @@ class RuntimeAgentRunStore(AgentRunStore):
         producer_generation: int | None = None,
     ) -> None:
         await self._ensure_business()
+        if (execution_id is not None and producer_generation is not None
+                and self._archive_for_run(RuntimeDomain.RECOVERY, checkpoint.agent_run_id) is None):
+            await self._require_active_execution_producer(
+                agent_run_id=checkpoint.agent_run_id,
+                execution_id=execution_id, producer_generation=producer_generation,
+                allow_cancelling=checkpoint.state == "interrupted",
+            )
         execution = (
             self._archives.get(RuntimeDomain.EXECUTION)
-            if execution_id is not None and producer_generation is not None else None
+            if execution_id is not None and producer_generation is not None
+            and self._archive_for_run(RuntimeDomain.RECOVERY, checkpoint.agent_run_id) is not None else None
         )
         if execution is not None:
             recovery = self._archives.get(RuntimeDomain.RECOVERY)
@@ -350,7 +383,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         offset.observation_producer_generation = producer_generation
                     self._staging.save_checkpoint_local(checkpoint)
                     self._projection_dirty.add(checkpoint.agent_run_id)
-                    recovery = self._archives.get(RuntimeDomain.RECOVERY)
+                    recovery = self._archive_for_run(RuntimeDomain.RECOVERY, checkpoint.agent_run_id)
                     recovery_run = self._staging.get_agent_run_local(checkpoint.agent_run_id)
                     recovery_interactions_snapshot = self._staging.capture_interactions_local(checkpoint.agent_run_id)
                     if recovery is not None:
@@ -463,6 +496,39 @@ class RuntimeAgentRunStore(AgentRunStore):
                 raise AIError(ErrorCode.EXECUTION_CANCELLED)
             return
 
+    async def _require_active_execution_producer(
+        self, *, agent_run_id: str, execution_id: str, producer_generation: int,
+        allow_cancelling: bool = True,
+    ) -> None:
+        """Check control authority before advancing a run without a durable checkpoint."""
+        repository = self._execution_repository
+        if repository is None or self._tenant_id is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+        async def read(
+            _transaction: StateTransaction,
+        ) -> tuple[ExecutionRecord | None, ExecutionHistoryHeadRecord | None]:
+            head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
+            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
+            return execution, head
+
+        restart, _trace = self._execution_persistence.get(agent_run_id, (True, True))
+        if not restart and type(repository) is ExecutionRepositoryImpl:
+            execution, head = await repository.observe_execution_control(execution_id, tenant_id=self._tenant_id)
+        else:
+            execution, head = await repository.state_store.read(read)
+        if head is None or execution is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (head.state is not ExecutionHistoryState.OPEN
+                or head.producer_generation != producer_generation):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
+            raise AIError(ErrorCode.EXECUTION_CANCELLED)
+        if execution.status not in {
+            ExecutionStatus.STARTED, ExecutionStatus.CANCELLING, ExecutionStatus.FINALIZING,
+        }:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
     async def _prepare_recovery_checkpoint(
         self, archive: StateStepArchive, run: AgentRunRecord,
         checkpoint: AgentRunCheckpoint,
@@ -530,7 +596,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise TypeError("staged model interaction has no AgentRun identity")
         self._projection_dirty.add(agent_run_id)
-        if RuntimeDomain.EXECUTION not in self._archives:
+        if self._archive_for_run(RuntimeDomain.EXECUTION, agent_run_id) is None:
             self._publish_model_interaction_change(agent_run_id)
 
     def prepare_model_interaction(self, interaction: object) -> None:
@@ -538,7 +604,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
         self._projection_dirty.add(interaction.agent_run_id)
-        if RuntimeDomain.EXECUTION not in self._archives:
+        if self._archive_for_run(RuntimeDomain.EXECUTION, interaction.agent_run_id) is None:
             self._publish_model_interaction_change(interaction.agent_run_id)
 
     @property
@@ -589,7 +655,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         await self._ensure_business()
         high_water = await self._staging.model_interaction_count(agent_run_id=agent_run_id)
         for domain in (RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
-            archive = self._archives.get(domain)
+            archive = self._archive_for_run(domain, agent_run_id)
             if archive is not None:
                 high_water = max(high_water, await archive.model_interaction_count(agent_run_id=agent_run_id))
         return high_water
@@ -743,8 +809,8 @@ class RuntimeAgentRunStore(AgentRunStore):
             values, include_client_requests=include_client_requests, include_content=include_content,
         )
 
-    def read_store(self, runtime_domain: RuntimeDomain) -> AgentRunStore:
-        if runtime_domain not in self._archives:
+    def read_store(self, runtime_domain: RuntimeDomain, *, durable: bool = True) -> AgentRunStore:
+        if not durable or runtime_domain not in self._archives:
             return self._staging
         return self._archives[runtime_domain]
 
@@ -1999,7 +2065,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         producer_generation: int | None = None,
         deferred: bool = False,
     ) -> None:
-        if RuntimeDomain.EXECUTION not in self._archives:
+        if self._archive_for_run(RuntimeDomain.EXECUTION, agent_run_id) is None:
             await self._ensure_business()
             # A transient route is observable only through its local staging
             # owner; there is no archive projection to commit or acknowledge.
@@ -2298,6 +2364,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
                         self._execution_producers.pop(agent_run_id, None)
+                        self._execution_persistence.pop(agent_run_id, None)
                         self._projection_offsets.pop(agent_run_id, None)
                         self._projection_dirty.discard(agent_run_id)
                         for archive in self._archives.values():

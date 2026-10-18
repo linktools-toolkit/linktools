@@ -43,6 +43,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 from linktools.ai.observe._memory import InMemoryMetricStore
+from ._runtime_test_helpers import _persistence_capabilities
 
 from ._runtime_test_helpers import _wait_for_committed
 
@@ -1191,7 +1192,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(group,),
+            capabilities=(_persistence_capabilities(trace=True), group,),
             metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("TOP_SECRET_PROMPT")
@@ -1247,7 +1248,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
                 "default",
                 models=models,  # type: ignore[arg-type]
                 storage=RuntimeStorage.filesystem(storage_path),
-                capabilities=(group,),
+                capabilities=(_persistence_capabilities(trace=True), group,),
                 metrics=Metrics.in_memory(),
             ) as reopened:
                 assert reopened.history is not None
@@ -1284,7 +1285,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(group,),
+            capabilities=(_persistence_capabilities(trace=True), group,),
             metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
@@ -1382,7 +1383,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(group,),
+            capabilities=(_persistence_capabilities(trace=True), group,),
             metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")
@@ -1486,7 +1487,7 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            capabilities=(group,),
+            capabilities=(_persistence_capabilities(trace=True), group,),
             metrics=metrics,
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")

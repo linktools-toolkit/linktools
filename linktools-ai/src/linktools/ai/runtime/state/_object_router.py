@@ -5,7 +5,10 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from time import monotonic
 from pathlib import Path
 
 from linktools.core import environ
@@ -19,6 +22,7 @@ from ...storage import (
     ObjectStore,
     SqlObjectStore,
     SqlStorageContext,
+    StorageReadCache,
     TransientObjectStore,
     read_object,
 )
@@ -30,6 +34,18 @@ from ._plan import (
 )
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
+_OBJECT_MAX_AGE_SECONDS = 3.0
+_source_reads: ContextVar[bool] = ContextVar("runtime_object_source_reads", default=False)
+
+
+@contextmanager
+def runtime_object_source_reads() -> Iterator[None]:
+    """Require current source membership without holding a storage transaction."""
+    token = _source_reads.set(True)
+    try:
+        yield
+    finally:
+        _source_reads.reset(token)
 
 
 class _RuntimeObjectRouter:
@@ -46,14 +62,15 @@ class _RuntimeObjectRouter:
         self._stores = dict(stores)
         self._close_guard_stores = tuple(close_guard_stores)
         self._cache = cache if isinstance(cache, CacheBackend) else None
+        self._hot = StorageReadCache(self._cache, max_age_seconds=_OBJECT_MAX_AGE_SECONDS)
         self._cache_domains = frozenset(cache_domains)
         self._cache_scope = (namespace, tenant_id)
         self._closing = False
         self._pending_reads: set[asyncio.Task[bytes]] = set()
-        self._inflight: dict[tuple[RuntimeDomain, ObjectRef], asyncio.Task[bytes]] = {}
+        self._inflight: dict[tuple[RuntimeDomain, ObjectRef], tuple[float, asyncio.Task[bytes]]] = {}
 
     async def read_object(self, domain: RuntimeDomain, reference: ObjectRef) -> bytes:
-        """Read immutable bytes without making the cache a retention authority."""
+        """Read verified bytes with bounded source-membership staleness."""
         if self._closing:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         store = self.object_store(domain)
@@ -71,47 +88,40 @@ class _RuntimeObjectRouter:
         if self._cache is None or domain not in self._cache_domains:
             return await self._read_origin(store, reference)
         identity = (domain, reference)
-        task = self._inflight.get(identity)
-        if task is None or task.done():
+        flight = self._inflight.get(identity)
+        if (flight is None or flight[1].done()
+                or monotonic() >= flight[0] + _OBJECT_MAX_AGE_SECONDS):
             task = asyncio.create_task(self._read_cached(domain, store, reference))
-            self._inflight[identity] = task
+            self._inflight[identity] = (monotonic(), task)
             task.add_done_callback(
                 lambda finished: self._flight_finished(identity, finished)
             )
         else:
-            # A load may have opened the source before this borrower arrived.
-            # Membership must therefore be established for each joining read.
-            await self._validate_source(store, reference)
+            task = flight[1]
+            if domain is RuntimeDomain.RECOVERY or _source_reads.get():
+                await self._validate_source(store, reference)
         return await asyncio.shield(task)
 
     async def _read_cached(
         self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef
     ) -> bytes:
-        cache = self._cache
-        assert cache is not None
         key = self._cache_key(domain, reference)
-        try:
-            cached = await cache.get(key)
-        except Exception:  # noqa: BLE001
-            cached = None
-        if cached is not None:
-            if (
-                isinstance(cached, bytes)
-                and len(cached) == reference.size
-                and hashlib.sha256(cached).hexdigest() == reference.digest
-            ):
+
+        loaded = False
+
+        async def load() -> bytes:
+            nonlocal loaded
+            loaded = True
+            return await self._read_origin(store, reference)
+
+        content = await self._hot.get(key, load)
+        if (isinstance(content, bytes) and len(content) == reference.size
+                and hashlib.sha256(content).hexdigest() == reference.digest):
+            if not loaded and (domain is RuntimeDomain.RECOVERY or _source_reads.get()):
                 await self._validate_source(store, reference)
-                return cached
-            try:
-                await cache.delete(key)
-            except Exception:  # noqa: BLE001, S110
-                pass
-        content = await self._read_origin(store, reference)
-        try:
-            await cache.put(key, content)
-        except Exception:  # noqa: BLE001, S110
-            pass
-        return content
+            return content
+        await self._hot.invalidate(key)
+        return await load()
 
     def _cache_key(self, domain: RuntimeDomain, reference: ObjectRef) -> str:
         identity = (
@@ -123,8 +133,8 @@ class _RuntimeObjectRouter:
             reference.size,
         )
         encoded = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
-        # Store IDs are not globally unique. Equal keys may only reuse verified
-        # bytes; a hit still checks membership in this router's actual source.
+        # A shared cache/Runtime namespace is bound to one logical source.
+        # The hot envelope bounds membership age independently of backend TTL.
         return "runtime-object:v1:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     async def _validate_source(self, store: ObjectStore, reference: ObjectRef) -> None:
@@ -154,7 +164,8 @@ class _RuntimeObjectRouter:
     def _flight_finished(
         self, identity: tuple[RuntimeDomain, ObjectRef], task: asyncio.Task[bytes]
     ) -> None:
-        if self._inflight.get(identity) is task:
+        flight = self._inflight.get(identity)
+        if flight is not None and flight[1] is task:
             del self._inflight[identity]
         if not task.cancelled():
             task.exception()
@@ -168,6 +179,7 @@ class _RuntimeObjectRouter:
         self.begin_close()
         while self._pending_reads:
             await asyncio.wait(tuple(self._pending_reads))
+        await self._hot.close()
 
     def object_store(self, domain: RuntimeDomain) -> ObjectStore:
         try:
@@ -288,4 +300,4 @@ def build_runtime_object_router(
     )
 
 
-__all__ = ["_RuntimeObjectRouter", "build_runtime_object_router"]
+__all__ = ["_RuntimeObjectRouter", "build_runtime_object_router", "runtime_object_source_reads"]

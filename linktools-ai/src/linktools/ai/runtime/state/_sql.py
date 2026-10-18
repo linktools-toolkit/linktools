@@ -20,6 +20,7 @@ from ...storage import (
 )
 from ._plan import RuntimeDomain
 from ._schema import build_runtime_sql_metadata
+from ._record_cache import StateRecordCache
 from ._store import (
     FactQuery,
     FactScanCursor,
@@ -275,6 +276,8 @@ class SqlStateStorageGroup:
         finally:
             if lock is not None:
                 lock.release()
+            for store in members:
+                await store._reads.invalidate()
 
     @asynccontextmanager
     async def _session(self):
@@ -308,6 +311,7 @@ class SqlStateStore:
         context: "SqlStorageContext | None" = None,
         runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
         group: SqlStateStorageGroup | None = None,
+        cache: object | None = None,
         store_digest: bytes | None = None,
     ) -> None:
         resolved_context = context or create_sql_storage_context(engine)
@@ -335,6 +339,7 @@ class SqlStateStore:
         self._close_lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
+        self._reads = StateRecordCache(self, cache, scope=f"sql:{self._store_digest.hex()}")
 
     @property
     def context(self) -> SqlStorageContext:
@@ -364,12 +369,23 @@ class SqlStateStore:
                 return
             self._closed = True
             try:
+                await self._reads.close()
                 if self._owns_group:
                     await self._storage_group.close()
             except BaseException:
                 self._closed = False
                 raise
             self._initialized = False
+
+    async def read_record(self, key: bytes) -> StoredRecord | None:
+        """Read ordinary committed metadata with bounded cache freshness."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_record(key)
+
+    async def read_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Read ordinary metadata; explicit transaction scopes stay source-only."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_records(keys)
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()

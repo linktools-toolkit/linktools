@@ -25,6 +25,7 @@ from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from ._runtime_test_helpers import _persistence_capabilities
 
 from .test_model_interaction_lifecycle_paging import (
     _Executions, _HistoryStore, _interaction, _reader,
@@ -297,7 +298,7 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "metadata-live", models=_Models(_UsageFunctionModel(model)),
-        storage=storage(), capabilities=(group,),
+        storage=storage(), capabilities=(_persistence_capabilities(trace=True), group,),
     ) as runtime:
         execution = await runtime.agents.get("default").start("private prompt")
         principal = runtime.default_principal
@@ -381,7 +382,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     storage_path = tmp_path / "scheduled"
     async with Runtime.open(
         "scheduled-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.filesystem(storage_path), capabilities=(group,),
+        storage=RuntimeStorage.filesystem(storage_path), capabilities=(_persistence_capabilities(trace=True), group,),
     ) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal

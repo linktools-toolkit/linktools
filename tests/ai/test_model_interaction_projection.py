@@ -50,6 +50,9 @@ from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
+from ._runtime_test_helpers import _persistence_capabilities
+
+
 class _TextModelBinding:
     route_id = "default"
     provider = "test"
@@ -103,7 +106,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     sizes = []
     async with Runtime.open(
         "response-growth", storage=RuntimeStorage.sqlite(database),
-        models=_TextModels(), capabilities=(_agent_group(),),
+        models=_TextModels(), capabilities=(_persistence_capabilities(trace=True), _agent_group(),),
     ) as runtime:
         agent = runtime.agents.get("default")
         await agent.create_session("session")
@@ -815,7 +818,7 @@ async def test_execution_model_interactions_are_durable_and_public() -> None:
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
+        capabilities=(_persistence_capabilities(trace=True), _agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
@@ -827,7 +830,7 @@ async def test_execution_model_interactions_support_volatile_memory_state() -> N
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
+        capabilities=(_persistence_capabilities(trace=True), _agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)

@@ -208,3 +208,31 @@ async def test_delegation_filter_keeps_captured_agent_metadata_and_named_referen
     assert binding.binding_contract.subagents[0].to_payload() == {
         "kind": "agent", "id": "child", "revision": 3, "description": "Delegate work",
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_scope_is_captured_but_never_agent_selected_or_filtered():
+    group = CapabilityGroup("application")
+    spec = group.agent("root")
+    group.capability(_ExtraCapability("selected"))
+    group.capability(_ExtraCapability("host"), scope="runtime", revision=2)
+    capture = await group.capture()
+    seen = []
+
+    def include(_agent, item):
+        seen.append(item.id)
+        return True
+
+    scopes = {item.id: item.scope for item in capture.contributions}
+    assert scopes == {"root": "agent", "selected": "agent", "host": "runtime"}
+    visible = AgentCompiler.filter_capabilities(spec, capture.contributions, capability_filter=include)
+    assert [item.id for item in visible] == ["selected"]
+    assert seen == ["selected"]
+    compiler = _compiler(capture.contributions, include)
+    compiled = compiler.compile(spec)
+    assert [item.id for item in compiled.selected_capabilities] == ["selected"]
+    binding = compiler.bind(compiled)
+    without_host = _compiler(tuple(item for item in capture.contributions if item.scope == "agent"))
+    assert without_host.bind(without_host.compile(spec)).binding_digest == binding.binding_digest
+    assert without_host.restore(binding.binding_contract).binding_digest == binding.binding_digest
+    assert "host" not in seen

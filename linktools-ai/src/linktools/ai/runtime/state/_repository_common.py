@@ -279,7 +279,12 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def get(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
-        record = await self._record(self._key(self._kind, identity))
+        key = self._key(self._kind, identity)
+        record = (
+            await self._store.read_record(key)
+            if self._kind in {"session", "execution"}
+            else await self._record(key)
+        )
         return None if record is None else await self._decode(record, self._value_type)
 
     async def get_in_transaction(
@@ -294,6 +299,8 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         return None if record is None else await self._decode(record, self._value_type)
 
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
+        if tenant_id != self._tenant_id:
+            return None
         value = await self.get(identity, tenant_id=tenant_id)
         return (
             None

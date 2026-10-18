@@ -35,7 +35,7 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
 from pydantic import BaseModel
 
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
 
 def test_runtime_runs_agents_and_tasks_when_mcp_client_is_unavailable(tmp_path: Path) -> None:
@@ -307,7 +307,7 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(application,),
+        capabilities=(_persistence_capabilities(trace=True), application,),
     ) as runtime:
         result = (await runtime.agents.get("default").run(
             "hello",

@@ -100,6 +100,10 @@ from ._budget import RunBudgetContext
 from .service_api import ExecutionRequest
 from .state import RuntimeDomain
 from .state._commands import RuntimeStateCommands
+from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._conversation_repositories import SessionRepositoryImpl
+from .state._recovery_repositories import RecoveryCheckpointRepositoryImpl
+from .state._object_router import runtime_object_source_reads
 from .state._contracts import (
     ApprovalRecord,
     AgentAttemptClaim,
@@ -107,6 +111,7 @@ from .state._contracts import (
     ConversationCursor,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
+    ExecutionHistoryState,
     ExecutionRepository,
     ExecutionRecord,
     ExecutionStartClaim,
@@ -129,6 +134,7 @@ from .state._contracts import (
     RecoveryTerminalOutcome,
     RepositoryInstructionBarrier,
     ResultRecord,
+    SessionRecord,
     SessionRepository,
     ToolOperationRecord,
 )
@@ -394,9 +400,15 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None:
-        return await self._execution.executions.get(
-            execution_id,
-            tenant_id=tenant_id,
+        repository = self._execution.executions
+        return await repository.state_store.read(
+            lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
+        )
+
+    async def _load_session(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
+        repository = self._conversation.sessions
+        return await repository.state_store.read(
+            lambda _transaction: repository.get(session_id, tenant_id=tenant_id)
         )
 
     async def _list_recoverable_checkpoints(
@@ -733,7 +745,7 @@ class LocalExecutionBackend:
         expected_status: ExecutionStatus,
     ) -> ExecutionRecord:
         async with self._audit_lock(commit.execution_id):
-            current = await self._execution.executions.get(
+            current = await self.load_execution(
                 commit.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -861,6 +873,24 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._input_materializer.restore(execution.stored_user_input)
 
+    def _can_prepare_initial_attempt(self, execution: ExecutionRecord) -> bool:
+        if (type(self) is not LocalExecutionBackend or execution.restart_checkpoints
+                or execution.durable_trace or execution.binding_kind != "agent"
+                or execution.parent_execution_id is not None
+                or execution.requires_task_invocation_capture
+                or execution.input_context is not None or execution.agent_run_seq != 0
+                or type(self._execution.executions) is not ExecutionRepositoryImpl
+                or type(self._conversation.sessions) is not SessionRepositoryImpl
+                or type(self._recovery.checkpoints) is not RecoveryCheckpointRepositoryImpl):
+            return False
+        stores = (self._execution.executions.state_store,
+                  self._conversation.sessions.state_store, self._recovery.checkpoints.state_store)
+        if any(store.storage_group is not stores[0].storage_group for store in stores):
+            return False
+        binding = self._execution_binding(execution)
+        return not (execution.memory_scope is not None
+                    and select_harness_memory_tools(binding.compiled_agent.tool_policy))
+
     async def prepare_start(
         self,
         request: ExecutionRequest,
@@ -915,7 +945,7 @@ class LocalExecutionBackend:
         expected = await self._expected_session_cursor(execution)
         released_stale_owner = False
         for _ in range(2):
-            session = await self._conversation.sessions.get(
+            session = await self._load_session(
                 execution.session_id,
                 tenant_id=self._tenant_id,
             )
@@ -935,7 +965,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return
             if owner_id is not None:
-                owner = await self._execution.executions.get(
+                owner = await self.load_execution(
                     owner_id,
                     tenant_id=self._tenant_id,
                 )
@@ -1011,7 +1041,7 @@ class LocalExecutionBackend:
             user_prompt=await self.restore_user_input(execution),
             files=(),
         )
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -1041,7 +1071,7 @@ class LocalExecutionBackend:
         if current.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.session_id is not None:
-            session = await self._conversation.sessions.get(
+            session = await self._load_session(
                 current.session_id,
                 tenant_id=self._tenant_id,
             )
@@ -1082,6 +1112,10 @@ class LocalExecutionBackend:
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT,
                     safe_details={"phase": "recovery_launch_rejected"})
+        if current.budget_scope_id is not None and request.budget is None:
+            # Cold recovery and deferred resumption reconstruct the launch request.
+            usage = await self._execution.budgets.read(current.budget_scope_id)
+            request = replace(request, budget=usage.limits)
         if not self._live_broker.is_local_producer(current.execution_id):
             self._live_broker.register_local_producer(
                 current.execution_id,
@@ -1109,7 +1143,7 @@ class LocalExecutionBackend:
         )
 
     async def abort_start(self, execution: ExecutionRecord) -> None:
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -1319,9 +1353,9 @@ class LocalExecutionBackend:
     def live_broker(self) -> LiveExecutionEventBroker:
         return self._live_broker
 
-    async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
+    async def cancel(self, execution: ExecutionRecord, *, force: bool = False) -> CancelEffectOutcome:
         self._worker_shutdown_requests.discard(execution.execution_id)
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -1333,18 +1367,19 @@ class LocalExecutionBackend:
             return CancelEffectOutcome.CONFIRMED
         task = self._tasks.get(execution.execution_id)
         if task is None:
-            return await self._confirm_cancel_effects(current)
+            return await self._confirm_cancel_effects(current, force=force)
         self._request_worker_cancel(execution.execution_id, task)
         await self._drain_worker_task(execution.execution_id, task)
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
-        return await self._confirm_cancel_effects(current)
+        return await self._confirm_cancel_effects(current, force=force)
 
     async def _confirm_cancel_effects(
         self,
         execution: ExecutionRecord | None,
+        *, force: bool = False,
     ) -> CancelEffectOutcome:
         if execution is None:
             return CancelEffectOutcome.UNKNOWN
@@ -1355,11 +1390,24 @@ class LocalExecutionBackend:
             ExecutionStatus.FINALIZING,
         }:
             return CancelEffectOutcome.CONFIRMED
-        if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+        revoke = (force and not execution.restart_checkpoints
+                  and execution.binding_kind == "agent"
+                  and not execution.requires_task_invocation_capture)
+        if revoke and execution.root_execution_id != execution.execution_id:
+            root = await self.load_execution(
+                execution.root_execution_id, tenant_id=self._tenant_id,
+            )
+            if root is None or root.root_execution_id != root.execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            # Delegated calls inherit their root's task ownership, not the
+            # child's optional invocation-capture marker.
+            revoke = root.binding_kind == "agent" and not root.requires_task_invocation_capture
+        if execution.status is ExecutionStatus.RECOVERY_REQUIRED and not revoke:
             return CancelEffectOutcome.UNKNOWN
         if execution.status not in {
             ExecutionStatus.STARTED,
             ExecutionStatus.CANCELLING,
+            ExecutionStatus.RECOVERY_REQUIRED,
         }:
             return CancelEffectOutcome.UNKNOWN
         effects, active_claims = await self._reconcile_tool_effects(
@@ -1367,13 +1415,18 @@ class LocalExecutionBackend:
             tenant_id=self._tenant_id,
         )
         if effects:
-            await self._require_tool_effect_recovery(execution, effects)
+            if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
+                await self._require_tool_effect_recovery(execution, effects)
             return CancelEffectOutcome.UNKNOWN
         if active_claims:
             return CancelEffectOutcome.UNKNOWN
+        if revoke and execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+            execution = await self._recovery_commands_for(execution.execution_id).commit_cancel_claim(execution)
+        # CANCELLING blocks new tool admission. The terminal transaction closes
+        # the producer head, so a remote model response cannot publish afterward.
         return (
             CancelEffectOutcome.CONFIRMED
-            if execution.status is ExecutionStatus.CANCELLING and execution.agent_run_seq == 0
+            if execution.status is ExecutionStatus.CANCELLING and (execution.agent_run_seq == 0 or revoke)
             else CancelEffectOutcome.UNKNOWN
         )
 
@@ -1562,6 +1615,10 @@ class LocalExecutionBackend:
         *,
         producer_generation: int | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+        if not execution.restart_checkpoints:
+            await self._agent_run_lifecycle.materialize_recovery_checkpoint(
+                agent_run_id=continuation.source_agent_run_id, require_complete=False,
+            )
         await self._agent_run_lifecycle.flush_execution_projection(
             continuation.source_agent_run_id, execution_id=execution.execution_id,
         )
@@ -1646,10 +1703,11 @@ class LocalExecutionBackend:
         agent_run_id: str,
     ) -> tuple[ModelMessage, ...]:
         archive = self._run_stores[RuntimeDomain.RECOVERY]
-        checkpoint = await archive.latest_checkpoint(
-            agent_run_id=agent_run_id,
-            include_interrupted=True,
-        )
+        with runtime_object_source_reads():
+            checkpoint = await archive.latest_checkpoint(
+                agent_run_id=agent_run_id,
+                include_interrupted=True,
+            )
         if checkpoint is None or checkpoint.state != "interrupted":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(
@@ -1791,7 +1849,7 @@ class LocalExecutionBackend:
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
                         raise
-                    current = await self._execution.executions.get(
+                    current = await self.load_execution(
                         execution_id,
                         tenant_id=self._tenant_id,
                     )
@@ -1808,7 +1866,7 @@ class LocalExecutionBackend:
                         return
                     await asyncio.sleep(1)
                     continue
-                current = await self._execution.executions.get(
+                current = await self.load_execution(
                     execution_id,
                     tenant_id=self._tenant_id,
                 )
@@ -1847,7 +1905,7 @@ class LocalExecutionBackend:
                 expected_revision=execution.revision if recovery_operation is not None else None,
             )
 
-        session = await self._conversation.sessions.get(
+        session = await self._load_session(
             execution.session_id,
             tenant_id=self._tenant_id,
         )
@@ -1976,7 +2034,7 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLED,
         } and (handoff.conversation is not None or outcome.output is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution = await self._execution.executions.get(
+        execution = await self.load_execution(
             checkpoint.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -1998,15 +2056,18 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if handoff.source_agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if execution.status is not ExecutionStatus.SUCCEEDED:
+                if execution.durable_trace and execution.status is not ExecutionStatus.SUCCEEDED:
                     await self._agent_run_lifecycle.materialize_from_recovery(
                         target=RuntimeDomain.EXECUTION,
                         agent_run_id=handoff.source_agent_run_id,
                         execution_id=checkpoint.execution_id,
                     )
-                agent_run_checkpoint = await self._run_stores[
+                checkpoint_domain = (
                     RuntimeDomain.EXECUTION
-                ].latest_checkpoint(
+                    if execution.durable_trace
+                    else RuntimeDomain.RECOVERY
+                )
+                agent_run_checkpoint = await self._run_stores[checkpoint_domain].latest_checkpoint(
                     agent_run_id=handoff.source_agent_run_id,
                 )
                 if (
@@ -2155,7 +2216,7 @@ class LocalExecutionBackend:
         intent = handoff.conversation
         if intent is None:
             return
-        session = await self._conversation.sessions.get(
+        session = await self._load_session(
             intent.session_id, tenant_id=self._tenant_id
         )
         if session is None:
@@ -2242,7 +2303,7 @@ class LocalExecutionBackend:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
-            latest = await self._conversation.sessions.get(
+            latest = await self._load_session(
                 intent.session_id,
                 tenant_id=self._tenant_id,
             )
@@ -2319,7 +2380,7 @@ class LocalExecutionBackend:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._execution.executions.get(
+            current = await self.load_execution(
                 execution.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -2430,7 +2491,7 @@ class LocalExecutionBackend:
         if handoff is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         outcome = handoff.outcome
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             checkpoint.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -2547,7 +2608,7 @@ class LocalExecutionBackend:
                 ErrorCode.EXECUTION_RESULT_CONFLICT,
             }:
                 raise
-            latest = await self._execution.executions.get(
+            latest = await self.load_execution(
                 current.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -2569,7 +2630,7 @@ class LocalExecutionBackend:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        execution = await self._execution.executions.get(
+        execution = await self.load_execution(
             checkpoint.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -2582,9 +2643,9 @@ class LocalExecutionBackend:
             or execution.error_diagnostics != handoff.outcome.error_diagnostics
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = await self._execution.executions.get_result(
-            checkpoint.execution_id,
-            tenant_id=self._tenant_id,
+        repository = self._execution.executions
+        result = await repository.state_store.read(
+            lambda _transaction: repository.get_result(checkpoint.execution_id, tenant_id=self._tenant_id)
         )
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2634,7 +2695,7 @@ class LocalExecutionBackend:
 
         tasks = tuple(self._tasks.items())
         for execution_id, task in tasks:
-            current = await self._execution.executions.get(
+            current = await self.load_execution(
                 execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -2867,12 +2928,15 @@ class LocalExecutionBackend:
         value = payload.decode() if payload.kind == "inline" else json.loads(await read_runtime_object(self._execution_objects, payload.ref))
         return ExecutionInputContext.from_payload(value)
 
-    async def _persist_input_context(self, execution: ExecutionRecord, context: ExecutionInputContext) -> ExecutionRecord:
+    async def _prepare_input_context(self, context: ExecutionInputContext) -> RuntimePayloadRef:
         stored = StoredPayload.inline_json(context.to_payload())
         if not payload_fits_inline(stored, self._payload_policy):
             stored = StoredPayload.object(await put_runtime_object(self._execution_objects, RuntimeObjectKeyFactory(self._namespace),
                 RuntimeDomain.EXECUTION, self._tenant_id, canonical_json_bytes(context.to_payload())))
-        reference = RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
+        return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
+
+    async def _persist_input_context(self, execution: ExecutionRecord, context: ExecutionInputContext) -> ExecutionRecord:
+        reference = await self._prepare_input_context(context)
         current = execution
         while current.input_context is None:
             try:
@@ -2882,7 +2946,7 @@ class LocalExecutionBackend:
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-                current = await self._execution.executions.get(current.execution_id, tenant_id=self._tenant_id)
+                current = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
                 if current is None or current.status is not ExecutionStatus.STARTED:
                     raise AIError(ErrorCode.EXECUTION_CANCELLED) from error
         return current
@@ -2907,8 +2971,9 @@ class LocalExecutionBackend:
         metric_error_code: str | None = None
         claimed_from_admitted = False
         admission_claim: AgentAttemptClaim | None = None
+        prepared_admission: AgentAttemptClaim | None = None
         try:
-            current = await self._execution.executions.get(
+            current = await self.load_execution(
                 execution_id, tenant_id=self._tenant_id
             )
             if current is None:
@@ -2928,18 +2993,21 @@ class LocalExecutionBackend:
                     expected_recovery_revision=checkpoint.revision,
                     expected_recovery_state=checkpoint.state,
                 )
-                current, checkpoint = (
-                    await self._runtime_commands.commit_agent_attempt_checkpoint(
-                        admission_claim,
+                if self._can_prepare_initial_attempt(current):
+                    prepared_admission = admission_claim
+                else:
+                    current, checkpoint = (
+                        await self._runtime_commands.commit_agent_attempt_checkpoint(
+                            admission_claim,
+                        )
                     )
-                )
-                producer_generation = admitted_generation
+                    producer_generation = admitted_generation
+                    _logger.info(
+                        "agent attempt activated: execution=%s sequence=%s",
+                        execution_id,
+                        current.agent_run_seq,
+                    )
                 claimed_from_admitted = True
-                _logger.info(
-                    "agent attempt activated: execution=%s sequence=%s",
-                    execution_id,
-                    current.agent_run_seq,
-                )
             elif checkpoint.state is RecoveryCheckpointState.WAITING:
                 if current.status is not ExecutionStatus.WAITING_DEFERRED:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2956,7 +3024,7 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if (
                 current.status is not ExecutionStatus.STARTED
-                or checkpoint.agent_run_id is None
+                or (checkpoint.agent_run_id is None and prepared_admission is None)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = self._execution_binding(current)
@@ -2968,26 +3036,14 @@ class LocalExecutionBackend:
                 checkpoint.repository_instruction_overlay
             )
             _validate_repository_instruction_frontier(checkpoint, repository_overlay)
-            agent_run_id = checkpoint.agent_run_id
+            agent_run_id = (make_agent_run_id(
+                namespace=self._namespace, tenant_id=self._tenant_id,
+                execution_id=execution_id, agent_run_seq=current.agent_run_seq + 1,
+            ) if prepared_admission is not None else checkpoint.agent_run_id)
             if producer_generation is None and resume is not None:
                 producer_generation = resume.producer_generation
-            if producer_generation is None:
+            if producer_generation is None and prepared_admission is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if self._live_broker.shared is not None:
-                shared_head = await self._execution.executions.get_history_head(
-                    execution_id, tenant_id=self._tenant_id,
-                )
-                if (shared_head is not None and shared_head.producer_generation == producer_generation
-                        and shared_head.producer_claim_id is not None):
-                    self._live_broker.admit_shared_producer(
-                        execution_id, producer_generation, shared_head.producer_claim_id,
-                    )
-            if isinstance(self._run_store, RuntimeAgentRunStore):
-                self._run_store.bind_execution_producer(
-                    agent_run_id,
-                    execution_id=execution_id,
-                    producer_generation=producer_generation,
-                )
             agent_conversation_id = make_agent_conversation_id(
                 namespace=self._namespace,
                 tenant_id=self._tenant_id,
@@ -2996,7 +3052,7 @@ class LocalExecutionBackend:
             session = (
                 None
                 if current.session_id is None
-                else await self._conversation.sessions.get(
+                else await self._load_session(
                     current.session_id,
                     tenant_id=self._tenant_id,
                 )
@@ -3067,7 +3123,7 @@ class LocalExecutionBackend:
                         except AIError as error:
                             if error.code is not ErrorCode.TOOL_EFFECT_UNKNOWN:
                                 raise
-                            persisted = await self._execution.executions.get(
+                            persisted = await self.load_execution(
                                 execution_id,
                                 tenant_id=self._tenant_id,
                             )
@@ -3085,26 +3141,6 @@ class LocalExecutionBackend:
                             metric_status = recovered.status.value
                             metric_error_code = recovered.error_code
                             return
-            tool_repository = self._tool_operations
-            tool_operations = (
-                RuntimeToolOperationBridge(
-                    tool_repository,
-                    self._recovery_objects,
-                    namespace=self._namespace,
-                    tenant_id=self._tenant_id,
-                    execution_id=execution_id,
-                    agent_run_id=agent_run_id,
-                    binding_digest=current.binding_digest,
-                    owner=tool_owner,
-                    background_tasks=execution_tasks,
-                    payload_policy=self._payload_policy,
-                    recovery_agent_run_id=recovery_history_agent_run_id,
-                    producer_generation=producer_generation,
-                    terminal_commands=self._runtime_commands,
-                )
-                if tool_repository is not None
-                else None
-            )
             accepted_context = await self.load_input_context(current.input_context)
             loaded_context = LoadedModelContext(())
             session_history_source = (
@@ -3120,53 +3156,45 @@ class LocalExecutionBackend:
                     session_history_owner = history_id
                 elif session is not None and session.continuation is not None:
                     session_history_owner = session.continuation.agent_run_id
-            if source_replay_history is not None:
-                history = source_replay_history
-            elif recovery_history_agent_run_id is not None:
-                loaded_context = await self._run_store.load_loaded_model_context(
-                    RuntimeDomain.RECOVERY,
-                    recovery_history_agent_run_id,
-                )
-                history = list(loaded_context.model_messages())
-            elif accepted_context is not None:
-                history = list(accepted_context.model_messages())
-                loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
-            elif session_history_source:
-                if session_history_owner is not None:
-                    if (
-                        isinstance(self._run_store, RuntimeAgentRunStore)
-                        and session is not None
-                        and session.continuation is not None
-                        and history_id is not None
-                    ):
-                        loaded_context = (
-                            await self._run_store.load_committed_conversation_context(
-                                history_id=history_id,
-                                agent_run_id=session.continuation.agent_run_id,
-                                message_count=session.continuation.message_count,
-                                tenant_id=self._tenant_id,
+            with runtime_object_source_reads():
+                if source_replay_history is not None:
+                    history = source_replay_history
+                elif recovery_history_agent_run_id is not None:
+                    loaded_context = await self._run_store.load_loaded_model_context(
+                        RuntimeDomain.RECOVERY,
+                        recovery_history_agent_run_id,
+                    )
+                    history = list(loaded_context.model_messages())
+                elif accepted_context is not None:
+                    history = list(accepted_context.model_messages())
+                    loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
+                elif session_history_source:
+                    if session_history_owner is not None:
+                        if (
+                            isinstance(self._run_store, RuntimeAgentRunStore)
+                            and session is not None
+                            and session.continuation is not None
+                            and history_id is not None
+                        ):
+                            loaded_context = (
+                                await self._run_store.load_committed_conversation_context(
+                                    history_id=history_id,
+                                    agent_run_id=session.continuation.agent_run_id,
+                                    message_count=session.continuation.message_count,
+                                    tenant_id=self._tenant_id,
+                                )
                             )
-                        )
-                    else:
-                        loaded_context = await self._run_store.load_loaded_model_context(
-                            RuntimeDomain.CONVERSATION,
-                            session_history_owner,
-                        )
-                history = list(loaded_context.model_messages())
-            else:
-                history = cast("list[ModelMessage]", await self._history(current))
+                        else:
+                            loaded_context = await self._run_store.load_loaded_model_context(
+                                RuntimeDomain.CONVERSATION,
+                                session_history_owner,
+                            )
+                    history = list(loaded_context.model_messages())
+                else:
+                    history = cast("list[ModelMessage]", await self._history(current))
             session_history_start = (
                 accepted_context.replace_history_system_prompt if accepted_context is not None
                 else current.lineage_kind is ExecutionLineageKind.SESSION_RESUME and bool(history)
-            )
-            if isinstance(self._run_store, RuntimeAgentRunStore):
-                self._run_store.register_context_baseline(agent_run_id, loaded_context)
-            repository_boundary = _RepositoryInstructionBoundary(
-                self._recovery_coordinator,
-                current,
-                initial_repository_instructions,
-                repository_overlay,
-                producer_generation=producer_generation,
             )
             run_user_prompt = (
                 None
@@ -3206,13 +3234,14 @@ class LocalExecutionBackend:
                 )
             session_metadata: Mapping[str, JsonValue] = {}
             if current.session_id is not None:
-                session = await self._conversation.sessions.get(
+                session = await self._load_session(
                     current.session_id,
                     tenant_id=self._tenant_id,
                 )
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 session_metadata = session.metadata
+            prepared_context = None
             if accepted_context is None:
                 memory_capture = None
                 reason = None
@@ -3226,14 +3255,85 @@ class LocalExecutionBackend:
                     repository_instructions=None if initial_repository_instructions is None else initial_repository_instructions.to_payload(),
                     replace_history_system_prompt=session_history_start, unavailable_reason=reason)
                 proposed_context = accepted_context
-                current = await self._persist_input_context(current, accepted_context)
-                accepted_context = await self.load_input_context(current.input_context)
-                if accepted_context.digest != proposed_context.digest:
-                    history = list(accepted_context.model_messages())
-                    loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
-                    session_history_start = accepted_context.replace_history_system_prompt
-                    if isinstance(self._run_store, RuntimeAgentRunStore):
-                        self._run_store.register_context_baseline(agent_run_id, loaded_context)
+                if prepared_admission is not None:
+                    prepared_context = await self._prepare_input_context(accepted_context)
+                else:
+                    current = await self._persist_input_context(current, accepted_context)
+                    accepted_context = await self.load_input_context(current.input_context)
+                    if accepted_context.digest != proposed_context.digest:
+                        history = list(accepted_context.model_messages())
+                        loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
+                        session_history_start = accepted_context.replace_history_system_prompt
+            if prepared_admission is not None:
+                if prepared_context is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    current, checkpoint = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
+                        prepared_admission, prepared_context,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    observed = await self.load_execution(execution_id, tenant_id=self._tenant_id)
+                    if observed is not None and observed.agent_run_seq == 0:
+                        if observed.status is ExecutionStatus.CANCELLING:
+                            raise asyncio.CancelledError from error
+                        if observed.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                            metric_status = observed.status.value
+                            metric_error_code = observed.error_code
+                            return
+                    raise
+                producer_generation = prepared_admission.expected_execution_revision + 1
+                _logger.info(
+                    "agent attempt activated: execution=%s sequence=%s",
+                    execution_id,
+                    current.agent_run_seq,
+                )
+            if self._live_broker.shared is not None:
+                shared_head = await self._execution.executions.get_history_head(
+                    execution_id, tenant_id=self._tenant_id,
+                )
+                if (shared_head is not None and shared_head.producer_generation == producer_generation
+                        and shared_head.producer_claim_id is not None):
+                    self._live_broker.admit_shared_producer(
+                        execution_id, producer_generation, shared_head.producer_claim_id,
+                    )
+            if isinstance(self._run_store, RuntimeAgentRunStore):
+                self._run_store.bind_execution_producer(
+                    agent_run_id,
+                    execution_id=execution_id,
+                    producer_generation=producer_generation,
+                    restart_checkpoints=current.restart_checkpoints,
+                    durable_trace=current.durable_trace,
+                )
+                self._run_store.register_context_baseline(agent_run_id, loaded_context)
+            repository_boundary = _RepositoryInstructionBoundary(
+                self._recovery_coordinator,
+                current,
+                initial_repository_instructions,
+                repository_overlay,
+                producer_generation=producer_generation,
+            )
+            tool_repository = self._tool_operations
+            tool_operations = (
+                RuntimeToolOperationBridge(
+                    tool_repository,
+                    self._recovery_objects,
+                    namespace=self._namespace,
+                    tenant_id=self._tenant_id,
+                    execution_id=execution_id,
+                    agent_run_id=agent_run_id,
+                    binding_digest=current.binding_digest,
+                    owner=tool_owner,
+                    background_tasks=execution_tasks,
+                    payload_policy=self._payload_policy,
+                    recovery_agent_run_id=recovery_history_agent_run_id,
+                    producer_generation=producer_generation,
+                    terminal_commands=self._runtime_commands,
+                )
+                if tool_repository is not None
+                else None
+            )
             if current.context_imported:
                 session_metadata = accepted_context.session_metadata
                 if memory is not None:
@@ -3249,6 +3349,7 @@ class LocalExecutionBackend:
                 session_metadata=session_metadata,
                 memory_scope=current.memory_scope,
                 correlation=current.correlation,
+                deadline_at=None if request.budget is None else request.budget.deadline_at,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store
@@ -3337,7 +3438,7 @@ class LocalExecutionBackend:
             except Exception as error:
                 if isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED:
                     raise asyncio.CancelledError from error
-                current = await self._execution.executions.get(
+                current = await self.load_execution(
                     execution_id,
                     tenant_id=self._tenant_id,
                 )
@@ -3375,7 +3476,7 @@ class LocalExecutionBackend:
                         raise
                     except Exception as commit_error:
                         try:
-                            persisted = await self._execution.executions.get(
+                            persisted = await self.load_execution(
                                 execution_id,
                                 tenant_id=self._tenant_id,
                             )
@@ -3466,7 +3567,7 @@ class LocalExecutionBackend:
                     metric_status = "SUPERSEDED"
                     metric_error_code = None
                     return
-                persisted = await self._execution.executions.get(
+                persisted = await self.load_execution(
                     execution_id,
                     tenant_id=self._tenant_id,
                 )
@@ -3491,7 +3592,7 @@ class LocalExecutionBackend:
                     except asyncio.CancelledError:
                         raise
                     except Exception as commit_error:
-                        observed = await self._execution.executions.get(
+                        observed = await self.load_execution(
                             execution_id,
                             tenant_id=self._tenant_id,
                         )
@@ -3557,7 +3658,7 @@ class LocalExecutionBackend:
                 metric_status = "SUPERSEDED"
                 metric_error_code = None
                 return
-            current = await self._execution.executions.get(
+            current = await self.load_execution(
                 execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -3717,7 +3818,7 @@ class LocalExecutionBackend:
         session = (
             None
             if execution.session_id is None
-            else await self._conversation.sessions.get(
+            else await self._load_session(
                 execution.session_id,
                 tenant_id=self._tenant_id,
             )
@@ -3759,7 +3860,7 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
         if execution.fork_base_execution_id is None:
             return []
-        base = await self._execution.executions.get(
+        base = await self.load_execution(
             execution.fork_base_execution_id, tenant_id=self._tenant_id
         )
         if base is None or base.agent_run_seq < 1:
@@ -3894,7 +3995,7 @@ class LocalExecutionBackend:
         if producer_generation is None:
             if admission is None or admission.agent_run_seq != 0:
                 return False
-            current = await self._execution.executions.get(execution_id, tenant_id=self._tenant_id)
+            current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
             checkpoint = await self._recovery.checkpoints.get(execution_id, tenant_id=self._tenant_id)
             if (current is None or checkpoint is None
                     or current.agent_run_seq <= admission.agent_run_seq
@@ -3930,7 +4031,7 @@ class LocalExecutionBackend:
         *,
         producer_generation: int | None = None,
     ) -> ExecutionRecord:
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -3981,7 +4082,7 @@ class LocalExecutionBackend:
         history_id = None
         session = None
         if execution.session_id is not None:
-            session = await self._conversation.sessions.get(
+            session = await self._load_session(
                 execution.session_id,
                 tenant_id=self._tenant_id,
             )
@@ -4006,7 +4107,7 @@ class LocalExecutionBackend:
             )
         if execution.fork_base_execution_id is None:
             return None
-        base = await self._execution.executions.get(
+        base = await self.load_execution(
             execution.fork_base_execution_id,
             tenant_id=self._tenant_id,
         )
@@ -4045,7 +4146,7 @@ class LocalExecutionBackend:
         expected_revision: int | None = None,
         producer_generation: int | None = None,
     ) -> ExecutionRecord:
-        current = await self._execution.executions.get(
+        current = await self.load_execution(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -4855,7 +4956,7 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         current = observed_execution
         if current is None:
-            current = await self._execution.executions.get(
+            current = await self.load_execution(
                 execution.execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -4963,7 +5064,7 @@ class LocalExecutionBackend:
                     and current.session_id is not None
                     and agent_run_id is not None
                 ):
-                    session = await self._conversation.sessions.get(
+                    session = await self._load_session(
                         current.session_id,
                         tenant_id=self._tenant_id,
                     )
@@ -5171,7 +5272,7 @@ class LocalExecutionBackend:
             return current
         recovery_run = None
         recovery_agent_run_checkpoint = None
-        if agent_run_id is not None and status is not ExecutionStatus.SUCCEEDED:
+        if current.restart_checkpoints and agent_run_id is not None and status is not ExecutionStatus.SUCCEEDED:
             candidate_run = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
             candidate_checkpoint = await self._run_store.latest_checkpoint(
                 agent_run_id=agent_run_id,
@@ -5293,7 +5394,7 @@ class LocalExecutionBackend:
             durable_commit = False
             pending_count = 0
             try:
-                state_archive = isinstance(
+                state_archive = current.durable_trace and isinstance(
                     self._run_stores[RuntimeDomain.EXECUTION],
                     StateStepArchive,
                 )
@@ -5375,12 +5476,12 @@ class LocalExecutionBackend:
                             )
                 return committed
             except BaseException as error:
-                if plan is not None and not durable_commit:
+                if (plan is not None or not current.durable_trace) and not durable_commit:
                     if (
                         isinstance(error, AIError)
                         and error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
                     ):
-                        observed = await self._execution.executions.get(
+                        observed = await self.load_execution(
                             current.execution_id,
                             tenant_id=self._tenant_id,
                         )
@@ -5398,10 +5499,22 @@ class LocalExecutionBackend:
                                 or observed.result != commit.result
                                 or observed.error_code
                                 != commit.execution.error_code
+                                or observed.restart_checkpoints != current.restart_checkpoints
+                                or observed.durable_trace != current.durable_trace
                             ):
                                 raise AIError(
                                     ErrorCode.STORAGE_INTEGRITY_ERROR
                                 ) from error
+                            if not current.durable_trace:
+                                head = await self._execution.executions.get_history_head(
+                                    current.execution_id, tenant_id=self._tenant_id,
+                                )
+                                if (head is None or head.execution_id != current.execution_id
+                                        or head.state is not ExecutionHistoryState.CLOSED
+                                        or head.seal_digest is not None
+                                        or commit.producer_generation is not None
+                                        and head.producer_generation != commit.producer_generation):
+                                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                             committed = ExecutionTerminalCommitResult(
                                 observed,
                                 commit.result,
@@ -5415,16 +5528,18 @@ class LocalExecutionBackend:
                                 pending_count=pending_count,
                                 durable_seq=observed.event_seq,
                             )
-                            await asyncio.shield(
-                                self._agent_run_lifecycle.reconcile_execution_terminal_seal(
-                                    plan
+                            if plan is not None:
+                                await asyncio.shield(
+                                    self._agent_run_lifecycle.reconcile_execution_terminal_seal(
+                                        plan
+                                    )
                                 )
-                            )
                             return committed
-                        await self._agent_run_lifecycle.discard_execution_terminal_seal(
-                            plan
-                        )
-                    else:
+                        if plan is not None:
+                            await self._agent_run_lifecycle.discard_execution_terminal_seal(
+                                plan
+                            )
+                    elif plan is not None:
                         await self._agent_run_lifecycle.discard_execution_terminal_seal(
                             plan
                         )
@@ -5497,7 +5612,7 @@ class LocalExecutionBackend:
         if agent_run_id is not None:
             history_id = None
             if current.session_id is not None:
-                session = await self._conversation.sessions.get(
+                session = await self._load_session(
                     current.session_id,
                     tenant_id=self._tenant_id,
                 )

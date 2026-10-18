@@ -208,7 +208,9 @@ class DefaultExternalService:
         *,
         tenant_id: str,
     ) -> RecoveryCheckpoint | None:
-        execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+        execution = await self._executions.state_store.read(
+            lambda _transaction: self._executions.get(execution_id, tenant_id=tenant_id)
+        )
         if execution is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         checkpoint = await self._checkpoints.get(execution_id, tenant_id=tenant_id)

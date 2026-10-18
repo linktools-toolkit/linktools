@@ -2,9 +2,23 @@
 
 Observation events identify progress; the corresponding Runtime domain owns
 its recorded content. Live progress can arrive before its history is persisted.
-Retained execution routes coalesce observation writes with one Runtime-owned
-timer. The first queued observation starts a one-second window; the shared
-tick flushes queued runs. A run reaching 16 observation boundaries flushes
+Detailed execution persistence requires `DurableTraceCapability()` registered
+at Runtime scope; storage retention alone does not select it. Without this
+capability, the owning Runtime exposes its existing live staging content while
+retained locally; Session history and final results remain durable. See
+[optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
+
+For runs with restart checkpoints disabled, model-boundary control checks may
+reuse one execution/history-head observation captured within the last three
+seconds. Both records share the same source capture and expiry. Without a hot
+record cache, each check reads the source. Tool admission, recovery checkpoints,
+terminal commits and result consumption retain their authoritative transaction
+checks. Task-owned runs and their delegated descendants keep source-only model control
+checks, including on transient execution routes.
+
+With durable trace enabled, retained execution routes coalesce observation writes
+with one Runtime-owned timer. The first queued observation starts a three-second window; the shared
+tick flushes queued runs. A run reaching 128 observation boundaries flushes
 earlier. Each run keeps its own transaction and completion barrier, so a blocked
 run does not stop another run's publication. An idle Runtime performs no flush.
 Storage latency and contention can extend publication time. A blocked provider
@@ -16,7 +30,8 @@ results may be published while sibling tools are still running; their pending
 transcript group contains complete results, not half-received tool bodies.
 While a retained model request is `RUNNING`, its public interaction contains
 identity/status metadata and empty request/response content. The prepared input
-stays with the active request; required recovery captures remain unchanged.
+stays with the active request. Separately enabled restart checkpoints preserve
+recovery context without publishing public trace.
 Completion or a controlled abnormal end publishes the actual prepared input and
 any received response. Requesting content early does not force a write or provider completion.
 Complete outgoing raw input may already be captured before provider completion;
@@ -26,8 +41,8 @@ may be refined during preparation without changing request identity or start tim
 With shared retained backing storage, independently opened
 `RuntimeHistory.open(...)` readers see the committed prefix while the execution
 is active. An immediate read after a live notification can be empty; a fresh
-read after publication includes the new facts. Recovery checkpoints remain
-durable independently of public observation publication. Terminal handoffs and
+read after publication includes the new facts. Opted-in recovery checkpoints
+remain durable independently of public observation publication. Terminal handoffs and
 Runtime close drain queued observations before completing. Separate in-memory
 storage instances do not share state. An explicit TRANSIENT execution route
 exposes active content immediately in its owning Runtime/process and discards
@@ -270,11 +285,12 @@ query can observe the completed association.
 
 ## Visibility, paging and persistence
 
-For retained execution routes, public history reads the canonical EXECUTION
-owner. Admission, prepared model requests, completed response parts, and
+For executions admitted with durable trace and a retained execution route,
+public history reads the canonical EXECUTION owner. Admission, prepared model requests, completed response parts, and
 model-facing tool returns enter the next observation batch; raw streaming
-deltas do not become complete history parts. Checkpoint and terminal operations
-force pending observations through their required commit boundary. A public
+deltas do not become complete history parts. Terminal operations and Runtime
+close drain queued observations. Restart checkpoint commits remain independent
+of public observation publication. A public
 read captures the committed run identity and transcript, event, and model-request
 high-water marks together. Immutable body references can then be resolved
 outside that read boundary. Readers do not fall back to producer-local staging

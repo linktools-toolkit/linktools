@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, RestartCheckpointCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
 from linktools.ai.task import TaskGraph, TaskNode
 
@@ -188,6 +188,7 @@ def _recovery_group(subagent: bool, change: str = "none") -> CapabilityGroup:
         return value
 
     group = CapabilityGroup("deadline-recovery")
+    group.capability(RestartCheckpointCapability(), scope="runtime")
     group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=("child",) if subagent else ())

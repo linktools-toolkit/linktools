@@ -48,6 +48,8 @@ def _binding() -> AgentBindingContract:
 
 def _execution(now: datetime) -> ExecutionRecord:
     return ExecutionRecord(
+        restart_checkpoints=True,
+        durable_trace=True,
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,

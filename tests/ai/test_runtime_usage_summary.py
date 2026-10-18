@@ -183,6 +183,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
         binding_kind="agent",
         status=ExecutionStatus.STARTED,
         agent_run_seq=1,
+        durable_trace=True,
     )
     reader = StepExecutionHistoryReader(
         namespace=namespace,

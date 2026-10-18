@@ -50,7 +50,13 @@ class CapabilityContribution(Generic[AppT]):
         "AbstractCapability[AgentContext[AppT]]"
     )
 
+    scope: Literal["agent", "runtime"] = field(default="agent", kw_only=True)
+
     def __post_init__(self) -> None:
+        if self.scope not in ("agent", "runtime") or (
+            self.scope == "runtime" and self.kind != "capability"
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind not in {
             "tool",
             "agent",
@@ -86,6 +92,9 @@ class CapabilityContribution(Generic[AppT]):
             if capability.id is None and capability.defer_loading:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             _validate_external_capability_id(self.id)
+            if self.scope == "runtime":
+                _validate_runtime_capability(capability)
+                capability.apply(_validate_runtime_capability)
 
     @property
     def revision(self) -> int:
@@ -103,6 +112,7 @@ class CapabilityContribution(Generic[AppT]):
         *,
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
+        scope: Literal["agent", "runtime"] = "agent",
     ) -> "CapabilityContribution[AppT]":
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -118,6 +128,7 @@ class CapabilityContribution(Generic[AppT]):
                 revision=revision,
                 config=config,
             ),
+            scope=scope,
         )
 
     @classmethod
@@ -183,7 +194,17 @@ def _freeze_contribution(
         value.id,
         value.value,
         value.contract,
+        scope=value.scope,
     )
+
+
+def _validate_runtime_capability(capability: AbstractCapability[object]) -> None:
+    if not isinstance(capability.defer_loading, bool) or capability.defer_loading:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if capability.id is not None:
+        if not isinstance(capability.id, str) or not capability.id.strip():
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        _validate_external_capability_id(capability.id)
 
 
 def _contribution_contract(

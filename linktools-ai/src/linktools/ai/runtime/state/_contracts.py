@@ -891,8 +891,12 @@ class ExecutionRecord:
     started_at: datetime | None = None
     budget_scope_id: str | None = field(default=None, metadata={"wire_optional": True})
     tool_response_ref: AssetVersionRef | None = field(default=None, metadata={"wire_optional": True})
+    restart_checkpoints: bool = False
+    durable_trace: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.restart_checkpoints, bool) or not isinstance(self.durable_trace, bool):
+            raise TypeError("execution persistence guarantees must be bool")
         if self.tool_response_ref is not None and not isinstance(self.tool_response_ref, AssetVersionRef):
             raise TypeError("execution tool response reference is invalid")
         if self.budget_scope_id is not None and (
@@ -1093,14 +1097,16 @@ class ExecutionHistoryState(str, Enum):
     __format__ = str.__format__
     OPEN = "open"
     SEALED = "sealed"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionHistoryHeadRecord:
     """Durable fencing head for one execution's mutable history.
 
-    ``seal_digest`` is set only by the terminal boundary that flips the state
-    to SEALED; every earlier mutation replaces the head with revision + 1.
+    Every terminal boundary closes producer writes: SEALED commits a durable
+    trace digest; CLOSED retains only the control barrier. Earlier mutations
+    replace the OPEN head with revision + 1.
     """
 
     execution_id: str
@@ -1129,8 +1135,8 @@ class ExecutionHistoryHeadRecord:
             raise ValueError("execution history head identity cannot be empty")
         if self.state is ExecutionHistoryState.SEALED and not self.seal_digest:
             raise ValueError("sealed history head requires a seal digest")
-        if self.state is ExecutionHistoryState.OPEN and self.seal_digest is not None:
-            raise ValueError("open history head cannot carry a seal digest")
+        if self.state in {ExecutionHistoryState.OPEN, ExecutionHistoryState.CLOSED} and self.seal_digest is not None:
+            raise ValueError("unarchived history head cannot carry a seal digest")
 
 
 @dataclass(frozen=True, slots=True)

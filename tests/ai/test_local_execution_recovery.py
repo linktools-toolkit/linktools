@@ -3,10 +3,11 @@
 """Local execution recovery and worker-supervision contracts."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 from linktools.ai.agent import AgentBindingContract
@@ -74,6 +75,8 @@ def _record() -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     binding_contract = _binding_contract()
     return ExecutionRecord(
+        restart_checkpoints=True,
+        durable_trace=True,
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,
@@ -102,9 +105,18 @@ def _record() -> ExecutionRecord:
     )
 
 
+_ValueT = TypeVar("_ValueT")
+
+
+class _ReadStateStore:
+    async def read(self, callback: Callable[[object], Awaitable[_ValueT]]) -> _ValueT:
+        return await callback(None)
+
+
 class _Executions:
     def __init__(self, record: ExecutionRecord) -> None:
         self.record = record
+        self.state_store = _ReadStateStore()
 
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord:
         del execution_id, tenant_id

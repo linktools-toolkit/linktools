@@ -23,6 +23,7 @@ from linktools.ai.runtime._model_interaction import StagedContextInline, StagedC
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+from ._runtime_test_helpers import _persistence_capabilities
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_incremental_projection_boundaries import _storage
@@ -122,7 +123,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
     try:
         async with Runtime.open(
             "completed-call-persistence", models=_Models(FunctionModel(stream_function=stream)),
-            storage=state, capabilities=(group,),
+            storage=state, capabilities=(_persistence_capabilities(trace=True), group,),
         ) as runtime:
             execution = await runtime.agents.get("default").start("Respond slowly")
             execution_id = execution.execution_id
@@ -219,7 +220,7 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     try:
         async with Runtime.open(
             "partial-tool-arguments", models=_Models(FunctionModel(stream_function=stream)),
-            storage=_storage(backend, tmp_path), capabilities=(group,),
+            storage=_storage(backend, tmp_path), capabilities=(_persistence_capabilities(trace=True), group,),
         ) as runtime:
             execution = await runtime.agents.get("default").start("Call work")
             execution_id = execution.execution_id

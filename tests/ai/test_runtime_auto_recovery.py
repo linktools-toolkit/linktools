@@ -14,6 +14,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import RestartCheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import ExecutionRequest
 from linktools.ai.runtime.state._contracts import ExecutionRecord
@@ -27,6 +28,7 @@ _NAMESPACE = "startup-recovery"
 
 def _capabilities() -> CapabilityGroup[None]:
     group: CapabilityGroup[None] = CapabilityGroup(_NAMESPACE)
+    group.capability(RestartCheckpointCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     return group
 

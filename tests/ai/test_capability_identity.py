@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for explicit Capability identity and contracts."""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 import pytest
 from linktools.ai.agent import OutputBinding
@@ -120,11 +120,7 @@ async def test_capability_identity_is_id_and_revision() -> None:
     first_candidate = (await first.capture()).contributions[0]
     second_candidate = (await second.capture()).contributions[0]
 
-    assert tuple(item.name for item in fields(CapabilityContribution)) == (
-        "kind",
-        "id",
-        "value",
-    )
+    assert first_candidate.scope == "agent"
     assert first_candidate.kind == "capability"
     assert first_candidate.id == "test-capability"
     assert first_candidate.revision == 1
@@ -282,3 +278,17 @@ async def test_anonymous_native_capabilities_require_explicit_ids() -> None:
         "prepare-tools",
         "select-model",
     }
+
+
+@pytest.mark.parametrize("scope", [None, "global", "", 1])
+def test_capability_scope_rejects_unsupported_values(scope: object) -> None:
+    group = CapabilityGroup[None]("group")
+    with pytest.raises(AIError) as raised:
+        group.capability(_Capability(), scope=scope)  # type: ignore[arg-type]
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+def test_runtime_scope_is_only_valid_for_native_capabilities() -> None:
+    with pytest.raises(AIError) as raised:
+        CapabilityContribution("agent", "default", AgentSpec("default"), scope="runtime")
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

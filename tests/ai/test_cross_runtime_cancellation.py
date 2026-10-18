@@ -10,7 +10,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import DurableTraceCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -55,6 +55,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
         monkeypatch.setattr(LocalExecutionBackend, "_commit_success", pause_success)
 
     group = CapabilityGroup("remote-cancel-release")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
@@ -228,6 +229,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
         ])
 
     group = CapabilityGroup("individual-tool-cancel")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.tool(fast, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("fast", "slow"))
@@ -305,6 +307,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
     group = CapabilityGroup("projection-cancel-conflict")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")

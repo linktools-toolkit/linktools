@@ -30,10 +30,11 @@ from ._filesystem_layout import (
     _require_layout_path, _sync_record_index_tree, _track_physical_task, _write_json, _write_text,
 )
 from ._filesystem_transaction import _FilesystemTransaction
+from ._record_cache import StateRecordCache
 from ._store import (
     StateCallback, StateGroupCallback, StateStorageGroup, StateTransaction, StoredOperation,
     StoredRecord, active_state_group_transaction, active_state_transaction, bind_state_scope,
-    reset_state_transaction,
+    reset_state_transaction, state_store_digest,
 )
 
 ValueT = TypeVar("ValueT")
@@ -434,6 +435,8 @@ class FilesystemStateStorageGroup:
                     store._consistency_lock.release()
         finally:
             self._mutation_lock.release()
+            for store in members:
+                await store._reads.invalidate()
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
@@ -813,6 +816,7 @@ class FilesystemStateStore:
         runtime_domain: str,
         _range_index: bool = False,
         group: FilesystemStateStorageGroup | None = None,
+        cache: object | None = None,
     ) -> None:
         self._root = Path(root).expanduser().resolve()
         self._namespace = namespace
@@ -831,6 +835,9 @@ class FilesystemStateStore:
         self._closed = False
         self._poisoned = False
         self._initialized = False
+        self._reads = StateRecordCache(
+            self, cache, scope=f"filesystem:{state_store_digest(namespace, tenant_id, runtime_domain).hex()}",
+        )
         self._close_task: asyncio.Task[None] | None = None
         self._pending_physical: set[asyncio.Task[None]] = set()
         self._index: _FilesystemIndex | None = None
@@ -882,6 +889,16 @@ class FilesystemStateStore:
             raise RuntimeError("filesystem close task was not created")
         await asyncio.shield(task)
 
+    async def read_record(self, key: bytes) -> StoredRecord | None:
+        """Read ordinary committed metadata with bounded cache freshness."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_record(key)
+
+    async def read_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Read ordinary metadata; explicit transaction scopes stay source-only."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_records(keys)
+
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
         active = active_state_transaction(self)
@@ -915,6 +932,7 @@ class FilesystemStateStore:
         return self._index
 
     async def _close_inner(self) -> None:
+        await self._reads.close()
         await self._storage_group.close()
         self._index = None
         self._index_generation = None

@@ -6,7 +6,6 @@ import asyncio
 import json
 import math
 import time
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
@@ -67,6 +66,7 @@ from .service_api import (
     SessionView,
     UpdateSessionRequest,
 )
+from .state._object_router import runtime_object_source_reads
 from .state._contracts import (
     ConversationCursor,
     ConversationRepositories,
@@ -177,8 +177,6 @@ class DefaultSessionService:
         self._release_terminal = release_terminal or _no_release_terminal
         self._workspace_access = workspace_access
         self._cache = cache if isinstance(cache, CacheBackend) else None
-        # Monotonic timestamps and source identity belong to this service lifetime.
-        self._display_cache_scope = uuid.uuid4().hex
         self._display_reads: set[asyncio.Future[None]] = set()
         self._display_close_started = False
         self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
@@ -330,7 +328,7 @@ class DefaultSessionService:
         """
         if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not math.isfinite(max_age) or max_age < 0:
             raise ValueError("max_age must be finite and non-negative")
-        started = time.monotonic()
+        started = time.time()
         cache_key = None
         async with self._session_consumer(
             session_id, principal.tenant_id,
@@ -355,7 +353,7 @@ class DefaultSessionService:
                     cacheable_request = False
             if cacheable_request:
                 cache_key = "session-display:v1:" + canonical_sha256({
-                    "scope": self._display_cache_scope,
+                    "namespace": self._conversation.sessions.namespace,
                     "principal": [principal.tenant_id, principal.principal_id, principal.kind],
                     "session_id": session_id, "cursor": cursor, "limit": limit,
                 })
@@ -384,11 +382,12 @@ class DefaultSessionService:
             session = await self._view(record, principal, active=active)
             if self._transcript_store is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            timeline = await project_captured_session_timeline(
-                state, self._transcript_store, self._cursor_signer,
-                session_id=session_id, tenant_id=principal.tenant_id,
-                transcript_tenant_id=self._conversation.sessions.tenant_id,
-            )
+            with runtime_object_source_reads():
+                timeline = await project_captured_session_timeline(
+                    state, self._transcript_store, self._cursor_signer,
+                    session_id=session_id, tenant_id=principal.tenant_id,
+                    transcript_tenant_id=self._conversation.sessions.tenant_id,
+                )
             detail = SessionDetail(session, timeline)
             if cache_key is not None and record.timeline_parent_session_id is None:
                 await self._cache_display(cache_key, state, detail, started, max_age)
@@ -492,7 +491,7 @@ class DefaultSessionService:
             if (entry["key"] != key or not isinstance(started, (float, int))
                     or not isinstance(expires, (float, int))
                     or not math.isfinite(started) or not math.isfinite(expires)
-                    or not started <= time.monotonic() < min(expires, started + max_age)):
+                    or not started <= time.time() < min(expires, started + max_age)):
                 return None
             detail = self._decode_display(entry["detail"])
             if detail.session.session_id != header.id:
@@ -560,7 +559,7 @@ class DefaultSessionService:
                     and head.message_count >= required_end)
 
         valid = await session_store.storage_group.read_many((session_store, execution_store), validate)
-        if valid and time.monotonic() < min(expires, started + max_age):
+        if valid and time.time() < min(expires, started + max_age):
             return detail
         return None
 
@@ -568,7 +567,7 @@ class DefaultSessionService:
         self, key: str, state: SessionTimelineCapture, detail: SessionDetail,
         started: float, max_age: float,
     ) -> None:
-        if state.root.history_id is None or time.monotonic() >= started + max_age:
+        if state.root.history_id is None or time.time() >= started + max_age:
             return
         try:
             entry = {
@@ -973,7 +972,7 @@ class DefaultSessionService:
             digest,
         )
         if operation.status is OperationStatus.SUCCEEDED:
-            closed = await self._conversation.sessions.get(
+            closed = await self._load_session(
                 session_id, tenant_id=request.principal.tenant_id
             )
             if closed is None:
@@ -991,7 +990,7 @@ class DefaultSessionService:
                 closed.continuation,
             )
             return view
-        current = await self._conversation.sessions.get(
+        current = await self._load_session(
             session_id,
             tenant_id=request.principal.tenant_id,
         )
@@ -1033,7 +1032,7 @@ class DefaultSessionService:
                         ErrorCode.SESSION_CONFLICT,
                     }:
                         raise
-                    latest = await self._conversation.sessions.get(
+                    latest = await self._load_session(
                         session_id,
                         tenant_id=request.principal.tenant_id,
                     )
@@ -1076,7 +1075,7 @@ class DefaultSessionService:
                         raise
                     if error.code is not ErrorCode.SESSION_CONFLICT:
                         raise
-                    current = await self._conversation.sessions.get(
+                    current = await self._load_session(
                         session_id,
                         tenant_id=request.principal.tenant_id,
                     )
@@ -1091,7 +1090,7 @@ class DefaultSessionService:
                     }:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             while True:
-                current = await self._conversation.sessions.get(
+                current = await self._load_session(
                     session_id,
                     tenant_id=request.principal.tenant_id,
                 )
@@ -1121,7 +1120,7 @@ class DefaultSessionService:
                         timeout=request.wait_timeout_seconds,
                     )
                 except asyncio.TimeoutError as error:
-                    current = await self._conversation.sessions.get(
+                    current = await self._load_session(
                         session_id,
                         tenant_id=request.principal.tenant_id,
                     )
@@ -1136,7 +1135,7 @@ class DefaultSessionService:
                         )
                     raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
                 break
-            current = await self._conversation.sessions.get(
+            current = await self._load_session(
                 session_id,
                 tenant_id=request.principal.tenant_id,
             )
@@ -1195,7 +1194,7 @@ class DefaultSessionService:
                 ErrorCode.SESSION_CONFLICT,
             }:
                 raise
-            latest = await self._conversation.sessions.get(
+            latest = await self._load_session(
                 session_id,
                 tenant_id=tenant_id,
             )
@@ -1282,7 +1281,7 @@ class DefaultSessionService:
             raise cleanup_error
 
     async def _wait_for_no_active(self, session_id: str, tenant_id: str) -> None:
-        record = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
+        record = await self._load_session(session_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution = await self._active_admitted_execution(record)
@@ -1298,10 +1297,16 @@ class DefaultSessionService:
                 PrincipalKind.LOCAL_TRUSTED.value,
             ),
         )
-        current = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
+        current = await self._load_session(session_id, tenant_id=tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._reconcile_terminal_admission(current)
+
+    async def _load_session(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
+        repository = self._conversation.sessions
+        return await repository.state_store.read(
+            lambda _transaction: repository.get(session_id, tenant_id=tenant_id)
+        )
 
     async def _authorized(
         self, session_id: str, principal: Principal, action: AuthorizationAction
@@ -1317,6 +1322,7 @@ class DefaultSessionService:
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        self._check_display_authority(record, header)
         return record
 
     async def _view(

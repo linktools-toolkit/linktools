@@ -43,6 +43,7 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
+from .state._object_router import runtime_object_source_reads
 from ._event import project_event_payload
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
@@ -294,7 +295,7 @@ class RuntimeHistory:
         *,
         principal: Principal,
     ) -> ExecutionResult:
-        record = await self._authorized_record(execution_id, principal)
+        record = await self._authorized_record(execution_id, principal, committed=True)
         if record.status is ExecutionStatus.RECOVERY_REQUIRED:
             if record.error_code is None or record.error_diagnostics is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1089,7 +1090,8 @@ class RuntimeHistory:
                 if payload.ref is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 if self._object_reader is not None:
-                    raw = await self._object_reader(RuntimeDomain.EXECUTION, payload.ref)
+                    with runtime_object_source_reads():
+                        raw = await self._object_reader(RuntimeDomain.EXECUTION, payload.ref)
                 else:
                     if self._execution_objects is None:
                         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1110,6 +1112,7 @@ class RuntimeHistory:
         self,
         execution_id: str,
         principal: Principal,
+        *, committed: bool = False,
     ) -> ExecutionRecord:
         executions, authorization = self._require_direct_reader()
         header = await executions.get_header(
@@ -1123,9 +1126,11 @@ class RuntimeHistory:
             AuthorizationAction.EXECUTION_READ,
             header,
         )
-        record = await executions.get(
-            execution_id,
-            tenant_id=principal.tenant_id,
+        record = (
+            await executions.state_store.read(
+                lambda _transaction: executions.get(execution_id, tenant_id=principal.tenant_id)
+            )
+            if committed else await executions.get(execution_id, tenant_id=principal.tenant_id)
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)

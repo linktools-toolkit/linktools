@@ -14,6 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy, Workspace, WorkspaceInstructionResolver, WorkspacePolicy
+from ._runtime_test_helpers import _persistence_capabilities
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -54,7 +55,7 @@ async def test_runtime_path_retry_rechecks_allowed_target(tmp_path: Path, bad_ta
     group.agent("reader", model="default", allow_tools=("read_file",))
     async with Runtime.open(
         "paths", models=_Models(_UsageFunctionModel(model)), storage=RuntimeStorage.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path),
+        capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=Workspace.load(tmp_path),
             sandbox=LocalSandbox(read_policy=ReadOnlySandboxPolicy(("allowed.txt", "missing.txt")))), group),
     ) as runtime:
         execution = await runtime.agents.get("reader").start("read")
@@ -96,7 +97,7 @@ async def test_runtime_instruction_failure_is_not_model_retry(tmp_path: Path, mo
     with nullcontext() if failure == "malformed_document" else pytest.raises(AIError, match=expected.value):
         async with Runtime.open(
             "paths", models=_Models(_UsageFunctionModel(model)), storage=RuntimeStorage.in_memory(),
-            capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
+            capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
         ) as runtime:
             execution = await runtime.agents.get("reader").start("read")
             if failure == "malformed_document":
@@ -143,7 +144,7 @@ async def test_shared_rule_boundary_allows_literal_paths_for_workspace_tools(tmp
     group.agent("reader", model="default", allow_tools=(name,))
     async with Runtime.open(
         "literal-paths", models=_Models(_UsageFunctionModel(model)), storage=RuntimeStorage.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
+        capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
     ) as runtime:
         execution = await runtime.agents.get("reader").start("use the file")
         assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED

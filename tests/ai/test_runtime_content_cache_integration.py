@@ -53,7 +53,7 @@ async def test_shared_cache_reuses_body_across_storage_lifetimes(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_warm_shared_cache_does_not_replace_another_origins_membership(tmp_path) -> None:
+async def test_distinct_source_namespaces_do_not_share_membership(tmp_path) -> None:
     cache = InMemoryCacheBackend(max_bytes=1024)
     present = CountingObjects()
     absent = CountingObjects()
@@ -62,7 +62,7 @@ async def test_warm_shared_cache_does_not_replace_another_origins_membership(tmp
         storage = RuntimeStorage.sqlite(
             tmp_path / "runtime.db", object_store=source, cache=cache,
         )
-        await storage.initialize(namespace="runtime", tenant_id="tenant")
+        await storage.initialize(namespace="present" if source is present else "absent", tenant_id="tenant")
         try:
             if source is present:
                 assert await storage.read_object(RuntimeDomain.EXECUTION, ref) == b"persisted body"
@@ -72,7 +72,7 @@ async def test_warm_shared_cache_does_not_replace_another_origins_membership(tmp
                 assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
         finally:
             await storage.close()
-    assert absent.reads == 0
+    assert absent.reads == 1
 
 
 @pytest.mark.asyncio

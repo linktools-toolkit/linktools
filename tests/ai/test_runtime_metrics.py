@@ -47,6 +47,9 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.usage import RunUsage
 
 
+from ._runtime_test_helpers import _persistence_capabilities
+
+
 class _TextModelBinding:
     route_id = "default"
     provider = "test"
@@ -845,7 +848,7 @@ async def test_terminal_metric_cancellation_preserves_published_success_and_hist
     metrics = Metrics.from_store(store, namespace="terminal-order")
     async with Runtime.open(
         "terminal-order", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),), metrics=metrics,
+        capabilities=(_persistence_capabilities(trace=True), _agent_group(),), metrics=metrics,
     ) as runtime:
         execution = await runtime.agents.get("default").start("hello")
         try:

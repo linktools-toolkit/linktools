@@ -61,6 +61,8 @@ def build_runtime_agent_run_store(
         )
     return RuntimeAgentRunStore(
         StagingAgentRunStore(),
+        execution_repository=execution_repository,
+        tenant_id=tenant_id,
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
         execution_archive=archives.get(RuntimeDomain.EXECUTION),
         recovery_archive=archives.get(RuntimeDomain.RECOVERY),

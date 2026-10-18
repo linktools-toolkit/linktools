@@ -60,6 +60,7 @@ from ._history import (
 )
 from ._model_client import prepare_client_requests, resolve_client_requests
 from ._plan import RuntimeDomain
+from ._object_router import runtime_object_source_reads
 from ._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
@@ -1609,12 +1610,13 @@ class StateStepArchive(AgentRunStore):
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if before:
-            observed = await self._history.load_message_span(
-                run.agent_run_id,
-                0,
-                before,
-                observed_head=head,
-            )
+            with runtime_object_source_reads():
+                observed = await self._history.load_message_span(
+                    run.agent_run_id,
+                    0,
+                    before,
+                    observed_head=head,
+                )
             if tuple(
                 _exact_message_signature(message) for message in observed
             ) != tuple(
@@ -2057,6 +2059,8 @@ class StateStepArchive(AgentRunStore):
         values = tuple(checkpoints)
         if any(not isinstance(checkpoint, PreparedAgentRunCheckpoint) for checkpoint in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if values and any(checkpoint.owner_id != values[0].owner_id for checkpoint in values):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
     async def _execution_history_guard_in_transaction(
@@ -2123,6 +2127,11 @@ class StateStepArchive(AgentRunStore):
                     and head.producer_generation > producer_generation):
                 return
             execution = await repository.get(execution_id, tenant_id=self._tenant_id)
+            if (execution is not None and not execution.durable_trace
+                    and execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+                    and head is not None and head.state is ExecutionHistoryState.CLOSED
+                    and head.producer_generation >= producer_generation):
+                return
             seal = await repository.get_history_seal(execution_id, tenant_id=self._tenant_id)
             if (execution is None or execution.status not in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
@@ -2248,7 +2257,11 @@ class StateStepArchive(AgentRunStore):
             transaction,
             run,
             include_projection=bool(checkpoints),
-            prefetch_keys=prefetch_keys,
+            prefetch_keys=(
+                *prefetch_keys,
+                *(key for checkpoint in checkpoints for key in
+                  self._history.checkpoint_record_keys(checkpoint.owner_id, checkpoint.chunks)),
+            ),
         )
         if observation is not None:
             await self._history.commit_observation(transaction, observation)
@@ -2307,7 +2320,7 @@ class StateStepArchive(AgentRunStore):
                     )
                 )
         if checkpoints:
-            await self._history.append_chunks(
+            await self._history.append_checkpoint(
                 transaction,
                 checkpoints[0].owner_id,
                 tuple(
@@ -2315,16 +2328,12 @@ class StateStepArchive(AgentRunStore):
                     for checkpoint in checkpoints
                     for chunk in checkpoint.chunks
                 ),
+                checkpoints[-1].projection,
                 min(
                     (checkpoint.history_quality for checkpoint in checkpoints),
                     key=lambda value: value is HistoryQuality.COMPLETE,
                     default=HistoryQuality.COMPLETE,
                 ),
-            )
-            await self._history.store_projection(
-                transaction,
-                checkpoints[-1].owner_id,
-                checkpoints[-1].projection,
             )
         if await transaction.guard_record(
             owner,
@@ -2392,6 +2401,9 @@ class StateStepArchive(AgentRunStore):
         # Pin ownership before the fact read so READ COMMITTED races fail the CAS.
         owner_record, _created = await self._ensure_run_with_head_in_transaction(
             transaction, run, include_projection=True,
+            prefetch_keys=self._history.checkpoint_record_keys(
+                checkpoint.owner_id, checkpoint.chunks,
+            ),
         )
         stream = self._stream(run.agent_run_id, "checkpoint")
         subject = _step_subject(checkpoint.stored)
@@ -2404,16 +2416,12 @@ class StateStepArchive(AgentRunStore):
             for fact in existing
         ):
             return
-        await self._history.append_chunks(
+        await self._history.append_checkpoint(
             transaction,
             checkpoint.owner_id,
             checkpoint.chunks,
-            checkpoint.history_quality,
-        )
-        await self._history.store_projection(
-            transaction,
-            checkpoint.owner_id,
             checkpoint.projection,
+            checkpoint.history_quality,
         )
         owner = self._agent_run_key(run.agent_run_id)
         if await transaction.guard_record(
@@ -2766,7 +2774,8 @@ class StateStepArchive(AgentRunStore):
         projection = await self._history.load_projection(owner_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
-        context = await self._history.load_model_context(owner_id)
+        with runtime_object_source_reads():
+            context = await self._history.load_model_context(owner_id)
         expected_messages = (
             checkpoint.messages
             if checkpoint.context_messages is None
@@ -2820,13 +2829,14 @@ class StateStepArchive(AgentRunStore):
             if self._runtime_domain is RuntimeDomain.CONVERSATION
             else agent_run_id
         )
-        messages = (await self._history.load_model_context(owner_id)).model_messages()
         transcript_message_count = latest.transcript_message_count
         if transcript_message_count is None:
             transcript_message_count = await self._history.transcript_message_count(owner_id)
-        raw_messages = await self._history.load_message_span(
-            owner_id, 0, transcript_message_count,
-        )
+        with runtime_object_source_reads():
+            messages = (await self._history.load_model_context(owner_id)).model_messages()
+            raw_messages = await self._history.load_message_span(
+                owner_id, 0, transcript_message_count,
+            )
         if not raw_messages and not latest.has_context_projection:
             raw_messages = tuple(messages)
         context_messages = (

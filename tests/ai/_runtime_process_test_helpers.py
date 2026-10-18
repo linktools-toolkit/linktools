@@ -11,6 +11,7 @@ import traceback
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import CapabilityGroup
+from linktools.ai.runtime import RestartCheckpointCapability, DurableTraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -23,6 +24,8 @@ _NAMESPACE = "recovery-ownership"
 
 def _capabilities() -> CapabilityGroup:
     group = CapabilityGroup(_NAMESPACE)
+    group.capability(RestartCheckpointCapability(), scope="runtime")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 

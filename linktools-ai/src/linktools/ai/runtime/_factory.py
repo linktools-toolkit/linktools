@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import TypeVar
 
 from linktools.core import environ
+from pydantic_ai.capabilities import AbstractCapability
 
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler, CapabilityFilter
 from ..capability import (
+    AgentContext,
     AssetSkillSource,
     CapabilityContribution,
     CapabilityGroup,
@@ -67,6 +69,7 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricRecorder
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
+from ._persistence_capabilities import DurableTraceCapability, RestartCheckpointCapability
 from ._runtime_history import RuntimeHistory
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
@@ -178,6 +181,28 @@ async def compose_runtime_components(
             if group.asset_reader is not None:
                 asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
+        def require_runtime_persistence_scope(capability: AbstractCapability[object]) -> None:
+            if isinstance(capability, (RestartCheckpointCapability, DurableTraceCapability)):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "persistence capabilities require Runtime scope")
+
+        for candidate in candidates:
+            if candidate.kind == "capability" and candidate.scope != "runtime":
+                candidate.value.apply(require_runtime_persistence_scope)
+        runtime_capabilities = tuple(
+            candidate.value for candidate in candidates
+            if candidate.scope == "runtime"
+        )
+        runtime_ids: set[str] = set()
+
+        def register_runtime_id(capability: AbstractCapability[AgentContext[AppT]]) -> None:
+            if capability.id is not None:
+                if capability.id in runtime_ids:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                runtime_ids.add(capability.id)
+
+        for capability in runtime_capabilities:
+            capability.apply(register_runtime_id)
+        candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
             tuple(
                 AssetSkillSource(group.group_id, reader)
@@ -296,6 +321,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
+            runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
@@ -420,6 +446,10 @@ def _execution_history_reader(
     storage: RuntimeStorage,
     runtime_token_seed: bytes,
 ) -> StepExecutionHistoryReader:
+    local_store = storage.run_store.read_store(RuntimeDomain.EXECUTION, durable=False)
+    if not isinstance(local_store, StagingAgentRunStore):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    transient_store = TransientExecutionHistoryStore(local_store, storage.run_store)
     history_store = storage.run_store.read_store(RuntimeDomain.EXECUTION)
     if storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.TRANSIENT:
         if not isinstance(history_store, StagingAgentRunStore):
@@ -429,6 +459,7 @@ def _execution_history_reader(
         namespace=namespace,
         executions=storage.execution.executions,
         store=history_store,
+        transient_store=transient_store,
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
         tool_operations=storage.recovery.tools,
         notifications=storage.run_store,
@@ -494,6 +525,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
+    runtime_capabilities: Sequence[AbstractCapability[AgentContext[AppT]]],
     asset_sources: Mapping[str, AssetStoreReader],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
@@ -532,6 +564,9 @@ async def _build_local_components(
         metric_buffer = None if metrics is None else _RuntimeMetricRecorder(metrics.recorder())
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
+        persistence_capabilities: list[AbstractCapability[object]] = []
+        for capability in runtime_capabilities:
+            capability.apply(persistence_capabilities.append)
         stream_cache = (
             storage.cache
             if isinstance(storage.cache, StreamBackend)
@@ -574,6 +609,8 @@ async def _build_local_components(
             session_execution_ready=session_execution_ready,
             tool_responses=tool_responses,
             object_reader=storage.read_object,
+            restart_checkpoints=any(isinstance(value, RestartCheckpointCapability) for value in persistence_capabilities),
+            durable_trace=any(isinstance(value, DurableTraceCapability) for value in persistence_capabilities),
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -584,6 +621,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
+            runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
             metrics=metric_buffer,
             sandbox=sandbox,

@@ -37,6 +37,7 @@ from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from .test_history_projection_conformance import _record
 from .test_session_admission import _session
 from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
+from ._runtime_test_helpers import _persistence_capabilities
 
 
 def _storage(tmp_path: Path, backend: str, split_session: bool) -> RuntimeStorage:
@@ -145,7 +146,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         models=FixtureModels(),
         storage=state,
         context=CONTEXT,
-        capabilities=(group,),
+        capabilities=(_persistence_capabilities(trace=True), group,),
     ) as runtime:
         agent = runtime.agents.get()
         if split_session:

@@ -213,10 +213,11 @@ source and layer policies; it is not a universal forced-origin read.
 ## Boundaries
 
 Runtime authorization, leases, cancellation, commit confirmation and recovery
-remain authoritative operations. Cache hits do not grant access. A cached
-immutable value must not remain accessible after its owning domain has deleted
-it or expired its retention scope. Transient or volatile content must not gain
-persistent filesystem or remote copies merely because its bytes are immutable.
+remain authoritative operations. Cache hits do not grant access. Ordinary
+observations may retain deleted or expired source members only within their
+explicit bounded observation window; strong consumers keep current source
+validation. Transient or volatile content must not gain persistent filesystem
+or remote copies merely because its bytes are immutable.
 
 Live event delivery and reconnect cursors are separate from content caching.
 A shared byte cache does not provide event ordering, subscription recovery, or
@@ -224,6 +225,37 @@ producer fencing. Likewise, business TTL snapshots and explicit refresh
 semantics remain with their read owner unless an equivalent contract has been
 established. Existing Runtime history calls do not automatically acquire shared
 content caching from the asset-store configuration above.
+
+## Runtime state observations
+
+Built-in `StateStore.read_record(key)` and `read_records(keys)` use the same
+optional hot-cache group. Records and a complete batch share an absolute
+three-second capture deadline; hits require no source query. The namespace,
+tenant and logical store identify the source view. Sharing the cache therefore
+requires the source-binding rule below, including for filesystem and SQL stores.
+No cache means direct source reads.
+
+`read(callback)` and `mutate(callback)` retain their source transaction semantics;
+record reads inside those scopes bypass the cache. Successful local mutations
+invalidate that owner's observations without letting an older in-flight load
+repopulate them. Other owners may observe the old snapshot within three seconds.
+A custom `StateStore` can implement the two ordinary methods by delegating to
+its existing `read` callback; caching is optional, correctness is not.
+
+Runtime `inspect` and ordinary display observations can use this bounded view.
+Explicit results, waits, next-turn admission, terminal/unknown-commit readback,
+and effect ownership use their committed owner paths. These guarantees do not
+require a new per-call cache option or a different Runtime profile.
+
+## Runtime observation publication
+
+Metrics uses the cache's pending-write group with its 60-second/128-entry
+scheduler. Runtime retains its existing archive-owned publication scheduler,
+coalescing public observations for up to three seconds or 128 boundaries.
+Recovery checkpoints and final conversation/result commits keep their own
+reliable transaction boundaries; terminal completion and close drain publication.
+The Runtime scheduler remains local whether or not a cache is supplied. It does
+not enqueue empty markers or claim that its payloads live in a shared cache queue.
 
 ## Runtime content
 
@@ -248,11 +280,29 @@ storage settles its own reads on close without closing the borrowed cache or a
 host connection pool. Closing first completes pending archive projections,
 then drains accepted object reads before source storage is closed.
 
-Only durable routes use this cache. A cold read uses the source directly. A
-cache hit verifies the expected size and digest and checks the referenced
-object still exists in the current source. Deletion or a source error cannot
-be hidden by cached bytes. This saves body transfer and filesystem work; it
-does not eliminate authorization, state, reference or object-metadata queries.
+Only durable routes use this cache. A cold or expired read uses the source
+and verifies the expected size and digest. A hot read verifies those immutable
+bytes again without an object-metadata query. Source membership may be stale
+for at most three seconds from the original load's start; expiry checks live in
+the owner envelope, so promoting bytes into an L1 without TTL cannot renew them.
+Deletion or source damage is detected on the next source read. A caller arriving
+after a shared load's deadline starts a new source read; a slow original read
+may finish for its original callers without restarting indefinitely.
+
+Recovery-domain objects always retain current source-membership checks. Other
+strong consumers retain them as well: explicit result/wait,
+RuntimeHistory results, persistent checkpoint reads, model/recovery context loading, and every rebuilt session
+display (including `max_age=0`). They may reuse verified bytes after the existing
+ObjectStore `stat` validation instead of transferring the complete object again.
+This does not claim to detect physical corruption beyond that ObjectStore
+contract. Authorization and control checks remain with their domain owners.
+
+Sharing a cache requires each Runtime namespace to identify the same logical
+data source. When changing databases or object sources, use another Runtime
+namespace or a separate cache namespace/instance. Store IDs alone do not
+identify physical sources. Keys also isolate tenant, domain, and the complete
+immutable ObjectRef. A host-provided cache is a trusted byte transport, not an
+authorization service.
 `RuntimeStorage.read_object(domain, reference)` is the storage-level read
 operation used by SDK composition; applications normally keep using their
 existing domain/history APIs.
@@ -364,8 +414,9 @@ log does not remove child-discovery scans or guarantee lower SQL counts.
 
 This transport does not route control requests to an execution's owning
 process. Existing unsuccessful/unknown non-owner cancellation results remain
-meaningful; a host requiring prompt remote cancellation must route the request
-to the owner. Stream delivery is not proof of cancellation or task migration.
+meaningful. Cancellation uses execution ownership and effect-ledger rules,
+including explicit force revocation where supported; stream delivery does not
+stop a remote provider or prove cancellation or task migration.
 
 After a preview gap or admission change, the current watch uses durable replay
 for the remainder of that observation. A cursor containing only durable
@@ -390,10 +441,12 @@ entries, including when a custom `SessionService` still has the earlier signatur
 The Runtime borrows its existing `RuntimeStorage.cache`; no extra cache
 configuration or backend lifecycle is introduced. Standard assembly enables
 this optimization only when conversation and execution retention are both
-`DURABLE`. Entries are isolated by service lifetime, principal/tenant/kind,
-session, cursor, and page limit. The service-lifetime scope also separates data
-sources and monotonic clock domains: sharing the byte backend does not share
-these display captures across Runtime instances or process restarts.
+`DURABLE`. Entries are isolated by Runtime namespace, principal/tenant/kind,
+session, cursor, and page limit. Instances sharing that logical source can reuse
+the same capture. Its wall-clock capture and expiry travel with the payload;
+reopening a Runtime or reading another cache tier never renews its deadline.
+Hosts sharing cache entries must keep clocks synchronized. Different sources
+require separate namespaces or cache instances.
 
 Every hit still reads the authorization header, runs the current policy outside
 the metadata transaction, and freshly checks the session, the referenced
@@ -413,8 +466,11 @@ those fields may remain undisplayed until expiry or a strong refresh.
 Independently removed/corrupted transcript facts or object bodies may likewise
 be detected up to `max_age` later. Sending, cancelling,
 resuming, and all other control operations retain their authoritative reads.
-Root authorization and deletion are never cached. Signed input and output
-cursors are checked again and are not renewed by a cache hit.
+The current authorization policy runs on every call; the dependency validation
+reads source records directly, so display expiry is not stacked on top of a
+metadata-cache expiry. Rebuilding a page also validates current object membership,
+so an older body-cache capture cannot acquire a new page lifetime. Signed input and output cursors are checked again and
+are not renewed by a cache hit.
 
 Cache serialization uses the existing domain leaf codec without adding durable
 record types. A private payload checksum detects cache byte corruption (it is
@@ -459,10 +515,17 @@ same order. Closing or a failed buffer rejects new writes explicitly rather
 than returning an easily ignored boolean. Cancellation while waiting for
 capacity does not accept the waiting mutation.
 
-`read_pending` is selected once at construction. The default `False` reads the
-actual committed source. `True` overlays the latest accepted, unresolved local
-value or deletion, then falls back to the source. It does not expose another
-buffer's pending writes. In pending-visible mode, a source read overlapping a
+`read_pending` is selected once at construction. The default `False` exposes only
+source-confirmed values, with a three-second read-through hot view when the cache
+provides the complete hot group. This means confirmed data, not the latest source
+state on every call: another owner or external writer can remain invisible until
+three seconds after the original capture. Hits and tier promotion never renew
+that deadline. `True` first overlays the latest accepted,
+unresolved local value or deletion, then uses that committed view. It does not
+expose another buffer's pending writes or call an unconfirmed value committed.
+After a successful batch the local hot entry is invalidated; the next read loads
+and caches the confirmed source once. This optional refill cannot change the
+write receipt or delay acknowledgement. In pending-visible mode, a source read overlapping a
 complete enqueue/commit/settlement cycle is rechecked rather than returning its
 obsolete result. Committed-only mode preserves one source read's snapshot
 contract; it does not retry to chase later concurrent commits.
@@ -496,9 +559,10 @@ cancellation was requested. The injected cache owns pending bytes and its capaci
 pending views reference those immutable values rather than introducing a second
 payload queue. A logical byte budget does not promise an RSS or physical-disk limit.
 
-Committed reads retain the store's existing `ContentCache`, metadata and
-source-validation behavior. This buffer can reduce repeated writes and serve
-local pending values; it does not promise zero-SQL committed reads. Native SQL
+A valid committed hot hit does not query the source. On a miss, committed reads
+retain the store's existing `ContentCache`, metadata and source-validation
+behavior. The hot view is scoped to this buffer owner; it does not promise
+cross-owner immediate visibility or act as an authorization cache. Native SQL
 batching, transaction-local record reuse, CAS and atomic Runtime commands stay
 with the authoritative store. No execution control state is moved into this
 best-effort buffer merely because it shares a database.

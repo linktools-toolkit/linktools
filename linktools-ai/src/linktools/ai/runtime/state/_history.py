@@ -46,6 +46,7 @@ from ._plan import RuntimeDomain
 from ._store import (
     FactQuery,
     RecordQuery,
+    RecordReplacement,
     StateStore,
     StateTransaction,
     StoredFact,
@@ -707,12 +708,76 @@ class TranscriptRepository:
             ObjectRef("runtime", key, stat.digest, stat.size)
         )
 
+    def checkpoint_record_keys(
+        self,
+        owner_id: str,
+        chunks: Sequence[TranscriptChunk],
+    ) -> tuple[bytes, ...]:
+        """Identify metadata touched by a contiguous checkpoint append."""
+        keys = (self._head_key(owner_id), self._projection_key(owner_id))
+        # Prefetch only canonical chunks; append retains ownership/range validation.
+        if any(
+            not isinstance(chunk, TranscriptChunk)
+            or chunk.owner_id != owner_id
+            or isinstance(chunk.first_message_index, bool)
+            or not isinstance(chunk.first_message_index, int)
+            or chunk.first_message_index < 0
+            or isinstance(chunk.message_count, bool)
+            or not isinstance(chunk.message_count, int)
+            or not 0 < chunk.message_count <= _TRANSCRIPT_CHUNK_MAX_MESSAGES
+            for chunk in chunks
+        ):
+            return keys
+        return (
+            *keys,
+            *(
+                self._seek_key(owner_id, boundary)
+                for chunk in chunks
+                for boundary in range(
+                    ((chunk.first_message_index + _TRANSCRIPT_SEEK_BLOCK - 1)
+                     // _TRANSCRIPT_SEEK_BLOCK) * _TRANSCRIPT_SEEK_BLOCK,
+                    chunk.first_message_index + chunk.message_count,
+                    _TRANSCRIPT_SEEK_BLOCK,
+                )
+            ),
+        )
+
+    async def append_checkpoint(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+        chunks: Sequence[TranscriptChunk],
+        projection: ContextProjection,
+        quality: HistoryQuality | None = None,
+    ) -> None:
+        """Write one transcript checkpoint using its known metadata write set."""
+        if type(self) is not TranscriptRepository:
+            await self.append_chunks(transaction, owner_id, chunks, quality)
+            await self.store_projection(transaction, owner_id, projection)
+        elif chunks:
+            await self._append_chunks(
+                transaction, owner_id, chunks, quality, projection=projection,
+            )
+        else:
+            await self.store_projection(transaction, owner_id, projection)
+
     async def append_chunks(
         self,
         transaction: StateTransaction,
         owner_id: str,
         chunks: Sequence[TranscriptChunk],
         quality: HistoryQuality | None = None,
+    ) -> None:
+        await self._append_chunks(transaction, owner_id, chunks, quality)
+
+    async def _append_chunks(
+        self,
+        transaction: StateTransaction,
+        owner_id: str,
+        chunks: Sequence[TranscriptChunk],
+        quality: HistoryQuality | None,
+        *,
+        projection: ContextProjection | None = None,
     ) -> None:
         if not chunks:
             return
@@ -753,11 +818,30 @@ class TranscriptRepository:
             ),
             storage_revision=head_record.storage_revision + 1,
         )
-        if not await transaction.replace_record(
-            upgraded,
-            expected_storage_revision=head_record.storage_revision,
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        projection_insert = None
+        if projection is None:
+            if not await transaction.replace_record(
+                upgraded,
+                expected_storage_revision=head_record.storage_revision,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        else:
+            value = self._projection_record(owner_id, projection)
+            current = await transaction.get_record(value.key_digest)
+            replacements = [RecordReplacement(upgraded, head_record.storage_revision)]
+            if current is None:
+                projection_insert = value
+            else:
+                replacements.append(RecordReplacement(
+                    replace(
+                        value,
+                        scope_digest=current.scope_digest,
+                        parent_digest=current.parent_digest,
+                        storage_revision=current.storage_revision + 1,
+                    ),
+                    current.storage_revision,
+                ))
+            await transaction.replace_records(tuple(replacements))
         final = await transaction.reserve_sequence(
             self._transcript_sequence(owner_id),
             len(chunks),
@@ -788,6 +872,7 @@ class TranscriptRepository:
             chunks,
             sequences,
             base_head.message_count,
+            projection_insert=projection_insert,
         )
         _logger.debug(
             "transcript chunks appended: domain=%s owner=%s "
@@ -806,6 +891,8 @@ class TranscriptRepository:
         chunks: Sequence[TranscriptChunk],
         sequences: Sequence[int],
         base_message_count: int,
+        *,
+        projection_insert: StoredRecord | None = None,
     ) -> None:
         candidates: dict[bytes, StoredRecord] = {}
         for chunk, sequence in zip(chunks, sequences, strict=True):
@@ -842,12 +929,12 @@ class TranscriptRepository:
                         }
                     ),
                 )
-        if not candidates:
-            return
         existing = await transaction.get_records(tuple(candidates))
         fresh = tuple(
             record for key, record in candidates.items() if key not in existing
         )
+        if projection_insert is not None:
+            fresh += (projection_insert,)
         if fresh:
             await transaction.insert_records(fresh)
 
@@ -1267,8 +1354,30 @@ class TranscriptRepository:
         agent_run_id: str,
         projection: ContextProjection,
     ) -> None:
+        value = self._projection_record(agent_run_id, projection)
+        key = value.key_digest
+        current = await transaction.get_record(key)
+        if current is None:
+            await transaction.insert_record(value)
+            return
+        if not await transaction.replace_record(
+            replace(
+                value,
+                scope_digest=current.scope_digest,
+                parent_digest=current.parent_digest,
+                storage_revision=current.storage_revision + 1,
+            ),
+            expected_storage_revision=current.storage_revision,
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    def _projection_record(
+        self,
+        agent_run_id: str,
+        projection: ContextProjection,
+    ) -> StoredRecord:
         key = self._projection_key(agent_run_id)
-        value = StoredRecord(
+        return StoredRecord(
             key,
             None,
             self._owner_key(agent_run_id),
@@ -1286,20 +1395,6 @@ class TranscriptRepository:
                 }
             ),
         )
-        current = await transaction.get_record(key)
-        if current is None:
-            await transaction.insert_record(value)
-            return
-        if not await transaction.replace_record(
-            replace(
-                value,
-                scope_digest=current.scope_digest,
-                parent_digest=current.parent_digest,
-                storage_revision=current.storage_revision + 1,
-            ),
-            expected_storage_revision=current.storage_revision,
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def load_projection(self, owner_id: str) -> ContextProjection | None:
         require_no_run_history_lock("TranscriptRepository.load_projection")

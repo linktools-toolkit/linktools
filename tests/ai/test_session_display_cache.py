@@ -61,7 +61,7 @@ def _service(state, cache, authorization=None):
 
 def _clock(monkeypatch):
     clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(session_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(session_module, "time", SimpleNamespace(time=lambda: clock.now))
     return clock
 
 
@@ -70,8 +70,8 @@ def _fixed_display_clock(monkeypatch):
     _clock(monkeypatch)
 
 
-async def _prepare(state, *, body=False):
-    await state.initialize(namespace="display", tenant_id="tenant")
+async def _prepare(state, *, body=False, namespace="display"):
+    await state.initialize(namespace=namespace, tenant_id="tenant")
     record = await state.conversation.sessions.create(replace(_session(), metadata={"nested": {"value": "old"}}))
     await _admit(state, status=ExecutionStatus.SUCCEEDED if body else ExecutionStatus.PENDING_START)
     if body:
@@ -199,8 +199,8 @@ async def test_display_cache_rechecks_policy_and_deletion_after_authorization(mo
 async def test_display_cache_does_not_share_sources_or_mutable_results():
     cache = _Cache()
     states = [RuntimeStorage.in_memory(), RuntimeStorage.in_memory()]
-    for state in states:
-        await _prepare(state, body=True)
+    for index, state in enumerate(states):
+        await _prepare(state, body=True, namespace=f"display-source-{index}")
     try:
         first = _service(states[0], cache)
         second = _service(states[1], cache)
@@ -779,10 +779,10 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
         second = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
         if retention == "durable":
             assert second == first
-            assert cache.writes == 1
+            assert len([key for key in cache.keys if key.startswith("session-display:")]) == 1
         else:
             assert second.timeline.items[0].safe_error_details == {"value": "changed"}
-            assert cache.writes == 0
+            assert not any(key.startswith("session-display:") for key in cache.keys)
     await cache.put("after-close", b"host-owned")
     assert await cache.get("after-close") == b"host-owned"
     with pytest.raises(AIError):
@@ -949,5 +949,87 @@ async def test_display_refresh_without_key_value_cache_keeps_fresh_source(cache:
         await _change_execution_display(state, "changed")
         fresh = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         assert fresh.timeline.items[0].safe_error_details == {"value": "changed"}
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+async def test_display_cache_is_shared_across_readers_without_renewing_capture(
+    tmp_path, monkeypatch, backend,
+):
+    clock = _clock(monkeypatch)
+    cache = _Cache()
+    first_state = _storage(backend, tmp_path)
+    await _prepare(first_state, body=True)
+    first = _service(first_state, cache)
+    detail = await first.refresh("session", principal=_PRINCIPAL, max_age=3)
+    await first_state.close()
+    second_state = _storage(backend, tmp_path)
+    await second_state.initialize(namespace="display", tenant_id="tenant")
+    try:
+        second = _service(second_state, cache)
+        writes = cache.writes
+        captures = 0
+        capture = session_module.capture_session_refresh
+
+        async def count_capture(*args, **kwargs):
+            nonlocal captures
+            captures += 1
+            return await capture(*args, **kwargs)
+
+        monkeypatch.setattr(session_module, "capture_session_refresh", count_capture)
+        clock.now += 2
+        assert await second.refresh("session", principal=_PRINCIPAL, max_age=3) == detail
+        assert captures == 0 and cache.writes == writes
+        clock.now += 1
+        assert await second.refresh("session", principal=_PRINCIPAL, max_age=3) == detail
+        assert captures == 1 and cache.writes == writes + 1
+    finally:
+        await second_state.close()
+        await first_state.close()
+
+
+@pytest.mark.parametrize("warm_page", (False, True))
+async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkeypatch, warm_page):
+    from linktools.ai.runtime import RuntimeDomain
+    from linktools.ai.runtime.state import _history
+    from linktools.ai.runtime.state._store import FactQuery
+    from linktools.ai.storage import _write_cache
+
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(_write_cache, "time", lambda: clock.now)
+    monkeypatch.setattr(_history, "PAYLOAD_COMPRESS_MINIMUM", 0)
+    cache = _Cache()
+    state = RuntimeStorage.sqlite(tmp_path / "display.db", cache=cache)
+    session = await _prepare(state, body=True)
+    try:
+        service = _service(state, cache)
+        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
+        transcript = archive.transcript_repository
+        stream = transcript.transcript_stream(session.history_id)
+        facts = await archive.state_store.read(lambda tx: tx.list_facts(FactQuery(stream)))
+        references = [transcript.decode_chunk(fact).content.payload.ref for fact in facts]
+        assert references and all(reference is not None for reference in references)
+        if warm_page:
+            detail = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+        else:
+            await transcript.load_messages(session.history_id)
+        objects = state.object_store(RuntimeDomain.CONVERSATION)
+        for reference in references:
+            await objects.delete_object(reference.key, expected_digest=reference.digest)
+        clock.now += 2
+        if warm_page:
+            assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == detail
+        else:
+            with pytest.raises(AIError) as raised:
+                await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+            assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+        with pytest.raises(AIError) as raised:
+            await service.refresh("session", principal=_PRINCIPAL, max_age=0)
+        assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+        clock.now += 1
+        with pytest.raises(AIError) as raised:
+            await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+        assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
     finally:
         await state.close()

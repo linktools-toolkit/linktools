@@ -46,6 +46,7 @@ def _record(
 ) -> ExecutionRecord:
     subagent = parent_execution_id is not None
     return ExecutionRecord(
+        durable_trace=True,
         execution_id=execution_id,
         session_id=None,
         parent_execution_id=parent_execution_id,

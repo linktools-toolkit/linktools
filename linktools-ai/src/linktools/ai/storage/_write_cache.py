@@ -6,15 +6,18 @@ from __future__ import annotations
 
 import asyncio
 import math
+import struct
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Hashable, Sequence
 from dataclasses import dataclass
-from time import monotonic
+from time import monotonic, time
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 from uuid import uuid4
 
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
+from ._cache import CacheBackend, read_cache, write_cache
 from ._contracts import StorageBatchResult, StorageChange, StorageOperation
 
 _Key = TypeVar("_Key", bound=Hashable)
@@ -25,6 +28,9 @@ _CLOSE_DEADLINE_SECONDS = 10.0
 _WARNING_INTERVAL_SECONDS = 30.0
 _BATCH_SIZE = 128
 _FLUSH_INTERVAL_SECONDS = 60.0
+_HOT_KEY_LIMIT = 128
+_HOT_HEADER = struct.Struct("!ddB16s")
+_HOT_PREFIX = b"linktools-read-v1\0"
 _Entry = tuple[str, Hashable, bytes | None]
 
 
@@ -506,6 +512,140 @@ class _BufferStore(Protocol[_Key, _Info]):
 
 
 @dataclass(frozen=True, slots=True)
+class _ReadGeneration:
+    token: bytes
+    invalidated_at: float | None = None
+
+
+class StorageReadCache:
+    """Best-effort committed byte views with reader-enforced freshness.
+
+    Owners supply collision-free content keys and retain source authorization.
+    Captured wall-clock deadlines travel with the bytes across cache tiers;
+    loading a tier never extends freshness. Only bounded mutation tokens live
+    here. Concurrent source reads may return their original snapshot, but a
+    later put or invalidation prevents that snapshot from being published.
+    """
+
+    def __init__(self, cache: object | None, *, max_age_seconds: float = 3.0) -> None:
+        if (
+            isinstance(max_age_seconds, bool)
+            or not isinstance(max_age_seconds, (int, float))
+            or not math.isfinite(max_age_seconds) or max_age_seconds <= 0
+        ):
+            raise ValueError("max_age_seconds must be finite and positive")
+        self._cache: CacheBackend | None = cache if all(
+            callable(getattr(cache, name, None)) for name in ("get", "put", "delete")
+        ) else None
+        self._max_age = float(max_age_seconds)
+        self._generations: OrderedDict[str, _ReadGeneration] = OrderedDict()
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._cleared_at = -math.inf
+
+    def _generation(self, key: str, *, replace: bool = False) -> _ReadGeneration:
+        if not isinstance(key, str):
+            raise TypeError("read cache keys must be strings")
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        generation = self._generations.pop(key, None)
+        if generation is None or replace:
+            generation = _ReadGeneration(uuid4().bytes, time() if replace else None)
+        self._generations[key] = generation
+        if len(self._generations) > _HOT_KEY_LIMIT:
+            _, evicted = self._generations.popitem(last=False)
+            if evicted.invalidated_at is not None:
+                # Forgetting a local barrier must not revive older shared bytes.
+                self._cleared_at = max(self._cleared_at, evicted.invalidated_at)
+        return generation
+
+    def _decode(
+        self, content: bytes | None, generation: _ReadGeneration,
+    ) -> tuple[bool, bytes | None]:
+        if not isinstance(content, bytes) or not content.startswith(_HOT_PREFIX):
+            return False, None
+        offset = len(_HOT_PREFIX)
+        if len(content) < offset + _HOT_HEADER.size:
+            return False, None
+        captured, expires, present, token = _HOT_HEADER.unpack_from(content, offset)
+        now = time()
+        if (
+            not math.isfinite(captured) or not math.isfinite(expires)
+            or not captured <= now < min(expires, captured + self._max_age)
+            or present not in (0, 1)
+            or (generation.invalidated_at is not None
+                and captured <= generation.invalidated_at and token != generation.token)
+            or (captured <= self._cleared_at and token != generation.token)
+        ):
+            return False, None
+        value = content[offset + _HOT_HEADER.size:]
+        if not present and value:
+            return False, None
+        return True, value if present else None
+
+    async def get(
+        self, key: str, load: Callable[[], Awaitable[bytes | None]],
+    ) -> bytes | None:
+        """Read fresh committed bytes, loading the source only on a miss."""
+        generation = self._generation(key)
+        if self._cache is not None:
+            async with self._lock:
+                content = await read_cache(self._cache, key)
+            hit, value = self._decode(content, generation)
+            if hit and self._generations.get(key) is generation:
+                return value
+        if self._generations.get(key) is generation:
+            generation = self._generation(key, replace=True)
+        captured = time()
+        value = await load()
+        await self._publish(key, value, captured, generation)
+        return value
+
+    async def put(self, key: str, value: bytes | None) -> None:
+        """Publish a source-confirmed value or tombstone, superseding loads."""
+        generation = self._generation(key, replace=True)
+        await self._publish(key, value, time(), generation)
+
+    async def _publish(
+        self, key: str, value: bytes | None, captured: float, generation: _ReadGeneration,
+    ) -> None:
+        if value is not None and not isinstance(value, bytes):
+            raise TypeError("read cache values must be immutable bytes or None")
+        if self._cache is None:
+            return
+        async with self._lock:
+            if (
+                self._closed or self._generations.get(key) is not generation
+                or not captured <= time() < captured + self._max_age
+            ):
+                return
+            content = _HOT_PREFIX + _HOT_HEADER.pack(
+                captured, captured + self._max_age, int(value is not None), generation.token,
+            ) + (b"" if value is None else value)
+            await write_cache(self._cache, key, content)
+
+    async def invalidate(self, key: str) -> None:
+        """Forget this key and suppress any older source fill still in flight."""
+        if self._closed:
+            return
+        self._generation(key, replace=True)
+
+    async def close(self) -> None:
+        """Stop this view without closing or clearing the borrowed cache."""
+        self._closed = True
+        self._generations.clear()
+        async with self._lock:
+            pass
+
+    async def clear(self) -> None:
+        """Invalidate this view's bounded index and all in-flight source fills."""
+        if self._closed:
+            return
+        self._generations.clear()
+        self._cleared_at = time()
+
+
+@dataclass(frozen=True, slots=True)
 class _BufferedChange(Generic[_Key]):
     key: _Key
     value: bytes | None
@@ -527,6 +667,8 @@ class StorageBuffer(Generic[_Key, _Info]):
     transactional prefix snapshot. Use one buffer for all writes to its keys.
     The injected cache owns capacity, including in-flight entries. Without its
     write capability, enqueue waits for the source instead of retaining a queue.
+    A complete hot-cache capability serves committed values for up to three
+    seconds. Pending and hot payloads share the injected cache's capacity.
     The source retains its own initialization, authorization and close lifetime.
     """
 
@@ -546,6 +688,9 @@ class StorageBuffer(Generic[_Key, _Info]):
             raise TypeError("cache must provide the complete append/read_batch/ack capability")
         self._store = store
         self._read_pending = read_pending
+        self._hot = StorageReadCache(cache)
+        self._hot_scope = uuid4().hex
+        self._hot_keys: OrderedDict[_Key, str] = OrderedDict()
         self._scope = BatchWriteScope(cache, self._consume_batch) if all(methods) else None
         self._direct_active = 0
         self._direct_done = asyncio.Event()
@@ -620,9 +765,22 @@ class StorageBuffer(Generic[_Key, _Info]):
             if self._failure is None and self._read_pending and state.pending is not None:
                 return state.pending.value
             mutation = state.mutation
-            value = await self._store.get(key)
+            if self._failure is None:
+                value = await self._hot.get(await self._hot_key(key), lambda: self._store.get(key))
+            else:
+                value = await self._store.get(key)
             if not self._read_pending or mutation == state.mutation:
                 return value
+
+    async def _hot_key(self, key: _Key) -> str:
+        token = self._hot_keys.pop(key, None)
+        if token is None:
+            token = f"storage-buffer:{self._hot_scope}:{uuid4().hex}"
+        self._hot_keys[key] = token
+        if len(self._hot_keys) > _HOT_KEY_LIMIT:
+            _, evicted = self._hot_keys.popitem(last=False)
+            await self._hot.invalidate(evicted)
+        return token
 
     def _read_finished(
         self, key: _Key, state: _BufferKey[_Key], task: asyncio.Task[bytes | None],
@@ -682,6 +840,8 @@ class StorageBuffer(Generic[_Key, _Info]):
                     state.mutation += 1
                     self._release_key(key, state)
             await self._reads_done.wait()
+            self._hot_keys.clear()
+            await self._hot.close()
         self._check_settlement()
 
     async def _consume_batch(self, batch: tuple[_Entry, ...]) -> None:
@@ -701,12 +861,17 @@ class StorageBuffer(Generic[_Key, _Info]):
         )
         try:
             self._raise_failure()
-            await self._store.apply_batch(changes)
+            result = await self._store.apply_batch(changes)
+            if len(result.results) != len(changes):
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
         except BaseException as error:
             self._fail(error)
             raise
         finally:
             for change in latest.values():
+                token = self._hot_keys.get(change.key)
+                if token is not None:
+                    await self._hot.invalidate(token)
                 state = self._keys.get(change.key)
                 if state is not None:
                     state.mutation += 1
@@ -743,5 +908,5 @@ class StorageBuffer(Generic[_Key, _Info]):
 
 
 __all__ = [
-    "BatchWriteScope", "BatchWriteStatus", "BatchWriteFlushResult", "StorageBuffer",
+    "BatchWriteScope", "BatchWriteStatus", "BatchWriteFlushResult", "StorageBuffer", "StorageReadCache",
 ]

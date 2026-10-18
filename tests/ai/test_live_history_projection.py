@@ -31,6 +31,7 @@ from linktools.ai.runtime.state._step_contracts import (
 )
 
 from .test_history_projection_conformance import _record
+from ._runtime_test_helpers import _persistence_capabilities
 
 
 @pytest.mark.asyncio
@@ -308,7 +309,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
         "partial",
         models=_Models(Model(unused)),
         storage=RuntimeStorage.in_memory(),
-        capabilities=(group,),
+        capabilities=(group, _persistence_capabilities(trace=True)),
     ) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None
@@ -395,6 +396,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
     archive.runs[run.agent_run_id] = run
     archive.interactions[run.agent_run_id] = [interaction]
     record = SimpleNamespace(
+        durable_trace=True,
         execution_id="execution",
         status=ExecutionStatus.STARTED,
         binding_kind="agent",

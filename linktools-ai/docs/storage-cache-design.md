@@ -65,14 +65,14 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 |---|---|---|
 | 版本化资产内容 | 有界内存，按需要加文件/宿主共享副本 | key 绑定逻辑条目、entry revision 与 digest；读前由所属源的 metadata 和调用方权限决定可见性 |
 | 资产 metadata | 进程快照 + RevisionSource 提示 | metadata刷新遵循来源策略；显式权威读取由backend所有者负责，不由提示代替 |
-| 持久 history/result 大正文 | 独立预算内容缓存，复用 Runtime object router | DURABLE 才接入；每次仍守存在性、授权、保留期 |
+| 持久 history/result 大正文 | 独立预算内容缓存，复用 Runtime object router | DURABLE 才接入；字节逐次验摘要，普通观察的源成员可见性最多陈旧3秒；强结果、模型输入和展示重建仍验证当前源 |
 | 短期配置/派生参数 | 复用宿主已有 TTL 与回源合并 | 失效由业务版本/刷新契约决定，不统一猜 TTL |
 | 实时片段与 UI projection | 已有进程内订阅/有界状态 | 不是写库后再轮询；重连仍尊重 cursor/高水位 |
 | session/graph/权限/控制 | 保留权威状态路径 | 不把租约、fence、授权、幂等当普通副本 |
 | 可观测性指标/诊断 | 评估有界批写 | 先明确哪些允许延迟/丢失；记账和审计不能默认可丢 |
 | 快照/恢复/冻结资产 | 各自固定读取源 | 不以最新在线缓存替代冻结内容 |
 
-资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识，命中仍验证当前实际源中的对象存在性。
+资产缓存允许同一摘要的字节跨来源复用；现有 AssetContentCache 不提供租户或物理 backend 的 key 隔离。需要独立隔离的宿主使用适配器 namespace 或独立缓存实例，不增加框架参数。Runtime 对象缓存采用另一所有者合同：key 包含 namespace、tenant、domain 与完整 ObjectRef；store_id 不是全局物理源标识；共用 cache 时同一 Runtime namespace 必须绑定同一逻辑数据源，换源须换 namespace 或 cache 实例。普通观察的正文命中无需 stat，所属读缓存 envelope 强制原始 capture 起最多3秒期限，过期回源验证存在性和完整性，L1晋升及重开 Runtime 都不续期。RECOVERY域始终保留原有当前源校验；result/wait、RuntimeHistory 结果、持久checkpoint、模型与恢复输入、展示重建（含 max_age=0）保留原有当前源 stat 验证，复用已校验字节，避免重复传输完整正文。新展示不会把旧正文期限延长；stat 能检出的变化仅遵循原 ObjectStore 合同。
 
 ## 5. 最小接入方式
 
@@ -185,7 +185,7 @@ RuntimeHistory.open 在进入时按 read_only=True 初始化所传 storage，在
 
 宿主共享缓存适配器实现同一 CacheBackend；连接配置与关闭仍由宿主资源所有者负责，RuntimeHistory 退出不关闭它。适配器须限制网络操作耗时；低层 TTL 不会自动使已提升到内存/文件层的副本过期，业务失效仍由拥有者合同决定。
 
-RuntimeStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；后到冷 miss 若加入已有 flight，须另查权威源，避免借用源已删除的旧读取；热 hit 校验缓存字节并检查权威对象存在性。查询数按这三类分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
+RuntimeStorage.read_object(domain, reference) 是 storage-bound SDK 读出口，供内部组装 history/transcript/result 复用；普通业务不主动调用它。它与通用 storage.read_object(store, key, ...) 的完整物化/校验工具具有不同所属对象和参数。独立冷 miss 创建新 flight，直接读取源而不先 stat；普通观察可在原 capture 的3秒内借用 flight 或热字节，晚于期限的新调用另读源，原慢调用可以正常结束。强消费者对借用 flight/热字节保留当前源 stat 验证。查询数按冷读、普通命中和强验证分别计量。禁用缓存和非 DURABLE 保留原有取消与源读取行为。
 
 ## 6. 并发、一致性与生命周期
 
@@ -403,8 +403,11 @@ CAS、RESET 或领域原子事务。普通消费者只操作一个 buffer：`enq
 `enqueue_delete` 接纳、`get` 读取、`flush` 确认及 `close` 排空。
 
 接纳容量不足时等待，关闭或失败明确报错；返回不代表已持久化。读取模式在装配时
-选择一次：默认仅源的已提交视图；启用 `read_pending` 时，最新未结算值或删除覆盖
-源值。同 key 同批可只写最后意图，不能把中间版本未落库称为数据丢失。Metrics 的
+选择一次：默认仅返回源已确认持久化的数据，不表示每次都读取源的最新值。存在完整
+热点能力时，committed-only 也可命中原 capture 起最多3秒的热快照；命中、层间提升
+均不续期，其他实例或外部写入的变化可在该窗口内延迟可见。启用 `read_pending` 时，
+最新未结算值或删除优先覆盖该已确认视图，不能把 pending 当作 committed。
+同 key 同批可只写最后意图，不能把中间版本未落库称为数据丢失。Metrics 的
 append 记录不采用这种覆盖合并。
 
 `flush` 成功表示调用前意图已落库，或已被之后成功落库的同 key 值覆盖；不是精确
@@ -413,13 +416,15 @@ append 记录不采用这种覆盖合并。
 已经部分提交的事实仍由源决定，不把异常当作回滚。
 
 并发正确性归 buffer：pending-visible 源读取跨完整接纳、提交和移除 pending 的窗口必须重验；
-committed-only 保留单次源读取的快照合同，不追踪等待期间的后续提交。旧批
-结算不能删新值；未 dispatch 队列在关闭时也必须结算清理。pending 与活跃读取的
+committed-only 的冷读保留该次源读取的快照合同，不追踪等待期间的后续提交；有效
+hot 命中按原3秒期限返回已确认快照。成功结算仅在本 owner 失效旧hot，下次读取一次
+源再填充，回填不能改写持久回执或阻塞ack。旧批结算不能删新值；未 dispatch 队列在关闭时也必须结算清理。pending 与活跃读取的
 代次记录仅保留必要生命周期，不永久积累历史 key。使用同一不可变 bytes 引用，待写数据保留在注入 cache 中；其预算包含 inflight。逻辑 payload 计费不是进程 RSS 或物理磁盘硬上限。
 
 源为借用资源。关闭先停止新接纳，等待实际写入和已接纳读取退出后才能允许源关闭；
 取消等待者不能丢失内部任务所有权。同 key 写入不得绕过 buffer 与旧队列竞争。
-读取仍遵守领域授权，已提交读取可复用源已有 ContentCache，但不能因此跳过其源校验。
+读取仍须先由领域执行授权。已确认hot命中不再回源证明；miss 才调用源并遵循源的
+ContentCache、metadata及校验合同。显式强结果/控制读取不通过这个普通hot视图。
 
 这项通用能力不要求 ExecutionStatus 改为可丢状态，不接管 Runtime 事务内 identity
 map、原生批 SQL、checkpoint、取消、恢复和终态提交。它补充的是两种读取可见性与

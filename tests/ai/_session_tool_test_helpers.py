@@ -29,6 +29,7 @@ from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
+from ._runtime_test_helpers import _persistence_capabilities
 
 
 class _ToolModelBinding:
@@ -240,7 +241,7 @@ def _crash_session_process(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            capabilities=(application,),
+            capabilities=(_persistence_capabilities(restart=True, trace=True), application,),
         ) as runtime:
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
@@ -301,7 +302,7 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            capabilities=(application,),
+            capabilities=(_persistence_capabilities(restart=True, trace=True), application,),
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             before_replay = await state.execution.executions.get(

@@ -119,7 +119,7 @@ from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
 
-from ._write_cache import StorageBuffer, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
+from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
 
 __all__ = [
     "StreamBackend",
@@ -127,6 +127,7 @@ __all__ = [
     "StreamBatch",
     "InMemoryStreamBackend",
     "StorageBuffer",
+    "StorageReadCache",
     "BatchWriteFlushResult",
     "BatchWriteScope",
     "BatchWriteStatus",

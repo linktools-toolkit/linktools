@@ -259,21 +259,20 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
         await archive.materialize_checkpoint(run, _checkpoint(1))
         prepared, = (await archive.prepare_checkpoints(run, (_checkpoint(2),))).checkpoints
         projection_key = archive.transcript_repository.projection_key("run")
-        replace_record = _SqlTransaction.replace_record
+        replace_records = _SqlTransaction.replace_records
         injected = []
 
-        async def stale_projection(transaction, record, *, expected_storage_revision):
-            if record.key_digest == projection_key and not injected:
+        async def stale_projection(transaction, replacements):
+            projection = next((
+                value for value in replacements if value.record.key_digest == projection_key
+            ), None)
+            if projection is not None and not injected:
                 injected.append(True)
-                assert await replace_record(
-                    transaction, record, expected_storage_revision=expected_storage_revision,
-                )
-            return await replace_record(
-                transaction, record, expected_storage_revision=expected_storage_revision,
-            )
+                await replace_records(transaction, (projection,))
+            return await replace_records(transaction, replacements)
 
         with monkeypatch.context() as patch:
-            patch.setattr(_SqlTransaction, "replace_record", stale_projection)
+            patch.setattr(_SqlTransaction, "replace_records", stale_projection)
             with pytest.raises(AIError) as raised:
                 await archive.state_store.mutate(
                     lambda tx: archive.materialize_checkpoint_in_transaction(tx, run, prepared)

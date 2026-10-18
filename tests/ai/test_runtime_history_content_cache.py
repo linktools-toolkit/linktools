@@ -21,7 +21,7 @@ from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._factory import _borrowed_runtime_history
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.state._step_archive import StateStepArchive
-from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload, StorageReadCache
 
 from .test_runtime_history_public import _ResultExecutions, _TaskResults
 from .test_execution_result_read_io import _seed
@@ -138,7 +138,12 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         assert await repository.load_messages("run") == messages
         assert objects.reads == 1
         assert len(cache.writes) == 1
-        key, compressed = cache.writes[0]
+        key, _envelope = cache.writes[0]
+
+        async def unexpected_origin():
+            pytest.fail("fresh verified compressed body must stay hot")
+
+        compressed = await StorageReadCache(cache).get(key, unexpected_origin)
         assert hashlib.sha256(compressed).hexdigest() == chunk.content.payload.digest
         assert len(compressed) == chunk.content.payload.size
         assert zlib.decompress(compressed) == encode_model_messages(messages)
@@ -246,3 +251,89 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
     async with RuntimeHistory.open("history", storage=reopened, tenant_id="tenant") as history:
         assert (await history.result("execution", principal=principal)).output == {"result": "persisted output"}
         assert objects.reads == 1
+
+
+@pytest.mark.asyncio
+async def test_history_result_confirms_source_membership_inside_body_cache_window(tmp_path: Path, monkeypatch) -> None:
+    from linktools.ai.storage import _write_cache
+
+    now = [1000.0]
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
+    objects = _CountingObjects()
+    content = b'{"text":"retained result"}'
+    digest = hashlib.sha256(content).hexdigest()
+
+    async def chunks():
+        yield content
+
+    await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
+    reference = ObjectRef("runtime", "result", digest, len(content))
+    storage = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects,
+                                    cache=InMemoryCacheBackend(max_bytes=100000))
+    await storage.initialize(namespace="history", tenant_id="tenant")
+    principal = Principal("principal", "tenant", "service")
+    try:
+        await _seed(storage, output=StoredPayload.object(reference))
+        history = _borrowed_runtime_history(SimpleNamespace(), tenant_id="tenant", storage=storage,
+                                           authorization=TenantAuthorizationPolicy("tenant"), artifact=SimpleNamespace())
+        assert (await history.result("execution", principal=principal)).output == {"text": "retained result"}
+        await objects.delete_object(reference.key, expected_digest=reference.digest)
+        now[0] = 1002.0
+        assert await storage.read_object(RuntimeDomain.EXECUTION, reference) == content
+        with pytest.raises(AIError) as raised:
+            await history.result("execution", principal=principal)
+        assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer", ("checkpoint", "verify", "relocate", "deferred"))
+@pytest.mark.parametrize("domain", (RuntimeDomain.RECOVERY, RuntimeDomain.CONVERSATION))
+async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
+    tmp_path: Path, monkeypatch, consumer: str, domain: RuntimeDomain,
+) -> None:
+    from linktools.ai.runtime._local import LocalExecutionBackend
+    from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+    from linktools.ai.storage import _write_cache
+
+    now = [1000.0]
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
+    objects = _CountingObjects()
+    storage = RuntimeStorage.sqlite(tmp_path / "checkpoint.db", object_store=objects,
+                                    cache=InMemoryCacheBackend(max_bytes=100000))
+    await storage.initialize(namespace="checkpoint", tenant_id="tenant")
+    try:
+        archive = storage.run_store.read_store(domain)
+        run = AgentRunRecord("run")
+        messages = [ModelResponse(parts=[TextPart("retained checkpoint " * 2048)])]
+        checkpoint = AgentRunCheckpoint("run", 1, messages, state="interrupted", context_messages=messages,
+                                        transcript_message_count_before=0)
+        await archive.materialize_checkpoint(run, checkpoint)
+        assert await archive.latest_checkpoint(agent_run_id="run", include_interrupted=True) is not None
+        references = [value async for value in objects.list_objects()]
+        assert references
+        for reference in references:
+            await objects.delete_object(reference.key, expected_digest=reference.digest)
+        now[0] = 1002.0
+        # The ordinary observer still has its permitted hot bytes. The consumers
+        # below must instead validate the current recovery source.
+        if domain is not RuntimeDomain.RECOVERY:
+            assert await archive.transcript_repository.load_messages("run") == tuple(messages)
+        with pytest.raises(AIError) as raised:
+            if consumer == "checkpoint":
+                await archive.latest_checkpoint(agent_run_id="run", include_interrupted=True)
+            elif consumer == "verify":
+                await archive.verify_checkpoint_projection(agent_run_id="run", checkpoint=checkpoint)
+            elif consumer == "relocate":
+                if domain is RuntimeDomain.CONVERSATION:
+                    await archive.relocate_conversation_checkpoint(run, checkpoint)
+                else:
+                    await archive.relocate_run_checkpoint(run, checkpoint)
+            else:
+                backend = object.__new__(LocalExecutionBackend)
+                backend._run_stores = {RuntimeDomain.RECOVERY: archive}
+                await backend.load_interrupted_messages("run")
+        assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+    finally:
+        await storage.close()

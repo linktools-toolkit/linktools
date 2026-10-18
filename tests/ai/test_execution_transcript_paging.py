@@ -40,6 +40,7 @@ def _binding() -> AgentBindingContract:
 def _execution() -> ExecutionRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return ExecutionRecord(
+        durable_trace=True,
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,

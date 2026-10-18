@@ -15,8 +15,9 @@ from linktools.ai.runtime.state._history import TranscriptRepository
 from linktools.ai.runtime.state._object_router import (
     _RuntimeObjectRouter,
     build_runtime_object_router,
+    runtime_object_source_reads,
 )
-from linktools.ai.storage import InMemoryObjectStore, ObjectRef, ObjectStat, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, ObjectRef, ObjectStat, StoredPayload, StorageReadCache, _write_cache
 
 
 class RecordingCache:
@@ -106,14 +107,14 @@ def router(store: RecordingStore, cache: RecordingCache | None, **scope: str) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", (b"", b"content"))
-async def test_cache_warm_read_avoids_blob_open_but_checks_source(payload: bytes) -> None:
+async def test_cache_warm_read_avoids_all_source_reads(payload: bytes) -> None:
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store, payload)
     objects = router(store, cache)
     assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == payload
     assert store.opens == 1 and store.stats == 0
     assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == payload
-    assert store.opens == 1 and store.stats == 1
+    assert store.opens == 1 and store.stats == 0
     await objects.drain_reads()
 
 
@@ -126,35 +127,34 @@ async def test_corrupt_cached_bytes_are_evicted_and_read_from_origin(corrupt: by
     await objects.read_object(RuntimeDomain.ARTIFACT, ref)
     cache.items = dict.fromkeys(cache.items, corrupt)
     assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == b"content"
-    assert "delete" in cache.calls
-    assert tuple(cache.items.values()) == (b"content",)
+    assert len(cache.items) == 1
     assert store.opens == 2
     await objects.drain_reads()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ("get", "put", "delete"))
+@pytest.mark.parametrize("operation", ("get", "put"))
 async def test_cache_errors_do_not_replace_origin_result(operation: str) -> None:
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store)
     objects = router(store, cache)
-    if operation == "delete":
-        await objects.read_object(RuntimeDomain.ARTIFACT, ref)
-        cache.items = dict.fromkeys(cache.items, b"corrupt")
     cache.fail = operation
     assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == b"content"
     await objects.drain_reads()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ("open", "stat"))
-async def test_origin_errors_are_not_hidden_by_cache(operation: str) -> None:
+@pytest.mark.parametrize("warm", (False, True))
+async def test_origin_errors_are_not_hidden_by_expired_cache(warm: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store)
     objects = router(store, cache)
-    if operation == "stat":
+    now = [1000.0]
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
+    if warm:
         await objects.read_object(RuntimeDomain.ARTIFACT, ref)
-    store.fail = operation
+        now[0] += 3
+    store.fail = "open"
     with pytest.raises(RuntimeError) as raised:
         await objects.read_object(RuntimeDomain.ARTIFACT, ref)
     assert raised.value is store.failure
@@ -163,7 +163,9 @@ async def test_origin_errors_are_not_hidden_by_cache(operation: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replacement", (None, b"changed", b"changed size"))
-async def test_cache_cannot_mask_deleted_or_changed_source(replacement: bytes | None) -> None:
+async def test_cache_bounds_deleted_or_changed_source_visibility(replacement: bytes | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store)
     objects = router(store, cache)
@@ -171,6 +173,10 @@ async def test_cache_cannot_mask_deleted_or_changed_source(replacement: bytes | 
     await store.delete_object(ref.key, expected_digest=ref.digest)
     if replacement is not None:
         await put(store, replacement)
+    now[0] = 1002.0
+    assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == b"content"
+    assert store.opens == 1 and store.stats == 0
+    now[0] = 1003.0
     with pytest.raises(AIError) as raised:
         await objects.read_object(RuntimeDomain.ARTIFACT, ref)
     expected = ErrorCode.STORAGE_NOT_FOUND if replacement is None else ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -179,10 +185,10 @@ async def test_cache_cannot_mask_deleted_or_changed_source(replacement: bytes | 
 
 
 @pytest.mark.asyncio
-async def test_shared_cache_verifies_each_physical_source_despite_equal_store_ids() -> None:
+async def test_different_physical_sources_use_distinct_namespaces() -> None:
     first, second, cache = RecordingStore(), RecordingStore(), RecordingCache()
     ref = await put(first)
-    one, two = router(first, cache), router(second, cache)
+    one, two = router(first, cache, namespace="first"), router(second, cache, namespace="second")
     assert first.store_id == second.store_id
     await one.read_object(RuntimeDomain.ARTIFACT, ref)
     with pytest.raises(AIError) as raised:
@@ -190,7 +196,7 @@ async def test_shared_cache_verifies_each_physical_source_despite_equal_store_id
     assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
     await put(second)
     assert await two.read_object(RuntimeDomain.ARTIFACT, ref) == b"content"
-    assert second.opens == 0 and second.stats == 2
+    assert second.opens == 2 and second.stats == 0
     await one.drain_reads()
     await two.drain_reads()
 
@@ -268,11 +274,14 @@ async def test_singleflight_survives_cancelled_waiters() -> None:
     assert await asyncio.gather(*others[1:]) == [b"content"] * 4
     await objects.drain_reads()
     assert store.opens == 1
-    assert tuple(cache.items.values()) == (b"content",)
+    assert len(cache.items) == 1
+    assert store.stats == 0
 
 
 @pytest.mark.asyncio
-async def test_late_singleflight_borrower_cannot_read_deleted_source() -> None:
+async def test_singleflight_capture_does_not_renew_source_membership_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store)
     store.block = "open"
@@ -280,11 +289,13 @@ async def test_late_singleflight_borrower_cannot_read_deleted_source() -> None:
     first = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
     await store.entered.wait()
     await store.delete_object(ref.key, expected_digest=ref.digest)
-    with pytest.raises(AIError) as raised:
-        await objects.read_object(RuntimeDomain.ARTIFACT, ref)
-    assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+    now[0] = 1002.0
+    borrower = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    await asyncio.sleep(0)
     store.release.set()
-    assert await first == b"content"
+    assert await first == await borrower == b"content"
+    assert store.opens == 1 and store.stats == 0
+    now[0] = 1003.0
     with pytest.raises(AIError) as raised:
         await objects.read_object(RuntimeDomain.ARTIFACT, ref)
     assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
@@ -292,18 +303,22 @@ async def test_late_singleflight_borrower_cannot_read_deleted_source() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ("get", "stat", "open", "put", "delete"))
+@pytest.mark.parametrize("phase", ("get", "open", "put", "corrupt", "stat"))
 async def test_close_drains_all_accepted_read_phases_even_after_caller_cancellation(phase: str) -> None:
     store, cache = RecordingStore(), RecordingCache()
     ref = await put(store)
     objects = router(store, cache)
-    if phase in {"get", "stat", "delete"}:
+    if phase in {"get", "corrupt", "stat"}:
         await objects.read_object(RuntimeDomain.ARTIFACT, ref)
-    if phase == "delete":
+    if phase == "corrupt":
         cache.items = dict.fromkeys(cache.items, b"corrupt")
-    barrier = store if phase in {"stat", "open"} else cache
-    barrier.block = phase
-    read = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    barrier = store if phase in {"open", "corrupt", "stat"} else cache
+    barrier.block = "open" if phase == "corrupt" else phase
+    if phase == "stat":
+        with runtime_object_source_reads():
+            read = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    else:
+        read = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
     await barrier.entered.wait()
     read.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -323,7 +338,7 @@ async def test_close_drains_all_accepted_read_phases_even_after_caller_cancellat
     assert not retry.done()
     barrier.release.set()
     await retry
-    assert store.opens == (2 if phase == "delete" else 1)
+    assert store.opens == (2 if phase == "corrupt" else 1)
 
 
 @pytest.mark.asyncio
@@ -385,3 +400,114 @@ async def test_uncached_transcript_cancellation_waits_for_owned_stream_close(
         await objects.drain_reads()
         if close is not None:
             await close
+
+
+@pytest.mark.asyncio
+async def test_fresh_envelope_still_verifies_content_digest() -> None:
+    store, cache = RecordingStore(), RecordingCache()
+    ref = await put(store)
+    objects = router(store, cache)
+    await objects.read_object(RuntimeDomain.ARTIFACT, ref)
+    key = next(iter(cache.items))
+    await StorageReadCache(cache).put(key, b"changed")
+    assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == b"content"
+    assert store.opens == 2 and store.stats == 0
+    await objects.drain_reads()
+
+
+@pytest.mark.asyncio
+async def test_new_borrower_does_not_join_expired_source_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.runtime.state import _object_router
+
+    now = [1000.0]
+    monkeypatch.setattr(_object_router, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
+    store, cache = RecordingStore(), RecordingCache()
+    ref = await put(store)
+    store.block = "open"
+    objects = router(store, cache)
+    first = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    await store.entered.wait()
+    await store.delete_object(ref.key, expected_digest=ref.digest)
+    now[0] = 1004.0
+    with pytest.raises(AIError) as raised:
+        await objects.read_object(RuntimeDomain.ARTIFACT, ref)
+    assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+    store.release.set()
+    assert await first == b"content"
+    assert store.opens == 2
+    assert not cache.items
+    await objects.drain_reads()
+
+
+@pytest.mark.asyncio
+async def test_old_flight_cleanup_keeps_new_flight_after_cancelled_waiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.runtime.state import _object_router
+
+    now = [1000.0]
+    monkeypatch.setattr(_object_router, "monotonic", lambda: now[0])
+    monkeypatch.setattr(_write_cache, "time", lambda: now[0])
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+
+    class Store(RecordingStore):
+        async def open(self, key: str) -> AsyncIterator[bytes]:
+            index = self.opens
+            self.opens += 1
+            async for content in InMemoryObjectStore.open(self, key):
+                entered[index].set()
+                await release[index].wait()
+                yield content
+
+    store = Store()
+    ref = await put(store)
+    objects = router(store, RecordingCache())
+    first = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    await entered[0].wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    now[0] = 1004.0
+    second = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    await entered[1].wait()
+    release[0].set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    third = asyncio.create_task(objects.read_object(RuntimeDomain.ARTIFACT, ref))
+    await asyncio.sleep(0)
+    release[1].set()
+    assert await second == await third == b"content"
+    assert store.opens == 2
+    await objects.drain_reads()
+
+
+@pytest.mark.asyncio
+async def test_source_scope_is_nested_and_task_local_and_resets_after_cancellation() -> None:
+    store, cache = RecordingStore(), RecordingCache()
+    ref = await put(store)
+    objects = router(store, cache)
+    await objects.read_object(RuntimeDomain.ARTIFACT, ref)
+    await store.delete_object(ref.key, expected_digest=ref.digest)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def strong() -> bytes:
+        try:
+            with runtime_object_source_reads():
+                with runtime_object_source_reads():
+                    with pytest.raises(AIError) as raised:
+                        await objects.read_object(RuntimeDomain.ARTIFACT, ref)
+                    assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
+                with pytest.raises(AIError):
+                    await objects.read_object(RuntimeDomain.ARTIFACT, ref)
+                entered.set()
+                await release.wait()
+        except asyncio.CancelledError:
+            return await objects.read_object(RuntimeDomain.ARTIFACT, ref)
+        raise AssertionError("test requires cancellation")
+
+    task = asyncio.create_task(strong())
+    await entered.wait()
+    assert await objects.read_object(RuntimeDomain.ARTIFACT, ref) == b"content"
+    task.cancel()
+    assert await task == b"content"
+    await objects.drain_reads()
