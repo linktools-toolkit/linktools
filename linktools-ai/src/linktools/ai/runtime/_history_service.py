@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authorized read-only execution query and history service."""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 from ..core import JsonValue
 
@@ -51,11 +51,14 @@ class DefaultExecutionHistoryService:
         authorization: AuthorizationPolicy,
         reader: ExecutionHistoryReader,
         cursor_signer: "CursorSigner | None" = None,
+        *,
+        pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
     ) -> None:
         self._executions = executions
         self._authorization = authorization
         self._reader = reader
         self._cursor_signer = cursor_signer
+        self._pending_execution = pending_execution
 
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -535,10 +538,13 @@ class DefaultExecutionHistoryService:
         principal: Principal,
     ) -> None:
         tenant_id = principal.tenant_id
-        header = await self._executions.get_header(
+        pending = (None if self._pending_execution is None else
+                   await self._pending_execution(execution_id, tenant_id=tenant_id))
+        header = (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, pending.principal_id)
+                  if pending is not None else await self._executions.get_header(
             execution_id,
             tenant_id=tenant_id,
-        )
+        ))
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
@@ -553,6 +559,10 @@ class DefaultExecutionHistoryService:
         principal: Principal,
     ) -> ExecutionRecord:
         await self._authorize_header(execution_id, principal)
+        if self._pending_execution is not None:
+            pending = await self._pending_execution(execution_id, tenant_id=principal.tenant_id)
+            if pending is not None:
+                return pending
         record = await self._executions.get(
             execution_id,
             tenant_id=principal.tenant_id,

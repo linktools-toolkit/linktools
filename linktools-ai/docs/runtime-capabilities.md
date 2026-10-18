@@ -101,6 +101,81 @@ must accept `cancel(execution, *, force=False)`. An implementation that does not
 support explicit revocation can ignore the keyword and keep returning its
 existing confirmation outcome. It must not claim completion from force alone.
 
+### Terminal-only commit for ordinary Agent runs
+
+`TerminalCommitCapability()` opts ordinary Agent runs into deferred persistence:
+
+```python
+from linktools.ai.capability import CapabilityGroup
+from linktools.ai.runtime import TerminalCommitCapability
+
+chat = CapabilityGroup("chat")
+chat.agent("default", model="default")
+chat.capability(TerminalCommitCapability(), scope="runtime")
+# Runtime.open(..., capabilities=(chat,))
+```
+
+The capability has no arguments and uses the existing native registration path,
+including combined native capabilities. Agent-scope registration is rejected.
+`session.start`, execution watching and waiting keep their existing API.
+
+Ordinary work buffers its execution state until terminal commit. Successful native
+runs on one shared durable storage group commit their execution, result, session
+cursor and conversation history in one database write transaction. This is a
+batch of SQL statements, not one SQL statement or one network operation. Cold
+loads, object storage, cache coordination and preview streaming have their own
+I/O. Metrics retain their separate 60-second batch policy. A process crash before
+the terminal commit cannot recover the uncommitted turn. Before admitting a tool
+with side effects, Task ownership or a Task dependency, Runtime first switches
+the execution to its existing durable path. Those runs do not promise one write
+at completion. Task admissions themselves retain their existing durability and
+do not opt into terminal commit.
+
+`RestartCheckpointCapability()` and `DurableTraceCapability()` each take
+precedence: registering either alongside terminal commit selects the existing
+durable execution path from admission. The resolved policy is captured with the
+Runtime's capability declarations and written to each execution record. Reopening
+or replaying an execution does not reinterpret its admitted policy.
+
+An ordinary terminal-commit result does not retain a window for another Task to
+attach a dependency after execution finishes but before the caller consumes its
+result. Applications requiring that window should use the existing durable path.
+
+Current writers always emit the boolean `terminal_commit` field. Omission in an
+earlier record means `False`, preserving the existing durable path; malformed
+values fail closed. This is a safe additive wire default, with no format-version
+change or legacy adapter. There is no additional storage profile or
+`Runtime.open` parameter. Distributed operation borrows the optional turn
+coordination group from the same cache; the SDK does not implement Redis.
+
+Without an injected cache, native terminal commit uses a private in-memory
+coordinator for that Runtime owner. Multiple Runtime instances or pods must share
+a cache implementing both the complete hot-content and turn-coordination groups
+to coordinate live turns. A configured cache without these groups keeps the
+existing durable admission path; it is never silently replaced with a local
+coordinator. Split storage, custom execution backends, budgets, memory capture,
+forks and retries retain their existing durable paths.
+
+With shared coordination, ordinary and durable admissions both respect a live
+session claim. Durable admission releases that temporary claim after its source
+record is established; a terminal-only owner retains it until source settlement.
+Remote status and preview use owner-bound provisional data and are subject to
+cache availability. They do not prove a committed result. Explicit results and
+wait completion use authoritative storage. Loss or partition of the shared lease
+may cause duplicate model work, but the database accepts only one canonical
+result. An unknown commit is confirmed from source before reporting success; it
+is not retried by running the model again.
+
+A live dependency or input capture may ask the current owner to establish durable
+state. This request is a best-effort, owner-bound cache hint. The caller must still
+observe the source record and complete the original authorization and dependency
+operation. A lost hint, changed owner, or terminal commit winning the race cannot
+reopen the terminal dependency window.
+
+Upgrade all readers and writers sharing a namespace before enabling terminal
+commit. Readers that predate this capability do not enforce its terminal
+dependency boundary; mixed-version operation is not supported.
+
 ## Capture, identity and lifecycle
 
 - A capture exposes every registration in `capture.contributions`, including its

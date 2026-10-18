@@ -118,10 +118,13 @@ from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
+from ._turn import TurnCoordination, TurnCoordinationBackend
 
 from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
 
 __all__ = [
+    "TurnCoordination",
+    "TurnCoordinationBackend",
     "StreamBackend",
     "StreamWriter",
     "StreamBatch",

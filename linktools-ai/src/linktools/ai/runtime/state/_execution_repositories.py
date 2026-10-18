@@ -1298,6 +1298,85 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             history_head=replacement,
         )
 
+    async def pending_turn_result_in_transaction(
+        self, transaction: StateTransaction, reservation: ExecutionStartReservation,
+    ) -> ExecutionTerminalCommitResult | None:
+        identity = self._idempotency._identity_key(
+            reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
+        )
+        stored = await transaction.get_record(self._idempotency._key("idempotency", identity))
+        if stored is None:
+            return None
+        current = await self._idempotency._decode(stored, IdempotencyRecord)
+        if not _same_idempotency_identity(current, reservation.idempotency):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        execution = await self.get(current.resource_id, tenant_id=self._tenant_id)
+        head = await self.get_history_head(current.resource_id, tenant_id=self._tenant_id)
+        if (current.status is not IdempotencyStatus.COMPLETED or execution is None
+                or execution.status is not ExecutionStatus.SUCCEEDED or execution.result is None
+                or execution.result.output is None or head is None
+                or head.state is not ExecutionHistoryState.CLOSED
+                or current.result_digest != execution.result.output.digest):
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+        return ExecutionTerminalCommitResult(execution, execution.result)
+
+    async def insert_pending_turn_in_transaction(
+        self, transaction: StateTransaction, reservation: ExecutionStartReservation,
+        commit: ExecutionTerminalCommit, *, audit_events: Sequence[ExecutionEventAppend] = (),
+    ) -> ExecutionTerminalCommitResult:
+        _require_tenant(reservation.execution, self._tenant_id)
+        _require_tenant(reservation.idempotency, self._tenant_id)
+        _require_tenant(commit.execution, self._tenant_id)
+        self._idempotency._require_resource_kind(reservation.idempotency)
+        execution_id = reservation.execution.execution_id
+        if (not reservation.execution.terminal_commit or not commit.execution.terminal_commit
+                or commit.execution.execution_id != execution_id
+                or reservation.idempotency.resource_id != execution_id
+                or reservation.idempotency.status is not IdempotencyStatus.RESERVED
+                or commit.execution.status is not ExecutionStatus.SUCCEEDED
+                or commit.terminal_event_type != ExecutionEventType.EXECUTION_SUCCEEDED
+                or commit.operation is not None or commit.result.output is None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for name in ("session_id", "binding_digest", "principal_id", "principal_kind", "stored_user_input", "binding",
+                     "parent_execution_id", "parent_invocation_id", "root_execution_id", "previous_execution_id",
+                     "fork_base_execution_id", "lineage_kind", "created_at", "mode", "planning", "thinking",
+                     "memory_scope", "repository_instructions", "context_imported", "correlation",
+                     "requires_task_invocation_capture", "budget_scope_id", "restart_checkpoints", "durable_trace",
+                     "terminal_commit"):
+            if getattr(reservation.execution, name) != getattr(commit.execution, name):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        events = (ExecutionEventAppend(ExecutionEventType.EXECUTION_STARTED, {}), *audit_events,
+                  ExecutionEventAppend(commit.terminal_event_type, commit.terminal_event_payload))
+        if any(event.event_type not in {ExecutionEventType.MODEL_REQUEST_STARTED,
+                                        ExecutionEventType.MODEL_REQUEST_FINISHED,
+                                        ExecutionEventType.ASSISTANT_PART_COMPLETED,
+                                        ExecutionEventType.TOOL_CALL_STARTED,
+                                        ExecutionEventType.TOOL_CALL_FINISHED} for event in audit_events):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        # Pending turns opt out of the post-terminal dependency admission window.
+        final = replace(commit.execution, result=commit.result, event_seq=len(events), retention_closed=True,
+                        revision=commit.expected_revision + len(audit_events) + 1)
+        identity = self._idempotency._identity_key(
+            reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
+        )
+        completed = replace(reservation.idempotency, status=IdempotencyStatus.COMPLETED,
+                            result_digest=commit.result.output.digest, error_code=None,
+                            updated_at=await transaction.now())
+        head = ExecutionHistoryHeadRecord(execution_id, ExecutionHistoryState.CLOSED, 2, None,
+                                          producer_generation=commit.producer_generation or 0)
+        await transaction.insert_records((
+            self._stored("execution", execution_id, final, state=final.status.value),
+            self._idempotency._stored("idempotency", identity, completed, state=completed.status.value),
+            self._stored_history_head(head),
+        ))
+        stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
+        await transaction.insert_facts(tuple(
+            StoredFact(stream, index, self._key("execution", execution_id), str(event.event_type),
+                       None, None, event.payload)
+            for index, event in enumerate(events, 1)
+        ))
+        return ExecutionTerminalCommitResult(final, commit.result)
+
     async def get_result(
         self, execution_id: str, *, tenant_id: str
     ) -> ResultRecord | None:

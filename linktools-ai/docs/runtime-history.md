@@ -435,7 +435,10 @@ SQL and SQLite permit several Runtime instances to use one namespace. Opening
 another Runtime does not take over an admitted or running execution, or finish
 an unhanded-off cancellation. Separate sessions can run concurrently; one
 session's active-execution admission still uses its existing optimistic claim.
-Runtime does not add an ownership heartbeat or a namespace-wide database lock.
+The ordinary durable path does not add an ownership heartbeat or a
+namespace-wide database lock. `TerminalCommitCapability` instead uses the
+optional cache turn-coordination lease while a turn has no database record;
+see [terminal-only commit](runtime-capabilities.md#terminal-only-commit-for-ordinary-agent-runs).
 
 After an executor crashes, confirm it has stopped, then call the existing
 `runtime.executions.recover(execution_id, principal=...)`. Recovery competes for

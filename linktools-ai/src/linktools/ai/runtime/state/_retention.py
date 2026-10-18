@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
-from ...core import agent_run_id
+from ...core import ExecutionStatus, agent_run_id
 from ...storage import ObjectStore
 from ._contracts import ConversationCursor, ConversationRepositories, ExecutionRepositories
 from ._execution_repositories import ExecutionRepositoryImpl
@@ -52,7 +52,7 @@ class RuntimeRetentionController:
         self._closed = False
 
     async def release_execution_handoff(
-        self, execution_id: str, *, tenant_id: str
+        self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
     ) -> bool:
         repository = self._execution.executions
 
@@ -64,19 +64,38 @@ class RuntimeRetentionController:
             return released, execution
 
         if type(repository) is ExecutionRepositoryImpl:
+            async def read_closed(_transaction: "StateTransaction") -> "ExecutionRecord | None":
+                current = await repository.get(execution_id, tenant_id=tenant_id)
+                if (current is not None and current.terminal_commit and current.retention_closed
+                        and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED,
+                                               ExecutionStatus.CANCELLED}):
+                    return current
+                return None
+
+            execution = await repository.state_store.read(read_closed) if terminal_commit else None
             # Keep the closing decision and its metadata in the same transaction;
             # cleanup belongs outside this retryable mutation callback.
-            released, execution = await repository.state_store.mutate(close_and_read)
+            if execution is None:
+                released, execution = await repository.state_store.mutate(close_and_read)
+            else:
+                released = True
         else:
             released, execution = await close_and_read()
         if not released:
             return False
         if execution is not None and execution.session_id is not None:
-            await self._conversation.sessions.release_execution(
-                execution.session_id,
-                tenant_id=tenant_id,
-                execution_id=execution_id,
-            )
+            sessions = self._conversation.sessions
+
+            async def read_session(_transaction: "StateTransaction"):
+                return await sessions.get(execution.session_id, tenant_id=tenant_id)
+
+            session = await sessions.state_store.read(read_session) if execution.terminal_commit else None
+            if session is None or session.active_execution_id == execution_id or not execution.terminal_commit:
+                await sessions.release_execution(
+                    execution.session_id,
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                )
         if execution is not None:
             agent_run_ids = tuple(
                 agent_run_id(

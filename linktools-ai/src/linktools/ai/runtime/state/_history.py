@@ -1205,16 +1205,33 @@ class TranscriptRepository:
         require_no_run_history_lock("TranscriptRepository.history_message_count")
         if self._history_repository is None:
             return 0
-        record = await self._history_repository.get(
-            history_id,
-            tenant_id=tenant_id,
-        )
-        if record is None:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if (
+            type(self._history_repository) is ConversationHistoryRepositoryImpl
+            and self._history_repository.state_store is self._store
+            and tenant_id == self._tenant_id
+            and self._history_repository.namespace == self._namespace
+            and self._history_repository.tenant_id == self._tenant_id
+            and self._runtime_domain is RuntimeDomain.CONVERSATION
+        ):
+            captured = await self._store.read(
+                lambda transaction: self._history_repository.get_with_head_in_transaction(
+                    transaction, history_id, tenant_id=tenant_id,
+                )
+            )
+            if captured is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            record, head = captured
+            head = self._validate_observed_head(history_id, head)
+        else:
+            record = await self._history_repository.get(history_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            if record.inherited_message_count < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            head = await self.get_head(history_id)
+            if head is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if record.inherited_message_count < 0:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        head = await self.get_head(history_id)
-        if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return record.inherited_message_count + head.message_count
 

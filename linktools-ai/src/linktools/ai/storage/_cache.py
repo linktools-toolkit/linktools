@@ -7,23 +7,30 @@ Hot reads and writes are best-effort; their helpers treat errors as misses.
 Buffered admission and acknowledgement have explicit outcomes instead: accepted
 entries remain non-evictable until their owner settles and acknowledges them.
 Content keys are domain identity strings; pending keys use the source's key type.
+Live turn coordination has explicit ownership outcomes and propagates errors.
 """
 
 
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import stat
 import tempfile
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Protocol, TypeAlias, runtime_checkable
+from uuid import uuid4
 
+from ..errors import AIError, ErrorCode
 from ._files import sync_directory
-from ._lock import FilesystemMutationLock
+from ._lock import FilesystemMutationLock, Lease
+from ._turn import TurnCoordination
 
 ContentCacheKey: TypeAlias = str
 
@@ -38,7 +45,8 @@ class CacheBackend(Protocol):
     """Optional hot-content capability of an injected cache.
 
     A cache may instead, or also, implement append/read_batch/ack for buffered
-    writes and open_stream/read_stream for preview streams. Consumers select
+    writes, open_stream/read_stream for preview streams, and the five-method
+    TurnCoordinationBackend group for live turn ownership. Consumers select
     complete groups only; no inheritance or placeholder methods are required.
     """
     async def get(self, key: ContentCacheKey) -> "bytes | None": ...
@@ -85,6 +93,40 @@ async def contains_many(
         return frozenset()
 
 
+@dataclass(slots=True)
+class _MemoryTurn:
+    scope: str
+    session_key: str
+    request_key: str
+    request_digest: str
+    execution_id: str
+    owner_id: str
+    lease: Lease
+    expires_at: float
+    cancel_requested: bool = False
+
+    def coordination(self, *, owned: bool = False) -> TurnCoordination:
+        return TurnCoordination(
+            self.execution_id, self.owner_id, self.cancel_requested,
+            self.lease if owned else None,
+        )
+
+
+def _require_turn_text(value: str, name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a nonempty string")
+
+
+def _require_turn_duration(lease_seconds: float) -> None:
+    if (
+        isinstance(lease_seconds, bool)
+        or not isinstance(lease_seconds, (int, float))
+        or not math.isfinite(lease_seconds)
+        or lease_seconds <= 0
+    ):
+        raise ValueError("lease_seconds must be finite and positive")
+
+
 class InMemoryCacheBackend:
     """Bounded hot content and owner-scoped pending writes.
 
@@ -94,6 +136,11 @@ class InMemoryCacheBackend:
     keys under one lock and does not touch LRU order. Pending entries share
     these same limits, including in-flight batches, and cannot be evicted.
     Hot entries yield capacity to admitted pending writes.
+
+    Live turn coordination is local to this cache instance and event loop, not
+    cross-process or cross-pod. Its metadata is separate from the byte budget:
+    live ownership is never evicted for content or pending-write pressure.
+    Turn metadata expires with its lease and is reclaimed on coordination calls.
     """
 
     def __init__(self, *, max_bytes: int, max_size: "int | None" = None) -> None:
@@ -112,6 +159,10 @@ class InMemoryCacheBackend:
         self._pending: dict[str, OrderedDict[str, tuple[Hashable, bytes | None]]] = {}
         self._pending_size = 0
         self._pending_count = 0
+        self._turns: dict[str, _MemoryTurn] = {}
+        self._turn_requests: dict[tuple[str, str], str] = {}
+        self._turn_executions: dict[tuple[str, str], str] = {}
+        self._turn_fence = 0
 
     async def get(self, key: ContentCacheKey) -> "bytes | None":
         async with self._lock:
@@ -229,6 +280,106 @@ class InMemoryCacheBackend:
             if not entries:
                 self._pending.pop(scope, None)
             self._changed.notify_all()
+
+
+    async def claim_turn(
+        self,
+        scope: str,
+        *,
+        session_key: str,
+        request_key: str,
+        request_digest: str,
+        execution_id: str,
+        owner_id: str,
+        lease_seconds: float,
+    ) -> "TurnCoordination | None":
+        """Atomically acquire a live turn or return its token-free replay."""
+        for name, value in (
+            ("scope", scope), ("session_key", session_key),
+            ("request_key", request_key), ("request_digest", request_digest),
+            ("execution_id", execution_id), ("owner_id", owner_id),
+        ):
+            _require_turn_text(value, name)
+        _require_turn_duration(lease_seconds)
+        async with self._lock:
+            now = monotonic()
+            self._expire_turns(now)
+            previous_key = self._turn_requests.get((scope, request_key))
+            if previous_key is not None:
+                previous = self._turns[previous_key]
+                if previous.session_key != session_key or previous.request_digest != request_digest:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                return previous.coordination()
+            if (scope, execution_id) in self._turn_executions:
+                raise AIError(ErrorCode.STORAGE_CONFLICT, "execution ID already owns a live turn")
+            key = json.dumps(("turn", scope, session_key), separators=(",", ":"))
+            if key in self._turns:
+                return None
+            self._turn_fence += 1
+            lease = Lease(key, self._turn_fence, uuid4().hex)
+            turn = _MemoryTurn(
+                scope, session_key, request_key, request_digest, execution_id,
+                owner_id, lease, now + lease_seconds,
+            )
+            self._turns[key] = turn
+            self._turn_requests[scope, request_key] = key
+            self._turn_executions[scope, execution_id] = key
+            return turn.coordination(owned=True)
+
+    async def read_turn(self, scope: str, execution_id: str) -> "TurnCoordination | None":
+        """Read live execution ownership without extending or exposing its lease."""
+        _require_turn_text(scope, "scope")
+        _require_turn_text(execution_id, "execution_id")
+        async with self._lock:
+            self._expire_turns(monotonic())
+            key = self._turn_executions.get((scope, execution_id))
+            return None if key is None else self._turns[key].coordination()
+
+    async def renew_turn(
+        self, lease: Lease, *, lease_seconds: float,
+    ) -> "TurnCoordination | None":
+        """Renew only the matching live owner and observe its cancellation flag."""
+        _require_turn_duration(lease_seconds)
+        async with self._lock:
+            now = monotonic()
+            self._expire_turns(now)
+            turn = self._turns.get(lease.key)
+            if turn is None or turn.lease != lease:
+                return None
+            turn.expires_at = now + lease_seconds
+            return turn.coordination(owned=True)
+
+    async def release_turn(self, lease: Lease) -> bool:
+        """Release the exact live generation without disturbing a newer owner."""
+        async with self._lock:
+            self._expire_turns(monotonic())
+            turn = self._turns.get(lease.key)
+            if turn is None or turn.lease != lease:
+                return False
+            self._discard_turn(turn)
+            return True
+
+    async def cancel_turn(self, scope: str, execution_id: str) -> bool:
+        """Request cancellation of this execution without extending its lease."""
+        _require_turn_text(scope, "scope")
+        _require_turn_text(execution_id, "execution_id")
+        async with self._lock:
+            self._expire_turns(monotonic())
+            key = self._turn_executions.get((scope, execution_id))
+            if key is None:
+                return False
+            self._turns[key].cancel_requested = True
+            return True
+
+    def _expire_turns(self, now: float) -> None:
+        for turn in tuple(self._turns.values()):
+            if turn.expires_at <= now:
+                self._discard_turn(turn)
+
+    def _discard_turn(self, turn: _MemoryTurn) -> None:
+        del self._turns[turn.lease.key]
+        del self._turn_requests[turn.scope, turn.request_key]
+        del self._turn_executions[turn.scope, turn.execution_id]
 
 
 class FilesystemCacheBackend:

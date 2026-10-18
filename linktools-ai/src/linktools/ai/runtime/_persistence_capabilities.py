@@ -30,4 +30,19 @@ class DurableTraceCapability(AbstractCapability[AgentContext[AppT]]):
     id: str | None = "runtime.durable-trace"
 
 
-__all__ = ["RestartCheckpointCapability", "DurableTraceCapability"]
+class TerminalCommitCapability(AbstractCapability[AgentContext[AppT]]):
+    """Defer ordinary Agent persistence until the execution reaches terminal state.
+
+    Register at Runtime scope. Side effects and Task dependencies require the
+    existing durable path before they are admitted. Restart checkpoints and
+    durable trace take precedence over this optimization.
+    """
+
+    id: str | None = "runtime.terminal-commit"
+
+
+__all__ = [
+    "RestartCheckpointCapability",
+    "DurableTraceCapability",
+    "TerminalCommitCapability",
+]

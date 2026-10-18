@@ -14,7 +14,7 @@ from sqlalchemy import event
 from linktools.ai.core import ExecutionStatus, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeHistory, RuntimeStorage
-from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.storage import ObjectRef, StoredPayload
@@ -38,7 +38,7 @@ def _service(state, *, repository=None, authorization=None, objects=None, releas
         replace(state.execution, executions=repository or state.execution.executions),
         objects or state.object_store(RuntimeDomain.EXECUTION),
         authorization or TenantAuthorizationPolicy(), sessions=state.conversation.sessions,
-        catalog=None, compiler=None, runtime_bridge=SimpleNamespace(port=None),
+        catalog=None, compiler=None, runtime_bridge=_ExecutionRuntimeBridge(),
         live_broker=LiveExecutionEventBroker(), history_reader=None, release_terminal=release,
     )
 

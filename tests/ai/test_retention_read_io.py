@@ -170,3 +170,43 @@ async def test_retention_unknown_commit_does_not_clean_until_retry(
         assert calls == [("staging", "execution")]
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("terminal_commit,closed,held", (
+    (False, False, False), (False, True, False), (False, False, True),
+    (True, False, False), (True, True, False), (True, False, True),
+))
+async def test_terminal_policy_hint_still_requires_source_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    terminal_commit: bool, closed: bool, held: bool,
+) -> None:
+    state = _storage("sqlite", tmp_path)
+    await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
+    try:
+        repository = state.execution.executions
+        await repository.create_with_history_head(replace(
+            _execution(), session_id=None, status=ExecutionStatus.SUCCEEDED,
+            terminal_commit=terminal_commit, retention_closed=closed,
+            dependency_hold_ids=("hold",) if held else (),
+        ))
+        calls = []
+        controller = _controller(repository, calls)
+        original = repository.state_store.mutate
+        mutations = []
+
+        async def mutate(callback):
+            mutations.append(callback)
+            return await original(callback)
+
+        monkeypatch.setattr(repository.state_store, "mutate", mutate)
+        released = await controller.release_execution_handoff(
+            "execution", tenant_id="tenant", terminal_commit=True,
+        )
+        assert released is not held
+        assert bool(mutations) is not (terminal_commit and closed)
+        assert calls == ([] if held else [("staging", "execution")])
+        current = await repository.get("execution", tenant_id="tenant")
+        assert current is not None
+        assert current.retention_closed is not held
+    finally:
+        await state.close()

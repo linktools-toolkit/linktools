@@ -88,6 +88,7 @@ def _validate_cache(cache: object | None) -> None:
         ("get", "put", "delete"),
         ("append", "read_batch", "ack"),
         ("open_stream", "read_stream"),
+        ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn"),
     ):
         available = tuple(getattr(cache, method, None) for method in methods)
         if any(method is not None for method in available) and not all(map(callable, available)):

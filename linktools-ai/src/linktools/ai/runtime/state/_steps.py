@@ -123,6 +123,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         del conversation_retention, execution_retention, recovery_retention
         self._staging = staging
         self._execution_repository = execution_repository
+        self._pending_producer_guard: Callable[[str, int, bool], bool] | None = None
         self._tenant_id = tenant_id
         self._archives = {
             RuntimeDomain.CONVERSATION: conversation_archive,
@@ -146,6 +147,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
                 archive.bind_history_lock(self._history_lock)
+
+    def bind_pending_producer_guard(self, guard: Callable[[str, int, bool], bool]) -> None:
+        """Bind the Runtime-owned authority for turns not yet persisted."""
+        self._pending_producer_guard = guard
 
     def bind_execution_producer(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
@@ -501,6 +506,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         allow_cancelling: bool = True,
     ) -> None:
         """Check control authority before advancing a run without a durable checkpoint."""
+        if (self._pending_producer_guard is not None
+                and self._pending_producer_guard(execution_id, producer_generation, allow_cancelling)):
+            return
         repository = self._execution_repository
         if repository is None or self._tenant_id is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)

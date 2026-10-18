@@ -23,6 +23,7 @@ from ..capability import (
     SkillSourceRegistry,
 )
 from ..core import (
+    AuthorizationAction,
     AuthorizationPolicy,
     HmacCursorSigner,
     PromptLimits,
@@ -40,7 +41,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import ObjectStore, PayloadPolicy, StreamBackend
+from ..storage import InMemoryCacheBackend, ObjectStore, PayloadPolicy, StreamBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -65,11 +66,16 @@ from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
 from ._input_capture import RuntimeInputCaptures
 from ._local import LocalExecutionBackend
+from ._pending_coordination import _PendingTurnCoordination
 from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricRecorder
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
-from ._persistence_capabilities import DurableTraceCapability, RestartCheckpointCapability
+from ._persistence_capabilities import (
+    DurableTraceCapability,
+    RestartCheckpointCapability,
+    TerminalCommitCapability,
+)
 from ._runtime_history import RuntimeHistory
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
@@ -77,7 +83,7 @@ from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from ._transient_history import TransientExecutionHistoryStore
 from ._tool_response_fixture import ToolResponseFixture
-from .service_api import ExecutionHistoryReader, SessionHistoryReader
+from .service_api import CancelExecutionRequest, ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
 from .state._contracts import BudgetRepository, TaskAdmissionRepository
 from .state._step_archive import StagingAgentRunStore
@@ -182,7 +188,9 @@ async def compose_runtime_components(
                 asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
         def require_runtime_persistence_scope(capability: AbstractCapability[object]) -> None:
-            if isinstance(capability, (RestartCheckpointCapability, DurableTraceCapability)):
+            if isinstance(capability, (
+                RestartCheckpointCapability, DurableTraceCapability, TerminalCommitCapability,
+            )):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "persistence capabilities require Runtime scope")
 
         for candidate in candidates:
@@ -545,6 +553,7 @@ async def _build_local_components(
         execution_id: str,
         *,
         tenant_id: str,
+        terminal_commit: bool = False,
     ) -> bool:
         if backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -553,8 +562,7 @@ async def _build_local_components(
             tenant_id=tenant_id,
         )
         return await storage.retention.release_execution_handoff(
-            execution_id,
-            tenant_id=tenant_id,
+            execution_id, tenant_id=tenant_id, terminal_commit=terminal_commit,
         )
 
     try:
@@ -564,9 +572,25 @@ async def _build_local_components(
         metric_buffer = None if metrics is None else _RuntimeMetricRecorder(metrics.recorder())
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
+        if isinstance(history_reader, StepExecutionHistoryReader):
+            history_reader.bind_pending_execution_reader(runtime_bridge.pending_turns.read_execution)
         persistence_capabilities: list[AbstractCapability[object]] = []
         for capability in runtime_capabilities:
             capability.apply(persistence_capabilities.append)
+        restart_checkpoints = any(
+            isinstance(value, RestartCheckpointCapability) for value in persistence_capabilities
+        )
+        durable_trace = any(
+            isinstance(value, DurableTraceCapability) for value in persistence_capabilities
+        )
+        terminal_commit = not (restart_checkpoints or durable_trace) and any(
+            isinstance(value, TerminalCommitCapability) for value in persistence_capabilities
+        )
+        if terminal_commit or storage.cache is not None:
+            coordination_cache = storage.cache if storage.cache is not None else InMemoryCacheBackend(max_bytes=0)
+            runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(
+                coordination_cache, namespace=namespace, tenant_id=tenant_id,
+            ))
         stream_cache = (
             storage.cache
             if isinstance(storage.cache, StreamBackend)
@@ -583,6 +607,7 @@ async def _build_local_components(
             authorization,
             history_reader,
             HmacCursorSigner("execution", runtime_token_seed),
+            pending_execution=runtime_bridge.pending_turns.read_execution,
         )
         binding_resolver = _AgentBindingResolver(
             catalog,
@@ -609,8 +634,9 @@ async def _build_local_components(
             session_execution_ready=session_execution_ready,
             tool_responses=tool_responses,
             object_reader=storage.read_object,
-            restart_checkpoints=any(isinstance(value, RestartCheckpointCapability) for value in persistence_capabilities),
-            durable_trace=any(isinstance(value, DurableTraceCapability) for value in persistence_capabilities),
+            restart_checkpoints=restart_checkpoints,
+            durable_trace=durable_trace,
+            terminal_commit=terminal_commit,
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -716,8 +742,18 @@ async def _build_local_components(
             metric_recorder=metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
+            pending_turns=runtime_bridge.pending_turns,
+            pending_cancel=lambda execution_id, principal: execution.cancel(
+                execution_id, CancelExecutionRequest(principal, f"pending-cancel:{execution_id}"),
+            ),
         )
         runtime_bridge.bind(backend)
+        runtime_bridge.pending_start = backend.start_pending
+        runtime_bridge.pending_promote = backend.promote_pending_execution
+        runtime_bridge.pending_cancel_promote = lambda execution_id: backend.promote_pending_execution(
+            execution_id, allow_cancelled=True,
+        )
+        storage.run_store.bind_pending_producer_guard(backend.require_pending_producer)
         session = DefaultSessionService(
             storage.conversation,
             storage.execution.executions,
@@ -733,10 +769,17 @@ async def _build_local_components(
             ),
             transcript_store=storage.run_store,
             release_terminal=storage.retention.release_session,
+            pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
             workspace_access=input_materializer.access,
         )
+        async def prepare_pending_capture(execution_id: str, principal) -> None:
+            await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT)
+            await execution.load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+            await backend.promote_pending_execution(execution_id)
+
         input_captures = RuntimeInputCaptures(
             namespace, storage, authorization, execution, input_materializer,
+            prepare_pending_capture=prepare_pending_capture,
         )
         task_graph_binding_captures = TaskGraphBindingCaptureStore(
             namespace,
@@ -822,6 +865,8 @@ async def _build_local_components(
             authorization,
             backend.worker_failure,
             live_broker,
+            pending_execution=backend.pending_execution,
+            pending_stream=runtime_bridge.pending_turns.read_stream,
         )
         artifact = DefaultArtifactService(
             storage.artifact,

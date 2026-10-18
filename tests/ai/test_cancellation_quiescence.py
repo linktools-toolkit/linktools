@@ -17,6 +17,7 @@ from linktools.ai.runtime._execution import (
 )
 from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.task import DefaultTaskGraphService
 from linktools.ai.task._local import LocalTaskGraphLauncher
 
@@ -52,6 +53,8 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
     backend._execution = SimpleNamespace(executions=_ExecutionRecords(current))
     backend._tenant_id = "tenant"
+    backend._pending_turns = _PendingExecutionTurns()
+    backend._pending_renewals = {}
     backend._tasks = {}
     backend._worker_failures = {}
     backend._captured_usage = {}
@@ -78,6 +81,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
 def _execution_service() -> DefaultExecutionService:
     service = object.__new__(DefaultExecutionService)
     service._handoff = HandoffGate()
+    service._admission_tasks = set()
     service._detached_cancel_finalizers = set()
     service._detached_cancel_failure = None
     return service

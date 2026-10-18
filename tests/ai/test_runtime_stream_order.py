@@ -33,6 +33,7 @@ from linktools.ai.runtime._event import (
     _LiveEvent,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor
 from linktools.ai.runtime.service_api import (
@@ -886,6 +887,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._pending_turns = _PendingExecutionTurns()
     backend._tenant_id = "tenant"
     backend._namespace = "stream-order"
     backend._agent_run_lifecycle = SimpleNamespace(

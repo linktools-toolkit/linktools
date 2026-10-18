@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
@@ -166,6 +166,7 @@ class DefaultSessionService:
         release_terminal: _SessionReleaseCallback | None = None,
         workspace_access: _InputFileSource | None = None,
         cache: object | None = None,
+        pending_session_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -177,6 +178,7 @@ class DefaultSessionService:
         self._release_terminal = release_terminal or _no_release_terminal
         self._workspace_access = workspace_access
         self._cache = cache if isinstance(cache, CacheBackend) else None
+        self._pending_session_execution = pending_session_execution
         self._display_reads: set[asyncio.Future[None]] = set()
         self._display_close_started = False
         self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
@@ -955,6 +957,15 @@ class DefaultSessionService:
         await self._authorized(
             session_id, request.principal, AuthorizationAction.SESSION_CLOSE
         )
+        if self._pending_session_execution is not None:
+            pending = await self._pending_session_execution(session_id, tenant_id=request.principal.tenant_id)
+            if pending is not None:
+                if not request.force:
+                    raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+                await self._execution.cancel(
+                    pending.execution_id,
+                    CancelExecutionRequest(request.principal, f"{request.idempotency_key}/{pending.execution_id}", True),
+                )
         digest = canonical_sha256(
             {
                 "action": "session.close",

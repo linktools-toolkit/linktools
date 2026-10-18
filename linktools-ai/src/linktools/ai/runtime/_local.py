@@ -41,6 +41,7 @@ from ._input import (
     stored_input_attachment_views,
 )
 from ._plan import RuntimePlanStore
+from ._pending_turn import _PendingExecutionTurn, _PendingExecutionTurns
 from ..core import (
     ExecutionEventType,
     ExecutionMode,
@@ -73,6 +74,7 @@ from ..storage import (
     ObjectStore,
     PayloadPolicy,
     StoredPayload,
+    TurnCoordination,
     payload_fits_inline,
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
@@ -115,6 +117,7 @@ from .state._contracts import (
     ExecutionRepository,
     ExecutionRecord,
     ExecutionStartClaim,
+    ExecutionStartReservation,
     ExecutionRepositories,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
@@ -283,7 +286,12 @@ class LocalExecutionBackend:
         metric_recorder: "MetricRecorder | None" = None,
         worker_completed: "Callable[[str], Awaitable[None]] | None" = None,
         exclusive_execution_writer: bool = False,
+        pending_turns: _PendingExecutionTurns | None = None,
+        pending_cancel: Callable[[str, Principal], Awaitable[object]] | None = None,
     ) -> None:
+        self._pending_turns = pending_turns or _PendingExecutionTurns()
+        self._pending_cancel = pending_cancel
+        self._pending_renewals: dict[str, asyncio.Task[None]] = {}
         self._conversation = conversation
         self._execution = execution_state
         self._recovery = recovery
@@ -406,6 +414,9 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None:
+        pending = await self._pending_turns.read_execution(execution_id, tenant_id=tenant_id)
+        if pending is not None:
+            return pending
         repository = self._execution.executions
         return await repository.state_store.read(
             lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
@@ -434,6 +445,9 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> RecoveryCheckpoint | None:
+        pending = self._pending_turns.get(execution_id, tenant_id=tenant_id)
+        if pending is not None:
+            return pending.recovery
         return await self._recovery.checkpoints.get(
             execution_id,
             tenant_id=tenant_id,
@@ -897,6 +911,275 @@ class LocalExecutionBackend:
         return not (execution.memory_scope is not None
                     and select_harness_memory_tools(binding.compiled_agent.tool_policy))
 
+    async def pending_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+        local = await self._pending_turns.read_execution(execution_id, tenant_id=tenant_id)
+        if local is not None:
+            return local
+        return await self._pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
+
+    def require_pending_producer(
+        self, execution_id: str, generation: int, allow_cancelling: bool,
+    ) -> bool:
+        turn = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+        if turn is None or turn.committed is not None:
+            return False
+        turn.require_active(generation, allow_cancelling=allow_cancelling)
+        return True
+
+    async def start_pending(
+        self, request: ExecutionRequest, reservation: ExecutionStartReservation,
+        session: SessionRecord | None, coordination: TurnCoordination | None,
+    ) -> str | None:
+        execution = reservation.execution
+        if (coordination is None or self._pending_turns.coordination is None
+                or not execution.terminal_commit or not self._can_prepare_initial_attempt(execution)
+                or execution.budget_scope_id is not None or execution.memory_scope is not None
+                or not self._conversation_durable or not self._execution_objects_durable
+                or not isinstance(self._run_store, RuntimeAgentRunStore)):
+            return None
+        if (execution.planning or execution.fork_base_execution_id is not None
+                or execution.previous_execution_id is not None):
+            return None
+        await self._validate_start(request, execution)
+        if not self._accepting:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if coordination.lease is None or coordination.execution_id != execution.execution_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        coordinator = self._pending_turns.coordination
+        identity = reservation.idempotency
+        turn = None
+        try:
+            # The previous owner may have committed and released after the
+            # service's idempotency read. Confirm the source after winning a new
+            # ephemeral claim, before starting any model work.
+            repository = self._execution.idempotency
+            existing = await repository.state_store.read(lambda _transaction: repository.get(
+                identity.scope, identity.idempotency_key_digest, tenant_id=self._tenant_id,
+            ))
+            if existing is not None:
+                if existing.request_digest != identity.request_digest:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                if existing.status is IdempotencyStatus.START_UNKNOWN:
+                    raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+                await self._release_pending_claim(coordination)
+                return existing.resource_id
+            if session is not None:
+                sessions = self._conversation.sessions
+                current_session = await sessions.state_store.read(
+                    lambda _transaction: sessions.get(session.session_id, tenant_id=self._tenant_id)
+                )
+                if current_session is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                if current_session.status is not SessionStatus.OPEN:
+                    raise AIError(ErrorCode.SESSION_CONFLICT)
+                if (current_session.active_execution_id is not None
+                        or current_session.continuation != session.continuation):
+                    raise AIError(ErrorCode.SESSION_BUSY)
+                session = current_session
+            turn, created = self._pending_turns.admit(
+                self._tenant_id, reservation, session, now=datetime.now(timezone.utc),
+            )
+            if not created:
+                await self._release_pending_claim(coordination)
+                return turn.execution.execution_id
+            turn.coordination = coordination
+            turn.promotion_claim_id = coordination.owner_id
+            await coordinator.publish(turn.execution, coordination)
+            if not self._accepting:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            self._live_broker.prepare_local_producer(execution.execution_id)
+            self._live_broker.register_local_producer(execution.execution_id, 0)
+            self._live_broker.publish_event(
+                execution.execution_id, ExecutionEventType.EXECUTION_STARTED, {}, durable_seq=None,
+            )
+            self._terminal_events[execution.execution_id] = asyncio.Event()
+            task = asyncio.create_task(
+                self._run(request, turn.execution, initial_attempt=_InitialAttemptCapture(
+                    turn.execution, turn.recovery,
+                )), name=f"ai-execution-{execution.execution_id}",
+            )
+            self._tasks[execution.execution_id] = task
+            task.add_done_callback(
+                lambda completed: self._task_done(execution.execution_id, completed)
+            )
+            renewal = asyncio.create_task(
+                self._renew_pending(turn, request.principal),
+                name=f"ai-pending-lease-{execution.execution_id}",
+            )
+            self._pending_renewals[execution.execution_id] = renewal
+            renewal.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+            return turn.execution.execution_id
+        except BaseException:
+            if turn is not None:
+                self._pending_turns.release(turn)
+            # Until this method returns an ID, the admission owner retains the
+            # lease and releases it on failure.
+            raise
+
+    async def _check_pending_lease(self, turn: _PendingExecutionTurn, *, allow_cancelled: bool) -> None:
+        coordinator = self._pending_turns.coordination
+        current = turn.coordination
+        if coordinator is None or current is None or current.lease is None:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        renewed = await coordinator.renew(current.lease, lease_seconds=30)
+        if (renewed is None or renewed.owner_id != current.owner_id
+                or renewed.execution_id != current.execution_id or renewed.lease is None):
+            error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_lease_lost"})
+            self._pending_turns.fail(turn, error)
+            raise error
+        turn.coordination = renewed
+        if renewed.cancel_requested and not allow_cancelled:
+            raise asyncio.CancelledError
+
+    async def _renew_pending(self, turn: _PendingExecutionTurn, principal: Principal) -> None:
+        execution_id = turn.execution.execution_id
+        try:
+            while self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is turn:
+                await asyncio.sleep(3)
+                if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not turn:
+                    return
+                if turn.committing or turn.uncertain:
+                    continue
+                await self._check_pending_lease(turn, allow_cancelled=True)
+                if turn.coordination is not None and turn.coordination.cancel_requested:
+                    if self._pending_cancel is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    await self._pending_cancel(execution_id, principal)
+                    return
+                coordinator = self._pending_turns.coordination
+                if (coordinator is not None and turn.coordination is not None
+                        and await coordinator.promotion_requested(turn.coordination)):
+                    await self.promote_pending_execution(execution_id)
+                    return
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            if self._pending_cancel is not None:
+                await self._pending_cancel(execution_id, principal)
+            else:
+                raise
+        except Exception as cause:
+            error = cause if isinstance(cause, AIError) else AIError(
+                ErrorCode.STORAGE_DEPENDENCY_NOT_READY, safe_details={"phase": "pending_lease_renewal"},
+            )
+            self._pending_turns.fail(turn, error)
+            self._record_worker_failure(execution_id, error)
+            worker = self._tasks.get(execution_id)
+            if worker is not None:
+                worker.cancel()
+
+    async def _release_pending_coordination(self, turn: _PendingExecutionTurn) -> None:
+        renewal = self._pending_renewals.pop(turn.execution.execution_id, None)
+        if renewal is not None and renewal is not asyncio.current_task():
+            renewal.cancel()
+        if turn.coordination is not None:
+            await self._release_pending_claim(turn.coordination)
+
+    async def _release_pending_claim(self, coordination: TurnCoordination) -> None:
+        coordinator = self._pending_turns.coordination
+        if coordinator is not None and coordination.lease is not None:
+            try:
+                await coordinator.release(coordination.lease)
+            except Exception:
+                # Cleanup cannot change a known source result or replay receipt.
+                _logger.warning("pending lease release failed: execution=%s", coordination.execution_id)
+
+    async def promote_pending_execution(self, execution_id: str, *, allow_cancelled: bool = False) -> None:
+        """Establish source authority before effects or dependent work can begin."""
+        turn = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+        if turn is None:
+            await self._promote_remote_pending(execution_id)
+            return
+        async with turn.boundary:
+            if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not turn:
+                return
+            if turn.committing:
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+            await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
+            context = turn.execution.input_context
+            claim = turn.promotion_claim_id or uuid.uuid4().hex
+            turn.promotion_claim_id = claim
+
+            async def accept() -> None:
+                turn.uncertain = False
+                turn.failure = None
+                self._worker_failures.pop(execution_id, None)
+                self._pending_turns.release(turn)
+                self._live_broker.confirm_events(execution_id, first_event_seq=1, count=1)
+                await self._release_pending_coordination(turn)
+
+            async def confirm() -> None:
+                value = await self._runtime_commands.read_pending_turn_promotion(
+                    turn.reservation, expected_session=turn.session,
+                    captured_input_context=context, producer_claim_id=claim,
+                )
+                if value is None:
+                    error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_promotion_not_found"})
+                    self._pending_turns.fail(turn, error)
+                    self._record_worker_failure(execution_id, error)
+                    raise error
+                execution, checkpoint = value
+                failure = turn.failure
+                await accept()
+                if failure is not None and not self.worker_installed(execution_id):
+                    # The original worker stopped before its effect boundary.
+                    # Confirmation permits failure settlement, not a model replay.
+                    terminal = await self._commit_failure(
+                        execution, failure, agent_run_id=checkpoint.agent_run_id,
+                        producer_generation=None if context is None else 2,
+                    )
+                    if context is not None:
+                        await self._discard_terminal_producer_tail(
+                            terminal, agent_run_id=checkpoint.agent_run_id, producer_generation=2,
+                        )
+
+            turn.reconcile = lambda: self._reconcile_pending_boundary(turn, confirm)
+
+            async def promote_owned() -> None:
+                await self._runtime_commands.promote_pending_turn(
+                    turn.reservation, expected_session=turn.session,
+                    captured_input_context=context, producer_claim_id=claim,
+                )
+                await accept()
+
+            task = asyncio.create_task(promote_owned(), name=f"ai-promote-pending-{execution_id}")
+            _result, cancellation = await self._await_checkpoint_task(
+                task, label="pending promotion", execution_id=execution_id,
+            )
+            if cancellation is not None:
+                raise cancellation
+
+    async def _promote_remote_pending(self, execution_id: str) -> None:
+        coordinator = self._pending_turns.coordination
+        if coordinator is None:
+            return
+        if await self.load_execution(execution_id, tenant_id=self._tenant_id) is not None:
+            return
+        owner_id = await coordinator.request_promotion(execution_id, tenant_id=self._tenant_id)
+        if owner_id is None:
+            if await self.load_execution(execution_id, tenant_id=self._tenant_id) is not None:
+                return
+            raise AIError(ErrorCode.EXECUTION_NOT_READY)
+        pause = 0.05
+        deadline_ns = monotonic_ns() + 30_000_000_000
+        while True:
+            # Only an authoritative source row permits the original dependency
+            # operation. The cache hint is neither an ACK nor an admission.
+            if await self.load_execution(execution_id, tenant_id=self._tenant_id) is not None:
+                return
+            if monotonic_ns() >= deadline_ns:
+                raise AIError(ErrorCode.EXECUTION_NOT_READY, safe_details={"phase": "pending_promotion_timeout"})
+            if not await coordinator.remote_promotion_pending(
+                execution_id, owner_id, tenant_id=self._tenant_id,
+            ):
+                if await self.load_execution(execution_id, tenant_id=self._tenant_id) is not None:
+                    return
+                raise AIError(ErrorCode.EXECUTION_NOT_READY)
+            await asyncio.sleep(pause)
+            pause = min(1.0, pause * 2)
+
     async def prepare_start(
         self,
         request: ExecutionRequest,
@@ -1224,6 +1507,14 @@ class LocalExecutionBackend:
                 self._track_checkpoint_task(cleanup, "execution_handoff")
             return
         self._record_worker_failure(execution_id, error)
+        turn = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+        if turn is not None:
+            failure = self.worker_failure(execution_id, tenant_id=self._tenant_id)
+            assert failure is not None
+            self._pending_turns.fail(turn, failure)
+            if not turn.uncertain:
+                cleanup = asyncio.create_task(self._release_pending_coordination(turn))
+                self._track_checkpoint_task(cleanup, "pending_release", execution_id)
         self._live_broker.complete(execution_id)
 
     async def _complete_worker_handoff(
@@ -2695,6 +2986,13 @@ class LocalExecutionBackend:
 
     async def close(self) -> None:
         self._accepting = False
+        await self._pending_turns.settle_all()
+        renewals = tuple(self._pending_renewals.values())
+        for renewal in renewals:
+            renewal.cancel()
+        if renewals:
+            await asyncio.gather(*renewals, return_exceptions=True)
+        self._pending_renewals.clear()
         recovery_tasks = tuple(self._recovery_reconcile_tasks.values())
         for task in recovery_tasks:
             task.cancel()
@@ -3284,9 +3582,23 @@ class LocalExecutionBackend:
                 if prepared_context is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
-                    current, checkpoint = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
-                        prepared_admission, prepared_context,
-                    )
+                    pending = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+                    if pending is None:
+                        current, checkpoint = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
+                            prepared_admission, prepared_context,
+                        )
+                    else:
+                        async with pending.boundary:
+                            if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is pending:
+                                current, checkpoint = pending.activate(
+                                    agent_run_id, prepared_context, now=datetime.now(timezone.utc),
+                                )
+                                assert self._pending_turns.coordination is not None and pending.coordination is not None
+                                await self._pending_turns.coordination.publish(current, pending.coordination)
+                            else:
+                                current, checkpoint = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
+                                    prepared_admission, prepared_context,
+                                )
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
                         raise
@@ -3305,7 +3617,11 @@ class LocalExecutionBackend:
                     execution_id,
                     current.agent_run_seq,
                 )
-            if self._live_broker.shared is not None:
+            pending = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
+            if pending is not None and pending.coordination is not None:
+                self._live_broker.admit_shared_producer(execution_id, producer_generation, pending.coordination.owner_id)
+            if (self._live_broker.shared is not None
+                    and self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is None):
                 shared_head = await self._execution.executions.get_history_head(
                     execution_id, tenant_id=self._tenant_id,
                 )
@@ -3346,6 +3662,7 @@ class LocalExecutionBackend:
                     recovery_agent_run_id=recovery_history_agent_run_id,
                     producer_generation=producer_generation,
                     terminal_commands=self._runtime_commands,
+                    before_effect=lambda: self.promote_pending_execution(execution_id),
                 )
                 if tool_repository is not None
                 else None
@@ -3541,6 +3858,7 @@ class LocalExecutionBackend:
             if isinstance(result, DeferredToolRequests):
                 if checkpoint is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await self.promote_pending_execution(execution_id)
                 try:
                     deferred = await self._recovery_coordinator.commit_deferred_pause(
                         current,
@@ -3575,6 +3893,10 @@ class LocalExecutionBackend:
             except asyncio.CancelledError:
                 raise
             except Exception as terminal_error:
+                if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
+                    # Pending commits have no durable producer to supersede. Their
+                    # own receipt decides whether to retain or release admission.
+                    raise
                 if (isinstance(terminal_error, AIError) and terminal_error.code is ErrorCode.STORAGE_CONFLICT
                         and await self._finish_superseded_worker(
                             execution_id, agent_run_id=agent_run_id,
@@ -4003,6 +4325,8 @@ class LocalExecutionBackend:
         self, execution_id: str, *, agent_run_id: str | None,
         producer_generation: int | None, admission: ExecutionRecord | None,
     ) -> bool:
+        if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
+            return False
         head = await self._execution.executions.get_history_head(
             execution_id, tenant_id=self._tenant_id,
         )
@@ -4824,6 +5148,7 @@ class LocalExecutionBackend:
         *,
         producer_generation: int | None = None,
     ) -> RecoveryCheckpoint:
+        await self.promote_pending_execution(execution.execution_id)
         existing = tuple(
             item
             for item in checkpoint.repository_instruction_barriers
@@ -4988,6 +5313,25 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
+        pending = self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id)
+        if pending is not None:
+            coordinator = self._pending_turns.coordination
+            if (status is ExecutionStatus.SUCCEEDED and coordinator is not None
+                    and pending.coordination is not None
+                    and await coordinator.promotion_requested(pending.coordination)):
+                await self.promote_pending_execution(current.execution_id)
+            if status is ExecutionStatus.SUCCEEDED and output is not None and agent_run_id is not None:
+                async with pending.boundary:
+                    if self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id) is pending:
+                        return await self._commit_pending_success(
+                            current, output, usage or UsageMetrics(), agent_run_id,
+                            producer_generation=producer_generation,
+                        )
+            else:
+                await self.promote_pending_execution(current.execution_id, allow_cancelled=True)
+            current = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         recovered = await self._check_reconcile_tool_effects(
             current, producer_generation=producer_generation,
         )
@@ -5236,6 +5580,120 @@ class LocalExecutionBackend:
             status.value,
         )
         return committed.execution
+
+    async def _commit_pending_success(
+        self, current: ExecutionRecord, output: StoredPayload, usage: UsageMetrics,
+        agent_run_id: str, *, producer_generation: int | None,
+    ) -> ExecutionRecord:
+        turn = self._pending_turns.get(current.execution_id, tenant_id=self._tenant_id)
+        if turn is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        run = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
+        checkpoint = await self._run_store.latest_checkpoint(agent_run_id=agent_run_id)
+        if run is None or checkpoint is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history_id = None if turn.session is None else turn.session.history_id or (
+            None if turn.session.continuation is None else turn.session.continuation.history_id
+        )
+        now = datetime.now(timezone.utc)
+        terminal = replace(
+            _terminal_record(current, ExecutionStatus.SUCCEEDED, now, error_code=None),
+            conversation_agent_run_id=None if turn.session is None else agent_run_id,
+        )
+        commit = ExecutionTerminalCommit(
+            current.revision, current.event_seq, terminal,
+            ResultRecord(output, StopReason.END_TURN, usage, now),
+            ExecutionEventType.EXECUTION_SUCCEEDED, {"agent_run_id": agent_run_id},
+            producer_generation=producer_generation,
+        )
+        pending_audit = tuple(self._pending_audit_events.get(current.execution_id, ()))
+        await self._check_pending_lease(turn, allow_cancelled=False)
+        turn.begin_commit()
+
+        async def accept(committed: ExecutionTerminalCommitResult) -> None:
+            if committed.execution.execution_id != current.execution_id:
+                self._pending_turns.release(turn)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            turn.confirm(committed)
+            turn.uncertain = False
+            turn.failure = None
+            self._worker_failures.pop(current.execution_id, None)
+            self._pending_turns.release(turn)
+            self._pending_audit_events.pop(current.execution_id, None)
+            self._confirm_committed_events(
+                current.execution_id, pending_count=len(pending_audit) + 1,
+                durable_seq=committed.execution.event_seq,
+            )
+            self._publish_terminal_event(
+                current.execution_id, event_type=commit.terminal_event_type,
+                payload=dict(commit.terminal_event_payload), durable_seq=committed.execution.event_seq,
+            )
+            await self._record_committed_terminal(committed, session_id=current.session_id)
+            await self._release_pending_coordination(turn)
+
+        async def confirm() -> None:
+            committed = await self._runtime_commands.read_pending_turn(
+                turn.reservation, expected_session=turn.session,
+            )
+            if committed is None:
+                error = AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"phase": "pending_commit_not_found"})
+                self._pending_turns.fail(turn, error)
+                self._record_worker_failure(current.execution_id, error)
+                raise error
+            if producer_generation is not None:
+                await self._discard_terminal_producer_tail(
+                    committed.execution, agent_run_id=agent_run_id,
+                    producer_generation=producer_generation,
+                )
+            await accept(committed)
+
+        turn.reconcile = lambda: self._reconcile_pending_boundary(turn, confirm)
+
+        async def commit_owned() -> ExecutionTerminalCommitResult:
+            committed = await self._runtime_commands.commit_pending_turn(
+                turn.reservation, commit, expected_session=turn.session,
+                next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),
+                conversation_agent_run=None if turn.session is None else run,
+                conversation_checkpoint=None if turn.session is None else checkpoint,
+                audit_events=pending_audit,
+            )
+            await accept(committed)
+            return committed
+
+        task = asyncio.create_task(commit_owned(), name=f"ai-terminal-boundary-{current.execution_id}")
+        committed, cancellation = await self._await_checkpoint_task(
+            task, label="terminal", execution_id=current.execution_id,
+        )
+        if cancellation is not None:
+            raise cancellation
+        return committed.execution
+
+    async def _reconcile_pending_boundary(
+        self, turn: _PendingExecutionTurn, confirm: Callable[[], Awaitable[None]],
+    ) -> None:
+        async with turn.boundary:
+            if not turn.uncertain:
+                return
+
+            async def confirm_owned() -> None:
+                try:
+                    await confirm()
+                except Exception as error:
+                    if not turn.uncertain:
+                        raise
+                    raise AIError(
+                        ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                        safe_details={"phase": "pending_commit_readback"},
+                    ) from error
+
+            task = asyncio.create_task(
+                confirm_owned(), name=f"ai-confirm-pending-{turn.execution.execution_id}",
+            )
+            _result, cancellation = await self._await_checkpoint_task(
+                task, label="pending confirmation", execution_id=turn.execution.execution_id,
+            )
+            if cancellation is not None:
+                raise cancellation
 
     def _same_terminal_storage_group(
         self,

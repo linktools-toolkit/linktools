@@ -289,6 +289,7 @@ class RuntimeToolOperationBridge:
         recovery_agent_run_id: "str | None" = None,
         terminal_commands: "_ToolTerminalCommands | None" = None,
         producer_generation: int | None = None,
+        before_effect: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -303,6 +304,7 @@ class RuntimeToolOperationBridge:
         self._recovery_agent_run_id = recovery_agent_run_id
         self._terminal_commands = terminal_commands
         self._producer_generation = producer_generation
+        self._before_effect = before_effect
         self._cancellation_requested = False
         if producer_generation is not None and terminal_commands is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -323,6 +325,8 @@ class RuntimeToolOperationBridge:
     ) -> "ToolOperationDecision":
         if not isinstance(replay_safe, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self._before_effect is not None:
+            await self._before_effect()
         key = (self._run_id(ctx), call.tool_call_id)
         portable_args = _portable_arguments(args)
         arguments_digest = canonical_sha256(portable_args)
