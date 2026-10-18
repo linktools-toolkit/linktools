@@ -4397,6 +4397,8 @@ class DefaultExecutionService:
         self, execution_id: str, *, tenant_id: str,
     ) -> ExecutionRecord | None:
         repository = self._state.executions
+        if type(repository) is ExecutionRepositoryImpl:
+            return await repository.get_fresh(execution_id, tenant_id=tenant_id)
         return await repository.state_store.read(
             lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
         )
@@ -4550,6 +4552,8 @@ class DefaultExecutionService:
         self, execution_id: str, *, tenant_id: str,
     ) -> ResourceRef | None:
         repository = self._state.executions
+        if type(repository) is ExecutionRepositoryImpl:
+            return await repository.get_header_fresh(execution_id, tenant_id=tenant_id)
         return await repository.state_store.read(
             lambda _transaction: repository.get_header(execution_id, tenant_id=tenant_id)
         )

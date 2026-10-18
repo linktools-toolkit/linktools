@@ -161,6 +161,16 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
     ) -> Mapping[str, ExecutionRecord]:
+        return await self._get_many(execution_ids, tenant_id=tenant_id, refresh=False)
+
+    async def get_many_fresh(
+        self, execution_ids: Sequence[str], *, tenant_id: str,
+    ) -> Mapping[str, ExecutionRecord]:
+        return await self._get_many(execution_ids, tenant_id=tenant_id, refresh=True)
+
+    async def _get_many(
+        self, execution_ids: Sequence[str], *, tenant_id: str, refresh: bool,
+    ) -> Mapping[str, ExecutionRecord]:
         if tenant_id != self._tenant_id:
             return {}
         if isinstance(execution_ids, (str, bytes)):
@@ -175,7 +185,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             for execution_id in ordered
         }
 
-        records = await self._store.read_records(tuple(keys.values()))
+        records = (await self._refresh_records(tuple(keys.values())) if refresh else
+                   await self._store.read_records(tuple(keys.values())))
         values: dict[str, ExecutionRecord] = {}
         for execution_id, key in keys.items():
             record = records.get(key)

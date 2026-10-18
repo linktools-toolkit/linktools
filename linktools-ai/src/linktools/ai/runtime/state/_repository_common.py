@@ -5,7 +5,7 @@
 import base64
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Generic, TypeVar
@@ -194,6 +194,17 @@ class _RepositoryBase:
 
         return await self._store.read(read)
 
+    async def _refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        # Native stores can repair their ordinary cache after a source fallback.
+        # Custom stores retain the existing mandatory StateStore contract.
+        from ._filesystem import FilesystemStateStore
+        from ._memory import InMemoryStateStore
+        from ._sql import SqlStateStore
+
+        if isinstance(self._store, (FilesystemStateStore, InMemoryStateStore, SqlStateStore)):
+            return await self._store.refresh_records(keys)
+        return await self._store.read(lambda transaction: transaction.get_records(keys))
+
     async def _insert(self, record: StoredRecord) -> None:
         await self._store.mutate(lambda transaction: transaction.insert_record(record))
 
@@ -297,6 +308,18 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(self._key(self._kind, identity))
         return None if record is None else await self._decode(record, self._value_type)
+
+    async def get_fresh(self, identity: str, *, tenant_id: str) -> ValueT | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key(self._kind, identity)
+        records = await self._refresh_records((key,))
+        record = records.get(key)
+        return None if record is None else await self._decode(record, self._value_type)
+
+    async def get_header_fresh(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
+        value = await self.get_fresh(identity, tenant_id=tenant_id)
+        return None if value is None else self._header(value, self._resource_kind, identity)
 
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
         if tenant_id != self._tenant_id:

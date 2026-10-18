@@ -419,6 +419,11 @@ class SqlStateStore:
         self._storage_group._ensure_member(self)
         return await self._reads.read_records(keys)
 
+    async def refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Refresh an ordinary batch without changing authoritative read scopes."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.refresh_records(keys)
+
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
         active = active_state_transaction(self)

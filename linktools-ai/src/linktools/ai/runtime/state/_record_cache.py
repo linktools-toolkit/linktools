@@ -64,6 +64,28 @@ class StateRecordCache:
             await self._cache.invalidate(cache_key)
             return await self._store.read(lambda transaction: transaction.get_records(ordered))
 
+    async def refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Replace a stale ordinary batch from an authoritative source capture."""
+        ordered = tuple(sorted(set(keys)))
+        active = active_state_transaction(self._store)
+        if active is not None:
+            return await active.get_records(ordered)
+        if not ordered:
+            return {}
+        if self._cache is None:
+            return await self._store.read(lambda transaction: transaction.get_records(ordered))
+        records: Mapping[bytes, StoredRecord] = {}
+
+        async def load() -> bytes:
+            nonlocal records
+            records = await self._store.read(lambda transaction: transaction.get_records(ordered))
+            return canonical_json_bytes([encode_record(records[key]) for key in ordered if key in records])
+
+        # Allocate the publication generation before awaiting the source. A later
+        # refresh or local mutation must win even when this source returns last.
+        await self._cache.refresh(self._cache_key(ordered), load)
+        return records
+
     def _cache_key(self, ordered: Sequence[bytes]) -> str:
         key_digest = hashlib.sha256(canonical_json_bytes([key.hex() for key in ordered])).hexdigest()
         return f"runtime-record:{self._scope}:{key_digest}"

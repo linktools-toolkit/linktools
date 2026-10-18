@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Conversation-domain repository implementations."""
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
@@ -127,6 +128,28 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         head = await self._decode(record, TranscriptHeadRecord)
         return head.message_count
 
+    async def get_with_head(
+        self, history_id: str, *, tenant_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        """Read display membership with the store's bounded record freshness."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        records = await self._store.read_records((
+            self._key("conversation_history", history_id),
+            self._key("transcript_head", history_id),
+        ))
+        return await self._decode_with_head(records, history_id)
+
+    async def get_with_head_fresh(
+        self, history_id: str, *, tenant_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        """Confirm a newer display's history membership and repair older facts."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        records = await self._refresh_records((
+            self._key("conversation_history", history_id),
+            self._key("transcript_head", history_id),
+        ))
+        return await self._decode_with_head(records, history_id)
+
     async def get_with_head_in_transaction(
         self,
         transaction: StateTransaction,
@@ -139,6 +162,13 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         history_key = self._key("conversation_history", history_id)
         head_key = self._key("transcript_head", history_id)
         records = await transaction.get_records((history_key, head_key))
+        return await self._decode_with_head(records, history_id)
+
+    async def _decode_with_head(
+        self, records: Mapping[bytes, StoredRecord], history_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        history_key = self._key("conversation_history", history_id)
+        head_key = self._key("transcript_head", history_id)
         record = records.get(history_key)
         if record is None:
             return None

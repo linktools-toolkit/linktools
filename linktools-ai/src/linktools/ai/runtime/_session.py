@@ -47,7 +47,7 @@ from ._session_timeline import (
     project_captured_session_timeline,
     project_session_timeline,
 )
-from ._input import _InputFileSource
+from ._input import _InputFileSource, stored_user_input_view
 from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
@@ -81,7 +81,7 @@ from .state._model_interaction_store import ModelInteractionStateStepArchive
 from .state._plan import RuntimeDomain
 from .state._step_archive import StateStepArchive
 from .state._steps import RuntimeAgentRunStore
-from .state._store import StateGroupTransaction, active_state_scope
+from .state._store import active_state_scope
 
 _SESSION_CURSOR_KIND = "SESSION"
 
@@ -331,8 +331,9 @@ class DefaultSessionService:
 
         Positive ages allow stale display and delayed detection of independently
         removed or damaged bodies. Admission changes and terminal active executions
-        invalidate a cached display. Authorization and resource
-        existence are checked on every call. Control operations never use this cache.
+        invalidate a cached display. Authorization is checked on every call;
+        resource identity and membership use the store's bounded record freshness.
+        Control operations never use this cache.
         """
         if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not math.isfinite(max_age) or max_age < 0:
             raise ValueError("max_age must be finite and non-negative")
@@ -351,7 +352,7 @@ class DefaultSessionService:
                 principal, AuthorizationAction.SESSION_READ, header,
             )
             pending = await self._pending_display_execution(header)
-            cacheable_request = pending is None and max_age > 0 and active_state_scope() is None and self._display_cache_supported()
+            cacheable_request = (pending is None or cursor is None) and max_age > 0 and active_state_scope() is None and self._display_cache_supported()
             if cacheable_request:
                 try:
                     validate_page_limit(limit)
@@ -368,7 +369,7 @@ class DefaultSessionService:
                 })
             if cache_key is not None:
                 cached = await self._cached_display(
-                    cache_key, header, principal, cursor=cursor, max_age=max_age,
+                    cache_key, header, principal, cursor=cursor, max_age=max_age, pending=pending,
                 )
                 if cached is not None:
                     return cached
@@ -490,7 +491,7 @@ class DefaultSessionService:
 
     async def _cached_display(
         self, key: str, header: ResourceRef, principal: Principal,
-        *, cursor: str | None, max_age: float,
+        *, cursor: str | None, max_age: float, pending: ExecutionRecord | None = None,
     ) -> SessionDetail | None:
         try:
             raw = await self._cache.get(key)
@@ -505,6 +506,9 @@ class DefaultSessionService:
                     or not isinstance(expires, (float, int))
                     or not math.isfinite(started) or not math.isfinite(expires)
                     or not started <= time.time() < min(expires, started + max_age)):
+                return None
+            pending_identity = None if pending is None else self._display_execution_identity(pending)
+            if entry.get("pending") != pending_identity:
                 return None
             detail = self._decode_display(entry["detail"])
             if detail.session.session_id != header.id:
@@ -530,30 +534,36 @@ class DefaultSessionService:
 
         sessions = self._conversation.sessions
         histories = self._conversation.histories
-        session_store = sessions.state_store
-        execution_store = self._executions.state_store
-
-        async def validate(group: StateGroupTransaction) -> bool:
+        async def validate() -> bool:
             record = await sessions.get(header.id, tenant_id=principal.tenant_id)
             if record is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             self._check_display_authority(record, header)
             if (record.timeline_parent_session_id is not None
                     or self._display_session_identity(record) != entry["root"]
-                    or record.revision != detail.session.revision):
+                    or record.revision > detail.session.revision):
                 return False
             ids = tuple(identities)
-            if record.active_execution_id is not None and record.active_execution_id not in identities:
+            current_revision = record.revision == detail.session.revision
+            if current_revision and record.active_execution_id is not None and record.active_execution_id not in identities:
                 ids += (record.active_execution_id,)
             records = await self._executions.get_many(ids, tenant_id=principal.tenant_id) if ids else {}
             if len(records) != len(ids):
+                # A pre-admission negative cache entry can outlive the source
+                # capture. Only authoritative absence is an integrity failure.
+                records = await self._executions.get_many_fresh(ids, tenant_id=principal.tenant_id)
+            if len(records) != len(ids):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            active = self._validate_active_admitted_execution(
-                record, records.get(record.active_execution_id) if record.active_execution_id else None,
-            )
-            if (record.active_execution_id != detail.session.active_execution_id
-                    or record.active_execution_id is not None and active is None):
-                return False
+            if current_revision:
+                active = self._validate_active_admitted_execution(
+                    record, records.get(record.active_execution_id) if record.active_execution_id else None,
+                )
+                if (record.active_execution_id != detail.session.active_execution_id
+                        or record.active_execution_id is not None and active is None):
+                    return False
+            # A source-captured display can be newer than another reader's
+            # bounded session cache. Do not replace that newer whole snapshot
+            # merely because the same resource's older revision is still hot.
             if any(value.session_id != record.session_id or value.parent_execution_id is not None
                    for value in records.values()):
                 return False
@@ -562,17 +572,37 @@ class DefaultSessionService:
                 return False
             if record.history_id is None:
                 return False
-            value = await histories.get_with_head_in_transaction(
-                group.transaction(session_store), record.history_id, tenant_id=principal.tenant_id,
+            value = await histories.get_with_head(
+                record.history_id, tenant_id=principal.tenant_id,
             )
+            if (value is None or value[0].session_id != record.session_id
+                    or value[0].parent_history_id is not None or value[1].message_count < required_end):
+                # A pending-page head may predate the committed display. Confirm
+                # source membership and replace that older ordinary cache batch.
+                value = await histories.get_with_head_fresh(record.history_id, tenant_id=principal.tenant_id)
             if value is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             history, head = value
             return (history.session_id == record.session_id and history.parent_history_id is None
                     and head.message_count >= required_end)
 
-        valid = await session_store.storage_group.read_many((session_store, execution_store), validate)
+        # Reevaluate policy above on every request; only immutable resource
+        # identity/membership and display state use the existing bounded cache.
+        # A mismatch rebuilds the page in the authoritative capture below.
+        valid = await validate()
         if valid and time.time() < min(expires, started + max_age):
+            if pending is not None:
+                # Only the canonical page was cached. Progress and status always
+                # come from this request's authorized pending publication.
+                turn = SessionTurn(
+                    pending.execution_id, pending.status, pending.created_at, pending.updated_at,
+                    stored_user_input_view(pending.stored_user_input), False, (),
+                    pending.error_code, pending.safe_error_details,
+                )
+                return SessionDetail(
+                    replace(detail.session, active_execution_id=pending.execution_id),
+                    Page((*detail.timeline.items, turn), detail.timeline.next_cursor),
+                )
             return detail
         return None
 
@@ -580,14 +610,26 @@ class DefaultSessionService:
         self, key: str, state: SessionTimelineCapture, detail: SessionDetail,
         started: float, max_age: float,
     ) -> None:
-        if state.pending_execution is not None or state.root.history_id is None or time.time() >= started + max_age:
+        if state.root.history_id is None or time.time() >= started + max_age:
             return
+        pending = state.pending_execution
+        if pending is not None:
+            # Root pages reserve exactly one slot for the live pending turn.
+            # Its mutable content is never included in the cached page.
+            if not detail.timeline.items or detail.timeline.items[-1].execution_id != pending.execution_id:
+                return
+            detail = SessionDetail(
+                replace(detail.session, active_execution_id=None),
+                Page(detail.timeline.items[:-1], detail.timeline.next_cursor),
+            )
         try:
             entry = {
                 "key": key, "started": started, "expires": started + max_age,
                 "root": self._display_session_identity(state.root),
                 "executions": {key: self._display_execution_identity(value)
-                               for key, value in state.executions.items()},
+                               for key, value in state.executions.items()
+                               if pending is None or key != pending.execution_id},
+                "pending": None if pending is None else self._display_execution_identity(pending),
                 "message_end": max((value.end_message_index for value in state.commits.values()), default=0),
                 "detail": asdict(detail),
             }
@@ -1374,8 +1416,9 @@ class DefaultSessionService:
             return await self._view(record, principal, active=active)
 
         async def read() -> SessionView:
-            # Observation may settle a turn. Re-read the source before using
-            # it, while leaving control/admission reads entirely unchanged.
+            # Observation may settle a turn. Re-read committed metadata before
+            # using it; display reads retain the store's bounded freshness,
+            # while control/admission reads stay authoritative.
             current = await self._conversation.sessions.get(record.session_id, tenant_id=principal.tenant_id)
             if current is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -1389,6 +1432,9 @@ class DefaultSessionService:
             return await self._view(current, principal, active=observed)
 
         sessions, executions = self._conversation.sessions, self._executions
+        if (self._cache is not None and self._display_cache_supported()
+                and active_state_scope() is None):
+            return await read()
         if (type(sessions) is SessionRepositoryImpl and type(executions) is ExecutionRepositoryImpl
                 and sessions.state_store.storage_group is executions.state_store.storage_group):
             return await sessions.state_store.storage_group.read_many(

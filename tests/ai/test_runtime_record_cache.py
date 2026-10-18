@@ -327,3 +327,151 @@ async def test_sql_close_can_retry_after_cache_waiter_cancellation(tmp_path: Pat
         await asyncio.gather(read, return_exceptions=True)
         await store.close()
         assert store._closed and store.storage_group._closed
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+async def test_native_refresh_repairs_negative_batch_and_keeps_authoritative_absence(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
+        record = _record(1)
+        assert await store.read_record(record.key_digest) is None
+        # The refreshed source batch models a commit by another owner, which
+        # cannot invalidate this reader's earlier negative cache generation.
+        calls = 0
+
+        async def source(fn):
+            nonlocal calls
+            calls += 1
+            return {record.key_digest: record}
+
+        monkeypatch.setattr(store, "read", source)
+        assert await store.refresh_records((record.key_digest,)) == {record.key_digest: record}
+        assert await store.read_record(record.key_digest) == record
+        assert calls == 1
+
+        async def absent(fn):
+            nonlocal calls
+            calls += 1
+            return {}
+
+        monkeypatch.setattr(store, "read", absent)
+        assert await store.refresh_records((record.key_digest,)) == {}
+        assert await store.read_record(record.key_digest) is None
+        assert calls == 2
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+async def test_native_refresh_cannot_publish_before_local_mutation_snapshot(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
+        first, second = _record(1), _record(2)
+        await store.mutate(lambda tx: tx.insert_record(first))
+        started, release = asyncio.Event(), asyncio.Event()
+        original = store.read
+        paused = False
+
+        async def read(fn):
+            nonlocal paused
+            result = await original(fn)
+            if not paused:
+                paused = True
+                started.set()
+                await release.wait()
+            return result
+
+        monkeypatch.setattr(store, "read", read)
+        task = asyncio.create_task(store.refresh_records((first.key_digest,)))
+        try:
+            await started.wait()
+            await store.mutate(lambda tx: tx.replace_record(second, expected_storage_revision=0))
+            release.set()
+            assert await task == {first.key_digest: first}
+            assert await store.read_record(first.key_digest) == second
+        finally:
+            release.set()
+            await task
+
+
+async def test_native_refresh_uses_source_start_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(_write_cache, "time", lambda: clock[0])
+    store = InMemoryStateStore(cache=InMemoryCacheBackend(max_bytes=100000))
+    await store.initialize()
+    record = _record(1)
+    await store.mutate(lambda tx: tx.insert_record(record))
+    original = store.read
+    calls = 0
+
+    async def slow_read(fn):
+        nonlocal calls
+        calls += 1
+        value = await original(fn)
+        if calls == 1:
+            clock[0] += 2
+        return value
+
+    monkeypatch.setattr(store, "read", slow_read)
+    try:
+        assert await store.refresh_records((record.key_digest,)) == {record.key_digest: record}
+        clock[0] += .999
+        assert await store.read_record(record.key_digest) == record
+        assert calls == 1
+        clock[0] += .002
+        assert await store.read_record(record.key_digest) == record
+        assert calls == 2
+    finally:
+        await store.close()
+
+
+async def test_repository_refresh_keeps_custom_store_source_contract() -> None:
+    from linktools.ai.runtime.state._repository_common import RepositoryBase
+    from linktools.ai.runtime.state._plan import RuntimeDomain
+
+    record = _record(1)
+    store = InMemoryStateStore()
+    await store.initialize()
+    await store.mutate(lambda tx: tx.insert_record(record))
+
+    class CustomStore:
+        async def read(self, fn):
+            return await store.read(fn)
+
+    repository = RepositoryBase(CustomStore(), namespace="custom", tenant_id="tenant", domain=RuntimeDomain.EXECUTION)
+    try:
+        assert await repository._refresh_records((record.key_digest,)) == {record.key_digest: record}
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sql"))
+async def test_native_refresh_older_source_completion_cannot_replace_newer_refresh(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _store(backend, tmp_path / backend, InMemoryCacheBackend(max_bytes=100000)) as store:
+        first, second = _record(1), _record(2)
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def source(fn):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+                return {first.key_digest: first}
+            return {second.key_digest: second}
+
+        monkeypatch.setattr(store, "read", source)
+        older = asyncio.create_task(store.refresh_records((first.key_digest,)))
+        try:
+            await started.wait()
+            assert await store.refresh_records((first.key_digest,)) == {second.key_digest: second}
+            release.set()
+            assert await older == {first.key_digest: first}
+            assert await store.read_record(first.key_digest) == second
+            assert calls == 2
+        finally:
+            release.set()
+            await older

@@ -596,6 +596,18 @@ class StorageReadCache:
                 return value
         if self._generations.get(key) is generation:
             generation = self._generation(key, replace=True)
+        return await self._load(key, load, generation)
+
+    async def refresh(
+        self, key: str, load: Callable[[], Awaitable[bytes | None]],
+    ) -> bytes | None:
+        """Read the source and publish only if no newer capture superseded it."""
+        generation = self._generation(key, replace=True)
+        return await self._load(key, load, generation)
+
+    async def _load(
+        self, key: str, load: Callable[[], Awaitable[bytes | None]], generation: _ReadGeneration,
+    ) -> bytes | None:
         captured = time()
         value = await load()
         await self._publish(key, value, captured, generation)
