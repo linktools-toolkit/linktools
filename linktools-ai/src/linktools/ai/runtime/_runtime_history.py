@@ -862,14 +862,12 @@ class RuntimeHistory:
         storage: RuntimeStorage,
         features: RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None = None,
         tenant_id: "str | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
     ) -> AbstractAsyncContextManager["RuntimeHistory"]:
         return _open_runtime_history(
             namespace,
             storage=storage,
             features=features,
             tenant_id=tenant_id,
-            authorization=authorization,
         )
 
     async def history(
@@ -1147,7 +1145,6 @@ async def _open_runtime_history(
     storage: RuntimeStorage,
     features: RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None,
     tenant_id: "str | None",
-    authorization: "AuthorizationPolicy | None",
 ) -> AsyncIterator[RuntimeHistory]:
     resolved_namespace = validate_persistence_namespace(namespace)
     effective_tenant_id = (
@@ -1158,6 +1155,7 @@ async def _open_runtime_history(
     if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
         raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
     captured = await features.capture() if isinstance(features, RuntimeFeatures) else features
+    authorization = None if captured is None else captured.authorization
     if captured is not None:
         await captured.verify_source_revision()
     capabilities = () if captured is None else tuple(

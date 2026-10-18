@@ -25,7 +25,6 @@ from ..agent import (
 )
 from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
-    AuthorizationPolicy,
     RunBudget,
     CorrelationData,
     ExecutionMode,
@@ -34,7 +33,6 @@ from ..core import (
     PrincipalKind,
     SessionStatus,
     ThinkingValue,
-    PromptLimits,
     Page,
     normalize_correlation,
     normalize_execution_mode,
@@ -87,7 +85,6 @@ from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
-from ._tool_response_fixture import ToolResponseFixture
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
 from ..observe import MetricRecorderStatus, MetricFlushResult
@@ -385,10 +382,7 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: None = None,
         features: "RuntimeFeatures[None] | RuntimeFeaturesCapture[None] | None" = None,
-        limits: "PromptLimits | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
-        tool_responses: ToolResponseFixture | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -401,10 +395,7 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: RuntimeContext[AppT],
         features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
-        limits: "PromptLimits | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
-        tool_responses: ToolResponseFixture | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -416,10 +407,7 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: "RuntimeContext[object] | None" = None,
         features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None" = None,
-        limits: "PromptLimits | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
-        tool_responses: ToolResponseFixture | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         """Open a Runtime, optionally skipping namespace-wide startup recovery.
 
@@ -431,25 +419,19 @@ class Runtime(Generic[AppT]):
         lifecycle. Persistence guarantees are fixed on each admitted execution;
         reopening under different feature declarations does not reinterpret them.
         """
-        if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
-            raise TypeError("tool_responses must be ToolResponseFixture")
         if not isinstance(auto_recover, bool):
             raise TypeError("auto_recover must be bool")
         resolved_namespace = validate_persistence_namespace(namespace)
         root_context = RuntimeContext(None) if context is None else context
         if not isinstance(root_context, RuntimeContext):
             raise TypeError("context must be RuntimeContext")
-        selected_limits = PromptLimits() if limits is None else limits
         return _open_runtime(
             resolved_namespace,
             context=root_context,
             models=models,
             storage=storage,
             features=features,
-            limits=selected_limits,
-            authorization=authorization,
             auto_recover=auto_recover,
-            tool_responses=tool_responses,
         )
 
     @property
@@ -1460,10 +1442,7 @@ async def _open_runtime(
     models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
-    limits: PromptLimits,
-    authorization: "AuthorizationPolicy | None",
     auto_recover: bool = True,
-    tool_responses: ToolResponseFixture | None = None,
 ):
     from ._factory import compose_runtime_components
 
@@ -1474,10 +1453,7 @@ async def _open_runtime(
         models=models,
         storage=storage,
         features=features,
-        limits=limits,
-        authorization=authorization,
         auto_recover=auto_recover,
-        tool_responses=tool_responses,
     )
     try:
         if components.metric_control is not None:

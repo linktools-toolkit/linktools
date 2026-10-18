@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import RuntimeFeatures, ToolResponsesCapability
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ConversationCapability, CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage, ToolResponseFixture
@@ -103,9 +103,9 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     principal = service_principal("default", "fixture-owner")
     features = RuntimeFeatures("fixture-conversation")
     features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features,
-                            tool_responses=ToolResponseFixture(first, assets)) as runtime:
+    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -134,9 +134,11 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
             assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
     assert await assets.read_versions((first,))
 
+    features = RuntimeFeatures("fixture-conversation")
+    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ToolResponsesCapability(ToolResponseFixture(second, assets)), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features,
-                            tool_responses=ToolResponseFixture(second, assets)) as runtime:
+    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         original = await runtime.executions.get(execution.execution_id, principal=principal)
         for derived in (await original.retry("retry"), await original.fork("fork")):
             assert (await derived.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -167,9 +169,9 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
     assets, first, _second = await _fixtures()
     features = RuntimeFeatures("fixture-conversation")
     features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage, features=features,
-                            tool_responses=ToolResponseFixture(first, assets)) as runtime:
+    async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question", session_id="session")
         assert rejected.value.code is ErrorCode.BINDING_CONFLICT
@@ -187,8 +189,10 @@ async def test_derived_fixture_mode_mismatch_fails_before_execution_reservation(
     async with Runtime.open("fixture-modes", models=RuntimeUsageModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         live = await runtime.agents.get().start("live")
         assert (await live.wait()).result.status is ExecutionStatus.SUCCEEDED
+    features = RuntimeFeatures("fixture-modes")
+    features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     async with Runtime.open("fixture-modes", models=RuntimeUsageModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            tool_responses=ToolResponseFixture(first, assets)) as runtime:
+                            features=features) as runtime:
         fixture = await runtime.agents.get().start("fixture")
         assert (await fixture.wait()).result.status is ExecutionStatus.SUCCEEDED
         original = await runtime.executions.get(live.execution_id)
@@ -228,8 +232,9 @@ async def test_fixture_asset_preflight_is_authorized_and_precedes_admission(auth
 
     monkeypatch.setattr(assets, "read_versions", missing_version)
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("fixture-preflight", models=RuntimeUsageModels(), storage=storage,
-                            authorization=Authorization(), tool_responses=ToolResponseFixture(first, assets)) as runtime:
+    features = RuntimeFeatures("fixture-preflight", authorization=Authorization())
+    features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
+    async with Runtime.open("fixture-preflight", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         monkeypatch.setattr(storage.execution.executions, "reserve_start", unexpected_reservation)
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question")
@@ -373,9 +378,9 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
         return await read_versions(refs)
 
     monkeypatch.setattr(assets, "read_versions", read_fixture)
-    async with Runtime.open("fixture-repair", models=RuntimeUsageModels(), storage=storage,
-                            features=_persistence_capabilities(restart=True),
-                            tool_responses=ToolResponseFixture(first, assets)) as runtime:
+    features = _persistence_capabilities(restart=True)
+    features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
+    async with Runtime.open("fixture-repair", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         reserve = storage.execution.executions.reserve_start
 
         async def remove_after_admission(value: ExecutionStartReservation) -> object:

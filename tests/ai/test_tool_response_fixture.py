@@ -12,7 +12,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.mcp import MCPToolset
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry
+from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry, ToolResponsesCapability
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError
 from linktools.ai.runtime._mcp import (
@@ -406,10 +406,11 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
             AssetKey("mcp", "server"), revision=3,
         ))
         group.agent("default", model="default", allow_tools=(mcp_tool_selector("server", "lookup"),))
+        group.capability(ToolResponsesCapability(fixture), scope="runtime")
         storage = RuntimeStorage.in_memory()
         async with Runtime.open(
             "fixture-native-runtime", models=_Models(_UsageFunctionModel(model)),
-            storage=storage, features=group, tool_responses=fixture,
+            storage=storage, features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result

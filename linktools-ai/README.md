@@ -67,6 +67,22 @@ to `Runtime.open(features=...)`. This keeps the same source revision and
 reader without loading the assets again. `Runtime.open` has no separate filter
 parameter.
 
+`RuntimeFeatures` also owns the current host authorization policy and prompt
+limits: `RuntimeFeatures("application", authorization=policy, limits=PromptLimits(...))`.
+Capture it once and reuse that capture for `Runtime.open(features=...)`,
+`RuntimeHistory.open(features=...)`, or restored snapshot history. For restored
+history, features supplies only the authorization policy; the restored generation
+owns the storage routes and cache. The policy
+instance remains in process; it is not serialized as an execution identity.
+Omitting authorization uses the Runtime tenant policy. Prompt limits constrain
+model context and are separate from TaskGraph and snapshot limits.
+
+For a fixed MCP response fixture, register
+`ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
+`linktools.ai.capability` with `scope="runtime"` before capture. The fixture
+keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
+separate authorization, prompt-limit, or tool-response arguments.
+
 With no callback, existing selection behavior is unchanged. Wildcard selectors
 expand the remaining candidates; explicit unavailable selections and preloads fail.
 Callback exceptions propagate and non-boolean results are rejected. Use a pure,

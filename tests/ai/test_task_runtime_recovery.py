@@ -7,6 +7,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import pytest
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     JsonValue,
@@ -159,7 +160,7 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
         "default",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=reopened,
-        authorization=authorization,
+        features=RuntimeFeatures("authorization", authorization=authorization),
     ) as runtime:
         engine = runtime.tasks.bind(handler)
         recovery = await engine.get(graph.graph_id, principal=actor)
@@ -242,7 +243,7 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
         "recovery-actor",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=RuntimeStorage.filesystem(storage_root),
-        authorization=authorization,
+        features=RuntimeFeatures("authorization", authorization=authorization),
     ) as runtime:
         with pytest.raises(AIError) as read_denied:
             await runtime._graph_service.state(graph.graph_id, principal=actor)

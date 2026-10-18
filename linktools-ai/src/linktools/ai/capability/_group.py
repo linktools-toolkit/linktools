@@ -15,7 +15,7 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..asset import AssetStoreReader
-from ..core import JsonValue
+from ..core import AuthorizationPolicy, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
@@ -47,6 +47,7 @@ from ._tool_metadata import (
     validate_tool_metadata,
 )
 from ._workspace import WorkspaceCapability, workspace_tool_declarations
+from ._tool_responses import ToolResponsesCapability
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.capability.group")
@@ -69,6 +70,8 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     instructions: RepositoryInstructions
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
+    authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
+    limits: PromptLimits = field(default_factory=PromptLimits)
     tool_retries: int = DEFAULT_TOOL_RETRIES
     output_retries: int = DEFAULT_OUTPUT_RETRIES
     filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
@@ -78,6 +81,8 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
             raise ValueError("capture group_id must be non-empty")
+        if not isinstance(self.limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
         _validate_filter(self.filter)
         _validate_retry_defaults(self.tool_retries, self.output_retries)
         contributions = tuple(self.contributions)
@@ -120,6 +125,8 @@ class RuntimeFeatures(Generic[AppT]):
         group_id: str,
         *,
         sandbox: "Sandbox | None" = None,
+        authorization: AuthorizationPolicy | None = None,
+        limits: PromptLimits | None = None,
         tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
         output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
         filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
@@ -128,11 +135,16 @@ class RuntimeFeatures(Generic[AppT]):
             raise ValueError("capability group id must be a non-empty string")
         _validate_retry_defaults(tool_retries, output_retries)
         _validate_filter(filter)
+        self._authorization = authorization
+        self._limits = PromptLimits() if limits is None else limits
+        if not isinstance(self._limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
         self._filter = filter
         self._tool_retries = tool_retries
         self._output_retries = output_retries
         self._id = group_id
         self._asset_capability: AssetCapability[AppT] | None = None
+        self._tool_responses_registered = False
         self._workspace: Workspace | None = None
         self._sandbox = sandbox
         self._contributions: list[CapabilityContribution[AppT]] = []
@@ -140,6 +152,11 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def authorization(self) -> AuthorizationPolicy | None:
+        """Return the current borrowed policy without loading declarations."""
+        return self._authorization
 
     @property
     def workspace(self) -> "Workspace | None":
@@ -205,6 +222,7 @@ class RuntimeFeatures(Generic[AppT]):
         )
         workspace_capabilities: list[WorkspaceCapability] = []
         asset_capabilities: list[AssetCapability[AppT]] = []
+        response_capabilities: list[ToolResponsesCapability[AppT]] = []
 
         def collect(value: AbstractCapability[object]) -> None:
             if isinstance(value, WrapperCapability):
@@ -212,13 +230,17 @@ class RuntimeFeatures(Generic[AppT]):
             elif isinstance(value, CombinedCapability):
                 for child in value.capabilities:
                     collect(child)
+            elif isinstance(value, ToolResponsesCapability):
+                response_capabilities.append(value)
             elif isinstance(value, AssetCapability):
                 asset_capabilities.append(value)
             elif isinstance(value, WorkspaceCapability):
                 workspace_capabilities.append(value)
             else:
                 def collect_leaf(leaf: AbstractCapability[object]) -> None:
-                    if isinstance(leaf, WorkspaceCapability):
+                    if isinstance(leaf, ToolResponsesCapability):
+                        response_capabilities.append(leaf)
+                    elif isinstance(leaf, WorkspaceCapability):
                         workspace_capabilities.append(leaf)
                     elif isinstance(leaf, AssetCapability):
                         asset_capabilities.append(leaf)
@@ -226,6 +248,11 @@ class RuntimeFeatures(Generic[AppT]):
                 value.apply(collect_leaf)
 
         collect(capability)
+        if response_capabilities:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ToolResponsesCapability requires Runtime scope")
+            if self._tool_responses_registered or len(response_capabilities) != 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         if asset_capabilities:
             if scope != "runtime":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
@@ -250,6 +277,7 @@ class RuntimeFeatures(Generic[AppT]):
             self._contributions.extend(tools)
         if asset_capabilities:
             self._asset_capability = asset_capabilities[0]
+        self._tool_responses_registered |= bool(response_capabilities)
         self._contributions.append(contribution)
         return capability
 
@@ -308,6 +336,7 @@ class RuntimeFeatures(Generic[AppT]):
 
     async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
+        authorization, limits = self._authorization, self._limits
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
         context: CapabilityLoadContext | None = None
@@ -345,6 +374,8 @@ class RuntimeFeatures(Generic[AppT]):
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
             sandbox=self._sandbox,
+            authorization=authorization,
+            limits=limits,
             tool_retries=self._tool_retries,
             output_retries=self._output_retries,
             filter=self._filter,

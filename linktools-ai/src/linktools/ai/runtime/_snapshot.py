@@ -66,12 +66,24 @@ class RestoredRuntime:
     workspace_root: Path | None
     generation: str
 
-    def open_history(self) -> AbstractAsyncContextManager[RuntimeHistory]:
-        """Return a read-only RuntimeHistory context for this generation."""
+    def open_history(
+        self, *, features: RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None = None,
+    ) -> AbstractAsyncContextManager[RuntimeHistory]:
+        """Read this restored generation using only the supplied current policy.
+
+        Original module routes and caches never redirect restored storage reads.
+        No source assets or Agent hooks are loaded to obtain the policy.
+        """
+        if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
+            raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
+        policy_features = None if features is None else RuntimeFeatures(
+            "restored-history", authorization=features.authorization,
+        )
         return RuntimeHistory.open(
             self.namespace,
             storage=RuntimeStorage.from_root(self.storage_root),
             tenant_id=self.tenant_id,
+            features=policy_features,
         )
 
 

@@ -134,6 +134,7 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
 
     from pathlib import Path
 
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import AuthorizationPolicy, Principal
     from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
     from linktools.ai.storage import (
@@ -168,7 +169,7 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
             namespace,
             storage=storage,
             tenant_id=principal.tenant_id,
-            authorization=authorization,
+            features=RuntimeFeatures("history", authorization=authorization),
         ) as history:
             print(await history.inspect_session(session_id, principal=principal))
             timeline = await history.session_timeline(

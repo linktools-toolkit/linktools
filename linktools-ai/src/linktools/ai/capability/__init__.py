@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public capability extension contracts."""
 
+from ._tool_responses import ToolResponsesCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
 from ._declaration import AgentDeclarationLoader
@@ -54,6 +55,7 @@ from ._workspace import (
 from ..spec import mcp_server_selector, mcp_tool_selector
 
 __all__ = [
+    "ToolResponsesCapability",
     "AssetCapability",
     "WorkspaceCapability",
     "ToolClass",

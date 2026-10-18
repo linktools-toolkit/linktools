@@ -16,6 +16,7 @@ from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
+    ToolResponsesCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
@@ -126,20 +127,12 @@ async def compose_runtime_components(
     models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
-    limits: "PromptLimits | None" = None,
-    authorization: "AuthorizationPolicy | None" = None,
     auto_recover: bool = True,
-    tool_responses: ToolResponseFixture | None = None,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
     if not isinstance(storage, RuntimeStorage):
         raise TypeError("storage must be RuntimeStorage")
-    if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
-        raise TypeError("tool_responses must be ToolResponseFixture")
-    selected_limits = PromptLimits() if limits is None else limits
-    if not isinstance(selected_limits, PromptLimits):
-        raise TypeError("limits must be PromptLimits")
     sources = () if features is None else (features,)
     if any(
         not isinstance(source, (RuntimeFeatures, RuntimeFeaturesCapture))
@@ -158,6 +151,9 @@ async def compose_runtime_components(
         await capture.verify_source_revision()
         captures.append(capture)
     groups = tuple(captures)
+    selected_limits = PromptLimits() if not groups else groups[0].limits
+    authorization = None if not groups else groups[0].authorization
+    tool_responses: ToolResponseFixture | None = None
     group_ids = tuple(group.group_id for group in groups)
     if len(group_ids) != len(set(group_ids)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -187,7 +183,7 @@ async def compose_runtime_components(
         _validate_candidate_uniqueness(candidates)
         def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
             if isinstance(capability, (
-                CheckpointCapability, TraceCapability, ConversationCapability, MetricsCapability,
+                CheckpointCapability, TraceCapability, ConversationCapability, MetricsCapability, ToolResponsesCapability,
             )):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
 
@@ -207,6 +203,14 @@ async def compose_runtime_components(
                 declared_ids.add(leaf.id)
 
         def consume_assets(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
+            nonlocal tool_responses
+            if isinstance(capability, ToolResponsesCapability):
+                if tool_responses is not None:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                if not isinstance(capability.fixture, ToolResponseFixture):
+                    raise TypeError("fixture must be ToolResponseFixture")
+                tool_responses = capability.fixture
+                return None
             if isinstance(capability, AssetCapability):
                 return None
             if isinstance(capability, WrapperCapability):
