@@ -25,7 +25,7 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="observation-write-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         store = archive.state_store
         repository = archive.transcript_repository
         await repository.create_head("run")
@@ -84,7 +84,7 @@ async def test_observation_append_rollback_keeps_original_head_and_retry(
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="observation-rollback", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         store, repository = archive.state_store, archive.transcript_repository
         await repository.create_head("run")
         before = await repository.get_head("run")
@@ -119,7 +119,7 @@ async def test_empty_unchanged_observation_still_requires_head_guard(
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="observation-guard", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         store, repository = archive.state_store, archive.transcript_repository
         await repository.create_head("run")
         prepared = await repository.prepare_observation(

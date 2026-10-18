@@ -277,8 +277,8 @@ class TranscriptOwnerDomain(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     CONVERSATION = "conversation"
-    EXECUTION = "execution"
-    RECOVERY = "recovery"
+    TRACE = "trace"
+    CHECKPOINT = "checkpoint"
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,7 +27,7 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements = []
@@ -72,7 +72,7 @@ async def test_run_preparation_preserves_custom_relocation_and_preparation(
 ) -> None:
     state = _storage("memory", tmp_path)
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    original = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
 
     class RelocatingArchive(ModelInteractionStateStepArchive):
@@ -87,7 +87,7 @@ async def test_run_preparation_preserves_custom_relocation_and_preparation(
 
     custom = (RelocatingArchive if override == "relocate" else PreparingArchive)(
         original.state_store, object_store=None, namespace="run-preparation",
-        tenant_id="tenant", runtime_domain=RuntimeDomain.RECOVERY,
+        tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
     )
     try:
         checkpoint = _checkpoint(1)
@@ -108,7 +108,7 @@ async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     prepare = archive.transcript_repository.prepare_projection
     entered = False
@@ -161,7 +161,7 @@ async def test_run_preparation_rejects_corrupt_head_without_run(
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     try:
         await archive.materialize_checkpoint(run, _checkpoint(1))

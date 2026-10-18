@@ -64,23 +64,24 @@ class Command(BaseCommand):
                     if (root / "runtime.db").exists():
                         history = await stack.enter_async_context(RuntimeHistory.open("default", storage=_local_runtime_storage(workspace)))
                 else:
-                    from linktools.ai.capability import RuntimeFeatures, WorkspaceCapability
+                    from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
                     from linktools.ai.runtime import Runtime, ConversationCapability, MetricsCapability
 
                     assets = _local_runtime_assets(workspace)
                     await assets.initialize()
                     stack.push_async_callback(assets.close)
-                    features = RuntimeFeatures("workspace", assets=assets)
+                    features = RuntimeFeatures("workspace")
+                    features.capability(AssetCapability(assets), scope="runtime")
                     features.capability(WorkspaceCapability(workspace), scope="runtime")
                     features.capability(ConversationCapability(), scope="runtime")
-                    features.capability(MetricsCapability(), scope="runtime")
+                    metrics = await _local_metrics(workspace)
+                    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
                     capture = await features.capture()
                     declarations = [{"kind": item.kind, "id": item.id, "revision": item.revision} for item in capture.contributions]
                     if not any(item["kind"] == "agent" and item["id"] == "default" for item in declarations):
                         declarations.insert(0, {"kind": "agent", "id": "default", "revision": 1})
-                    metrics = await _local_metrics(workspace)
                     runtime = await stack.enter_async_context(Runtime.open(
-                        "default", storage=_local_runtime_storage(workspace), metrics=metrics,
+                        "default", storage=_local_runtime_storage(workspace),
                         models=models, features=capture,
                     ))
                 status = {

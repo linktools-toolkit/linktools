@@ -47,7 +47,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
         reader = StepExecutionHistoryReader(
             namespace="history",
             executions=state.execution.executions,
-            store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+            store=state.run_store.read_store(RuntimeDomain.TRACE),
             notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )

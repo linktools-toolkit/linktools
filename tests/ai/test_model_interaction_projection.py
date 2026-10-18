@@ -26,7 +26,6 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime._attachment import (
@@ -726,11 +725,11 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             )
         )
 
-        await state.run_store.materialize_recovery_checkpoint(
+        await state.run_store.checkpoint_persistence.materialize_recovery_checkpoint(
             agent_run_id="run",
             require_complete=True,
         )
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         interactions = await archive.list_model_interactions(agent_run_id="run")
         assert [value.model_request_seq for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)
@@ -822,7 +821,6 @@ async def test_execution_model_interactions_are_durable_and_public() -> None:
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
         features=_agent_group(),
-        metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
 
@@ -834,7 +832,6 @@ async def test_execution_model_interactions_support_volatile_memory_state() -> N
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
         features=_agent_group(),
-        metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
 

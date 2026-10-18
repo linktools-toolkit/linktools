@@ -12,7 +12,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.mcp import MCPToolset
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
+from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError
 from linktools.ai.runtime._mcp import (
@@ -398,7 +398,9 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     assets, fixture = await _store(payload)
     try:
         await assets.put(AssetKey("mcp", "server/server.py"), b"raise AssertionError('must not run')")
-        group = RuntimeFeatures("fixture-native-runtime", assets=assets)
+        group = RuntimeFeatures("fixture-native-runtime")
+        group_assets = AssetCapability(assets)
+        group.capability(group_assets, scope="runtime")
         group.mcp(MCPServerSpec(
             "server", "fixture-server-must-not-start", ("resource:server.py",),
             AssetKey("mcp", "server"), revision=3,

@@ -27,7 +27,7 @@ async def test_execution_interaction_lifecycle_bounds_record_reads(
         prepared = replace(
             _prepared(admitted),
             request_envelope=RuntimePayloadRef(
-                StoredPayload.inline_bytes(b"{}"), RuntimeDomain.EXECUTION,
+                StoredPayload.inline_bytes(b"{}"), RuntimeDomain.TRACE,
             ),
         )
         engine = (
@@ -106,7 +106,10 @@ async def test_execution_interaction_conflict_rolls_back_and_can_retry(
                 )
 
         with pytest.raises(AIError) as raised:
-            await archive.state_store.mutate(project)
+            await archive.state_store.storage_group.mutate(
+                archive.transaction_stores,
+                lambda group: project(group.transaction(archive.state_store)),
+            )
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         assert await archive.list_model_interactions(agent_run_id="run") == [current]
         assert await repository.get_history_head("execution", tenant_id="tenant") == before

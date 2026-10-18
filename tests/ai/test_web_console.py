@@ -103,9 +103,9 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
     features = RuntimeFeatures("web-test")
     features.capability(ConversationCapability(), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(MetricsCapability(), scope="runtime")
+    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open(
-        "web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), metrics=metrics,
+        "web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
         features=features,
     ) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:

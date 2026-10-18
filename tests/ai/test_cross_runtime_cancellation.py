@@ -109,8 +109,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
                 run_stores = (owner_storage.run_store, remote_storage.run_store)
-                observation_tasks = {store._observation_task for store in run_stores
-                                     if store._observation_task is not None}
+                observation_tasks = {store.trace_persistence.scheduler_task for store in run_stores
+                                     if store.trace_persistence.scheduler_task is not None}
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
                     asyncio.gather(asyncio.shield(worker), return_exceptions=True), 10,
@@ -146,8 +146,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         tasks = observation_tasks | backend._checkpoint_tasks
                         for store in run_stores:
                             tasks.update(store._background_tasks)
-                            if store._observation_task is not None:
-                                tasks.add(store._observation_task)
+                            if store.trace_persistence.scheduler_task is not None:
+                                tasks.add(store.trace_persistence.scheduler_task)
                         tasks.difference_update(joined)
                         if not tasks:
                             return
@@ -160,8 +160,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 ) == sealed
                 assert (await execution.history(include_content=True)).items == history.items
                 run_store = owner_storage.run_store
-                assert run_store._projection_dirty == set()
-                assert run_store._projection_offsets == {}
+                assert run_store.trace_persistence.dirty == set()
+                assert run_store.trace_persistence.offsets == {}
                 assert run_store._durability_flights == {}
                 assert run_store._execution_producers == {}
                 assert run_store._staging._runs == {}
@@ -289,7 +289,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     from linktools.ai.capability import AgentContext
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.runtime.state._sql import _SqlTransaction
-    from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+    from linktools.ai.runtime.state._trace_persistence import TracePersistence
 
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -324,7 +324,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         )
 
     # Keep the batch pending until the cancel CAS, rather than race a timer.
-    monkeypatch.setattr(RuntimeAgentRunStore, "_schedule_observation_flush", lambda self: None)
+    monkeypatch.setattr(TracePersistence, "schedule", lambda self: None)
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),

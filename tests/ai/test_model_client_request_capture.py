@@ -386,7 +386,7 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
         assert result.status is expected
         assert recorder.requests == ()
         item = (await execution.model_interactions()).items[0]
-        archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
         records = await archive.list_model_interactions(agent_run_id=agent_run_id(
             namespace="default", tenant_id="default", execution_id=item.execution_id, agent_run_seq=item.agent_run_seq,
         ))

@@ -11,7 +11,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import _steps
+from linktools.ai.runtime.state import _steps, _trace_persistence
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from linktools.ai.runtime._transcript_staging import StagedTranscript
 
@@ -55,13 +55,13 @@ async def _add_run(state, run_id: str, execution_id: str) -> None:
 async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
     tmp_path: Path, backend: str, barrier: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 60.0)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 60.0)
     state = await _setup(tmp_path, backend)
     try:
         store = state.run_store
         repository = state.execution.executions
         before = await repository.get_history_head("execution", tenant_id="tenant")
-        archive = store.read_store(RuntimeDomain.EXECUTION)
+        archive = store.read_store(RuntimeDomain.TRACE)
         for index in range(8):
             await _observe(store, index)
         assert await archive.list_events(agent_run_id="run") == []
@@ -72,7 +72,7 @@ async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
                 AgentRunCheckpoint("run", 1, [message], transcript_message_count_before=0),
                 execution_id="execution", producer_generation=1,
             )
-            saved = await store.read_store(RuntimeDomain.RECOVERY).latest_checkpoint(agent_run_id="run")
+            saved = await store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
             assert saved is not None and saved.messages == [message]
             assert await archive.latest_checkpoint(agent_run_id="run") is None
             assert [item async for item in archive.iter_messages(agent_run_id="run")] == []
@@ -97,10 +97,10 @@ async def test_recovery_checkpoint_keeps_observations_queued_until_public_drain(
 async def test_boundary_pressure_flushes_a_single_batch(tmp_path: Path) -> None:
     state = await _setup(tmp_path, "memory")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
-        for index in range(_steps._OBSERVATION_FLUSH_BOUNDARIES):
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        for index in range(_trace_persistence._OBSERVATION_FLUSH_BOUNDARIES):
             await _observe(state.run_store, index)
-        assert len(await archive.list_events(agent_run_id="run")) == _steps._OBSERVATION_FLUSH_BOUNDARIES
+        assert len(await archive.list_events(agent_run_id="run")) == _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES
         await state.run_store.preflight_close()
         assert not state.run_store._background_tasks
     finally:
@@ -111,12 +111,12 @@ async def test_boundary_pressure_flushes_a_single_batch(tmp_path: Path) -> None:
 async def test_staging_during_scheduled_commit_gets_another_bounded_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.01)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.01)
     state = await _setup(tmp_path, "memory")
     entered = asyncio.Event()
     release = asyncio.Event()
     second = asyncio.Event()
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     count = 0
 
@@ -135,8 +135,8 @@ async def test_staging_during_scheduled_commit_gets_another_bounded_batch(
         await _observe(state.run_store, 1)
         await asyncio.wait_for(entered.wait(), 2)
         await _observe(state.run_store, 2)
-        assert state.run_store._projection_offsets["run"].observation_task is not None
-        assert state.run_store._observation_task is not None
+        assert state.run_store.trace_persistence.offsets["run"].observation_task is not None
+        assert state.run_store.trace_persistence.scheduler_task is not None
         release.set()
         await asyncio.wait_for(second.wait(), 2)
         await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
@@ -151,11 +151,11 @@ async def test_staging_during_scheduled_commit_gets_another_bounded_batch(
 async def test_cancelling_drain_settles_active_observation_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.01)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.01)
     state = await _setup(tmp_path, "memory")
     entered = asyncio.Event()
     release = asyncio.Event()
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     task = None
 
@@ -191,9 +191,9 @@ async def test_cancelling_drain_settles_active_observation_commit(
 async def test_ongoing_observations_do_not_reset_first_dirty_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.05)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.05)
     state = await _setup(tmp_path, "memory")
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     committed = asyncio.Event()
     stop = asyncio.Event()
@@ -214,7 +214,7 @@ async def test_ongoing_observations_do_not_reset_first_dirty_deadline(
     try:
         await asyncio.wait_for(committed.wait(), 1)
         assert not producer.done()
-        assert 1 <= len(await archive.list_events(agent_run_id="run")) < _steps._OBSERVATION_FLUSH_BOUNDARIES
+        assert 1 <= len(await archive.list_events(agent_run_id="run")) < _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES
     finally:
         stop.set()
         await producer
@@ -237,10 +237,10 @@ async def test_transient_observations_do_not_schedule_durability_tasks() -> None
     await store.initialize()
     try:
         await store.register_agent_run(AgentRunRecord("run"))
-        for index in range(_steps._OBSERVATION_FLUSH_BOUNDARIES * 2):
+        for index in range(_trace_persistence._OBSERVATION_FLUSH_BOUNDARIES * 2):
             await _observe(store, index)
         assert not store._background_tasks
-        assert len(await store.list_events(agent_run_id="run")) == _steps._OBSERVATION_FLUSH_BOUNDARIES * 2
+        assert len(await store.list_events(agent_run_id="run")) == _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES * 2
     finally:
         await store.preflight_close()
         await store.close()
@@ -252,7 +252,7 @@ async def test_recovery_checkpoint_does_not_force_a_public_filesystem_commit(
 ) -> None:
     from linktools.ai.storage import FilesystemJournal
 
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 60.0)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 60.0)
     state = await _setup(tmp_path, "filesystem")
     commits = 0
     original = FilesystemJournal.stage
@@ -273,9 +273,9 @@ async def test_recovery_checkpoint_does_not_force_a_public_filesystem_commit(
             execution_id="execution", producer_generation=1,
         )
         assert commits == 1
-        saved = await store.read_store(RuntimeDomain.RECOVERY).latest_checkpoint(agent_run_id="run")
+        saved = await store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
         assert saved is not None and saved.messages == [message]
-        public = store.read_store(RuntimeDomain.EXECUTION)
+        public = store.read_store(RuntimeDomain.TRACE)
         assert await public.latest_checkpoint(agent_run_id="run") is None
         assert [item async for item in public.iter_messages(agent_run_id="run")] == []
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
@@ -293,10 +293,10 @@ async def test_recovery_checkpoint_does_not_force_a_public_filesystem_commit(
 async def test_runs_share_one_idle_aware_scheduler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.05)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.05)
     state = await _setup(tmp_path, backend)
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     observed = set()
     committed = asyncio.Event()
     original = archive.sync_prepared_projection
@@ -310,9 +310,9 @@ async def test_runs_share_one_idle_aware_scheduler(
     monkeypatch.setattr(archive, "sync_prepared_projection", watched)
     try:
         await _observe(state.run_store, 1)
-        scheduler = state.run_store._observation_task
+        scheduler = state.run_store.trace_persistence.scheduler_task
         await _observe(state.run_store, 2, run_id="other-run", execution_id="other-execution")
-        assert state.run_store._observation_task is scheduler
+        assert state.run_store.trace_persistence.scheduler_task is scheduler
         await asyncio.wait_for(committed.wait(), 5)
         await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         await state.run_store.flush_execution_projection("other-run", execution_id="other-execution", producer_generation=1)
@@ -330,10 +330,10 @@ async def test_runs_share_one_idle_aware_scheduler(
 async def test_slow_run_does_not_hold_another_runs_flush_barrier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.01)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.01)
     state = await _setup(tmp_path, "memory")
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     entered = asyncio.Event()
     release = asyncio.Event()
     completed = asyncio.Event()
@@ -368,10 +368,10 @@ async def test_slow_run_does_not_hold_another_runs_flush_barrier(
 async def test_failed_scheduled_run_does_not_stop_siblings_or_its_required_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.01)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.01)
     state = await _setup(tmp_path, "memory")
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     failed = asyncio.Event()
     completed = asyncio.Event()
     original = archive.sync_prepared_projection
@@ -401,10 +401,10 @@ async def test_failed_scheduled_run_does_not_stop_siblings_or_its_required_retry
 async def test_runtime_close_drains_all_queued_runs_before_the_shared_tick(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 60.0)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 60.0)
     state = await _setup(tmp_path, "memory")
     await _add_run(state, "other-run", "other-execution")
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     try:
         await _observe(state.run_store, 1)
         await _observe(state.run_store, 2, run_id="other-run", execution_id="other-execution")
@@ -422,17 +422,17 @@ async def test_runtime_close_drains_all_queued_runs_before_the_shared_tick(
 async def test_shared_tick_rechecks_a_run_after_its_queue_snapshot_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
-    monkeypatch.setattr(_steps, "_OBSERVATION_FLUSH_SECONDS", 0.01)
+    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 0.01)
     state = await _setup(tmp_path, "memory")
     store = state.run_store
-    archive = store.read_store(RuntimeDomain.EXECUTION)
+    archive = store.read_store(RuntimeDomain.TRACE)
     entered = asyncio.Event()
     release = asyncio.Event()
     hold = store._history_lock.hold
 
     @asynccontextmanager
     async def pause_scheduler(agent_run_id):
-        if asyncio.current_task() is store._observation_task and not entered.is_set():
+        if asyncio.current_task() is store.trace_persistence.scheduler_task and not entered.is_set():
             entered.set()
             await release.wait()
         async with hold(agent_run_id):
@@ -442,9 +442,9 @@ async def test_shared_tick_rechecks_a_run_after_its_queue_snapshot_changes(
     try:
         await _observe(store, 1)
         await asyncio.wait_for(entered.wait(), 2)
-        scheduler = store._observation_task
+        scheduler = store.trace_persistence.scheduler_task
         if change == "pressure":
-            for index in range(2, _steps._OBSERVATION_FLUSH_BOUNDARIES + 1):
+            for index in range(2, _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES + 1):
                 await _observe(store, index)
         else:
             await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
@@ -466,11 +466,11 @@ async def test_shared_tick_rechecks_a_run_after_its_queue_snapshot_changes(
         await asyncio.wait_for(asyncio.shield(scheduler), 2)
         await store.preflight_close()
         expected = (
-            [str(index) for index in range(1, _steps._OBSERVATION_FLUSH_BOUNDARIES + 1)]
+            [str(index) for index in range(1, _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES + 1)]
             if change == "pressure" else ["1", "2"] if change == "rebind" else ["1"]
         )
         assert [event.tool_call_id for event in await archive.list_events(agent_run_id="run")] == expected
-        assert not store._projection_dirty
+        assert not store.trace_persistence.dirty
         assert not store._durability_flights
     finally:
         release.set()

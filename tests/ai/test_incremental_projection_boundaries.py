@@ -48,12 +48,12 @@ async def test_observed_transcript_does_not_extend_recoverable_checkpoint(
         store.stage_transcript("run", StagedTranscript((first, second)))
         await store.flush_execution_projection("run", execution_id="execution")
 
-        archive = store.read_store(RuntimeDomain.EXECUTION)
+        archive = store.read_store(RuntimeDomain.TRACE)
         assert [message async for message in archive.iter_messages(agent_run_id="run")] == [first, second]
         checkpoint = await archive.latest_checkpoint(agent_run_id="run")
         assert checkpoint is not None
         assert checkpoint.messages == [first]
-        recovery = await store.read_store(RuntimeDomain.RECOVERY).latest_checkpoint(agent_run_id="run")
+        recovery = await store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(agent_run_id="run")
         assert recovery is not None
         assert recovery.messages == [first]
     finally:
@@ -80,7 +80,7 @@ async def test_overlapping_request_updates_keep_their_admitted_identities(
         store.stage_model_interaction(first)
         store.stage_model_interaction(second)
         await store.flush_execution_projection("run", execution_id="execution")
-        archive = store.read_store(RuntimeDomain.EXECUTION)
+        archive = store.read_store(RuntimeDomain.TRACE)
         assert await archive.model_interaction_count(agent_run_id="run") == 2
         for running in (second, first):
             finished = replace(
@@ -124,8 +124,8 @@ async def test_recovery_checkpoint_commits_guarded_truth_before_public_projectio
             AgentRunRecord("run", agent_conversation_id="conversation"), execution_id="execution",
         )
         subscription = store.subscribe_model_interactions("conversation")
-        public = store.read_store(RuntimeDomain.EXECUTION)
-        recovery = store.read_store(RuntimeDomain.RECOVERY)
+        public = store.read_store(RuntimeDomain.TRACE)
+        recovery = store.read_store(RuntimeDomain.CHECKPOINT)
         assert public.state_store.storage_group is recovery.state_store.storage_group
         message = ModelRequest(parts=[UserPromptPart("atomic message")])
         store.stage_transcript("run", StagedTranscript((message,)))
@@ -237,7 +237,7 @@ async def test_caller_cancellation_waits_for_atomic_checkpoint_truth(
         store = state.run_store
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
-        recovery = store.read_store(RuntimeDomain.RECOVERY)
+        recovery = store.read_store(RuntimeDomain.CHECKPOINT)
         original = StateStepArchive.materialize_checkpoint_in_transaction
 
         async def hold_before_commit(self, *args, **kwargs):
@@ -261,7 +261,7 @@ async def test_caller_cancellation_waits_for_atomic_checkpoint_truth(
             await task
         saved = await recovery.latest_checkpoint(agent_run_id="run")
         assert saved is not None and saved.messages == [message]
-        public = store.read_store(RuntimeDomain.EXECUTION)
+        public = store.read_store(RuntimeDomain.TRACE)
         assert await public.checkpoint_count(agent_run_id="run") == 0
         assert [item async for item in public.iter_messages(agent_run_id="run")] == []
         await store.preflight_close()
@@ -302,10 +302,10 @@ async def test_recovery_restores_context_without_assuming_public_checkpoint_ackn
             lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
         )
         restored = state.run_store
-        public = restored.read_store(RuntimeDomain.EXECUTION)
+        public = restored.read_store(RuntimeDomain.TRACE)
         old = RuntimeAgentRunStore(
             StagingAgentRunStore(), conversation_archive=restored.read_store(RuntimeDomain.CONVERSATION),
-            execution_archive=public, recovery_archive=restored.read_store(RuntimeDomain.RECOVERY),
+            execution_archive=public, recovery_archive=restored.read_store(RuntimeDomain.CHECKPOINT),
             conversation_retention=RuntimeRetentionMode.VOLATILE,
             execution_retention=RuntimeRetentionMode.VOLATILE,
             recovery_retention=RuntimeRetentionMode.VOLATILE,

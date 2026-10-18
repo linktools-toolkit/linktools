@@ -78,9 +78,8 @@ from .state._codec import decode_domain, encode_domain
 from .state._conversation_repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from .state._execution_repositories import ExecutionRepositoryImpl
 from .state._model_interaction_store import ModelInteractionStateStepArchive
-from .state._plan import RuntimeDomain
 from .state._step_archive import StateStepArchive
-from .state._steps import RuntimeAgentRunStore
+from .state import ConversationPersistence
 from .state._store import active_state_scope
 
 _SESSION_CURSOR_KIND = "SESSION"
@@ -415,9 +414,9 @@ class DefaultSessionService:
                 or type(sessions) is not SessionRepositoryImpl
                 or type(histories) is not ConversationHistoryRepositoryImpl
                 or type(executions) is not ExecutionRepositoryImpl
-                or type(self._transcript_store) is not RuntimeAgentRunStore):
+                or type(self._transcript_store) is not ConversationPersistence):
             return False
-        archive = self._transcript_store.read_store(RuntimeDomain.CONVERSATION)
+        archive = self._transcript_store.archive
         return (
             type(archive) in (StateStepArchive, ModelInteractionStateStepArchive)
             and archive.state_store is sessions.state_store

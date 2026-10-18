@@ -114,7 +114,7 @@ def _history(
         authorization=TenantAuthorizationPolicy(),
         cursor_signer=HmacCursorSigner("timeline", b"timeline-owner-test"),
         conversation=state.conversation if sessions is None else replace(state.conversation, sessions=sessions),
-        session_transcript_store=state.run_store,
+        session_transcript_store=state.run_store.conversation_persistence,
     )
 
 

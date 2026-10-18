@@ -31,7 +31,7 @@ def _service(state: RuntimeStorage, authorization=None) -> DefaultSessionService
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("refresh", b"session-refresh-key"),
-        history_reader=object(), transcript_store=state.run_store,
+        history_reader=object(), transcript_store=state.run_store.conversation_persistence,
     )
 
 
@@ -331,7 +331,7 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
             )
         await sessions.state_store.mutate(commit)
         service = _service(state)
-        read = state.run_store.iter_conversation_message_range
+        read = state.run_store.conversation_persistence.iter_conversation_message_range
         entered, proceed, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
         async def body(**kwargs):
             assert active_state_scope() is None
@@ -344,7 +344,7 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
         async def release(*args, **kwargs):
             assert active_state_scope() is None
             released.set()
-        monkeypatch.setattr(state.run_store, "iter_conversation_message_range", body)
+        monkeypatch.setattr(state.run_store.conversation_persistence, "iter_conversation_message_range", body)
         monkeypatch.setattr(service, "_release_terminal", release)
         pending = asyncio.create_task(service.refresh("session", principal=_PRINCIPAL))
         await asyncio.wait_for(entered.wait(), timeout=5)

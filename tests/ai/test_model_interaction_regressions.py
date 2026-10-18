@@ -146,7 +146,7 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
 @pytest.mark.asyncio
 async def test_runtime_run_store_continues_recovery_interaction_high_water() -> None:
     staging = StagingAgentRunStore()
-    recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
+    recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.CHECKPOINT)
     store = RuntimeAgentRunStore(
         staging,
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
@@ -182,7 +182,7 @@ async def test_runtime_run_store_continues_recovery_interaction_high_water() -> 
 
 @pytest.mark.asyncio
 async def test_interaction_prepare_resolves_explicit_local_span() -> None:
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.TRACE)
     await archive.initialize()
     try:
         run = AgentRunRecord("run")
@@ -231,7 +231,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
 
         assert len(prepared) == 1
         assert prepared[0].request_context.items == (
-            TranscriptSpanRef(RuntimeDomain.EXECUTION, "run", 4, 5),
+            TranscriptSpanRef(RuntimeDomain.TRACE, "run", 4, 5),
         )
     finally:
         await archive.close()
@@ -358,7 +358,7 @@ async def test_interaction_capture_excludes_acknowledged_identities() -> None:
 
 @pytest.mark.asyncio
 async def test_volatile_archive_does_not_expose_staged_interactions() -> None:
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.TRACE)
     await archive.initialize()
     try:
         archive.stage_model_interaction(_interaction(1))

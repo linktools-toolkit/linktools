@@ -65,7 +65,7 @@ async def test_observation_scheduler_does_not_depend_on_hot_cache(
     try:
         await _observe(state)
         await _observe(state, 2)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         assert await archive.list_events(agent_run_id="run") == []
         await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         assert len(await archive.list_events(agent_run_id="run")) == 2
@@ -74,10 +74,10 @@ async def test_observation_scheduler_does_not_depend_on_hot_cache(
 
 
 def test_observation_policy_keeps_approved_window_and_threshold() -> None:
-    from linktools.ai.runtime.state import _steps
+    from linktools.ai.runtime.state import _trace_persistence
 
-    assert _steps._OBSERVATION_FLUSH_SECONDS == 3.0
-    assert _steps._OBSERVATION_FLUSH_BOUNDARIES == 128
+    assert _trace_persistence._OBSERVATION_FLUSH_SECONDS == 3.0
+    assert _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES == 128
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_required_drain_repeated_cancellation_waits_for_source_confirmatio
     import asyncio
 
     state = await _setup(tmp_path, backend, None)
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     entered, release = asyncio.Event(), asyncio.Event()
 

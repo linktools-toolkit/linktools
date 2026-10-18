@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """Declarative Runtime domain routing."""
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +25,8 @@ class RuntimeDomain(str, Enum):
     TASK = "task"
     EVALUATION = "evaluation"
     RECOVERY = "recovery"
+    TRACE = "trace"
+    CHECKPOINT = "checkpoint"
 
 
 _OBJECT_STORE_DOMAINS = frozenset(
@@ -34,6 +38,8 @@ _OBJECT_STORE_DOMAINS = frozenset(
         RuntimeDomain.TASK,
         RuntimeDomain.EVALUATION,
         RuntimeDomain.RECOVERY,
+        RuntimeDomain.TRACE,
+        RuntimeDomain.CHECKPOINT,
     }
 )
 
@@ -196,6 +202,9 @@ class RuntimeStoragePlan:
     artifact: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
     task: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
     evaluation: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
+    _module_routes: Mapping[RuntimeDomain, RuntimeStorageRoute] = field(
+        default_factory=dict, init=False, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         routes = tuple(self.route(domain) for domain in RuntimeDomain)
@@ -225,9 +234,23 @@ class RuntimeStoragePlan:
                     if left in right.parents or right in left.parents:
                         raise ValueError("filesystem group member paths must be disjoint")
 
+    def with_module_routes(
+        self, routes: Mapping[RuntimeDomain, RuntimeStorageRoute],
+    ) -> "RuntimeStoragePlan":
+        """Assemble module declarations without adding authoring route fields."""
+        allowed = {RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
+        if not routes.keys() <= allowed:
+            raise ValueError("module routes require persistence archive domains")
+        effective = replace(self)
+        object.__setattr__(effective, "_module_routes", MappingProxyType({**self._module_routes, **routes}))
+        effective.__post_init__()
+        return effective
+
     def route(self, domain: RuntimeDomain) -> RuntimeStorageRoute:
         if not isinstance(domain, RuntimeDomain):
             raise TypeError("RuntimeDomain is required")
+        if domain in self._module_routes:
+            return self._module_routes[domain]
         return {
             RuntimeDomain.CONVERSATION: self.conversation,
             RuntimeDomain.EXECUTION: self.execution,
@@ -236,6 +259,8 @@ class RuntimeStoragePlan:
             RuntimeDomain.TASK: self.task,
             RuntimeDomain.EVALUATION: self.evaluation,
             RuntimeDomain.RECOVERY: self.execution,
+            RuntimeDomain.TRACE: self.execution,
+            RuntimeDomain.CHECKPOINT: self.execution,
         }[domain]
 
     def filesystem_path(self, domain: RuntimeDomain) -> Path:
@@ -243,7 +268,7 @@ class RuntimeStoragePlan:
         route = self.route(domain)
         if route.path is None:
             raise ValueError("filesystem route path is required")
-        if domain in {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}:
+        if domain in {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}:
             return route.path / domain.value
         return route.path
 

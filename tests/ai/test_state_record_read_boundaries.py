@@ -105,7 +105,7 @@ def test_record_identity_still_validates_custom_mapping_behavior() -> None:
 def interaction_archive() -> ModelInteractionStateStepArchive:
     return ModelInteractionStateStepArchive(
         InMemoryStateStore(), object_store=None, namespace="reads", tenant_id="tenant",
-        runtime_domain=RuntimeDomain.RECOVERY,
+        runtime_domain=RuntimeDomain.CHECKPOINT,
     )
 
 

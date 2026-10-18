@@ -348,8 +348,8 @@ def _runtime_commands(
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
         conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
-        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
-        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.TRACE),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 

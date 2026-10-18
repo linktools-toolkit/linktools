@@ -113,8 +113,8 @@ and provider retry boundaries.
 Conversation, interrupted-run recovery, detailed trace and automatic Agent metrics
 are explicit, independent Runtime-scoped capabilities: `ConversationCapability`,
 `CheckpointCapability`, `TraceCapability`, and `MetricsCapability`. Durable storage
-alone enables none of them. Automatic Agent metrics additionally require a shared
-`Metrics` dataset supplied through `metrics=`. Task, Evaluation and Artifact remain
+alone enables none of them. `MetricsCapability(metrics=dataset)` supplies the shared
+recording dataset for automatic Agent, Task and Evaluation observations. Task, Evaluation and Artifact remain
 services and need no capability wrappers. See [feature guarantees and commit
 boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
@@ -259,11 +259,21 @@ Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
 MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
-`AssetStore` with `RuntimeFeatures(..., assets=store)`. A store-backed group
+`AssetStore` to `AssetCapability(store)` and register that capability with
+`features.capability(assets, scope="runtime")`. A store-backed group
 captures the declaration metadata visible when capture begins. Assets added
 afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
-identities or layouts fail closed.
+identities or layouts fail closed. Omitting `AssetCapability` contributes no Asset declarations.
+
+```python
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
+
+assets = AssetCapability(store)
+features = RuntimeFeatures("application")
+features.capability(assets, scope="runtime")
+capture = await features.capture()
+```
 
 Every Asset kind uses `AssetVersionRef` for byte-version reads through
 `AssetStore.resolve_versions()` and `read_versions()`. Agent, Skill, MCP, and
@@ -287,7 +297,7 @@ expose local rule files through `DirectoryAssetBackend` and a
 
 For downstream declaration formats or custom kinds such as `worker` or
 `audit`, implement `CapabilityLoader` and register it for its input Asset
-kind with `group.loader("audit", loader)`. One kind has exactly one loader;
+kind with `assets.loader("audit", loader)`. One kind has exactly one loader;
 registering `agent`, `skill`, `mcp`, or `rule` replaces that built-in
 parser slot instead of chaining with it. Every loader receives the same
 `CapabilityLoadContext`: `read()` / `read_many()` read the captured
@@ -297,7 +307,7 @@ values for execution-bound resources. Loaders return normal
 instruction-only inputs such as Rule. Use
 `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP
 declarations. Resource-backed declarations remain owned by the same
-RuntimeFeatures AssetStore; a custom loader may change declaration format or
+AssetCapability AssetStore; a custom loader may change declaration format or
 layout but does not implement a second version store. No additional
 Registry/Provider abstraction is required.
 
@@ -898,7 +908,9 @@ page = await runtime.executions.list(
 ```
 
 `RuntimeHistory.open()` provides the same read-only execution metadata and
-history projections without loading a ModelRegistry or compiling Agents.
+history projections without loading a ModelRegistry or compiling Agents. Pass the
+same `features=` declaration or capture when capabilities configure custom storage
+routes or caches; read-only opening does not activate hooks or metrics recording.
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
 or raw error diagnostics. Its optional `ExecutionInfo.capability_refs` contains
@@ -1041,7 +1053,7 @@ async with Runtime.open(
     ...
 ```
 
-`RuntimeStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the storage composition directly. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `RuntimeStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `RuntimeStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeStorage snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
+`RuntimeStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the storage composition directly. Use the same `features=` declaration or capture for `Runtime.open`, `RuntimeHistory.open` and `RuntimeSnapshot.create` when configuring module routes. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `RuntimeStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `RuntimeStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeStorage snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
 binding metadata; portable RuntimeStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.

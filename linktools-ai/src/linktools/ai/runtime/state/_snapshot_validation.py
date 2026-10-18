@@ -136,6 +136,15 @@ _ALLOWED_RECORD_KINDS = {
     ),
 }
 
+_ARCHIVE_RECORD_KINDS = frozenset({
+    "transcript_head", "transcript_seek", "context_projection", "agent_run", "model_interaction",
+})
+_ALLOWED_RECORD_KINDS[RuntimeDomain.TRACE] = _ARCHIVE_RECORD_KINDS | {"history_association"}
+_ALLOWED_RECORD_KINDS[RuntimeDomain.CHECKPOINT] = _ARCHIVE_RECORD_KINDS
+_ALLOWED_RECORD_KINDS[RuntimeDomain.EXECUTION] -= _ARCHIVE_RECORD_KINDS | {"history_association"}
+_ALLOWED_RECORD_KINDS[RuntimeDomain.RECOVERY] -= _ARCHIVE_RECORD_KINDS
+
+
 _RECORD_TYPES = {
     "budget_scope": BudgetUsage,
     "budget_model": BudgetModelReservation,
@@ -435,7 +444,7 @@ def _history_association_records(
     facts: tuple[StoredFact, ...],
     values: Mapping[bytes, object],
 ) -> Mapping[bytes, StoredRecord]:
-    if domain is not RuntimeDomain.EXECUTION:
+    if domain is not RuntimeDomain.TRACE:
         return {}
     result: dict[bytes, StoredRecord] = {}
     for fact in facts:
@@ -493,7 +502,7 @@ def _validate_history_association_coverage(
     associations: Mapping[bytes, StoredRecord],
 ) -> None:
     run = values.get(record.parent_digest)
-    if domain is not RuntimeDomain.EXECUTION or not isinstance(run, AgentRunRecord):
+    if domain is not RuntimeDomain.TRACE or not isinstance(run, AgentRunRecord):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     covered = cast(int, record.data["sequence"])
     expected = StoredRecord(

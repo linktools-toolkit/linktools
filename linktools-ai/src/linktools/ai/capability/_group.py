@@ -14,7 +14,7 @@ from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import AssetStore, AssetStoreReader
+from ..asset import AssetStoreReader
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -28,6 +28,7 @@ from ..spec import (
 )
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
+from ._asset import AssetCapability
 from ._context import AgentContext
 from ._contribution import (
     CapabilityContribution,
@@ -36,11 +37,9 @@ from ._contribution import (
     _validate_revision,
 )
 from ._declaration import (
-    BuiltinDeclarationLoader,
     _bind_mcp_contribution,
 )
-from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
-from ._skill import SkillDefinition
+from ._loading import CapabilityLoadContext
 from ._tool_metadata import (
     ToolEffectPolicy,
     is_tool_effect_policy,
@@ -120,7 +119,6 @@ class RuntimeFeatures(Generic[AppT]):
         self,
         group_id: str,
         *,
-        assets: "AssetStore | None" = None,
         sandbox: "Sandbox | None" = None,
         tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
         output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
@@ -128,22 +126,16 @@ class RuntimeFeatures(Generic[AppT]):
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
-        if assets is not None and not isinstance(assets, AssetStore):
-            raise TypeError("assets must be AssetStore")
         _validate_retry_defaults(tool_retries, output_retries)
         _validate_filter(filter)
         self._filter = filter
         self._tool_retries = tool_retries
         self._output_retries = output_retries
         self._id = group_id
-        self._store = assets
+        self._asset_capability: AssetCapability[AppT] | None = None
         self._workspace: Workspace | None = None
         self._sandbox = sandbox
-        self._loaders: dict[str, CapabilityLoader[AppT]] = {}
         self._contributions: list[CapabilityContribution[AppT]] = []
-        if assets is not None:
-            for kind in ("agent", "skill", "mcp", "rule"):
-                self._loaders[kind] = BuiltinDeclarationLoader(kind)
 
     @property
     def id(self) -> str:
@@ -156,11 +148,6 @@ class RuntimeFeatures(Generic[AppT]):
     @property
     def sandbox(self) -> "Sandbox | None":
         return self._sandbox
-
-    @property
-    def assets(self) -> "AssetStore | None":
-        """Return the explicit AssetStore used by this capability group."""
-        return self._store
 
     def tool(
         self,
@@ -217,6 +204,7 @@ class RuntimeFeatures(Generic[AppT]):
             config=config, scope=scope,
         )
         workspace_capabilities: list[WorkspaceCapability] = []
+        asset_capabilities: list[AssetCapability[AppT]] = []
 
         def collect(value: AbstractCapability[object]) -> None:
             if isinstance(value, WrapperCapability):
@@ -224,13 +212,26 @@ class RuntimeFeatures(Generic[AppT]):
             elif isinstance(value, CombinedCapability):
                 for child in value.capabilities:
                     collect(child)
+            elif isinstance(value, AssetCapability):
+                asset_capabilities.append(value)
             elif isinstance(value, WorkspaceCapability):
                 workspace_capabilities.append(value)
             else:
-                value.apply(lambda leaf: workspace_capabilities.append(leaf)
-                            if isinstance(leaf, WorkspaceCapability) else None)
+                def collect_leaf(leaf: AbstractCapability[object]) -> None:
+                    if isinstance(leaf, WorkspaceCapability):
+                        workspace_capabilities.append(leaf)
+                    elif isinstance(leaf, AssetCapability):
+                        asset_capabilities.append(leaf)
+
+                value.apply(collect_leaf)
 
         collect(capability)
+        if asset_capabilities:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                              "AssetCapability requires Runtime scope")
+            if self._asset_capability is not None or len(asset_capabilities) != 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         if workspace_capabilities:
             if scope != "runtime":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
@@ -247,6 +248,8 @@ class RuntimeFeatures(Generic[AppT]):
             )
             self._workspace = workspace_capability.workspace
             self._contributions.extend(tools)
+        if asset_capabilities:
+            self._asset_capability = asset_capabilities[0]
         self._contributions.append(contribution)
         return capability
 
@@ -303,52 +306,22 @@ class RuntimeFeatures(Generic[AppT]):
         self._contributions.append(CapabilityContribution.from_declaration(server))
         return server
 
-    def loader(
-        self,
-        kind: str,
-        loader: CapabilityLoader[AppT],
-    ) -> CapabilityLoader[AppT]:
-        """Register the sole loader for one input Asset kind, replacing its slot."""
-        if not isinstance(kind, str) or not kind.strip():
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if not callable(getattr(loader, "load", None)):
-            raise TypeError("loader must implement load")
-        source_kind = getattr(loader, "source_kind", None)
-        if source_kind is not None and source_kind != kind:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        self._loaders[kind] = loader
-        return loader
-
     async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
-        loaders = tuple(self._loaders.items())
-        store = self._store
         context: CapabilityLoadContext | None = None
         source_revision: StorageRevision | None = None
         asset_reader: AssetStoreReader | None = None
-        if store is not None:
-            context = await CapabilityLoadContext.capture(self._id, store)
-            for _kind, loader in loaders:
-                loaded = await loader.load(context)
-                for value in loaded:
-                    _validate_skill_source(value, context)
-                    if isinstance(value, (AgentSpec, SkillDefinition, MCPServerSpec)):
-                        item = CapabilityContribution.from_declaration(value)
-                    elif isinstance(value, CapabilityContribution):
-                        item = value
-                    elif isinstance(value, RepositoryInstructionDocument):
-                        instruction_documents.append(value)
-                        continue
-                    else:
-                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                    contributions.append(item)
-            await context.verify_source_revision()
+        if self._asset_capability is not None:
+            context, loaded = await self._asset_capability.capture(self._id)
+            for value in loaded:
+                if isinstance(value, RepositoryInstructionDocument):
+                    instruction_documents.append(value)
+                else:
+                    contributions.append(value)
             source_revision = context.source_revision
             asset_reader = context.asset_reader
-        elif loaders:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         captured_items = tuple(
             _freeze_contribution(
                 _bind_mcp_contribution(item, context)
@@ -398,34 +371,6 @@ def _validate_retry_defaults(tool_retries: int, output_retries: int) -> None:
             raise TypeError(f"runtime {name} must be an integer")
         if value < 0:
             raise ValueError(f"runtime {name} cannot be negative")
-
-
-def _validate_skill_source(
-    value: object,
-    context: CapabilityLoadContext,
-) -> None:
-    if isinstance(value, CapabilityContribution):
-        if value.kind != "skill" or not isinstance(value.value, SkillDefinition):
-            return
-        definition = value.value
-    elif isinstance(value, SkillDefinition):
-        definition = value
-    else:
-        return
-    source_ref = definition.source_ref
-    if source_ref is None:
-        return
-    if source_ref.source_id != context.group_id:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    versions = tuple(item.asset for item in source_ref.resources)
-    try:
-        captured = context.bind_versions(tuple(ref.key for ref in versions))
-    except AIError as error:
-        if error.code is ErrorCode.SNAPSHOT_CONFLICT:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        raise
-    if versions != captured:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:

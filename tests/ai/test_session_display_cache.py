@@ -55,7 +55,7 @@ def _service(state, cache, authorization=None):
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("display", b"display-test-key"), history_reader=object(),
-        transcript_store=state.run_store, cache=cache,
+        transcript_store=state.run_store.conversation_persistence, cache=cache,
     )
 
 
@@ -270,13 +270,13 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
         else:
             clock.now += 3
             if phase == "body":
-                read = state.run_store.iter_conversation_message_range
+                read = state.run_store.conversation_persistence.iter_conversation_message_range
 
                 async def slow_body(**kwargs):
                     clock.now += 3
                     async for item in read(**kwargs):
                         yield item
-                monkeypatch.setattr(state.run_store, "iter_conversation_message_range", slow_body)
+                monkeypatch.setattr(state.run_store.conversation_persistence, "iter_conversation_message_range", slow_body)
             else:
                 put = cache.put
 
@@ -803,7 +803,7 @@ async def test_display_cache_custom_repository_keeps_original_read_path():
         service = DefaultSessionService(
             replace(state.conversation, sessions=custom), state.execution.executions,
             TenantAuthorizationPolicy(), object(), HmacCursorSigner("display", b"display-test-key"),
-            history_reader=object(), transcript_store=state.run_store, cache=cache,
+            history_reader=object(), transcript_store=state.run_store.conversation_persistence, cache=cache,
         )
         await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         await _change_metadata(state, "changed")

@@ -75,7 +75,7 @@ async def _advance(
     if expected is not None and session.continuation is not None:
         assert session.continuation.agent_run_id == expected.agent_run_id
         effective_expected = session.continuation
-    message_count = await state.run_store.conversation_message_count(
+    message_count = await state.run_store.conversation_persistence.conversation_message_count(
         history_id=session.history_id,
         agent_run_id=next_cursor.agent_run_id,
         tenant_id="tenant",

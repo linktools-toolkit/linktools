@@ -34,7 +34,7 @@ def _reader(state, *, store=None, executions=None, reader_type=StepExecutionHist
     return reader_type(
         namespace=_NAMESPACE,
         executions=state.execution.executions if executions is None else executions,
-        store=state.run_store.read_store(RuntimeDomain.EXECUTION) if store is None else store,
+        store=state.run_store.read_store(RuntimeDomain.TRACE) if store is None else store,
         cursor_signer=HmacCursorSigner("capture", b"capture-key"),
     )
 
@@ -82,7 +82,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
     try:
         await _seed(state)
         repository = state.execution.executions
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         get, capture = repository.get, archive.capture_history
         scopes = []
         authorized = False
@@ -112,7 +112,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
         monkeypatch.setattr(archive, "capture_history", tracked_capture)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
         monkeypatch.setattr(archive, "read_pending_message", unexpected_body)
-        monkeypatch.setattr(state.object_store(RuntimeDomain.EXECUTION), "open", unexpected_object)
+        monkeypatch.setattr(state.object_store(RuntimeDomain.TRACE), "open", unexpected_object)
         boundary = await _service(state, authorization=Authorization()).capture_model_interaction_cutoffs(
             "execution", principal=_PRINCIPAL,
         )
@@ -210,7 +210,7 @@ async def test_capture_keeps_independent_storage_owners(
                 assert resource.owner_principal_id == "authorizing-owner"
         monkeypatch.setattr(state.execution.executions, "get_header", authorizing_header)
         monkeypatch.setattr(other.execution.executions, "get_header", unexpected_header)
-        archive = other.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = other.run_store.read_store(RuntimeDomain.TRACE)
         capture = archive.capture_history
         async def checked_capture(*args, **kwargs):
             assert active_state_scope() is None
@@ -239,7 +239,7 @@ async def test_capture_releases_metadata_scope_after_observer_cancellation(
     pending = None
     try:
         await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         capture = archive.capture_history
         entered, blocked = asyncio.Event(), asyncio.Event()
         async def blocked_capture(*args, **kwargs):
@@ -348,7 +348,7 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
         class Reader:
             capture_model_interaction_cutoffs = unexpected
         monkeypatch.setattr(repository, "get", get_after_auth)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         monkeypatch.setattr(archive, "capture_history", unexpected)
         service = _service(state, reader=Reader() if custom_reader else None, authorization=Authorization())
         principal = Principal("owner", "other") if failure == "tenant" else _PRINCIPAL
@@ -367,7 +367,7 @@ async def test_capture_does_not_scope_custom_owner_io(custom_owner: str) -> None
     try:
         await _seed(state)
         repository = state.execution.executions
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         class Repository:
             async def get_header(self, execution_id, *, tenant_id):
                 assert active_state_scope() is None
@@ -495,7 +495,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
     try:
         await _seed(state)
         repository = state.execution.executions
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         get, rows = repository.get, archive.read_model_interactions_with_run
         scopes = []
         authorized = False
@@ -518,7 +518,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
         monkeypatch.setattr(repository, "get", tracked_get)
         monkeypatch.setattr(archive, "read_model_interactions_with_run", tracked_rows)
         monkeypatch.setattr(archive, "resolve_model_interactions", unexpected_body)
-        monkeypatch.setattr(state.object_store(RuntimeDomain.EXECUTION), "open", unexpected_object)
+        monkeypatch.setattr(state.object_store(RuntimeDomain.TRACE), "open", unexpected_object)
         values = await _metadata(_service(state, authorization=Authorization()))
         assert [(value.execution_id, value.agent_run_seq, value.model_request_seq, value.status)
                 for value in values] == [("execution", 1, 1, "RUNNING")]
@@ -674,7 +674,7 @@ async def test_metadata_preserves_independent_owner_reads(
                 assert resource.owner_principal_id == "authorizing-owner"
         monkeypatch.setattr(state.execution.executions, "get_header", authorizing_header)
         monkeypatch.setattr(other.execution.executions, "get_header", unexpected_header)
-        archive = other.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = other.run_store.read_store(RuntimeDomain.TRACE)
         get_run, rows = archive.get_agent_run, archive.list_model_interactions
         combined = archive.read_model_interactions_with_run
         async def checked_run(*args, **kwargs):
@@ -713,7 +713,7 @@ async def test_metadata_cancellation_releases_shared_read_scope(
     pending = None
     try:
         await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         rows = archive.read_model_interactions_with_run
         entered, blocked = asyncio.Event(), asyncio.Event()
         async def blocked_rows(*args, **kwargs):
@@ -778,7 +778,7 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
         async def unexpected(*args, **kwargs):
             raise AssertionError("model rows must not be read before authority and request validation")
         monkeypatch.setattr(repository, "get", get_after_auth)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         monkeypatch.setattr(archive, "get_agent_run", unexpected)
         monkeypatch.setattr(archive, "read_model_interactions_with_run", unexpected)
         reader = _reader(state, executions=MissingReaderRepository() if phase == "reader_missing" else repository)
@@ -802,7 +802,7 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         engine = archive.state_store.storage_group.context.engine.sync_engine
         statements = []
         def capture(_connection, _cursor, statement, _parameters, _context, _many):
@@ -843,7 +843,7 @@ async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backe
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         key = archive._agent_run_key(run.agent_run_id) if missing == "run" else archive._interaction_key(run.agent_run_id, 1)
         await archive.state_store.mutate(lambda transaction: transaction.delete_record(key))
         with pytest.raises(AIError) as raised:
@@ -862,7 +862,7 @@ async def test_metadata_batch_reads_legacy_fact_with_same_ownership_validation(t
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         value, = await archive.list_model_interactions(agent_run_id=run.agent_run_id)
         terminal = _terminal(value)
         fact = StoredFact(
@@ -890,7 +890,7 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         calls = []
         class CustomArchive(ModelInteractionStateStepArchive):
             async def get_agent_run(self, *, agent_run_id):
@@ -903,7 +903,7 @@ async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
                 raise AssertionError("custom archive must retain its independent operations")
         custom = CustomArchive(
             archive.state_store, object_store=None, namespace=_NAMESPACE,
-            tenant_id="tenant", runtime_domain=RuntimeDomain.EXECUTION,
+            tenant_id="tenant", runtime_domain=RuntimeDomain.TRACE,
         )
         page = await _metadata(_service(state, reader=_reader(state, store=custom)))
         assert [item.model_request_seq for item in page] == [1]

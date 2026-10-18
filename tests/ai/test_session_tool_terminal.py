@@ -1286,7 +1286,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             assert checkpoint_before.agent_run_id is not None
             agent_run_id = checkpoint_before.agent_run_id
             if with_cancel:
-                recovery_archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+                recovery_archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
                 durable_interaction_count = await recovery_archive.model_interaction_count(
                     agent_run_id=agent_run_id
                 )
@@ -2347,7 +2347,7 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
 ) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="checkpoint-readback", tenant_id="tenant")
-    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     assert isinstance(recovery, StateStepArchive)
     original = recovery.state_store.mutate
     injected = False
@@ -2381,7 +2381,7 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
         await state.run_store.save_checkpoint(checkpoint)
         assert injected
 
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert isinstance(recovery, StateStepArchive)
         assert await recovery.transcript_message_count_for_run(run) == len(
             checkpoint.messages
@@ -2402,7 +2402,7 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="run-checkpoint-relocation", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert isinstance(recovery, StateStepArchive)
         run = AgentRunRecord("run", agent_conversation_id="conversation", agent_id="default")
         await recovery.register_agent_run(run)
@@ -2472,7 +2472,7 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> 
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         conversation = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         assert isinstance(recovery, StateStepArchive)
         assert isinstance(conversation, StateStepArchive)
@@ -2725,7 +2725,7 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
 ) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
-    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord(
         "run",
         agent_conversation_id="conversation",

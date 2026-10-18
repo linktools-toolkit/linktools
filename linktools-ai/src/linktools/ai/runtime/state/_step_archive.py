@@ -11,7 +11,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from enum import Enum
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
@@ -78,6 +78,7 @@ from ._store import (
     StoredFact,
     StoredRecord,
     active_state_scope,
+    active_state_transaction,
     enter_run_history_lock,
     exit_run_history_lock,
     parent_digest,
@@ -90,6 +91,7 @@ from ._store import (
 )
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
+_ValueT = TypeVar("_ValueT")
 
 
 @runtime_checkable
@@ -1039,6 +1041,43 @@ class StateStepArchive(AgentRunStore):
         return self._store
 
     @property
+    def transaction_stores(self) -> tuple[StateStore, ...]:
+        """Enlist evidence and its authoritative producer head atomically."""
+        repository = self._execution_repository
+        if repository is not None:
+            return tuple(dict.fromkeys((self._store, repository.state_store)))
+        return (self._store,)
+
+    async def _mutate(
+        self, callback: Callable[[StateTransaction], Awaitable[_ValueT]],
+    ) -> _ValueT:
+        stores = self.transaction_stores
+        if len(stores) == 1:
+            return await self._store.mutate(callback)
+        group = self._store.storage_group
+        if any(store.storage_group is not group for store in stores):
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                "trace evidence and execution authority require one StateStorageGroup",
+            )
+        return await group.mutate(
+            stores, lambda transaction: callback(transaction.transaction(self._store)),
+        )
+
+    def _execution_transaction(self, transaction: StateTransaction) -> StateTransaction:
+        repository = self._execution_repository
+        if repository is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if repository.state_store is self._store:
+            return transaction
+        if active_state_transaction(self._store, writable=True) is not transaction:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        core_transaction = active_state_transaction(repository.state_store, writable=True)
+        if core_transaction is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return core_transaction
+
+    @property
     def transcript_repository(self) -> TranscriptRepository:
         return self._history
 
@@ -1075,7 +1114,7 @@ class StateStepArchive(AgentRunStore):
         agent_run_ids: Sequence[str],
     ) -> Mapping[str, ExecutionRunSealHead]:
         require_no_run_history_lock("StateStepArchive.execution_history_heads")
-        if self._runtime_domain is not RuntimeDomain.EXECUTION:
+        if self._runtime_domain is not RuntimeDomain.TRACE:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         unique_agent_run_ids = tuple(dict.fromkeys(agent_run_ids))
         if not unique_agent_run_ids:
@@ -1313,7 +1352,7 @@ class StateStepArchive(AgentRunStore):
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
-            if self._runtime_domain is RuntimeDomain.EXECUTION and value.status == "RUNNING"
+            if self._runtime_domain is RuntimeDomain.TRACE and value.status == "RUNNING"
             else value
             for value in interactions
         )
@@ -1741,7 +1780,7 @@ class StateStepArchive(AgentRunStore):
                     history_head_guard,
                 )
 
-        await self._store.mutate(mutate)
+        await self._mutate(mutate)
 
     def _stored_agent_run(self, record: AgentRunRecord) -> StoredRecord:
         return StoredRecord(
@@ -2108,14 +2147,15 @@ class StateStepArchive(AgentRunStore):
         *,
         allow_cancelling: bool = True,
     ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord] | None:
-        if self._runtime_domain is not RuntimeDomain.EXECUTION:
+        if self._execution_repository is None:
+            if self._runtime_domain is RuntimeDomain.TRACE:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if history_head_guard is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return None
         if not execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self._execution_repository is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        core_transaction = self._execution_transaction(transaction)
         if history_head_guard is not None:
             head, _record = history_head_guard
             if (
@@ -2126,7 +2166,7 @@ class StateStepArchive(AgentRunStore):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return history_head_guard
         return await self._execution_repository.require_open_history_head_in_transaction(
-            transaction,
+            core_transaction,
             execution_id,
             expected_producer_generation=producer_generation,
             allow_cancelling=allow_cancelling,
@@ -2143,7 +2183,7 @@ class StateStepArchive(AgentRunStore):
         if guard is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _head, record = guard
-        if await transaction.guard_record(
+        if await self._execution_transaction(transaction).guard_record(
             record.key_digest, expected_storage_revision=record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -2190,7 +2230,7 @@ class StateStepArchive(AgentRunStore):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         head, record = history_head_guard
         await self._execution_repository.replace_history_head_in_transaction(
-            transaction,
+            self._execution_transaction(transaction),
             record,
             replace(head, revision=head.revision + 1),
         )
@@ -2210,7 +2250,7 @@ class StateStepArchive(AgentRunStore):
             run,
             checkpoints,
         )
-        await self._store.mutate(
+        await self._mutate(
             lambda transaction: self._sync_projection_in_transaction(
                 transaction,
                 run,
@@ -2240,7 +2280,7 @@ class StateStepArchive(AgentRunStore):
         values = tuple(checkpoints)
         if any(not isinstance(value, PreparedAgentRunCheckpoint) for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._store.mutate(
+        await self._mutate(
             lambda transaction: self._sync_projection_in_transaction(
                 transaction,
                 run,
@@ -2415,7 +2455,7 @@ class StateStepArchive(AgentRunStore):
                     execution_id=execution_id,
                 )
 
-        await self._store.mutate(mutate)
+        await self._mutate(mutate)
 
     async def _materialize_checkpoint_in_transaction(
         self,
@@ -2932,7 +2972,7 @@ class StateStepArchive(AgentRunStore):
                 history_head_guard,
             )
 
-        await self._store.mutate(mutate)
+        await self._mutate(mutate)
         self._context_baselines.pop(agent_run_id, None)
 
     def release_runtime_cache(self, agent_run_id: str) -> None:
@@ -2989,7 +3029,7 @@ class StateStepArchive(AgentRunStore):
                 history_head_guard,
             )
 
-        await self._store.mutate(mutate)
+        await self._mutate(mutate)
 
     async def _facts(
         self,
@@ -3071,7 +3111,7 @@ class StateStepArchive(AgentRunStore):
         events: Sequence[tuple[int, StepEvent]],
     ) -> None:
         """Derive event locators and certify only a continuously indexed prefix."""
-        if self._runtime_domain is not RuntimeDomain.EXECUTION or not events:
+        if self._runtime_domain is not RuntimeDomain.TRACE or not events:
             return
         derived = self._history_association_records(run.agent_run_id, events)
         coverage_key = self._history_association_key(run.agent_run_id, "coverage", "event")
@@ -3286,7 +3326,7 @@ class StateStepArchive(AgentRunStore):
         """Read run identities and all observable high waters in one snapshot."""
         require_no_run_history_lock("StateStepArchive.capture_history")
         self._ensure_open()
-        if self._runtime_domain is not RuntimeDomain.EXECUTION:
+        if self._runtime_domain is not RuntimeDomain.TRACE:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         run_ids = tuple(dict.fromkeys(agent_run_ids))
         if not run_ids:

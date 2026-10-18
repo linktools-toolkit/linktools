@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...core import (
-    RUNTIME_OBJECT_STORE_ID,
     canonical_json_bytes,
     validate_persistence_namespace,
     validate_tenant_id,
@@ -163,7 +162,7 @@ class RuntimeStorage:
                         transaction_root=base,
                     )
                     for domain in RuntimeDomain
-                    if domain is not RuntimeDomain.RECOVERY
+                    if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
                 }
             ),
             object_store=object_store,
@@ -184,7 +183,7 @@ class RuntimeStorage:
                 **{
                     domain.value: route
                     for domain in RuntimeDomain
-                    if domain is not RuntimeDomain.RECOVERY
+                    if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
                 }
             ),
             object_store=object_store,
@@ -216,7 +215,7 @@ class RuntimeStorage:
                 **{
                     domain.value: route
                     for domain in RuntimeDomain
-                    if domain is not RuntimeDomain.RECOVERY
+                    if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
                 }
             ),
             object_store=object_store,
@@ -308,6 +307,8 @@ class RuntimeStorage:
         namespace: str,
         tenant_id: str,
         read_only: bool = False,
+        module_routes: Mapping[RuntimeDomain, RuntimeStorageRoute] | None = None,
+        module_caches: Mapping[RuntimeDomain, object | None] | None = None,
     ) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStorageLifecycle.NEW:
@@ -320,6 +321,18 @@ class RuntimeStorage:
                 raise ValueError("tenant_id is required")
             if not isinstance(read_only, bool):
                 raise TypeError("read_only must be bool")
+            routes = dict(module_routes or {})
+            caches = dict(module_caches or {})
+            module_domains = {RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
+            if not routes.keys() <= module_domains or not caches.keys() <= module_domains:
+                raise ValueError("module storage only configures persistence archive domains")
+            for value in caches.values():
+                _validate_cache(value)
+            self._plan = self._plan.with_module_routes(routes)
+            _validate_storage_configuration(self._plan, self._external_object_store)
+            selected_modules = frozenset(caches)
+            for domain in module_domains:
+                caches.setdefault(domain, None)
             self._lifecycle = _RuntimeStorageLifecycle.INITIALIZING
             try:
                 from ._materializer import materialize_runtime_storage
@@ -330,6 +343,8 @@ class RuntimeStorage:
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
                     cache=self._cache,
+                    module_caches=caches,
+                    selected_modules=selected_modules,
                     read_only=read_only,
                 )
                 self._assign_materialized(

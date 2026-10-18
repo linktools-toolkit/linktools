@@ -12,6 +12,7 @@ from datetime import datetime
 from linktools.core import environ
 
 from ..agent import AgentBindingContract
+from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -36,13 +37,13 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
 from ..spec import CapabilityRef
 from ..task import (
-    TaskBindingContract,
     TaskEvent,
     TaskGraphInfo,
     TaskResultRecord,
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
+from ._persistence_configuration import persistence_storage_configuration
 from .state._object_router import runtime_object_source_reads
 from ._event import project_event_payload
 from ._cursor import decode_cursor as decode_runtime_cursor
@@ -859,12 +860,14 @@ class RuntimeHistory:
         namespace: str,
         *,
         storage: RuntimeStorage,
+        features: RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None = None,
         tenant_id: "str | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
     ) -> AbstractAsyncContextManager["RuntimeHistory"]:
         return _open_runtime_history(
             namespace,
             storage=storage,
+            features=features,
             tenant_id=tenant_id,
             authorization=authorization,
         )
@@ -1142,6 +1145,7 @@ async def _open_runtime_history(
     namespace: str,
     *,
     storage: RuntimeStorage,
+    features: RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None,
     tenant_id: "str | None",
     authorization: "AuthorizationPolicy | None",
 ) -> AsyncIterator[RuntimeHistory]:
@@ -1151,6 +1155,15 @@ async def _open_runtime_history(
     )
     if not isinstance(storage, RuntimeStorage):
         raise TypeError("storage must be RuntimeStorage")
+    if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
+        raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
+    captured = await features.capture() if isinstance(features, RuntimeFeatures) else features
+    if captured is not None:
+        await captured.verify_source_revision()
+    capabilities = () if captured is None else tuple(
+        item.value for item in captured.contributions if item.scope == "runtime"
+    )
+    module_routes, module_caches = persistence_storage_configuration(capabilities)
     selected_storage = storage
     initialized = False
     body_error: BaseException | None = None
@@ -1159,15 +1172,19 @@ async def _open_runtime_history(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
             read_only=True,
+            module_routes=module_routes,
+            module_caches=module_caches,
         )
         initialized = True
+        if captured is not None:
+            await captured.verify_source_revision()
         if (
             selected_storage.namespace != resolved_namespace
             or selected_storage.tenant_id != effective_tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        history_store = selected_storage.run_store.read_store(RuntimeDomain.EXECUTION)
-        if selected_storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.TRANSIENT:
+        history_store = selected_storage.run_store.read_store(RuntimeDomain.TRACE)
+        if selected_storage.plan.route(RuntimeDomain.TRACE).retention is RuntimeRetentionMode.TRANSIENT:
             if not isinstance(history_store, StagingAgentRunStore):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             history_store = TransientExecutionHistoryStore(history_store, selected_storage.run_store)
@@ -1217,7 +1234,7 @@ async def _open_runtime_history(
                 token_seed(resolved_namespace),
             ),
             conversation=selected_storage.conversation,
-            session_transcript_store=selected_storage.run_store,
+            session_transcript_store=selected_storage.run_store.conversation_persistence,
         )
     except BaseException as error:
         body_error = error

@@ -19,6 +19,7 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import (
+    AssetCapability,
     AssetSkillSource,
     RuntimeFeatures,
     SkillDefinition,
@@ -95,7 +96,9 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
     )
     await store.initialize()
     try:
-        capture = await RuntimeFeatures("application", assets=store).capture()
+        asset_features = RuntimeFeatures("application")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         definition = next(
             item.value
             for item in capture.contributions

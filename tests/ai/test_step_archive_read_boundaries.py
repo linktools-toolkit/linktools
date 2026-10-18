@@ -31,7 +31,7 @@ async def _archive(tmp_path: Path, backend: str = "memory"):
         await repository.state_store.mutate(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         yield state, archive, AgentRunRecord("run", metadata={"context": "x" * 16_384})
     finally:
         await state.close()
@@ -285,7 +285,10 @@ async def test_projection_uses_batched_owner_admission_without_existence_preread
                 )
             event.listen(engine, "before_cursor_execute", capture)
             try:
-                await archive.state_store.mutate(project)
+                await archive.state_store.storage_group.mutate(
+                    archive.transaction_stores,
+                    lambda group: project(group.transaction(archive.state_store)),
+                )
             finally:
                 event.remove(engine, "before_cursor_execute", capture)
             counts.append(sum(sql.startswith("SELECT") for sql in statements))
@@ -328,10 +331,10 @@ async def test_projection_keeps_custom_private_override_and_public_none_result(t
                 await super()._sync_projection_in_transaction(*args, **kwargs)
                 # Existing overrides may discard the private implementation result.
                 return None
-        recovery = _state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = _state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         custom = CustomArchive(
             recovery.state_store, object_store=None, namespace="archive-boundaries",
-            tenant_id="tenant", runtime_domain=RuntimeDomain.RECOVERY,
+            tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
         )
         assert await custom.sync_prepared_projection(run, events=(), checkpoints=()) is None
         assert calls == [True]

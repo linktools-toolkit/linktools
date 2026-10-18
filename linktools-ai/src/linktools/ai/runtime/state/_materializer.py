@@ -92,8 +92,14 @@ async def materialize_runtime_storage(
     tenant_id: str,
     object_store: ObjectStore | None,
     cache: object | None = None,
+    module_caches: Mapping[RuntimeDomain, object | None] | None = None,
     read_only: bool = False,
+    selected_modules: frozenset[RuntimeDomain] = frozenset(),
 ) -> _MaterializedRuntimeStorage:
+    module_caches = dict(module_caches or {})
+    def state_cache(domain: RuntimeDomain) -> object | None:
+        return module_caches.get(domain) if domain in {RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT} else cache
+
     stores: dict[RuntimeDomain, StateStore] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
@@ -121,7 +127,7 @@ async def materialize_runtime_storage(
                 sql_routes[key] = route
                 continue
             if route.kind == "memory":
-                stores[domain] = InMemoryStateStore(memory_group, cache=cache)
+                stores[domain] = InMemoryStateStore(memory_group, cache=state_cache(domain))
             elif route.kind == "filesystem":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -169,7 +175,7 @@ async def materialize_runtime_storage(
                     runtime_domain=domain.value,
                     _range_index=domain is RuntimeDomain.MEMORY,
                     group=group,
-                    cache=cache,
+                    cache=state_cache(domain),
                 )
                 stores[domain] = store
                 cleanups.append(store.close)
@@ -242,7 +248,7 @@ async def materialize_runtime_storage(
                         context=context,
                         runtime_domain=domain,
                         group=group,
-                        cache=cache,
+                        cache=state_cache(domain),
                         store_digest=state_store_digest(
                             namespace,
                             tenant_id,
@@ -273,12 +279,20 @@ async def materialize_runtime_storage(
                 "execution and recovery must share a StateStorageGroup",
             )
 
+        atomic_domains = {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT} | selected_modules
+        for domain in atomic_domains:
+            if stores[domain].storage_group is not execution_store.storage_group:
+                raise AIError(
+                    ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                    f"{domain.value} and execution must share a StateStorageGroup",
+                )
+
         bundles = {
             domain: build_repository_bundle(
                 stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
             )
             for domain in RuntimeDomain
-            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TASK}
+            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TASK, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         }
         bundles[RuntimeDomain.RECOVERY] = build_recovery_repository_bundle(
             recovery_store,
@@ -316,7 +330,7 @@ async def materialize_runtime_storage(
         repositories = _repositories(bundles)
         objects = build_runtime_object_router(
             plan, object_store, stores, sql_contexts,
-            cache=cache, namespace=namespace, tenant_id=tenant_id,
+            cache=cache, domain_caches=module_caches, namespace=namespace, tenant_id=tenant_id,
         )
         run_store = build_runtime_agent_run_store(
             plan,

@@ -18,9 +18,15 @@ from ._snapshot import (
 )
 from ._input_capture import input_capture_key, input_capture_expiry_key, input_capture_object_dependency, iter_input_capture_dependencies
 from ._root import RuntimeStorage
+from ._conversation_persistence import ConversationPersistence
+from ._checkpoint_persistence import CheckpointPersistence
+from ._trace_persistence import TracePersistence
 from ._contracts import ArtifactRecord, ArtifactRepositories, BudgetRepository
 
 __all__ = [
+    "ConversationPersistence",
+    "CheckpointPersistence",
+    "TracePersistence",
     "BudgetRepository",
     "ObjectCleanupResult",
     "input_capture_key",

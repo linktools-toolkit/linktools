@@ -195,7 +195,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             )
 
         await repository.state_store.mutate(seal)
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         agent_run_id = make_agent_run_id(
             namespace="history",
@@ -295,7 +295,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
             )
         )
 
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         assert await archive.get_agent_run(agent_run_id=agent_run_id) is None
         terminal_plan = await state.run_store.prepare_execution_terminal_seal(
@@ -408,9 +408,9 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
     backend._run_stores = {
-        RuntimeDomain.EXECUTION: object.__new__(ModelInteractionStateStepArchive),
+        RuntimeDomain.TRACE: object.__new__(ModelInteractionStateStepArchive),
         RuntimeDomain.CONVERSATION: object(),
-        RuntimeDomain.RECOVERY: object(),
+        RuntimeDomain.CHECKPOINT: object(),
     }
     backend._run_store = object()
     backend._agent_run_lifecycle = lifecycle
@@ -625,7 +625,7 @@ def _reader(state: RuntimeStorage) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace="history",
         executions=state.execution.executions,
-        store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+        store=state.run_store.read_store(RuntimeDomain.TRACE),
         cursor_signer=HmacCursorSigner("history", b"history-key"),
     )
 
@@ -637,7 +637,7 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "in-memory-ref")
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         agent_run_id = make_agent_run_id(
             namespace="history",
             tenant_id="tenant",
@@ -645,15 +645,15 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
             agent_run_seq=1,
         )
         resolved = await archive.resolve_transcript_message_refs(
-            (TranscriptMessageRef(RuntimeDomain.EXECUTION, agent_run_id, 0),)
+            (TranscriptMessageRef(RuntimeDomain.TRACE, agent_run_id, 0),)
         )
         assert len(resolved) == 1
         assert isinstance(resolved[0].message, ModelRequest)
         assert resolved[0].message.parts[0].content == "in-memory-ref"
 
         for ref in (
-            TranscriptMessageRef(RuntimeDomain.EXECUTION, "missing-run", 0),
-            TranscriptMessageRef(RuntimeDomain.EXECUTION, agent_run_id, 999),
+            TranscriptMessageRef(RuntimeDomain.TRACE, "missing-run", 0),
+            TranscriptMessageRef(RuntimeDomain.TRACE, agent_run_id, 999),
         ):
             with pytest.raises(AIError) as raised:
                 await archive.resolve_transcript_message_refs((ref,))
@@ -684,7 +684,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
             binding_digest="a" * 64,
         )
         assert terminal_plan.projections[0].projection_digest != "empty"
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         assert isinstance(archive, StateStepArchive)
         head = await archive.execution_history_head(agent_run_id)
         projection = terminal_plan.projections[0]
@@ -833,7 +833,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "hello")
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         repository = archive.transcript_repository
         owner_id = make_agent_run_id(
             namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1,
@@ -862,7 +862,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
         changed = replace(
             chunk,
             codec="unknown-compression" if corruption == "unknown-codec" else "zlib",
-            content=RuntimePayloadRef(payload, RuntimeDomain.EXECUTION),
+            content=RuntimePayloadRef(payload, RuntimeDomain.TRACE),
             raw_digest="0" * 64 if corruption == "raw-digest" else chunk.raw_digest,
             raw_size=chunk.raw_size + 1 if corruption == "raw-size" else chunk.raw_size,
         )

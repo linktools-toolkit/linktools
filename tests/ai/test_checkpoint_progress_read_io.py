@@ -26,7 +26,7 @@ async def test_checkpoint_progress_keeps_repeated_checkpoint_position_and_fresh_
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         run = AgentRunRecord("run")
         checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
         prepared, = (await archive.prepare_checkpoints(run, (checkpoint,))).checkpoints
@@ -47,7 +47,7 @@ async def test_checkpoint_progress_batches_sequence_queries_in_one_snapshot(tmp_
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         prepared, = (await archive.prepare_checkpoints(
             AgentRunRecord("run"), (AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),),
         )).checkpoints
@@ -73,7 +73,7 @@ async def test_checkpoint_progress_custom_archive_preserves_its_count_and_proof_
     state = _storage("memory", tmp_path)
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        original = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         prepared, = (await original.prepare_checkpoints(
             AgentRunRecord("run"), (AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),),
         )).checkpoints
@@ -90,7 +90,7 @@ async def test_checkpoint_progress_custom_archive_preserves_its_count_and_proof_
                 calls.append("interaction")
                 return 11
         custom = CustomArchive(original.state_store, object_store=None, namespace="progress-io",
-                               tenant_id="tenant", runtime_domain=RuntimeDomain.RECOVERY)
+                               tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT)
         assert await custom.capture_checkpoint_progress(agent_run_id="run", checkpoint=prepared) == (7, 11)
         assert calls == ["checkpoint", "proof", "interaction"]
     finally:
@@ -105,7 +105,7 @@ async def test_checkpoint_progress_rejects_history_lock_before_storage_read(
     state = _storage("memory", tmp_path)
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         prepared, = (await archive.prepare_checkpoints(
             AgentRunRecord("run"), (AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0),),
         )).checkpoints
@@ -125,7 +125,7 @@ async def test_checkpoint_progress_keeps_checkpoint_proof_failure(
     state = _storage("memory", tmp_path)
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
         run = AgentRunRecord("run")
         prepared, = (await archive.prepare_checkpoints(run, (checkpoint,))).checkpoints

@@ -345,7 +345,7 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
                 await watched
                 pytest.fail("Watch ended before the winning producer reached its boundary")
             assert not waited.done()
-            assert owner_state.run_store._projection_dirty == set()
+            assert owner_state.run_store.trace_persistence.dirty == set()
             assert owner_state.run_store._durability_flights == {}
             assert owner_state.run_store._execution_producers == {}
             assert owner_state.run_store._staging._runs == {}

@@ -992,13 +992,14 @@ async def _materialize_agent(
     metric_feature = next(
         (leaf for template in runtime_capabilities for leaf in runtime_feature_leaves(template)
          if isinstance(leaf, MetricsCapability)),
-        MetricsCapability(),
+        None,
     )
+    if metrics is not None and metric_feature is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     tool_metrics = (
         None
         if metrics is None
         else metric_feature.bind_tool_observer(
-            metrics,
             source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
@@ -1114,11 +1115,7 @@ async def _materialize_agent(
         if scope.event_sink is not None:
             await scope.event_sink(DurableBoundary(event_type, payload))
 
-    bind_model_observer = (
-        ModelObservationCapability if metrics is None else metric_feature.bind_model_observer
-    )
-    model_observation = bind_model_observer(
-        metrics,
+    model_observation_kwargs = dict(
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
@@ -1130,6 +1127,11 @@ async def _materialize_agent(
         interaction_recorder=run_recorder,
         event_sink=publish_model_request_event,
         budget=scope.budget,
+    )
+    model_observation = (
+        ModelObservationCapability(None, **model_observation_kwargs)
+        if metrics is None
+        else metric_feature.bind_model_observer(**model_observation_kwargs)
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(

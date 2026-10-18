@@ -323,7 +323,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             _ExecutionService(),  # type: ignore[arg-type]
             HmacCursorSigner("session", b"session-timeline-key"),
             history_reader=object(),  # type: ignore[arg-type]
-            transcript_store=state.run_store,
+            transcript_store=state.run_store.conversation_persistence,
         )
         principal = Principal("owner", "tenant")
 

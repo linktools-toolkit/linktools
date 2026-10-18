@@ -27,7 +27,8 @@ _logger = environ.get_logger("ai.observe.recorder")
 _WARNING_INTERVAL_SECONDS = 30.0
 
 
-class _MetricRecorder:
+class MetricRecording:
+    """Own one dataset recording scope, never its borrowed store or cache."""
     def __init__(self, metrics: Metrics, cache: object | None) -> None:
         self._metrics = metrics
         self._scope = None if cache is None else BatchWriteScope(cache, self._write_batch)
@@ -166,3 +167,6 @@ class _MetricRecorder:
         if now - self._last_warning_at >= _WARNING_INTERVAL_SECONDS:
             self._last_warning_at = now
             _logger.warning("automatic metric delivery degraded: code=%s", code)
+
+
+__all__ = ["MetricRecording"]

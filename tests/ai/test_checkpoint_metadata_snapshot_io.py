@@ -36,7 +36,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements: list[str] = []
@@ -100,7 +100,7 @@ async def test_checkpoint_relocation_keeps_integrity_failures(
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = _checkpoint(1)
     try:
@@ -137,7 +137,7 @@ async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_s
 ) -> None:
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     try:
         await archive.materialize_checkpoint(run, _checkpoint(1))
@@ -185,7 +185,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
         state = _storage("sqlite", path)
         await state.initialize(namespace="checkpoint-commit", tenant_id="tenant")
         domain = (RuntimeDomain.CONVERSATION if case == "conversation" else
-                  RuntimeDomain.EXECUTION if case == "execution" else RuntimeDomain.RECOVERY)
+                  RuntimeDomain.TRACE if case == "execution" else RuntimeDomain.CHECKPOINT)
         archive = state.run_store.read_store(domain)
         run = AgentRunRecord("run")
         engine = archive.state_store.storage_group.context.engine.sync_engine
@@ -202,7 +202,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             statements.append(statement.split()[0].upper())
 
         try:
-            if domain is RuntimeDomain.EXECUTION:
+            if domain is RuntimeDomain.TRACE:
                 execution = replace(_execution(), revision=1)
                 repository = state.execution.executions
                 await repository.create_with_history_head(execution)
@@ -214,7 +214,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             prepared, = (await archive.prepare_checkpoints(run, (_checkpoint(1),))).checkpoints
 
             async def commit():
-                if domain is RuntimeDomain.EXECUTION:
+                if domain is RuntimeDomain.TRACE:
                     await archive.sync_prepared_projection(
                         run, events=(), checkpoints=(prepared,), execution_id="execution",
                         producer_generation=1,
@@ -235,7 +235,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
             counts.append(statements.count("SELECT"))
             latest = await archive.latest_checkpoint(agent_run_id="run")
             assert latest is not None and latest.messages == _checkpoint(1).messages
-            if domain is not RuntimeDomain.EXECUTION:
+            if domain is not RuntimeDomain.TRACE:
                 statements.clear()
                 event.listen(engine, "before_cursor_execute", capture)
                 try:
@@ -253,7 +253,7 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="checkpoint-stale-projection", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     try:
         await archive.materialize_checkpoint(run, _checkpoint(1))
@@ -290,7 +290,7 @@ async def test_run_admission_does_not_read_context_projection(
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="checkpoint-admission", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     projection_key = archive.transcript_repository.projection_key("run")
     get_record, get_records = _SqlTransaction.get_record, _SqlTransaction.get_records
 

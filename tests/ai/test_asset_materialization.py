@@ -23,7 +23,7 @@ from linktools.ai.asset import (
     validate_materialized_path,
 )
 from linktools.ai.asset import _materialization
-from linktools.ai.capability import RuntimeFeatures, SkillResource, validate_resource_path
+from linktools.ai.capability import AssetCapability, RuntimeFeatures, SkillResource, validate_resource_path
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 
@@ -404,7 +404,9 @@ async def test_capability_capture_rejects_unmaterializable_resource_paths(
     await store.initialize()
     try:
         with pytest.raises(AIError) as error:
-            await RuntimeFeatures("application", assets=store).capture()
+            asset_features = RuntimeFeatures("application")
+            asset_features.capability(AssetCapability(store), scope="runtime")
+            await asset_features.capture()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()

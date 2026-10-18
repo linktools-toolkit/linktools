@@ -53,7 +53,7 @@ def _metric_correlation(
     return values
 
 
-class _RuntimeMetricRecorder:
+class RuntimeMetricRecorder:
     """Enrich one Runtime's observations and delegate its recording lifetime."""
 
     def __init__(self, recorder: MetricRecorder) -> None:
@@ -185,7 +185,7 @@ def _bind_metric_execution_context(
     execution_id: str,
     correlation: CorrelationData,
 ) -> None:
-    if isinstance(recorder, _RuntimeMetricRecorder):
+    if isinstance(recorder, RuntimeMetricRecorder):
         recorder.bind_execution_context(execution_id, correlation)
 
 
@@ -193,7 +193,7 @@ def _release_metric_execution_context(
     recorder: MetricRecorder | None,
     execution_id: str,
 ) -> None:
-    if not isinstance(recorder, _RuntimeMetricRecorder):
+    if not isinstance(recorder, RuntimeMetricRecorder):
         return
     try:
         recorder.release_execution_context(execution_id)
@@ -378,7 +378,7 @@ def _capture_metric_observation(
         return None
     try:
         observation = factory()
-        if isinstance(recorder, _RuntimeMetricRecorder):
+        if isinstance(recorder, RuntimeMetricRecorder):
             return recorder.capture(observation)
         return observation
     except Exception:
@@ -403,3 +403,6 @@ async def _try_record(
     except Exception:
         _logger.exception("runtime metric observation rejected")
         return False
+
+
+__all__ = ["RuntimeMetricRecorder"]

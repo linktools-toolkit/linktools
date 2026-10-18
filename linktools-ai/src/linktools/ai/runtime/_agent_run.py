@@ -30,7 +30,7 @@ from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
 from ._tool import ToolOperationBridge
 from ._tool_boundary import RepositoryInstructionBoundary
-from .state import RuntimeDomain
+from .state import RuntimeDomain, CheckpointPersistence
 from .state._contracts import LoadedModelContext
 from .state._step_contracts import AgentRunStore
 from .state._steps import ExecutionTerminalSealPlan
@@ -58,9 +58,8 @@ class _AgentRunLifecycle(Protocol):
         agent_run_id: str,
         execution_id: "str | None" = None,
     ) -> None: ...
-    async def materialize_recovery_checkpoint(
-        self, *, agent_run_id: str, require_complete: bool
-    ) -> None: ...
+    @property
+    def checkpoint_persistence(self) -> CheckpointPersistence: ...
     async def verify_terminal_attempts(
         self,
         *,

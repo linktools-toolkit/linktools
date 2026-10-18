@@ -179,9 +179,9 @@ class _CommitUnknownOnceMetricStore(_FailingMetricStore):
         return None
 
 
-def _agent_group() -> RuntimeFeatures[object]:
+def _agent_group(metrics: Metrics) -> RuntimeFeatures[object]:
     group = RuntimeFeatures[object]("application")
-    group.capability(MetricsCapability(), scope="runtime")
+    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -213,8 +213,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
-        metrics=metrics,
+        features=_agent_group(metrics),
     ) as runtime:
         result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -261,8 +260,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(),
-        metrics=metrics,
+        features=_agent_group(metrics),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -298,12 +296,14 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
         ),
     )
     observed_events: list[TaskEvent] = []
+    features = RuntimeFeatures("task-metrics")
+    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
 
     async with Runtime.open(
         "task-isolation-metrics",
+        features=features,
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        metrics=metrics,
     ) as runtime:
         run = await runtime.tasks.bind(failed_task, successful_task).start(
             graph,
@@ -374,7 +374,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
 @pytest.mark.asyncio
 async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open() -> None:
     store = _BlockingMetricStore()
-    buffer = runtime_metrics._RuntimeMetricRecorder(
+    buffer = runtime_metrics.RuntimeMetricRecorder(
         Metrics.from_store(store, namespace="buffer", cache=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2)).recorder()  # type: ignore[arg-type]
     )
 
@@ -393,7 +393,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open() -> None
 @pytest.mark.asyncio
 async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
-    buffer = runtime_metrics._RuntimeMetricRecorder(
+    buffer = runtime_metrics.RuntimeMetricRecorder(
         Metrics.from_store(store, namespace="buffer-retry", cache=InMemoryCacheBackend(max_bytes=1024 * 1024)).recorder()  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
@@ -847,11 +847,11 @@ async def test_terminal_metric_cancellation_preserves_published_success_and_hist
 
     store = BlockingTerminalStore()
     metrics = Metrics.from_store(store, namespace="terminal-order")
-    features = _agent_group()
+    features = _agent_group(metrics)
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "terminal-order", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        features=features, metrics=metrics,
+        features=features,
     ) as runtime:
         execution = await runtime.agents.get("default").start("hello")
         try:
@@ -926,7 +926,7 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
     store = Store()
     async with Runtime.open(
         "pending-cancel-metric", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        features=_agent_group(), metrics=Metrics.from_store(store),
+        features=_agent_group(Metrics.from_store(store)),
     ) as runtime:
         starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
         cancellation: asyncio.Task[object] | None = None

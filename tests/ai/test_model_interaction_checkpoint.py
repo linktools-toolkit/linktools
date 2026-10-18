@@ -45,7 +45,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
             execution_id="execution",
             agent_run_id="run",
         )
-        recovery = store.read_store(RuntimeDomain.RECOVERY)
+        recovery = store.read_store(RuntimeDomain.CHECKPOINT)
         for sequence in (1, 2):
             request = ModelRequest(parts=[UserPromptPart(f"request-{sequence}")])
             messages = (*capture.transcript_messages(), request)
@@ -66,7 +66,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
             )
             await capture.save_checkpoint(checkpoint)
             await capture.save_checkpoint(checkpoint)
-            await store.materialize_recovery_checkpoint(
+            await store.checkpoint_persistence.materialize_recovery_checkpoint(
                 agent_run_id="run", require_complete=True,
             )
             assert await recovery.model_interaction_count(agent_run_id="run") == sequence - 1
@@ -101,7 +101,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
                 transcript_message_count_before=0,
             )
         )
-        await store.materialize_recovery_checkpoint(
+        await store.checkpoint_persistence.materialize_recovery_checkpoint(
             agent_run_id="run", require_complete=status == "SUCCEEDED",
         )
         archived = await recovery.list_model_interactions(agent_run_id="run")

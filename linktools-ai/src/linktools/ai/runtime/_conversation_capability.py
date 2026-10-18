@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.run import AgentRunResult
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import DeferredToolRequests, RunContext
 
 from ..capability import AgentContext
 from ..core import ExecutionLineageKind, agent_run_id as make_agent_run_id
 from ..errors import AIError, ErrorCode
 from ..storage import TurnCoordination
 from .service_api import ExecutionRequest
-from .state import RuntimeDomain
+from .state import RuntimeDomain, RuntimeStorageRoute
 from .state._contracts import ExecutionRecord, ExecutionStartReservation, LoadedModelContext, SessionRecord
 from .state._step_contracts import AgentRunStore
 from .state._steps import RuntimeAgentRunStore, StateStepArchive
@@ -38,6 +38,22 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
     id: str | None = "runtime.conversation"
     _capture: "AgentRunCapture | None" = None
 
+    def __init__(
+        self, *, storage: RuntimeStorageRoute | None = None, cache: object | None = None,
+    ) -> None:
+        if storage is not None and not isinstance(storage, RuntimeStorageRoute):
+            raise TypeError("storage must be RuntimeStorageRoute")
+        self._storage = storage
+        self._cache = cache
+
+    @property
+    def storage(self) -> RuntimeStorageRoute | None:
+        return self._storage
+
+    @property
+    def cache(self) -> object | None:
+        return self._cache
+
     def bind(self, capture: "AgentRunCapture") -> "ConversationCapability[AppT]":
         """Bind isolated run resources without changing the native capability type."""
         bound = copy(self)
@@ -49,7 +65,11 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
     ) -> AgentRunResult[Any]:
         if self._capture is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        await self._capture.capture_final_context(ctx, result=result)
+        await self._capture.after_run(ctx, result=result)
+        await self._capture.context.save_checkpoint(
+            ctx, messages=result.all_messages(),
+            state="interrupted" if isinstance(result.output, DeferredToolRequests) else "complete",
+        )
         return result
 
     async def on_run_error(
@@ -57,7 +77,10 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
     ) -> AgentRunResult[Any]:
         if self._capture is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
-        await self._capture.capture_interrupted_context(ctx)
+        self._capture.recorder.finish_transcript(interrupted=True)
+        await self._capture.context.save_checkpoint(
+            ctx, messages=self._capture.live_messages or ctx.messages, state="interrupted",
+        )
         raise error
 
     @classmethod
@@ -98,7 +121,7 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
         else:
             return LoadedModelContext(())
         if isinstance(run_store, RuntimeAgentRunStore) and session is not None and session.continuation is not None:
-            return await run_store.load_committed_conversation_context(
+            return await run_store.conversation_persistence.load_committed_conversation_context(
                 history_id=history_id, agent_run_id=session.continuation.agent_run_id,
                 message_count=session.continuation.message_count, tenant_id=tenant_id,
             )
@@ -129,7 +152,7 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
             try:
                 return [
                     message
-                    async for message in run_store.iter_session_messages(
+                    async for message in run_store.conversation_persistence.iter_session_messages(
                         history_id,
                         tenant_id=tenant_id,
                     )

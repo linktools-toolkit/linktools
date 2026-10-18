@@ -68,7 +68,7 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
                    replace(staged, model_request_seq=3, client_requests=()),
                    replace(staged, model_request_seq=4, status="INTERRUPTED", response_context=None,
                            duration_ns=None, finished_at=None, client_requests=(original[1],)))
-        archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
         records = await archive.prepare_interactions(run, entries, payloads.__getitem__)
         await archive.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution")
         service = DefaultExecutionHistoryService(
@@ -77,7 +77,7 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
         )
         history = RuntimeHistory(service, tenant_id="tenant")
         principal = Principal("reader", "tenant")
-        objects = storage.object_store(RuntimeDomain.EXECUTION)
+        objects = storage.object_store(RuntimeDomain.TRACE)
         original_open = objects.open
         opened = []
 
@@ -90,7 +90,7 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
 
         def object_keys(value):
             return {ref.key for _, ref in iter_runtime_object_refs(
-                _encode_persisted_domain(value), default_domain=RuntimeDomain.EXECUTION,
+                _encode_persisted_domain(value), default_domain=RuntimeDomain.TRACE,
             )}
 
         sdk_keys = object_keys(replace(records[0], client_requests=None))
@@ -211,12 +211,12 @@ async def test_existing_custom_readers_and_services_keep_default_call_shape() ->
 @pytest.mark.asyncio
 async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload() -> None:
     original = _requests()
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.CHECKPOINT)
     await archive.initialize()
     try:
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(original),), lambda _: b"{}")
         pending_sdk = replace(record, request_context=ContextProjection(()), request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b"{}"), RuntimeDomain.RECOVERY,
+            StoredPayload.inline_bytes(b"{}"), RuntimeDomain.CHECKPOINT,
         ))
         assert await archive.resolve_model_interactions(
             (pending_sdk,), include_client_requests=True, include_content=False,
@@ -240,7 +240,7 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
         await storage.run_store.register_agent_run(AgentRunRecord("run"))
         storage.run_store.stage_model_interaction(staged)
         transient = TransientExecutionHistoryStore(
-            storage.run_store.read_store(RuntimeDomain.EXECUTION), storage.run_store,
+            storage.run_store.read_store(RuntimeDomain.TRACE), storage.run_store,
         )
         assert await transient.resolve_model_interactions(
             (staged,), include_client_requests=True, include_content=False,

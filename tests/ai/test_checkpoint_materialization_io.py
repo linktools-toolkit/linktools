@@ -27,7 +27,7 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
     await provision_database(engine)
     state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="checkpoint-io", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     statements: list[str] = []
@@ -68,7 +68,7 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
     await provision_database(engine)
     state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="checkpoint-race", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     await archive.register_agent_run(run)
@@ -114,7 +114,7 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
 async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: Path, replay: bool) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "preparation.db")
     await state.initialize(namespace="checkpoint-preparation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     engine = archive.state_store.storage_group.context.engine.sync_engine
@@ -128,7 +128,7 @@ async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: 
             await archive.materialize_checkpoint(run, checkpoint)
         event.listen(engine, "begin", begin)
         try:
-            prepared, interactions, sequence = await state.run_store._prepare_recovery_checkpoint(
+            prepared, interactions, sequence = await state.run_store.checkpoint_persistence.prepare_checkpoint(
                 archive, run, checkpoint, (),
             )
         finally:
@@ -151,7 +151,7 @@ async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
 
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="checkpoint-relocation", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint(
         "run", 1, [ModelRequest(parts=[UserPromptPart("retained message")])],
@@ -196,7 +196,7 @@ async def test_recovery_metadata_cancellation_releases_scope(
 
     state = _storage(backend, tmp_path)
     await state.initialize(namespace="checkpoint-cancel", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint("run", 1, [], transcript_message_count_before=0)
     count = archive.model_interaction_count
@@ -208,10 +208,10 @@ async def test_recovery_metadata_cancellation_releases_scope(
     try:
         monkeypatch.setattr(archive, "model_interaction_count", cancelled_count)
         with pytest.raises(asyncio.CancelledError):
-            await state.run_store._prepare_recovery_checkpoint(archive, run, checkpoint, ())
+            await state.run_store.checkpoint_persistence.prepare_checkpoint(archive, run, checkpoint, ())
         assert active_state_scope() is None
         monkeypatch.setattr(archive, "model_interaction_count", count)
-        _, interactions, sequence = await state.run_store._prepare_recovery_checkpoint(archive, run, checkpoint, ())
+        _, interactions, sequence = await state.run_store.checkpoint_persistence.prepare_checkpoint(archive, run, checkpoint, ())
         assert interactions == () and sequence == 1
     finally:
         await state.close()

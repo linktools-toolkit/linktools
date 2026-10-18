@@ -19,6 +19,7 @@ from linktools.ai.asset import (
     SqlAssetBackend,
 )
 from linktools.ai.capability import (
+    AssetCapability,
     AgentDeclarationLoader,
     CapabilityContribution,
     RuntimeFeatures,
@@ -39,7 +40,6 @@ from linktools.ai.spec import (
     MCPServerSpecCodec,
     SkillSpecAdapter,
     SkillSpec,
-    SkillSpecCodec,
     SubagentRef,
     validate_logical_id as validate_spec_logical_id,
 )
@@ -272,12 +272,14 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
         AssetKey("worker", "team/AGENT.md"),
         b"---\n{}\n---\nworker prompt",
     )
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", loader)
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", loader)
 
     snapshot = await group.capture()
 
-    assert len(snapshot.contributions) == 1
+    assert [(item.kind, item.id) for item in snapshot.contributions] == [("agent", "team"), ("capability", "runtime.assets")]
     spec = snapshot.contributions[0].value
     assert isinstance(spec, AgentSpec)
     assert spec.id == "team"
@@ -314,12 +316,14 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
                 ),
             )
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
 
     snapshot = await group.capture()
 
-    assert [item.id for item in snapshot.contributions] == ["security/audit"]
+    assert [item.id for item in snapshot.contributions] == ["security/audit", "runtime.assets"]
     assert isinstance(snapshot.contributions[0].value, AgentSpec)
     await store.close()
 
@@ -351,11 +355,13 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
                 ),
             )
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
-        assert len(capture.contributions) == 1
+        assert [(item.kind, item.id) for item in capture.contributions] == [("skill", "audit"), ("capability", "runtime.assets")]
         skill = capture.contributions[0].value
         assert isinstance(skill, SkillDefinition)
         assert skill.source_ref is not None
@@ -392,11 +398,13 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
                 ),
             )
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
-        assert len(capture.contributions) == 1
+        assert [(item.kind, item.id) for item in capture.contributions] == [("mcp", "server"), ("capability", "runtime.assets")]
         contribution = capture.contributions[0]
         assert contribution.kind == "mcp"
         server = contribution.value
@@ -452,8 +460,10 @@ async def test_prebound_mcp_loader_preserves_resources_and_execution_policy() ->
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
         bound = capture.contributions[0]
@@ -510,8 +520,10 @@ async def test_prebound_mcp_loader_rejects_wrong_source_or_resource(
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
             await group.capture()
@@ -554,8 +566,10 @@ async def test_prebound_mcp_loader_rejects_stale_resource_versions() -> None:
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
             await group.capture()
@@ -598,8 +612,10 @@ async def test_prebound_mcp_loader_reports_deleted_resource_as_snapshot_conflict
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
             await group.capture()
@@ -630,8 +646,10 @@ async def test_prebound_mcp_without_resources_keeps_execution_policy() -> None:
         ) -> "Sequence[CapabilityContribution[object]]":
             return (contribution,)
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         capture = await group.capture()
         assert capture.contributions[0].contract == contribution.contract
@@ -660,8 +678,10 @@ async def test_capture_rejects_asset_change_during_loader() -> None:
             await store.put(late, b"late")
             return (AgentSpec("team"),)
 
-    group = RuntimeFeatures("application", assets=store)
-    group.loader("worker", WorkerLoader())
+    group = RuntimeFeatures("application")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
+    group_assets.loader("worker", WorkerLoader())
     try:
         with pytest.raises(AIError) as error:
             await group.capture()
@@ -710,7 +730,9 @@ async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        snapshot = await RuntimeFeatures("application", assets=store).capture()
+        asset_features = RuntimeFeatures("application")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        snapshot = await asset_features.capture()
         reader = snapshot.asset_reader
         assert reader is not None
         refs = await reader.resolve_versions((key,))
@@ -809,7 +831,9 @@ async def test_declaration_loaders_are_backend_agnostic(
     try:
         results = []
         for store, _engine in stores:
-            snapshot = await RuntimeFeatures("assets", assets=store).capture()
+            asset_features = RuntimeFeatures("assets")
+            asset_features.capability(AssetCapability(store), scope="runtime")
+            snapshot = await asset_features.capture()
             results.append(
                 tuple(
                     (item.kind, item.id, item.value)
@@ -842,7 +866,9 @@ async def test_mcp_package_resource_reserves_declaration_filename() -> None:
             b'{"command":"python","args":["resource:mcp.json"]}',
         )
         with pytest.raises(AIError) as error:
-            await RuntimeFeatures("application", assets=store).capture()
+            asset_features = RuntimeFeatures("application")
+            asset_features.capability(AssetCapability(store), scope="runtime")
+            await asset_features.capture()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
@@ -859,6 +885,8 @@ async def test_builtin_loader_rejects_multiple_mcp_package_declarations() -> Non
             b"version: 1\ncommand: python\n",
         )
     with pytest.raises(AIError) as error:
-        await RuntimeFeatures("application", assets=store).capture()
+        asset_features = RuntimeFeatures("application")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        await asset_features.capture()
     assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     await store.close()

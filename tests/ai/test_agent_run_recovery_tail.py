@@ -86,15 +86,15 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
         if completed_partial:
             original.finish_transcript(interrupted=True)
             await original.commit_history_boundary()
-        archive = first.read_store(RuntimeDomain.EXECUTION)
+        archive = first.read_store(RuntimeDomain.TRACE)
         before = (await archive.capture_history(("run",), include_pending=True))["run"]
         assert before.message_count == 3
 
         second = RuntimeAgentRunStore(
-            StagingAgentRunStore(),
+            StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant",
             conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=archive,
-            recovery_archive=first.read_store(RuntimeDomain.RECOVERY),
+            recovery_archive=first.read_store(RuntimeDomain.CHECKPOINT),
             conversation_retention=RuntimeRetentionMode.VOLATILE,
             execution_retention=RuntimeRetentionMode.VOLATILE,
             recovery_retention=RuntimeRetentionMode.VOLATILE,
@@ -158,7 +158,7 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
         await repository.state_store.mutate(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         commands = RuntimeStateCommands(
             repository, namespace=namespace, events=state.execution.events,
             tools=state.recovery.tools, background_tasks=set(),
@@ -240,8 +240,8 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
 
         quick_result = await execute(bridge_for("first"), original, quick_call)
         second = RuntimeAgentRunStore(
-            StagingAgentRunStore(), conversation_archive=state.run_store.read_store(RuntimeDomain.CONVERSATION),
-            execution_archive=archive, recovery_archive=state.run_store.read_store(RuntimeDomain.RECOVERY),
+            StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+            execution_archive=archive, recovery_archive=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
             conversation_retention=RuntimeRetentionMode.VOLATILE,
             execution_retention=RuntimeRetentionMode.VOLATILE,
             recovery_retention=RuntimeRetentionMode.VOLATILE,
@@ -312,10 +312,10 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
             execution_id="execution", producer_generation=1,
         )
         await first.flush_execution_projection("run", execution_id="execution", producer_generation=1)
-        archive = first.read_store(RuntimeDomain.EXECUTION)
+        archive = first.read_store(RuntimeDomain.TRACE)
         old_producer = RuntimeAgentRunStore(
-            StagingAgentRunStore(), conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
-            execution_archive=archive, recovery_archive=first.read_store(RuntimeDomain.RECOVERY),
+            StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
+            execution_archive=archive, recovery_archive=first.read_store(RuntimeDomain.CHECKPOINT),
             conversation_retention=RuntimeRetentionMode.VOLATILE,
             execution_retention=RuntimeRetentionMode.VOLATILE,
             recovery_retention=RuntimeRetentionMode.VOLATILE,
@@ -369,7 +369,7 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
                 "run", execution_id="execution", producer_generation=1,
             )
         assert discard.value.code is ErrorCode.STORAGE_CONFLICT
-        assert old_producer._projection_dirty == {"run"}
+        assert old_producer.trace_persistence.dirty == {"run"}
         assert await old_producer.get_agent_run(agent_run_id="run") == run
         assert await archive.list_events(agent_run_id="run") == []
         with pytest.raises(AIError) as close_error:
@@ -404,7 +404,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
         first = ModelRequest(parts=[UserPromptPart("start")])
         checkpoint = AgentRunCheckpoint("run", 1, [first], transcript_message_count_before=0)
         await store.save_checkpoint(checkpoint, execution_id="execution", producer_generation=1)
-        archive = store.read_store(RuntimeDomain.EXECUTION)
+        archive = store.read_store(RuntimeDomain.TRACE)
         entered = asyncio.Event()
         original = archive.sync_prepared_projection
         intercepted = False
@@ -447,12 +447,12 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
                 await checkpoint_task
         else:
             await checkpoint_task
-        recovered = await store.read_store(RuntimeDomain.RECOVERY).latest_checkpoint(
+        recovered = await store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(
             agent_run_id="run", include_interrupted=True,
         )
         assert recovered is not None and recovered.step_index == 2 and recovered.state == "interrupted"
         if interrupt == "failed_observation":
-            assert "run" in store._projection_dirty
+            assert "run" in store.trace_persistence.dirty
             assert await archive.list_events(agent_run_id="run") == []
         await store.flush_execution_projection(
             "run", execution_id="execution", producer_generation=1,
@@ -484,7 +484,7 @@ async def test_terminal_producer_discard_preserves_unresolved_durability_flight(
         )
     assert caught.value is unknown
     assert store._durability_flights["run"] is flight
-    assert store._projection_dirty == {"run"}
+    assert store.trace_persistence.dirty == {"run"}
     assert await store.get_agent_run(agent_run_id="run") == run
     with pytest.raises(AIError) as close_error:
         await state.close()

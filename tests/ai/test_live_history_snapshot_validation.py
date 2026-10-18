@@ -34,7 +34,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
     await storage.initialize(namespace="pending-snapshot", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         await archive.register_agent_run(AgentRunRecord("run"))
         repository = archive.transcript_repository
         message = ModelResponse(parts=[TextPart("first"), TextPart("second")])
@@ -46,7 +46,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+            namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
             records=records, facts=facts, operations=(),
         )
         assert not sequences
@@ -58,11 +58,11 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
                 if corruption == "future-index":
                     chunk = replace(chunk, first_message_index=1)
                     fact = replace(fact, stream_digest=stream_digest(
-                        "pending-snapshot", "tenant", RuntimeDomain.RECOVERY.value,
+                        "pending-snapshot", "tenant", RuntimeDomain.CHECKPOINT.value,
                         "transcript_pending_parts", ["run", 1],
                     ))
                 elif corruption == "body-domain":
-                    chunk = replace(chunk, content=replace(chunk.content, source_domain=RuntimeDomain.EXECUTION))
+                    chunk = replace(chunk, content=replace(chunk.content, source_domain=RuntimeDomain.TRACE))
                 else:
                     envelope["pending_key"] = "part:0"
                 envelope["payload"] = _encode_persisted_domain(chunk)
@@ -82,13 +82,13 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
         if corruption is not None:
             with pytest.raises(AIError) as raised:
                 validate_snapshot_domain(
-                    namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+                    namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
                     records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
                 )
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         else:
             validate_snapshot_domain(
-                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
                 records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
             )
             completed = await repository.prepare_observation(
@@ -98,11 +98,11 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
             records = await archive.state_store.read(lambda tx: tx.scan_records())
             facts = await archive.state_store.read(lambda tx: tx.scan_facts())
             aliases, sequences = canonical_snapshot_indexes(
-                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
                 records=records, facts=facts, operations=(),
             )
             validate_snapshot_domain(
-                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
                 records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
             )
     finally:
@@ -117,7 +117,7 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
     await storage.initialize(namespace="pending-snapshot", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         await archive.register_agent_run(AgentRunRecord("run"))
         await archive.save_checkpoint(AgentRunCheckpoint(
             "run", 1, [ModelResponse(parts=[TextPart("complete")])],
@@ -126,11 +126,11 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
         records = await archive.state_store.read(lambda tx: tx.scan_records())
         facts = await archive.state_store.read(lambda tx: tx.scan_facts())
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+            namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
-            namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+            namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
             records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
         )
         corrupted = []
@@ -144,7 +144,7 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
             corrupted.append(fact)
         with pytest.raises(AIError) as raised:
             validate_snapshot_domain(
-                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.RECOVERY,
+                namespace="pending-snapshot", tenant_id="tenant", domain=RuntimeDomain.CHECKPOINT,
                 records=records, aliases=aliases, facts=tuple(corrupted), operations=(), sequences=sequences,
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -185,7 +185,7 @@ async def test_snapshot_fact_backed_model_interactions_validate_identity_and_seq
         if corruption == "conflict":
             second = replace(first, duration_ns=first.duration_ns + 1)
         record = project_record(
-            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
             kind="model_interaction", identity=["run", second.model_request_seq], value=second,
             parent=archive._agent_run_key("run"), state=second.status,
             sort_key=f"m:{second.model_request_seq:020d}", storage_revision=1,
@@ -194,11 +194,11 @@ async def test_snapshot_fact_backed_model_interactions_validate_identity_and_seq
 
         def validate() -> None:
             aliases, sequences = canonical_snapshot_indexes(
-                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
                 records=records, facts=(fact,), operations=(),
             )
             validate_snapshot_domain(
-                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
                 records=records, aliases=aliases, facts=(fact,), operations=(), sequences=sequences,
             )
 
@@ -238,13 +238,13 @@ async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
         elif corruption == "wrong-owner":
             records[records.index(marker)] = replace(marker, parent_digest=b"x" * 32)
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
             records=tuple(records), facts=facts, operations=(),
         )
 
         def validate() -> None:
             validate_snapshot_domain(
-                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.TRACE,
                 records=tuple(records), aliases=aliases, facts=facts, operations=(), sequences=sequences,
             )
 

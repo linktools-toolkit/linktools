@@ -33,7 +33,6 @@ from ..core import (
     Principal,
     PrincipalKind,
     SessionStatus,
-    TaskStatus,
     ThinkingValue,
     PromptLimits,
     Page,
@@ -55,7 +54,6 @@ from ..model import ModelRegistry
 if TYPE_CHECKING:
     from ._evaluation import RuntimeEvaluations
     from ._input_capture import RuntimeInputCaptures
-    from ..observe import Metrics
     from ..task import TaskResultRecord
     from ._runtime_history import RuntimeHistory
     from .state._contracts import (
@@ -78,7 +76,6 @@ from ..task import (
     TaskResultRef,
     TaskNode,
     TaskNodeInvocation,
-    TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
@@ -116,7 +113,6 @@ from .service_api import (
     SessionView,
     UpdateSessionRequest,
     ExecutionTreeEvent,
-    TaskGraphRunEvent,
 )
 from .state import RuntimeStorage
 
@@ -389,7 +385,6 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: None = None,
         features: "RuntimeFeatures[None] | RuntimeFeaturesCapture[None] | None" = None,
-        metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
@@ -406,7 +401,6 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: RuntimeContext[AppT],
         features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
-        metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
@@ -422,7 +416,6 @@ class Runtime(Generic[AppT]):
         storage: RuntimeStorage,
         context: "RuntimeContext[object] | None" = None,
         features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None" = None,
-        metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         auto_recover: bool = True,
@@ -453,7 +446,6 @@ class Runtime(Generic[AppT]):
             models=models,
             storage=storage,
             features=features,
-            metrics=metrics,
             limits=selected_limits,
             authorization=authorization,
             auto_recover=auto_recover,
@@ -1468,7 +1460,6 @@ async def _open_runtime(
     models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
-    metrics: "Metrics | None",
     limits: PromptLimits,
     authorization: "AuthorizationPolicy | None",
     auto_recover: bool = True,
@@ -1483,7 +1474,6 @@ async def _open_runtime(
         models=models,
         storage=storage,
         features=features,
-        metrics=metrics,
         limits=limits,
         authorization=authorization,
         auto_recover=auto_recover,

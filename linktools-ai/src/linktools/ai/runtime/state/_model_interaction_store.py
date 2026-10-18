@@ -61,7 +61,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
-            if self.runtime_domain is RuntimeDomain.EXECUTION and value.status == "RUNNING"
+            if self.runtime_domain is RuntimeDomain.TRACE and value.status == "RUNNING"
             else value
             for value in _validate_interaction_batch(run, interactions)
         )
@@ -408,7 +408,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             if changed:
                 await self._advance_execution_history_head_in_transaction(transaction, guard)
 
-        await self._store.mutate(mutate)
+        await self._mutate(mutate)
 
     async def _sync_projection_in_transaction(
         self,

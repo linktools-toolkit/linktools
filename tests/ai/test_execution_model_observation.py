@@ -596,7 +596,7 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
             run = await _publish(state)
             before, _ = await history.read_model_interaction_updates("execution", principal=_PRINCIPAL)
             assert before.cutoffs == after_cutoffs and before.durable_history_available
-            await state.run_store.read_store(RuntimeDomain.EXECUTION).release_agent_run(
+            await state.run_store.read_store(RuntimeDomain.TRACE).release_agent_run(
                 run.agent_run_id, execution_id="execution",
             )
             history = RuntimeHistory(_service(state, reader=_reader(state)), tenant_id="tenant")

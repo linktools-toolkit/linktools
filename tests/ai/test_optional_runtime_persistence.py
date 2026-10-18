@@ -143,7 +143,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
                 namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
                 execution_id=execution.execution_id, agent_run_seq=record.agent_run_seq,
             )
-            checkpoint = await storage.run_store.read_store(RuntimeDomain.RECOVERY).latest_checkpoint(
+            checkpoint = await storage.run_store.read_store(RuntimeDomain.CHECKPOINT).latest_checkpoint(
                 agent_run_id=run_id, include_interrupted=True,
             )
             assert (checkpoint is not None) is restart
@@ -184,11 +184,11 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         seal = await storage.execution.executions.get_history_seal(execution.execution_id, tenant_id=runtime.tenant_id)
         assert (seal is not None) is trace
         assert terminal_head.seal_digest == (seal.seal_digest if seal is not None else None)
-        archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
         assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
         assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
         assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        recovery = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
         if split_storage:
             handoff = await storage.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
@@ -208,11 +208,11 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         assert await reopened.execution.executions.get_history_head(
             execution.execution_id, tenant_id=runtime.tenant_id,
         ) == terminal_head
-        archive = reopened.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = reopened.run_store.read_store(RuntimeDomain.TRACE)
         assert (await archive.get_agent_run(agent_run_id=run_id) is not None) is trace
         assert bool(await archive.list_model_interactions(agent_run_id=run_id)) is trace
         assert bool(await archive.list_events(agent_run_id=run_id)) is trace
-        recovery = reopened.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = reopened.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert (await recovery.latest_checkpoint(agent_run_id=run_id) is not None) is (restart or split_storage)
         if trace:
             assert (await restored.trace()).items
@@ -1035,7 +1035,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(ConversationCapability(), scope="runtime")
-    group.capability(MetricsCapability(), scope="runtime")
+    group.capability(MetricsCapability(metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     if restart:
         group.capability(CheckpointCapability(), scope="runtime")
@@ -1043,7 +1043,6 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
     storage = storage_factory(tmp_path / "terminal.db")
     async with Runtime.open(
         _NAMESPACE, models=_Models(_UsageFunctionModel(model)), storage=storage, features=group,
-        metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE),
     ) as runtime:
         await runtime.agents.get().create_session("session")
         session = runtime.agents.get().session("session")
@@ -1067,7 +1066,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
             namespace=_NAMESPACE, tenant_id=runtime.tenant_id,
             execution_id=execution.execution_id, agent_run_seq=record.agent_run_seq,
         )
-        archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
         assert await archive.get_agent_run(agent_run_id=run_id) is None
         assert not await archive.list_events(agent_run_id=run_id)
         assert not await archive.list_model_interactions(agent_run_id=run_id)

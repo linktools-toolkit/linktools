@@ -26,7 +26,7 @@ def _reader(state, *, executions=None, reader_type=StepExecutionHistoryReader):
     return reader_type(
         namespace=_NAMESPACE,
         executions=state.execution.executions if executions is None else executions,
-        store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+        store=state.run_store.read_store(RuntimeDomain.TRACE),
         cursor_signer=HmacCursorSigner("subscription", b"subscription-key"),
         notifications=state.run_store,
     )

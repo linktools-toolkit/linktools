@@ -78,13 +78,13 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
         assert record is not None and not record.durable_trace and not record.restart_checkpoints
         run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                               execution_id=source_id, agent_run_seq=record.agent_run_seq)
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         checkpoint = await archive.latest_checkpoint(agent_run_id=run_id)
         assert checkpoint is not None
         assert encode_model_messages(tuple(checkpoint.context_messages or checkpoint.messages)) == expected
         assert await archive.checkpoint_count(agent_run_id=run_id) == 1
         assert await archive.list_events(agent_run_id=run_id) == []
-        assert await state.run_store.read_store(RuntimeDomain.EXECUTION).get_agent_run(agent_run_id=run_id) is None
+        assert await state.run_store.read_store(RuntimeDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
 
     async with Runtime.open("standalone-fork", storage=storage(), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         original = await runtime.executions.get(source_id)
@@ -261,7 +261,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
             finally:
                 run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                                       execution_id=source.execution_id, agent_run_seq=1)
-                archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+                archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
                 assert await archive.latest_checkpoint(agent_run_id=run_id) is None
                 if state == "running":
                     await source.cancel()

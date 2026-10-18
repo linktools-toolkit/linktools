@@ -122,7 +122,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
                 for item in trace.items[1:3]
             )
 
-        archive = history.state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = history.state.run_store.read_store(RuntimeDomain.TRACE)
         events = await archive.list_events(agent_run_id=recorder.agent_run_id)
         assert [event.error for event in events if event.error is not None] == [
             "unknown attempt 0", "unknown attempt 1",

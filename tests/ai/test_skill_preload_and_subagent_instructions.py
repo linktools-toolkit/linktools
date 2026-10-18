@@ -7,6 +7,7 @@ import pytest
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
+    AssetCapability,
     RuntimeFeatures,
     SkillCapability,
     SkillDefinition,
@@ -38,7 +39,9 @@ async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
                 AssetKey("skill", "guide/SKILL.md"),
                 b"---\nname: guide\ndescription: Follow the guide.\n---\nguide instructions",
             )
-        group: RuntimeFeatures[object] = RuntimeFeatures("application", assets=store)
+        group: RuntimeFeatures[object] = RuntimeFeatures("application")
+        group_assets = AssetCapability(store)
+        group.capability(group_assets, scope="runtime")
         preloads = ["guide", "guide"]
         declared = group.agent("agent", preload_skills=preloads)
         preloads.clear()

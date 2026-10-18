@@ -73,23 +73,47 @@ Task, Evaluation and Artifact remain Runtime services; they activate business
 work on actual use or required recovery, not through capability wrappers.
 Shared storage provisioning is independent of service activation.
 
-### Automatic Agent metrics
+### Automatic Runtime metrics
 
 `Metrics` remains the shared dataset for Agent, Task, Evaluation and application
-recording. Supplying `metrics=` alone does not enable automatic Agent observations:
+recording. Register its sole Runtime entry point explicitly:
 
 ```python
 from linktools.ai.runtime import MetricsCapability
 
-group.capability(MetricsCapability(), scope="runtime")
-# metrics is an application-owned Metrics instance.
-# Runtime.open(..., features=group, metrics=metrics)
+group.capability(MetricsCapability(metrics=metrics), scope="runtime")
+# Runtime.open(..., features=group)
 ```
 
-`MetricsCapability()` requires `metrics=` and selects automatic Agent model,
-tool, attempt and execution observations. Task/Evaluation and explicit business
-recording use the dataset independently. Metrics retain their own batching and
-flush/close lifecycle; a conversation turn does not force a metrics flush.
+The Runtime-scoped capability selects automatic Agent, Task and Evaluation
+recording, independently of Agent filtering. Without it, Runtime creates no
+automatic recorder. Application calls on the dataset remain available directly.
+One per-Runtime binding owns the shared recorder and drain lifecycle. Metrics
+retain their own batching; a conversation turn does not force a metrics flush.
+
+### Module storage and cache configuration
+
+`ConversationCapability(storage=route, cache=cache)`,
+`CheckpointCapability(storage=route)` and
+`TraceCapability(storage=route, cache=cache)` configure their own archives.
+Omitted storage inherits the corresponding Runtime base route; Trace and
+Checkpoint default to the execution route with separate logical partitions.
+Routes participating in atomic publication must share one StateStorageGroup;
+incompatible routes fail during opening. Shared SQL engines and object stores
+remain borrowed resources, rather than one connection or close per capability.
+
+A module's `cache=None` disables its hot/read cache; it never inherits the root
+cache. Pass the same cache instance explicitly to share it. `RuntimeStorage.cache`
+still supplies core turn coordination, live streams and core record/object reads.
+Changing module caches cannot create a separate producer ownership namespace.
+Use the same features declaration or capture with `RuntimeHistory.open(features=...)`
+to read custom module routes without activating native hooks or Metrics recorders.
+Pass that same `features=` value to `RuntimeSnapshot.create()` so export captures
+all configured module archives; restored portable generations use their local routes.
+
+Shared filesystem group manifests, locks and empty domain metadata are provisioned
+independently of selected features to preserve atomic recovery and historical reads.
+Unselected modules do not write new business archives or start observation workers.
 
 ### Retry defaults
 
@@ -146,7 +170,7 @@ batches and drains its queued records on completion or close. Metrics use their
 separate batching lifecycle. One module does not force unrelated modules to
 flush at every boundary.
 
-With Conversation enabled and an explicitly configured cache supporting the
+With Conversation enabled and an explicitly configured `RuntimeStorage.cache` supporting the
 required groups, eligible ordinary native execution can defer its initial state
 until the terminal boundary. Before side effects, Task ownership or another durable dependency
 requires state, Runtime establishes the necessary durable facts. Authorization,

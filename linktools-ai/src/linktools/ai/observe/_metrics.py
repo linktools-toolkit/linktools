@@ -32,6 +32,7 @@ from ._model import (
     validate_metric_value,
 )
 from ._query import execute_query
+from ._recorder import MetricRecording
 from ._sqlite import SQLiteMetricStore
 from ._store import MetricStore
 
@@ -62,9 +63,7 @@ class Metrics:
 
     def recorder(self) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
-        from ._recorder import _MetricRecorder
-
-        return _MetricRecorder(self, self._cache)
+        return MetricRecording(self, self._cache)
 
     @property
     def namespace(self) -> str:

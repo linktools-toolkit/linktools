@@ -322,8 +322,8 @@ class LocalExecutionBackend:
         if frozenset(self._run_stores) != frozenset(
             {
                 RuntimeDomain.CONVERSATION,
-                RuntimeDomain.EXECUTION,
-                RuntimeDomain.RECOVERY,
+                RuntimeDomain.TRACE,
+                RuntimeDomain.CHECKPOINT,
             }
         ):
             raise ValueError(
@@ -346,7 +346,7 @@ class LocalExecutionBackend:
         self._worker_shutdown_requests: set[str] = set()
         self._recovery_reconcile_tasks: dict[str, asyncio.Task[None]] = {}
         self._accepting = True
-        execution_run_store = self._run_stores[RuntimeDomain.EXECUTION]
+        execution_run_store = self._run_stores[RuntimeDomain.TRACE]
         conversation_run_store = self._run_stores[RuntimeDomain.CONVERSATION]
         execution_repository: ExecutionRepository = self._execution.executions
         session_repository: SessionRepository = self._conversation.sessions
@@ -372,9 +372,9 @@ class LocalExecutionBackend:
             if isinstance(execution_run_store, StateStepArchive)
             else None,
             recovery_run_store=(
-                self._run_stores[RuntimeDomain.RECOVERY]
+                self._run_stores[RuntimeDomain.CHECKPOINT]
                 if isinstance(
-                    self._run_stores[RuntimeDomain.RECOVERY], StateStepArchive
+                    self._run_stores[RuntimeDomain.CHECKPOINT], StateStepArchive
                 )
                 else None
             ),
@@ -1916,7 +1916,7 @@ class LocalExecutionBackend:
         producer_generation: int | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
         if not execution.restart_checkpoints:
-            await self._agent_run_lifecycle.materialize_recovery_checkpoint(
+            await self._agent_run_lifecycle.checkpoint_persistence.materialize_recovery_checkpoint(
                 agent_run_id=continuation.source_agent_run_id, require_complete=False,
             )
         await self._agent_run_lifecycle.flush_execution_projection(
@@ -2002,7 +2002,7 @@ class LocalExecutionBackend:
         self,
         agent_run_id: str,
     ) -> tuple[ModelMessage, ...]:
-        archive = self._run_stores[RuntimeDomain.RECOVERY]
+        archive = self._run_stores[RuntimeDomain.CHECKPOINT]
         with runtime_object_source_reads():
             checkpoint = await archive.latest_checkpoint(
                 agent_run_id=agent_run_id,
@@ -2358,15 +2358,15 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if execution.durable_trace and execution.status is not ExecutionStatus.SUCCEEDED:
                     await self._agent_run_lifecycle.materialize_from_recovery(
-                        target=RuntimeDomain.EXECUTION,
+                        target=RuntimeDomain.TRACE,
                         agent_run_id=handoff.source_agent_run_id,
                         execution_id=checkpoint.execution_id,
                     )
                 if execution.conversation or execution.restart_checkpoints or execution.durable_trace:
                     checkpoint_domain = (
-                        RuntimeDomain.EXECUTION
+                        RuntimeDomain.TRACE
                         if execution.durable_trace
-                        else RuntimeDomain.RECOVERY
+                        else RuntimeDomain.CHECKPOINT
                     )
                     agent_run_checkpoint = await self._run_stores[checkpoint_domain].latest_checkpoint(
                         agent_run_id=handoff.source_agent_run_id,
@@ -2544,7 +2544,7 @@ class LocalExecutionBackend:
         history_id = session.history_id or intent.next_cursor.history_id
         if history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        end_message_index = await self._run_store.conversation_message_count(
+        end_message_index = await self._run_store.conversation_persistence.conversation_message_count(
             history_id=history_id,
             agent_run_id=intent.next_cursor.agent_run_id,
             tenant_id=self._tenant_id,
@@ -3391,7 +3391,7 @@ class LocalExecutionBackend:
             exact_recovery_context = not claimed_from_admitted
             recovery_history_agent_run_id = None if claimed_from_admitted else agent_run_id
             if recovery_history_agent_run_id is not None:
-                recovery_archive = self._get_run_store(RuntimeDomain.RECOVERY)
+                recovery_archive = self._get_run_store(RuntimeDomain.CHECKPOINT)
                 recovery_run = await recovery_archive.get_agent_run(
                     agent_run_id=recovery_history_agent_run_id
                 )
@@ -3467,7 +3467,7 @@ class LocalExecutionBackend:
                     history = source_replay_history
                 elif recovery_history_agent_run_id is not None:
                     loaded_context = await self._run_store.load_loaded_model_context(
-                        RuntimeDomain.RECOVERY,
+                        RuntimeDomain.CHECKPOINT,
                         recovery_history_agent_run_id,
                     )
                     history = list(loaded_context.model_messages())
@@ -4111,9 +4111,9 @@ class LocalExecutionBackend:
         return await ConversationCapability.load_history(
             execution, session=session, namespace=self._namespace, tenant_id=self._tenant_id,
             run_store=self._run_store,
-            execution_run_store=self._get_run_store(RuntimeDomain.EXECUTION),
+            execution_run_store=self._get_run_store(RuntimeDomain.TRACE),
             conversation_run_store=self._get_run_store(RuntimeDomain.CONVERSATION),
-            recovery_run_store=self._get_run_store(RuntimeDomain.RECOVERY),
+            recovery_run_store=self._get_run_store(RuntimeDomain.CHECKPOINT),
             load_execution=lambda execution_id: self.load_execution(execution_id, tenant_id=self._tenant_id),
         )
 
@@ -5293,7 +5293,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if agent_run_id is not None:
                     if current.conversation or current.restart_checkpoints or current.durable_trace:
-                        await self._agent_run_lifecycle.materialize_recovery_checkpoint(
+                        await self._agent_run_lifecycle.checkpoint_persistence.materialize_recovery_checkpoint(
                             agent_run_id=agent_run_id,
                             require_complete=status is ExecutionStatus.SUCCEEDED,
                         )
@@ -5617,7 +5617,7 @@ class LocalExecutionBackend:
         if execution.session_id is not None:
             stores.append(self._conversation.sessions.state_store)
         if agent_run_id is not None:
-            for domain in (RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
+            for domain in (RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT):
                 archive = self._run_stores[domain]
                 if isinstance(archive, StateStepArchive):
                     stores.append(archive.state_store)
@@ -5657,7 +5657,7 @@ class LocalExecutionBackend:
         retain_fork_context = (
             current.conversation and status is ExecutionStatus.SUCCEEDED and current.session_id is None
             and current.parent_execution_id is None and not current.durable_trace
-            and isinstance(self._run_stores[RuntimeDomain.RECOVERY], StateStepArchive)
+            and isinstance(self._run_stores[RuntimeDomain.CHECKPOINT], StateStepArchive)
         )
         if agent_run_id is not None and (
             retain_fork_context
@@ -5671,7 +5671,7 @@ class LocalExecutionBackend:
             if candidate_checkpoint is not None:
                 if candidate_run is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if isinstance(self._run_stores[RuntimeDomain.RECOVERY], StateStepArchive):
+                if isinstance(self._run_stores[RuntimeDomain.CHECKPOINT], StateStepArchive):
                     recovery_run = candidate_run
                     recovery_agent_run_checkpoint = candidate_checkpoint
             if retain_fork_context and (recovery_run is None or recovery_agent_run_checkpoint is None):
@@ -5787,7 +5787,7 @@ class LocalExecutionBackend:
             pending_count = 0
             try:
                 state_archive = current.durable_trace and isinstance(
-                    self._run_stores[RuntimeDomain.EXECUTION],
+                    self._run_stores[RuntimeDomain.TRACE],
                     StateStepArchive,
                 )
                 if state_archive:
@@ -5961,7 +5961,7 @@ class LocalExecutionBackend:
         candidate_agent_run_ids: Sequence[str],
     ) -> tuple[str, ...]:
         existing: list[str] = []
-        execution_archive = self._run_stores[RuntimeDomain.EXECUTION]
+        execution_archive = self._run_stores[RuntimeDomain.TRACE]
         for agent_run_id in dict.fromkeys(candidate_agent_run_ids):
             staged = await self._run_store.get_agent_run(agent_run_id=agent_run_id)
             if staged is not None:

@@ -36,7 +36,8 @@ from linktools.ai.runtime.state._durability import (
     run_durable_commit,
 )
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
-from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.runtime.state._plan import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
@@ -243,17 +244,15 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
 
 
 def _run_store_for_preflight() -> RuntimeAgentRunStore:
-    store = object.__new__(RuntimeAgentRunStore)
-    store._projection_offsets = {}
-    store._projection_dirty = set()
-    store._observation_task = None
-    store._observation_wake = asyncio.Event()
-    store._observation_started_at = None
-    store._background_tasks = set()
-    store._durability_flights = {}
-    store._terminal_seals = {}
-    store._preflight = False
-    return store
+    return RuntimeAgentRunStore(
+        StagingAgentRunStore(),
+        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        execution_archive=None,
+        recovery_archive=None,
+        conversation_retention=RuntimeRetentionMode.VOLATILE,
+        execution_retention=RuntimeRetentionMode.VOLATILE,
+        recovery_retention=RuntimeRetentionMode.VOLATILE,
+    )
 
 
 @pytest.mark.asyncio

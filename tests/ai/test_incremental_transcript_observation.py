@@ -33,7 +33,7 @@ def observation_store(request: pytest.FixtureRequest, tmp_path: Path) -> StateSt
 def _repository(store: StateStore) -> TranscriptRepository:
     return TranscriptRepository(
         store, object_store=None, namespace="observation", tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION,
+        runtime_domain=RuntimeDomain.TRACE,
     )
 
 
@@ -166,7 +166,7 @@ async def test_pending_object_bytes_scale_with_new_content(monkeypatch: pytest.M
         objects = InMemoryObjectStore("runtime")
         repository = TranscriptRepository(
             store, object_store=objects, namespace="observation", tenant_id="tenant",
-            runtime_domain=RuntimeDomain.EXECUTION,
+            runtime_domain=RuntimeDomain.TRACE,
         )
         await repository.create_head("run")
         generator = random.Random(17)

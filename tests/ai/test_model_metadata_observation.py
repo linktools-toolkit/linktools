@@ -218,7 +218,7 @@ async def test_model_metadata_excludes_uncommitted_staging() -> None:
     execution = _record("root")
     reader = StepExecutionHistoryReader(
         namespace="history", executions=_Executions(execution),
-        store=storage.run_store.read_store(RuntimeDomain.EXECUTION), notifications=storage.run_store,
+        store=storage.run_store.read_store(RuntimeDomain.TRACE), notifications=storage.run_store,
         cursor_signer=HmacCursorSigner("metadata", b"metadata"),
     )
     try:
@@ -363,7 +363,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     prepare_interactions = StateStepArchive.prepare_interactions
 
     async def block_publication(self, run, interactions, payload, **kwargs):
-        if self.runtime_domain is RuntimeDomain.EXECUTION and any(
+        if self.runtime_domain is RuntimeDomain.TRACE and any(
             item.request_context is not None for item in interactions
         ):
             publication_started.set()

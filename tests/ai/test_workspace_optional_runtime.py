@@ -13,7 +13,7 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability
@@ -167,11 +167,13 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
     sandbox = _RecordingLocalSandbox()
     monkeypatch.chdir(tmp_path)
     try:
+        asset_features = RuntimeFeatures("assets", sandbox=sandbox)
+        asset_features.capability(AssetCapability(store), scope="runtime")
         async with Runtime.open(
             "sandbox-skill",
             models=RuntimeUsageModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            features=RuntimeFeatures("assets", assets=store, sandbox=sandbox),
+            features=asset_features,
         ) as runtime:
             result = (await runtime.agents.get("default").run(
                 "review",

@@ -25,10 +25,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
-from ..core import JsonValue, UsageMetrics
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
-from ._attachment import request_attachment_facts
 from ._transcript_staging import StagedTranscript
 from ._journal import (
     DURATION_NS_METADATA_KEY,
@@ -42,17 +41,10 @@ from ._journal import (
     ModelRequestFact,
     await_request_handoff,
 )
-from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
-from ._model_interaction import (
-    StagedContextProjection,
-    StagedModelInteraction,
-    build_context_projection,
-    build_inline_context_projection,
-    model_identity,
-    request_envelope,
-)
-from .state._contracts import LoadedModelContext, TranscriptMessageRef
-from .state._plan import RuntimeDomain
+from ._message import freeze_model_messages
+from ._run_context import RunContextProjection
+from ._trace_capture import ModelInteractionCapture, TraceStagingPort
+from .state._contracts import LoadedModelContext
 from .state._steps import RuntimeAgentRunStore, StagingAgentRunStore
 from .state._step_contracts import (
     TOOL_ERROR_CODE_METADATA_KEY,
@@ -68,12 +60,6 @@ class _RunStagingPort(Protocol):
     def stage_transcript(
         self, agent_run_id: str, transcript: StagedTranscript
     ) -> None: ...
-
-    def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]: ...
-
-    def stage_model_interaction(self, interaction: object) -> None: ...
-
-    def prepare_model_interaction(self, interaction: object) -> None: ...
 
 
 class AgentRunRecorder:
@@ -108,65 +94,12 @@ class AgentRunRecorder:
         self._restored_tool_calls: dict[str, ToolCallPart] = {}
         self._restored_pending = False
         self._model_request_seq_by_tool_call: dict[str, int] = {}
-        self._initial_attachments = tuple(dict(value) for value in initial_attachments)
-        self._accepted_attachment_ids = {
-            attachment_id
-            for value in self._initial_attachments
-            if isinstance((attachment_id := value.get("attachment_id")), str)
-            and attachment_id
-        }
-
-        frozen_initial = freeze_model_messages(initial_messages)
-        baseline = initial_context or LoadedModelContext(())
-        baseline_messages = baseline.model_messages()
-        baseline_refs: tuple[TranscriptMessageRef | int | None, ...]
-        if baseline.messages:
-            if (
-                len(baseline_messages) != len(frozen_initial)
-                or freeze_model_messages(baseline_messages) != frozen_initial
-            ):
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "initial model context does not match initial messages",
-                )
-            baseline_refs = tuple(
-                value.source.message_index
-                if value.source is not None
-                and value.source.source_domain is RuntimeDomain.RECOVERY
-                and value.source.owner_id == agent_run_id
-                else value.source
-                if value.source is not None
-                and value.source.source_domain is RuntimeDomain.CONVERSATION
-                else None
-                for value in baseline.messages
-            )
-        else:
-            baseline_refs = (None,) * len(frozen_initial)
-        self._source_keys: list[bytes] = [
-            encode_model_messages((message,))
-            for message in frozen_initial
-        ]
-        self._source_refs: list[TranscriptMessageRef | int | None] = list(
-            baseline_refs
+        self.context_projection = RunContextProjection(agent_run_id, initial_messages, initial_context)
+        self.model_interactions = ModelInteractionCapture(
+            cast(TraceStagingPort, store), agent_run_id, self.context_projection, initial_attachments,
         )
-        self._source_indices: dict[bytes, int | None] = {}
-        for index, key in enumerate(self._source_keys):
-            self._source_indices[key] = (
-                None if key in self._source_indices else index
-            )
         self._transcript_messages: list[ModelMessage] = []
         self._pending_parts: dict[str, ModelMessage] = {}
-
-        self._projection_source_count: int | None = None
-        self._projection_messages: tuple[ModelMessage, ...] | None = None
-
-        self._interaction_projections: dict[int, StagedContextProjection | None] = {}
-        self._interaction_payloads: dict[int, str | None] = {}
-        self._interaction_models: dict[int, dict[str, str]] = {}
-        self._interaction_attachments: dict[
-            int,
-            tuple[Mapping[str, JsonValue], ...],
-        ] = {}
 
     @property
     def agent_run_id(self) -> str:
@@ -383,12 +316,7 @@ class AgentRunRecorder:
                 self._tool_results[part.tool_call_id] = part
         local_index = len(self._transcript_messages)
         self._transcript_messages.append(frozen)
-        key = encode_model_messages((frozen,))
-        self._source_indices[key] = (
-            None if key in self._source_indices else len(self._source_keys)
-        )
-        self._source_keys.append(key)
-        self._source_refs.append(local_index)
+        self.context_projection.append_source(frozen, local_index)
         self._pending_parts.clear()
         self._restored_pending = False
         self._stage_transcript()
@@ -590,12 +518,7 @@ class AgentRunRecorder:
         source: Sequence[ModelMessage],
         projected: Sequence[ModelMessage] | None,
     ) -> None:
-        if projected is None:
-            self._projection_source_count = None
-            self._projection_messages = None
-            return
-        self._projection_source_count = len(tuple(source))
-        self._projection_messages = freeze_model_messages(projected)
+        self.context_projection.remember_context_projection(source, projected)
 
     def checkpoint_context(
         self,
@@ -603,41 +526,7 @@ class AgentRunRecorder:
         *,
         pending: ModelMessage | None = None,
     ) -> tuple[list[ModelMessage], int | None]:
-        current = freeze_model_messages(messages)
-        source_count = self._projection_source_count
-        projected = self._projection_messages
-        if source_count is not None and projected is not None:
-            if source_count > len(current):
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "captured context projection exceeds live history",
-                )
-            current = (*projected, *current[source_count:])
-        pending_index = None
-        if pending is not None:
-            frozen_pending = freeze_model_messages((pending,))[0]
-            pending_index = len(current)
-            current = (*current, frozen_pending)
-        current = project_transient_binary_content(current)
-        return list(freeze_model_messages(current)), pending_index
-
-    def _source_refs_for(
-        self,
-        messages: Sequence[ModelMessage],
-    ) -> tuple[
-        tuple[TranscriptMessageRef | int | None, ...],
-        tuple[bytes, ...],
-    ]:
-        values = freeze_model_messages(messages)
-        requested_keys = tuple(
-            encode_model_messages((message,))
-            for message in values
-        )
-        refs: list[TranscriptMessageRef | int | None] = []
-        for key in requested_keys:
-            index = self._source_indices.get(key)
-            refs.append(None if index is None else self._source_refs[index])
-        return tuple(refs), requested_keys
+        return self.context_projection.checkpoint_context(messages, pending=pending)
 
     def begin_model_interaction(
         self,
@@ -650,9 +539,8 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
-        self._stage_model_interaction(
-            fact, model, messages, model_settings, parameters, streaming,
-            model_id, source_messages, prepared=False,
+        self.model_interactions.begin_model_interaction(
+            fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
 
     def prepare_model_interaction(
@@ -666,97 +554,9 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
-        self._stage_model_interaction(
-            fact, model, messages, model_settings, parameters, streaming,
-            model_id, source_messages, prepared=True,
+        self.model_interactions.prepare_model_interaction(
+            fact, model, messages, model_settings, parameters, streaming, model_id, source_messages,
         )
-
-    def _stage_model_interaction(
-        self,
-        fact: ModelRequestFact,
-        model: Model,
-        messages: Sequence[ModelMessage],
-        model_settings: ModelSettings | None,
-        parameters: ModelRequestParameters,
-        streaming: bool,
-        model_id: str | None,
-        source_messages: Sequence[ModelMessage] | None,
-        *,
-        prepared: bool,
-    ) -> None:
-        frozen = freeze_model_messages(messages)
-        projection = None
-        digest = None
-        if prepared:
-            source = frozen if source_messages is None else freeze_model_messages(source_messages)
-            source_refs, source_keys = self._source_refs_for(source)
-            projection = build_context_projection(
-                source,
-                frozen,
-                lambda payload: self._staging_store.intern_payload(
-                    self._agent_run_id,
-                    payload,
-                ),
-                source_refs=source_refs,
-                source_keys=source_keys,
-            )
-            _envelope, envelope_bytes = request_envelope(
-                model_settings=model_settings,
-                parameters=parameters,
-                streaming=streaming,
-            )
-            digest, _size = self._staging_store.intern_payload(
-                self._agent_run_id,
-                envelope_bytes,
-            )
-        model_value = model_identity(
-            model,
-            route_id=model_id,
-        )
-        attachments = request_attachment_facts(
-            frozen,
-            self._initial_attachments,
-            accepted_attachment_ids=self._accepted_attachment_ids,
-        )
-        # Acceptance survives provider preparation even when the final input
-        # drops an attachment. Inclusion follows the current prepared request.
-        accepted = tuple(
-            value
-            for value in self._interaction_attachments.get(fact.model_request_seq, ())
-            if value["fact"] == "accepted"
-        )
-        attachments = (*accepted, *attachments)
-        if not prepared:
-            attachments = tuple(value for value in attachments if value["fact"] == "accepted")
-        stage = (
-            self._staging_store.prepare_model_interaction
-            if prepared
-            else self._staging_store.stage_model_interaction
-        )
-        stage(
-            StagedModelInteraction(
-                agent_run_id=self._agent_run_id,
-                step_index=fact.step_index,
-                model_request_seq=fact.model_request_seq,
-                purpose=fact.purpose,
-                output_retry_index=fact.output_retry_index,
-                model=model_value,
-                request_context=projection,
-                request_envelope_digest=digest,
-                response_context=None,
-                status="RUNNING",
-                error_code=None,
-                duration_ns=None,
-                usage=None,
-                attachments=attachments,
-                started_at=fact.started_at,
-                finished_at=None,
-            )
-        )
-        self._interaction_projections[fact.model_request_seq] = projection
-        self._interaction_payloads[fact.model_request_seq] = digest
-        self._interaction_models[fact.model_request_seq] = model_value
-        self._interaction_attachments[fact.model_request_seq] = attachments
 
     def finish_model_interaction(
         self,
@@ -770,17 +570,6 @@ class AgentRunRecorder:
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None:
-        del model
-        model_request_seq = fact.model_request_seq
-        try:
-            projection = self._interaction_projections.pop(model_request_seq)
-            envelope_digest = self._interaction_payloads.pop(model_request_seq)
-            model_value = self._interaction_models.pop(model_request_seq)
-            attachments = self._interaction_attachments.pop(model_request_seq)
-        except KeyError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-        response_projection = None
         if status in {"FAILED", "CANCELLED"} and fact.purpose == "agent":
             if response is None and self._pending_parts:
                 first = next(iter(self._pending_parts.values()))
@@ -791,35 +580,9 @@ class AgentRunRecorder:
             if response is not None:
                 response = replace(response, state="interrupted")
                 self.append_transcript_message(response)
-        if response is not None:
-            frozen_response = freeze_model_messages((response,))
-            response_projection = build_inline_context_projection(
-                frozen_response,
-                lambda payload: self._staging_store.intern_payload(
-                    self._agent_run_id,
-                    payload,
-                ),
-            )
-        self._staging_store.stage_model_interaction(
-            StagedModelInteraction(
-                agent_run_id=self._agent_run_id,
-                step_index=fact.step_index,
-                model_request_seq=model_request_seq,
-                purpose=fact.purpose,
-                output_retry_index=fact.output_retry_index,
-                model=model_value,
-                request_context=projection,
-                request_envelope_digest=envelope_digest,
-                response_context=response_projection,
-                status=status,
-                error_code=error_code,
-                duration_ns=duration_ns,
-                usage=_usage_metrics(usage),
-                attachments=attachments,
-                started_at=fact.started_at,
-                finished_at=fact.finished_at,
-                client_requests=client_requests,
-            )
+        self.model_interactions.finish_model_interaction(
+            fact, model=model, response=response, status=status, error_code=error_code,
+            duration_ns=duration_ns, usage=usage, client_requests=client_requests,
         )
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
@@ -902,17 +665,6 @@ class AgentRunRecorder:
         )
         await self.commit_history_boundary()
 
-
-def _usage_metrics(value: object | None) -> UsageMetrics | None:
-    if value is None:
-        return None
-    return UsageMetrics(
-        model_requests=1,
-        input_tokens=int(getattr(value, "input_tokens", 0)),
-        output_tokens=int(getattr(value, "output_tokens", 0)),
-        cache_read_tokens=int(getattr(value, "cache_read_tokens", 0)),
-        cache_write_tokens=int(getattr(value, "cache_write_tokens", 0)),
-    )
 
 
 __all__ = ["AgentRunRecorder"]

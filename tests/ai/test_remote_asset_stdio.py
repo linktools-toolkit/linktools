@@ -27,7 +27,7 @@ from linktools.ai.asset import (
     MaterializedAssets,
     SqlAssetBackend,
 )
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_asset_database
@@ -286,7 +286,9 @@ def _sandbox(kind: str, monkeypatch: pytest.MonkeyPatch) -> Sandbox | None:
 
 
 def _group(store: AssetStore, sandbox: Sandbox | None) -> RuntimeFeatures[object]:
-    group = RuntimeFeatures[object]("assets", assets=store, sandbox=sandbox)
+    group = RuntimeFeatures[object]("assets", sandbox=sandbox)
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
     group.agent("default", allow_tools=(mcp_tool_selector("probe", "probe"),))
     return group
 

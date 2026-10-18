@@ -1743,7 +1743,7 @@ class RuntimeStateCommands:
         if expected_session is not None:
             stores.append(self._conversation.state_store)
         elif self._recovery_run_store is not None:
-            stores.append(self._recovery_run_store.state_store)
+            stores.extend(self._recovery_run_store.transaction_stores)
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -2037,7 +2037,7 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if self._recovery_run_store is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            stores.append(self._recovery_run_store.state_store)
+            stores.extend(self._recovery_run_store.transaction_stores)
         else:
             if recovery_run is not None or recovery_agent_run_checkpoint is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2295,15 +2295,15 @@ class RuntimeStateCommands:
         if execution_run is not None:
             if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._execution_run_store.state_store)
+            stores.extend(self._execution_run_store.transaction_stores)
         if conversation_agent_run is not None or conversation_checkpoint is not None:
             if self._conversation_run_store is None or conversation_agent_run is None or conversation_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._conversation_run_store.state_store)
+            stores.extend(self._conversation_run_store.transaction_stores)
         if recovery_run is not None or recovery_agent_run_checkpoint is not None:
             if self._recovery_run_store is None or recovery_run is None or recovery_agent_run_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._recovery_run_store.state_store)
+            stores.extend(self._recovery_run_store.transaction_stores)
         if _same_group(stores):
             async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                 nonlocal effective_commit
@@ -2685,7 +2685,7 @@ class RuntimeStateCommands:
         if execution_run is not None:
             if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution_stores.append(self._execution_run_store.state_store)
+            execution_stores.extend(self._execution_run_store.transaction_stores)
         recovery_state_merged = (
             recovery_pending
             and recovery_checkpoint is not None
@@ -2701,7 +2701,7 @@ class RuntimeStateCommands:
                 )
             execution_stores.append(self._recovery.state_store)
             if recovery_run_store_merged:
-                execution_stores.append(self._recovery_run_store.state_store)
+                execution_stores.extend(self._recovery_run_store.transaction_stores)
         if recovery_pending and has_recovery_run_target and not recovery_run_store_merged:
             if self._recovery_run_store is None or recovery_run is None or recovery_agent_run_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2905,7 +2905,7 @@ class RuntimeStateCommands:
             if recovery_state_merged:
                 terminal_stores.append(self._recovery.state_store)
                 if recovery_run_store_merged:
-                    terminal_stores.append(self._recovery_run_store.state_store)
+                    terminal_stores.extend(self._recovery_run_store.transaction_stores)
             result = await commit_execution_with_reconciliation(terminal_stores)
         if recovery_state_merged and recovery_checkpoint is not None:
             actual_recovery = await self._recovery.get(

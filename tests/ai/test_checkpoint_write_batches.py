@@ -72,11 +72,11 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
             state = _storage(backend, path)
             await state.initialize(namespace="checkpoint-batch", tenant_id="tenant")
             states.append(state)
-            archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+            archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
             if name == "scalar":
                 archive._history = ScalarTranscript(
                     archive.state_store, object_store=archive.transcript_repository._object_store, namespace="checkpoint-batch",
-                    tenant_id="tenant", runtime_domain=RuntimeDomain.RECOVERY,
+                    tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
                 )
             archives.append(archive)
         messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(133)]
@@ -121,7 +121,7 @@ async def test_checkpoint_lost_member_cas_rolls_back_entire_write_set(
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="checkpoint-cas", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     first = ModelRequest(parts=[UserPromptPart("first")])
     second = ModelRequest(parts=[UserPromptPart("second")])
@@ -229,7 +229,7 @@ async def test_terminal_batch_preserves_custom_repository_path_and_durable_value
 async def test_checkpoint_prefetch_is_bounded_and_mixed_owners_fail_closed(tmp_path: Path) -> None:
     state = _storage("memory", tmp_path)
     await state.initialize(namespace="checkpoint-owner", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     repository = archive.transcript_repository
     run = AgentRunRecord("run")
     try:
@@ -319,7 +319,7 @@ async def test_new_checkpoint_fact_batch_rolls_back_or_retries_without_sequence_
 ) -> None:
     state = _storage("sqlite", tmp_path)
     await state.initialize(namespace="checkpoint-batch-rollback", tenant_id="tenant")
-    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
     checkpoint = AgentRunCheckpoint(
         "run", 1, [ModelRequest(parts=[UserPromptPart("owned")])],

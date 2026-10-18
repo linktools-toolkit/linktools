@@ -181,7 +181,7 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
             staged = await storage.run_store.list_model_interactions(agent_run_id=run_id)
             assert len(staged) == 1 and staged[0].status == "RUNNING"
             assert staged[0].client_requests is None
-            archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+            archive = storage.run_store.read_store(RuntimeDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert all(record.client_requests is None for record in records)
             await execution.cancel()

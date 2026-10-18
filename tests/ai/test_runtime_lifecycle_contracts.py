@@ -88,7 +88,6 @@ async def test_runtime_body_error_wins_over_cleanup_error(
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
             features=None,
-            metrics=None,
             limits=PromptLimits(),
             authorization=None,
         ):
@@ -114,7 +113,6 @@ async def test_runtime_body_error_wins_when_close_succeeds(
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
             features=None,
-            metrics=None,
             limits=PromptLimits(),
             authorization=None,
         ):
@@ -136,7 +134,6 @@ async def test_runtime_close_error_still_propagates_after_success(
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
             features=None,
-            metrics=None,
             limits=PromptLimits(),
             authorization=None,
         ):
@@ -164,7 +161,6 @@ async def test_runtime_construction_error_wins_when_cleanup_fails(
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
             features=None,
-            metrics=None,
             limits=PromptLimits(),
             authorization=None,
         ):
@@ -186,7 +182,6 @@ async def test_runtime_cancellation_wins_when_cleanup_fails(
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
             features=None,
-            metrics=None,
             limits=PromptLimits(),
             authorization=None,
         ):
@@ -211,7 +206,6 @@ async def test_secondary_cleanup_log_excludes_business_payload(
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
             features=None,
-            metrics=None,
             limits=PromptLimits(),
             authorization=None,
         ):

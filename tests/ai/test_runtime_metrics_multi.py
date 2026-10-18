@@ -51,9 +51,9 @@ class _Models:
         return _ModelBinding()
 
 
-def _agent_group() -> RuntimeFeatures[object]:
+def _agent_group(metrics: Metrics) -> RuntimeFeatures[object]:
     group = RuntimeFeatures[object]("application")
-    group.capability(MetricsCapability(), scope="runtime")
+    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -95,8 +95,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 "default",
                 models=_Models(),  # type: ignore[arg-type]
                 storage=state,
-                features=_agent_group(),
-                metrics=metrics,
+                features=_agent_group(metrics),
             ) as runtime:
                 result = (await runtime.agents.get("default").run(
                     f"hello-{label}",

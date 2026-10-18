@@ -21,6 +21,7 @@ from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
+    AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
     RuntimeFeatures,
@@ -614,6 +615,8 @@ def test_runtime_domain_object_store_trait_has_one_owner() -> None:
         RuntimeDomain.TASK,
         RuntimeDomain.EVALUATION,
         RuntimeDomain.RECOVERY,
+        RuntimeDomain.TRACE,
+        RuntimeDomain.CHECKPOINT,
     }
     assert {
         domain
@@ -875,7 +878,9 @@ async def _capture_mcp_resource_versions(
     store: AssetStore,
     server: MCPServerSpec,
 ) -> tuple[AssetVersionRef, ...]:
-    capture = await RuntimeFeatures("application", assets=store).capture()
+    asset_features = RuntimeFeatures("application")
+    asset_features.capability(AssetCapability(store), scope="runtime")
+    capture = await asset_features.capture()
     contribution = next(
         item
         for item in capture.contributions

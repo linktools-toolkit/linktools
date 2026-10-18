@@ -10,13 +10,12 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
-from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
 from pydantic_ai_harness.memory import Memory
@@ -195,12 +194,15 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     store = AssetStore(StorageOverlay(source))
     await store.initialize()
 
-    snapshot = await RuntimeFeatures("workspace", assets=store).capture()
+    asset_features = RuntimeFeatures("workspace")
+    asset_features.capability(AssetCapability(store), scope="runtime")
+    snapshot = await asset_features.capture()
 
     assert [(item.kind, item.id) for item in snapshot.contributions] == [
         ("agent", "default"),
         ("mcp", "local"),
         ("skill", "review"),
+        ("capability", "runtime.assets"),
     ]
 
 

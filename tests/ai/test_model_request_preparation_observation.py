@@ -122,12 +122,12 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
         ModelRequest(parts=[SystemPromptPart("original-only behavior"), UserPromptPart("previous turn")]),
         ModelResponse(parts=[TextPart("previous response")]),
     ), replace_history_system_prompt=True)
-    group.capability(MetricsCapability(), scope="runtime")
     metric_store = InMemoryMetricStore()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
+    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open("prepared-input", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            features=group, metrics=metrics) as runtime:
+                            features=group) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

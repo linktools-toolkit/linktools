@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Mapping, cast
 from filelock import FileLock, Timeout
 from linktools.core import environ
 
+from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
     RUNTIME_OBJECT_STORE_ID,
     JsonValue,
@@ -34,6 +35,7 @@ from ..storage import (
     read_object,
 )
 from ._runtime_history import RuntimeHistory
+from ._persistence_configuration import persistence_storage_configuration
 from .state import (
     SnapshotExclusiveGuard,
     RuntimeStorage,
@@ -85,6 +87,7 @@ class RuntimeSnapshot:
         storage: "RuntimeStorage",
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
+        features: RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None = None,
         exclusive: SnapshotExclusiveGuard,
         limits: SnapshotLimits,
     ) -> ObjectRef:
@@ -93,7 +96,16 @@ class RuntimeSnapshot:
         resolved_tenant = validate_tenant_id(tenant_id)
         if not isinstance(limits, SnapshotLimits):
             raise TypeError("limits must be SnapshotLimits")
+        if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
+            raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
         async def publish() -> ObjectRef:
+            captured = await features.capture() if isinstance(features, RuntimeFeatures) else features
+            if captured is not None:
+                await captured.verify_source_revision()
+            capabilities = () if captured is None else tuple(
+                item.value for item in captured.contributions if item.scope == "runtime"
+            )
+            module_routes, module_caches = persistence_storage_configuration(capabilities)
             initialized = False
             try:
                 if storage.ready:
@@ -102,8 +114,12 @@ class RuntimeSnapshot:
                     namespace=resolved_namespace,
                     tenant_id=resolved_tenant,
                     read_only=True,
+                    module_routes=module_routes,
+                    module_caches=module_caches,
                 )
                 initialized = True
+                if captured is not None:
+                    await captured.verify_source_revision()
                 if (
                     storage.namespace != resolved_namespace
                     or storage.tenant_id != resolved_tenant

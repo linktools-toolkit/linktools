@@ -44,7 +44,7 @@ def _execution_service(history):
 
 def _object_keys(value):
     return {ref.key for _, ref in iter_runtime_object_refs(
-        _encode_persisted_domain(value), default_domain=RuntimeDomain.EXECUTION,
+        _encode_persisted_domain(value), default_domain=RuntimeDomain.TRACE,
     )}
 
 
@@ -61,7 +61,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
         for record in (root, child):
             await storage.execution.executions.create_with_history_head(record)
-        archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = storage.run_store.read_store(RuntimeDomain.TRACE)
         records, bodies, sdk_keys, raw_keys = {}, {}, {}, {}
         payloads = {}
 
@@ -115,7 +115,7 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         service = DefaultExecutionHistoryService(
             storage.execution.executions, TenantAuthorizationPolicy("tenant"), reader, signer,
         )
-        objects = storage.object_store(RuntimeDomain.EXECUTION)
+        objects = storage.object_store(RuntimeDomain.TRACE)
         original_open = objects.open
         original_resolve = archive.resolve_model_interactions
         original_list_children = storage.execution.executions.list_children

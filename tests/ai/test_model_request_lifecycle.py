@@ -1194,7 +1194,6 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             models=models,  # type: ignore[arg-type]
             storage=storage,
             features=group,
-            metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("TOP_SECRET_PROMPT")
             wait_task = asyncio.create_task(execution.wait())
@@ -1250,7 +1249,6 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
                 models=models,  # type: ignore[arg-type]
                 storage=RuntimeStorage.filesystem(storage_path),
                 features=group,
-                metrics=Metrics.in_memory(),
             ) as reopened:
                 assert reopened.history is not None
                 page = await reopened.history.model_interactions(
@@ -1288,7 +1286,6 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
             models=models,  # type: ignore[arg-type]
             storage=storage,
             features=group,
-            metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())
@@ -1304,7 +1301,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                 ]
                 assert first.next_cursor is not None
 
-                archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+                archive = storage.run_store.read_store(RuntimeDomain.TRACE)
                 original_list = archive.list_model_interactions
                 archive_read_started = asyncio.Event()
                 allow_archive_read_to_return = asyncio.Event()
@@ -1387,7 +1384,6 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
             models=models,  # type: ignore[arg-type]
             storage=storage,
             features=group,
-            metrics=Metrics.in_memory(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")
             wait_task = asyncio.create_task(execution.wait())
@@ -1483,9 +1479,9 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
 
         group.tool(complete, effect_policy="none")
         group.agent("default", model="default", allow_tools=("complete",))
-        group.capability(MetricsCapability(), scope="runtime")
         metric_store = InMemoryMetricStore()
         metrics = Metrics.from_store(metric_store, namespace="model-lifecycle-fallback")
+        group.capability(MetricsCapability(metrics=metrics), scope="runtime")
         metric_start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         async with Runtime.open(
@@ -1493,7 +1489,6 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
             models=models,  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
             features=group,
-            metrics=metrics,
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())

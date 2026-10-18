@@ -17,7 +17,7 @@ import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output, restore_output
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
@@ -185,7 +185,9 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
-    group = RuntimeFeatures("workspace", assets=store)
+    group = RuntimeFeatures("workspace")
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
     components = await compose_runtime_components(
         "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
@@ -221,11 +223,13 @@ async def test_runtime_rejects_source_change_during_assembly(
     )
     try:
         with pytest.raises(AIError) as error:
+            asset_features = RuntimeFeatures("workspace")
+            asset_features.capability(AssetCapability(store), scope="runtime")
             await compose_runtime_components(
                 "workspace",
                 models=RuntimeUsageModels(),  # type: ignore[arg-type]
                 storage=RuntimeStorage.in_memory(),
-                features=RuntimeFeatures("workspace", assets=store),
+                features=asset_features,
             )
 
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT

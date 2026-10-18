@@ -125,7 +125,7 @@ async def test_update_read_does_not_disclose_metadata_without_current_authority(
         async def unexpected(*args, **kwargs):
             raise AssertionError("denied metadata must not be read")
         monkeypatch.setattr(repository, "get", fresh_get)
-        monkeypatch.setattr(state.run_store.read_store(RuntimeDomain.EXECUTION), "capture_history", unexpected)
+        monkeypatch.setattr(state.run_store.read_store(RuntimeDomain.TRACE), "capture_history", unexpected)
         principal = Principal("other", "tenant") if failure == "principal" else (
             Principal("owner", "other") if failure == "tenant" else _PRINCIPAL
         )
@@ -201,7 +201,7 @@ async def test_update_cancellation_releases_owner_scope(
                 if phase == "authorization":
                     entered.set()
                     await blocked.wait()
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         original = archive.read_model_interactions_with_run
         async def read(*args, **kwargs):
             assert active_state_scope() is not None

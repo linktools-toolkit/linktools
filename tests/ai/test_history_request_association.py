@@ -92,7 +92,7 @@ async def _history(run_count: int = 1) -> AsyncIterator[_History]:
         reader = StepExecutionHistoryReader(
             namespace="history",
             executions=state.execution.executions,
-            store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+            store=state.run_store.read_store(RuntimeDomain.TRACE),
             notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )

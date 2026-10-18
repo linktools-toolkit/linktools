@@ -14,7 +14,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures, ToolCallFailed
+from linktools.ai.capability import AgentContext, ToolCallFailed
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
@@ -96,7 +96,6 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     )
     application = workspace_features("application", workspace=workspace)
     application.capability(TraceCapability(), scope="runtime")
-    application.capability(MetricsCapability(), scope="runtime")
     application.tool(_business_tool, name="business", effect_policy="replay_safe")
     application.capability(_FailingCapability())
     application.agent(
@@ -111,6 +110,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     )
     metric_store = InMemoryMetricStore()
     metrics = Metrics.from_store(metric_store, namespace="composition")
+    application.capability(MetricsCapability(metrics=metrics), scope="runtime")
     state = RuntimeStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
@@ -119,7 +119,6 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         models=_CompositionModels(),  # type: ignore[arg-type]
         storage=state,
         features=application,
-        metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run(
             "prompt",

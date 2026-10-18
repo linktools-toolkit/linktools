@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from linktools.ai import Runtime
 from linktools.ai.agent import AgentBindingContract, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, SkillCapability, SkillDefinition, SkillSourceRegistry
+from linktools.ai.capability import AssetCapability, CapabilityContribution, RuntimeFeatures, SkillCapability, SkillDefinition, SkillSourceRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeStorage
@@ -167,14 +167,18 @@ async def test_custom_asset_capture_filter_and_historical_resources():
         key = AssetKey("skill", "guide/SKILL.md")
         await store.put(key, b"---\nname: guide\ndescription: Guide\nmetadata:\n  audience: [analyst]\n---\nOld instructions")
         await store.put(AssetKey("skill", "guide/reference.txt"), b"Old reference")
-        capture = await RuntimeFeatures("custom", assets=store).capture()
+        asset_features = RuntimeFeatures("custom")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         include = lambda agent, item: item.kind != "skill" or agent.metadata.get("role") in item.contract["metadata"]["audience"]
         compiler = _compiler(capture.contributions, include)
         agent = AgentSpec("custom-investigator", metadata={"role": "analyst"})
         binding = compiler.bind(compiler.compile(agent))
         assert binding.compiled_agent.skill_definitions[0].source_ref.resources
         await store.put(key, b"---\nname: guide\ndescription: Guide\nmetadata:\n  linktools-revision: 2\n  audience: [reporter]\n---\nNew instructions")
-        newer = await RuntimeFeatures("custom", assets=store).capture()
+        asset_features_2 = RuntimeFeatures("custom")
+        asset_features_2.capability(AssetCapability(store), scope="runtime")
+        newer = await asset_features_2.capture()
         current = _compiler(newer.contributions, include)
         assert current.compile(agent).skill_definitions == ()
         assert current.restore(binding.binding_contract).compiled_agent.skill_definitions == binding.compiled_agent.skill_definitions
@@ -253,7 +257,9 @@ async def test_filter_configuration_is_captured_and_replace_preserves_source():
         class CustomFeatures(RuntimeFeatures):
             pass
 
-        capture = await CustomFeatures("filtered", assets=store, filter=policy).capture()
+        asset_features = CustomFeatures("filtered",  filter=policy)
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         assert capture.filter is policy
         assert "filter=" not in repr(capture)
         seen_metadata = []

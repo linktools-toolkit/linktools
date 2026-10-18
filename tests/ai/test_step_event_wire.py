@@ -83,7 +83,7 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
     state = _storage(backend, root)
     await state.initialize(namespace="steps", tenant_id="tenant")
     try:
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         run = AgentRunRecord("run", started_at=_NOW)
         recorder = AgentRunRecorder(archive, execution_id=None, agent_run_id="run")
         await recorder.register_agent_run(run)
@@ -118,7 +118,7 @@ async def test_step_event_archive_and_idempotency_survive_snapshot(
     restored = RuntimeStorage.from_root(restored_root)
     await restored.initialize(namespace="steps", tenant_id="tenant")
     try:
-        restored_archive = restored.run_store.read_store(RuntimeDomain.RECOVERY)
+        restored_archive = restored.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert await restored_archive.list_events(agent_run_id="run") == events
         recorder = AgentRunRecorder(restored_archive, execution_id=None, agent_run_id="run")
         await recorder.register_agent_run(run)

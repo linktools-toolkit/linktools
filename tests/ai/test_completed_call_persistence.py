@@ -45,7 +45,7 @@ async def test_running_public_metadata_does_not_read_prepared_request_payloads(t
         def read_payload(digest: str) -> bytes:
             raise AssertionError(f"running observation read a prepared body: {digest}")
 
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         values = await archive.prepare_interactions(AgentRunRecord("run"), (prepared,), read_payload)
         assert len(values) == 1
         assert values[0].request_context is None and values[0].request_envelope is None

@@ -357,7 +357,7 @@ async def test_uncached_transcript_cancellation_waits_for_owned_stream_close(
     )
     cache = RecordingCache() if configured_cache else None
     objects = _RuntimeObjectRouter(
-        {RuntimeDomain.EXECUTION: _Store(stream)},  # type: ignore[dict-item]
+        {RuntimeDomain.TRACE: _Store(stream)},  # type: ignore[dict-item]
         close_guard_stores=(), cache=cache, cache_domains=(),
     )
     ref = ObjectRef("runtime", "transcript", hashlib.sha256(b"abcd").hexdigest(), 4)
@@ -365,7 +365,7 @@ async def test_uncached_transcript_cancellation_waits_for_owned_stream_close(
         object(),  # type: ignore[arg-type]
         object_store=_Store(stream),  # type: ignore[arg-type]
         object_reader=objects.read_object,
-        namespace="history", tenant_id="tenant", runtime_domain=RuntimeDomain.EXECUTION,
+        namespace="history", tenant_id="tenant", runtime_domain=RuntimeDomain.TRACE,
     )
     read = asyncio.create_task(reader.read_payload(StoredPayload.object(ref)))
     close: asyncio.Task[None] | None = None

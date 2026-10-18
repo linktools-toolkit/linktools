@@ -6,16 +6,18 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from copy import copy
 from pathlib import Path
 from typing import TypeVar
 
 from linktools.core import environ
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
     AgentContext,
+    AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
     RuntimeFeatures,
@@ -33,11 +35,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
-from ..observe import Metrics
 from ..spec import (
     AgentSpec,
     RuleInstructionResolver,
-    MCPServerSpec,
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
@@ -68,12 +68,12 @@ from ._input_capture import RuntimeInputCaptures
 from ._local import LocalExecutionBackend
 from ._pending_coordination import _PendingTurnCoordination
 from ._memory import MemoryStore, RuntimeMemoryStore
-from ._metrics import _RuntimeMetricRecorder
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._capabilities import runtime_feature_leaves
 from ._conversation_capability import ConversationCapability
-from ._metrics_capability import MetricsCapability
+from ._metrics_capability import MetricsCapability, MetricsRecordingBinding
+from ._persistence_configuration import persistence_storage_configuration
 from ._persistence_capabilities import (
     TraceCapability,
     CheckpointCapability,
@@ -110,7 +110,7 @@ class _RuntimeComponents:
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
-    metric_control: _RuntimeMetricRecorder | None
+    metric_control: MetricsRecordingBinding | None
     binding_resolver: _AgentBindingResolver
     history: object
     task_admissions: TaskAdmissionRepository
@@ -126,7 +126,6 @@ async def compose_runtime_components(
     models: ModelRegistry,
     storage: RuntimeStorage,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
-    metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
     authorization: "AuthorizationPolicy | None" = None,
     auto_recover: bool = True,
@@ -138,8 +137,6 @@ async def compose_runtime_components(
         raise TypeError("storage must be RuntimeStorage")
     if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
         raise TypeError("tool_responses must be ToolResponseFixture")
-    if metrics is not None and not isinstance(metrics, Metrics):
-        raise TypeError("metrics must be Metrics")
     selected_limits = PromptLimits() if limits is None else limits
     if not isinstance(selected_limits, PromptLimits):
         raise TypeError("limits must be PromptLimits")
@@ -198,9 +195,32 @@ async def compose_runtime_components(
             if candidate.kind == "capability" and candidate.scope != "runtime":
                 for leaf in runtime_feature_leaves(candidate.value):
                     require_runtime_feature_scope(leaf)
+        declared_ids: set[str] = set()
+        for candidate in candidates:
+            if candidate.scope != "runtime":
+                continue
+            for leaf in runtime_feature_leaves(candidate.value):
+                if leaf.id is None:
+                    continue
+                if leaf.id in declared_ids:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                declared_ids.add(leaf.id)
+
+        def consume_assets(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
+            if isinstance(capability, AssetCapability):
+                return None
+            if isinstance(capability, WrapperCapability):
+                wrapped = capability.wrapped.visit_and_replace(consume_assets)
+                if wrapped is None:
+                    return None
+                rebound = copy(capability)
+                rebound.wrapped = wrapped
+                return rebound
+            return capability
+
         runtime_capabilities = tuple(
-            candidate.value for candidate in candidates
-            if candidate.scope == "runtime"
+            selected for candidate in candidates if candidate.scope == "runtime"
+            if (selected := candidate.value.visit_and_replace(consume_assets)) is not None
         )
         runtime_ids: set[str] = set()
 
@@ -262,10 +282,14 @@ async def compose_runtime_components(
             "default" if tenant_id is None else validate_tenant_id(tenant_id)
         )
         selected_storage = storage
+        module_routes, module_caches = persistence_storage_configuration(runtime_capabilities)
         await selected_storage.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
+            module_routes=module_routes,
+            module_caches=module_caches,
         )
+
         initialized = True
         for group in groups:
             await group.verify_source_revision()
@@ -343,7 +367,6 @@ async def compose_runtime_components(
             session_execution_ready=True,
             auto_recover=auto_recover,
             tool_responses=tool_responses,
-            metrics=metrics,
         )
         try:
             for capture in groups:
@@ -374,7 +397,7 @@ def _runtime_close_actions(
     execution: DefaultExecutionService,
     backend: LocalExecutionBackend | None,
     input_materializer: ExecutionInputMaterializer,
-    metric_buffer: _RuntimeMetricRecorder | None,
+    metric_buffer: MetricsRecordingBinding | None,
     storage: RuntimeStorage,
     session: DefaultSessionService | None = None,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
@@ -458,12 +481,12 @@ def _execution_history_reader(
     storage: RuntimeStorage,
     runtime_token_seed: bytes,
 ) -> StepExecutionHistoryReader:
-    local_store = storage.run_store.read_store(RuntimeDomain.EXECUTION, durable=False)
+    local_store = storage.run_store.read_store(RuntimeDomain.TRACE, durable=False)
     if not isinstance(local_store, StagingAgentRunStore):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     transient_store = TransientExecutionHistoryStore(local_store, storage.run_store)
-    history_store = storage.run_store.read_store(RuntimeDomain.EXECUTION)
-    if storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.TRANSIENT:
+    history_store = storage.run_store.read_store(RuntimeDomain.TRACE)
+    if storage.plan.route(RuntimeDomain.TRACE).retention is RuntimeRetentionMode.TRANSIENT:
         if not isinstance(history_store, StagingAgentRunStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_store = TransientExecutionHistoryStore(history_store, storage.run_store)
@@ -546,10 +569,9 @@ async def _build_local_components(
     input_materializer: ExecutionInputMaterializer,
     session_execution_ready: bool,
     auto_recover: bool,
-    metrics: "Metrics | None",
     tool_responses: ToolResponseFixture | None,
 ) -> _RuntimeComponents:
-    metric_buffer: _RuntimeMetricRecorder | None = None
+    metric_buffer: MetricsRecordingBinding | None = None
     metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
@@ -573,8 +595,6 @@ async def _build_local_components(
         if not storage.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         _require_storage_identity(storage, namespace=namespace, tenant_id=tenant_id)
-        metric_buffer = None if metrics is None else _RuntimeMetricRecorder(metrics.recorder())
-        metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
         if isinstance(history_reader, StepExecutionHistoryReader):
             history_reader.bind_pending_execution_reader(runtime_bridge.pending_turns.read_execution)
@@ -590,12 +610,29 @@ async def _build_local_components(
         conversation = any(
             isinstance(value, ConversationCapability) for value in persistence_capabilities
         )
-        automatic_metrics = any(
-            isinstance(value, MetricsCapability) for value in persistence_capabilities
+        metric_capabilities = tuple(
+            value for value in persistence_capabilities if isinstance(value, MetricsCapability)
         )
-        if automatic_metrics and metric_buffer is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "MetricsCapability requires metrics")
-        agent_metric_buffer = metric_buffer if automatic_metrics else None
+        if len(metric_capabilities) > 1:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one Metrics dataset is allowed per Runtime")
+        automatic_metrics = bool(metric_capabilities)
+        metric_buffer = metric_capabilities[0].open_recording() if metric_capabilities else None
+        metric_source_namespace = None if metric_buffer is None else namespace
+        agent_metric_buffer = metric_buffer.recorder if automatic_metrics and metric_buffer is not None else None
+        if metric_buffer is not None:
+            def bind_metrics(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]]:
+                if isinstance(capability, WrapperCapability):
+                    rebound = copy(capability)
+                    rebound.wrapped = capability.wrapped.visit_and_replace(bind_metrics)
+                    return rebound
+                if isinstance(capability, MetricsCapability):
+                    return metric_buffer.bind(capability)
+                return capability
+
+            runtime_capabilities = tuple(
+                bound for template in runtime_capabilities
+                if (bound := template.visit_and_replace(bind_metrics)) is not None
+            )
         if storage.cache is not None:
             runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(
                 storage.cache, namespace=namespace, tenant_id=tenant_id,
@@ -729,8 +766,8 @@ async def _build_local_components(
                 domain: storage.run_store.read_store(domain)
                 for domain in (
                     RuntimeDomain.CONVERSATION,
-                    RuntimeDomain.EXECUTION,
-                    RuntimeDomain.RECOVERY,
+                    RuntimeDomain.TRACE,
+                    RuntimeDomain.CHECKPOINT,
                 )
             },
             agent_run_lifecycle=storage.run_store,
@@ -772,12 +809,12 @@ async def _build_local_components(
             conversation_enabled=conversation,
             history_reader=session_history_reader,
             cache=(
-                storage.cache
+                next((feature.cache for feature in persistence_capabilities if isinstance(feature, ConversationCapability)), None)
                 if all(storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
                        for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION))
                 else None
             ),
-            transcript_store=storage.run_store,
+            transcript_store=storage.run_store.conversation_persistence,
             release_terminal=storage.retention.release_session,
             pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
             workspace_access=input_materializer.access,
@@ -848,7 +885,7 @@ async def _build_local_components(
             local_waiter=task_launcher,
             preflight=task_runner,
             bound_execution_recovery=task_runner,
-            metric_recorder=metric_buffer,
+            metric_recorder=None if metric_buffer is None else metric_buffer.recorder,
             metric_source_namespace=metric_source_namespace,
         )
         approval = DefaultApprovalService(
@@ -974,7 +1011,7 @@ def _borrowed_runtime_history(
         events=storage.execution.events,
         sessions=storage.conversation.sessions,
         conversation=storage.conversation,
-        session_transcript_store=storage.run_store,
+        session_transcript_store=storage.run_store.conversation_persistence,
         tasks=storage.task.tasks,
         authorization=authorization,
         namespace=storage.namespace,

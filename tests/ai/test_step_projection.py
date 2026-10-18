@@ -94,8 +94,8 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
                 )
             )
 
-        execution = state.run_store.read_store(RuntimeDomain.EXECUTION)
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        execution = state.run_store.read_store(RuntimeDomain.TRACE)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert await execution.list_events(agent_run_id=run.agent_run_id) == []
         assert await recovery.get_agent_run(agent_run_id=run.agent_run_id) is None
 
@@ -141,7 +141,7 @@ async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> Non
     state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="agent-run-recovery", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         durable = AgentRunRecord(
             agent_run_id="run",
             agent_conversation_id="conversation",

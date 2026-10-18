@@ -473,7 +473,7 @@ async def test_batched_history_range_validates_descriptor_and_head(
                 head = repository.decode_head(stored)
                 head = (
                     replace(head, owner_id="another-history") if corruption == "owner"
-                    else replace(head, owner_domain=TranscriptOwnerDomain.EXECUTION)
+                    else replace(head, owner_domain=TranscriptOwnerDomain.TRACE)
                 )
                 changed = histories._stored("transcript_head", history_id, head)
                 assert await transaction.replace_record(
