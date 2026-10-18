@@ -37,6 +37,13 @@ Compaction requests are included. Cached tool effects are not charged again;
 a replay-safe tool's new dispatched attempt is counted on its new effect fence.
 Capability tools, including subagent delegation, also consume tool calls.
 
+Native capabilities and tools can read `AgentContext.deadline_at` (native SDK
+hooks use `ctx.deps.deadline_at`). This read-only, timezone-aware absolute deadline
+is inherited from the shared budget, including retries and recovery, or `None`
+when no admission deadline applies. Reading it does not query storage. Hosts can
+use it to bound quota acquisition and queue waiting; it is not a timeout that
+interrupts an already admitted model request or tool execution.
+
 `AgentUsageLimits` still limits an individual Agent run. Both limits apply when
 configured. `TaskGraphLimits.max_budget` remains a static sum of node
 `budget_cost` weights, independent of these observed-consumption limits.

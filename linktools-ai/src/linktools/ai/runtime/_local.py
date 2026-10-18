@@ -1069,6 +1069,10 @@ class LocalExecutionBackend:
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT,
                     safe_details={"phase": "recovery_launch_rejected"})
+        if current.budget_scope_id is not None and request.budget is None:
+            # Cold recovery and deferred resumption reconstruct the launch request.
+            usage = await self._execution.budgets.read(current.budget_scope_id)
+            request = replace(request, budget=usage.limits)
         if not self._live_broker.is_local_producer(current.execution_id):
             self._live_broker.register_local_producer(
                 current.execution_id,
@@ -3206,6 +3210,7 @@ class LocalExecutionBackend:
                 session_metadata=session_metadata,
                 memory_scope=current.memory_scope,
                 correlation=current.correlation,
+                deadline_at=None if request.budget is None else request.budget.deadline_at,
             )
             plan_store = RuntimePlanStore(
                 self._session_state_store
