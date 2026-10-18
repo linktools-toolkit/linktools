@@ -77,8 +77,12 @@ def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
 def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     binding_contract = AgentBindingContract.from_payload(payload)
+    current_model = ModelRegistry.openai(
+        model="gpt-test", input_types=["mime:text/plain"],
+    ).capture().resolve("default")
+    assert payload["model_contract"] == dict(current_model.contract)
 
-    class HistoricalBinding:
+    class RegisteredBinding:
         route_id = "default"
         provider = "openai"
         model_identity = "openai:gpt-test"
@@ -88,7 +92,7 @@ def test_v1_binding_restores_from_explicitly_registered_matching_contract() -> N
             return TestModel()
 
     registry = ModelRegistry()
-    registry.register(HistoricalBinding())
+    registry.register(RegisteredBinding())
     compiler = AgentCompiler(
         model_resolver=registry.capture(), candidates=(),
         agents={

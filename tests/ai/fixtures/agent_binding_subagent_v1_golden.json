@@ -25,10 +25,12 @@
     "model": "default"
   },
   "model_contract": {
-    "model_identity": "openai:gpt-test",
     "provider": "openai",
-    "vision": false,
-    "settings": {}
+    "model_identity": "openai:gpt-test",
+    "settings": {},
+    "input_mime_types": [
+      "text/plain"
+    ]
   },
   "selected": [],
   "subagents": [
