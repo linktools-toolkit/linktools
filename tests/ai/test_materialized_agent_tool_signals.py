@@ -97,7 +97,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     application = workspace_features("application", workspace=workspace)
     application.capability(TraceCapability(), scope="runtime")
     application.tool(_business_tool, name="business", effect_policy="replay_safe")
-    application.capability(_FailingCapability())
+    application.capability(_FailingCapability(), scope="agent")
     application.agent(
         "default",
         model="default",

@@ -204,9 +204,9 @@ class RuntimeFeatures(Generic[AppT]):
         id: "str | None" = None,
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
-        scope: Literal["agent", "runtime"] = "agent",
+        scope: Literal["agent", "runtime"] = "runtime",
     ) -> "AbstractCapability[AgentContext[AppT]]":
-        """Register native behavior selected by an Agent or applied Runtime-wide.
+        """Register Runtime-wide behavior, or explicitly opt into Agent selection.
 
         Runtime-scoped capabilities bypass Agent selection and are current host
         policy, outside durable Agent bindings. They must not defer loading.

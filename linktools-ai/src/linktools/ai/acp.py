@@ -242,8 +242,8 @@ class ACPApplication:
         from .runtime import ConversationCapability
 
         features = RuntimeFeatures("workspace")
-        features.capability(WorkspaceCapability(self.workspace), scope="runtime")
-        features.capability(ConversationCapability(), scope="runtime")
+        features.capability(WorkspaceCapability(self.workspace))
+        features.capability(ConversationCapability())
         async with Runtime.open(
             "default",
             models=self.models,

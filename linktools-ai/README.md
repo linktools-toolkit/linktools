@@ -79,7 +79,7 @@ model context and are separate from TaskGraph and snapshot limits.
 
 For a fixed MCP response fixture, register
 `ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
-`linktools.ai.capability` with `scope="runtime"` before capture. The fixture
+`linktools.ai.capability` before capture. The fixture
 keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
 separate authorization, prompt-limit, or tool-response arguments.
 
@@ -109,12 +109,13 @@ continuation, and durable recovery guarantees.
 ## Runtime-wide capabilities
 
 Register native Pydantic AI behavior through the same `RuntimeFeatures` used for
-Agent declarations. The default `scope="agent"` keeps normal Agent selection;
-`scope="runtime"` applies host policy to every Runtime-owned Agent run,
-independently of `allow_capabilities` and `RuntimeFeatures.filter`:
+Agent declarations. The default `scope="runtime"` applies host policy to every
+Runtime-owned Agent run,
+independently of `allow_capabilities` and `RuntimeFeatures.filter`. Use explicit
+`scope="agent"` for selectable behavior included in durable Agent bindings:
 
 ```python
-group.capability(global_rate_limit, id="host.rate-limit", scope="runtime")
+group.capability(global_rate_limit, id="host.rate-limit")
 async with Runtime.open(
     "application", models=models, storage=storage, features=group,
 ) as runtime:
@@ -184,7 +185,7 @@ workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
 storage = RuntimeStorage.in_memory()
 features = RuntimeFeatures("workspace")
-features.capability(WorkspaceCapability(workspace), scope="runtime")
+features.capability(WorkspaceCapability(workspace))
 
 async with Runtime.open(
     "default",
@@ -231,7 +232,7 @@ from linktools.ai import AgentContext, RuntimeFeatures, Runtime
 from linktools.ai.capability import WorkspaceCapability
 
 application = RuntimeFeatures[None]("application")
-application.capability(WorkspaceCapability(workspace), scope="runtime")
+application.capability(WorkspaceCapability(workspace))
 
 @application.tool
 def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
@@ -276,7 +277,7 @@ MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
 `AssetStore` to `AssetCapability(store)` and register that capability with
-`features.capability(assets, scope="runtime")`. A store-backed group
+`features.capability(assets)`. A store-backed group
 captures the declaration metadata visible when capture begins. Assets added
 afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
@@ -287,7 +288,7 @@ from linktools.ai.capability import AssetCapability, RuntimeFeatures
 
 assets = AssetCapability(store)
 features = RuntimeFeatures("application")
-features.capability(assets, scope="runtime")
+features.capability(assets)
 capture = await features.capture()
 ```
 
@@ -645,7 +646,7 @@ group = RuntimeFeatures(
     "workspace",
     sandbox=LocalSandbox(read_policy=readonly),
 )
-group.capability(WorkspaceCapability(workspace), scope="runtime")
+group.capability(WorkspaceCapability(workspace))
 ```
 
 With a read-only policy, Bubblewrap mounts the Workspace read-only and never creates hidden-path mount points there. Provision its hidden directories (including `.linktools`) before opening the sandbox; a missing or unsafe mount point causes startup to fail with `SANDBOX_UNAVAILABLE`.
@@ -724,7 +725,7 @@ on the same declaration before opening the Runtime:
 ```python
 from linktools.ai.runtime import ConversationCapability
 
-application.capability(ConversationCapability(), scope="runtime")
+application.capability(ConversationCapability())
 # Open with Runtime.open(..., features=application) after registration.
 ```
 

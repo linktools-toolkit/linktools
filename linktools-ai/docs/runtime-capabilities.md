@@ -1,6 +1,6 @@
 # Runtime-wide capabilities
 
-`RuntimeFeatures.capability(capability, scope="runtime")` registers a native
+`RuntimeFeatures.capability(capability)` registers a native
 Pydantic AI `AbstractCapability[AgentContext[AppT]]` as host policy. The same
 `features=group` argument to `Runtime.open` supplies both Agent-selected
 behavior and Runtime-wide policy; there is no separate registration system.
@@ -14,7 +14,7 @@ quota = GlobalRateLimit(
     quota_key="provider-project-a", rpm=60, tpm=60_000, token_reservation=4_000,
 )
 group = RuntimeFeatures("application")
-group.capability(quota, id="host.rate-limit", scope="runtime")
+group.capability(quota, id="host.rate-limit")
 group.agent("default", allow_capabilities=())
 
 capture = await group.capture()
@@ -24,9 +24,10 @@ async with Runtime.open(
     ...
 ```
 
-The default `scope="agent"` is unchanged: `allow_capabilities` and
-`capability_filter` choose the capability, and its versioned contract participates
-in Agent bindings. Runtime-scoped policies bypass both selectors. They are
+Use explicit `scope="agent"` for Agent-selectable, versioned behavior:
+`allow_capabilities` and `RuntimeFeatures.filter` select the capability, and its
+contract participates in Agent bindings. The default Runtime scope bypasses
+both selectors. Runtime-scoped policies are
 applied to direct Agent runs, Sessions, delegated Agents, Agent-backed Tasks and
 resumed/recovered runs. Plain Python Task bodies and external SDK calls do not
 pass through these hooks.
@@ -45,13 +46,13 @@ from linktools.ai.runtime import ConversationCapability, CheckpointCapability, T
 
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
-chat.capability(ConversationCapability(), scope="runtime")
+chat.capability(ConversationCapability())
 # Runtime.open(..., features=chat) supports Sessions and conversation forks.
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
-persistent_work.capability(CheckpointCapability(), scope="runtime")
-persistent_work.capability(TraceCapability(), scope="runtime")
+persistent_work.capability(CheckpointCapability())
+persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
@@ -81,7 +82,7 @@ recording. Register its sole Runtime entry point explicitly:
 ```python
 from linktools.ai.runtime import MetricsCapability
 
-group.capability(MetricsCapability(metrics=metrics), scope="runtime")
+group.capability(MetricsCapability(metrics=metrics))
 # Runtime.open(..., features=group)
 ```
 

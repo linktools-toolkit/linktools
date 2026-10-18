@@ -197,10 +197,10 @@ async def _open_local_runtime(
     await assets.initialize()
     try:
         features = RuntimeFeatures("workspace")
-        features.capability(AssetCapability(assets), scope="runtime")
-        features.capability(WorkspaceCapability(workspace), scope="runtime")
-        features.capability(ConversationCapability(), scope="runtime")
-        features.capability(MetricsCapability(metrics=await _local_metrics(workspace)), scope="runtime")
+        features.capability(AssetCapability(assets))
+        features.capability(WorkspaceCapability(workspace))
+        features.capability(ConversationCapability())
+        features.capability(MetricsCapability(metrics=await _local_metrics(workspace)))
         async with Runtime.open(
             "default",
             storage=_local_runtime_storage(workspace),

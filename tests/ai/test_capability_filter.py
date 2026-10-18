@@ -30,7 +30,7 @@ async def contributions():
     group.agent("root")
     group.agent("child", metadata={"business": "captured"}, description="Delegate work", revision=3)
     group.mcp(MCPServerSpec("server", "python"))
-    group.capability(_ExtraCapability("extra"))
+    group.capability(_ExtraCapability("extra"), scope="agent")
 
     def business(context: object) -> str:
         return "ready"
@@ -217,7 +217,7 @@ async def test_delegation_filter_keeps_captured_agent_metadata_and_named_referen
 async def test_runtime_scope_is_captured_but_never_agent_selected_or_filtered():
     group = RuntimeFeatures("application")
     spec = group.agent("root")
-    group.capability(_ExtraCapability("selected"))
+    group.capability(_ExtraCapability("selected"), scope="agent")
     group.capability(_ExtraCapability("host"), scope="runtime", revision=2)
     capture = await group.capture()
     seen = []

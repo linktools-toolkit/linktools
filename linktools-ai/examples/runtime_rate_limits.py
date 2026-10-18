@@ -9,7 +9,7 @@ LinkTools application, register the same instance with a RuntimeFeatures:
         quota_key="provider-project-a", rpm=60, tpm=60_000,
         token_reservation=4_000,
     )
-    group.capability(limits, id="host.rate-limit", scope="runtime")
+    group.capability(limits, id="host.rate-limit")
 
 Pass that group in Runtime.open(..., features=group). The quota key is an
 explicit host label for the project/account bucket, not a model or credential

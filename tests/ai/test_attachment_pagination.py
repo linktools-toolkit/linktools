@@ -240,7 +240,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
         _attachment_request("second-call"),
     ])
     group = RuntimeFeatures("attachment-pagination")
-    group.capability(PausePreparation(), id="pause-preparation")
+    group.capability(PausePreparation(), id="pause-preparation", scope="agent")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     models.contract = {**models.contract, "vision": True}

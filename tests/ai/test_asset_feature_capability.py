@@ -39,7 +39,7 @@ async def test_asset_capability_is_the_single_loading_configuration():
         assert not hasattr(features, "loader") and not hasattr(features, "assets")
         assets = AssetCapability(store)
         with pytest.raises(AIError, match="requires Runtime scope"):
-            features.capability(assets)
+            features.capability(assets, scope="agent")
         features.capability(assets, scope="runtime")
         with pytest.raises(AIError, match="CAPABILITY_CONFLICT"):
             features.capability(AssetCapability(store), scope="runtime")

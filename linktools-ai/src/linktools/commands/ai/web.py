@@ -71,11 +71,11 @@ class Command(BaseCommand):
                     await assets.initialize()
                     stack.push_async_callback(assets.close)
                     features = RuntimeFeatures("workspace")
-                    features.capability(AssetCapability(assets), scope="runtime")
-                    features.capability(WorkspaceCapability(workspace), scope="runtime")
-                    features.capability(ConversationCapability(), scope="runtime")
+                    features.capability(AssetCapability(assets))
+                    features.capability(WorkspaceCapability(workspace))
+                    features.capability(ConversationCapability())
                     metrics = await _local_metrics(workspace)
-                    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
+                    features.capability(MetricsCapability(metrics=metrics))
                     capture = await features.capture()
                     declarations = [{"kind": item.kind, "id": item.id, "revision": item.revision} for item in capture.contributions]
                     if not any(item["kind"] == "agent" and item["id"] == "default" for item in declarations):

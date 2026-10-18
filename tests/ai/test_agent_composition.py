@@ -150,8 +150,8 @@ class _OrderedCapability(AbstractCapability[object]):
 @pytest.mark.asyncio
 async def test_binding_preserves_declaration_order_and_capability_registration_order() -> None:
     group = RuntimeFeatures("application")
-    group.capability(_OrderedCapability("z-capability"), revision=2)
-    group.capability(_OrderedCapability("a-capability"), revision=3)
+    group.capability(_OrderedCapability("z-capability"), revision=2, scope="agent")
+    group.capability(_OrderedCapability("a-capability"), revision=3, scope="agent")
 
     def business(context: object) -> str:
         del context

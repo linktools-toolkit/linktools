@@ -285,7 +285,7 @@ async def test_persistence_capabilities_reject_agent_scope(
     capability_type: type[CheckpointCapability | TraceCapability],
 ) -> None:
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(capability_type())
+    group.capability(capability_type(), scope="agent")
     group.agent("default", model="default", allow_capabilities=())
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

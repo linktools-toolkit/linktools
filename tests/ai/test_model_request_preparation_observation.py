@@ -114,8 +114,8 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
 
     group = RuntimeFeatures("prepared-input")
     group.capability(TraceCapability(), scope="runtime")
-    group.capability(PrepareRequest(), id="prepare-request")
-    group.capability(_ChangeRequestAfterResponse(), id="change-after-response")
+    group.capability(PrepareRequest(), id="prepare-request", scope="agent")
+    group.capability(_ChangeRequestAfterResponse(), id="change-after-response", scope="agent")
     group.agent("default", model="default", system_prompt="candidate-only behavior",
                 allow_tools=(), allow_skills=(), allow_subagents=())
     imported = ExecutionInputContext.from_messages((

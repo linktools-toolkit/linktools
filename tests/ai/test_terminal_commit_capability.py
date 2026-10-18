@@ -56,7 +56,7 @@ async def test_conversation_uses_native_runtime_registration(combined: bool) -> 
 @pytest.mark.parametrize("combined", (False, True), ids=("native", "combined"))
 async def test_conversation_rejects_agent_scope(combined: bool) -> None:
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(_conversation_feature(combined), id="conversation-feature" if combined else None)
+    group.capability(_conversation_feature(combined), id="conversation-feature" if combined else None, scope="agent")
     with pytest.raises(AIError) as invalid:
         async with Runtime.open(
             "conversation-feature", models=RuntimeUsageModels(),

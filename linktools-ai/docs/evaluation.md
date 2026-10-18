@@ -292,7 +292,7 @@ retention and deletion remain the application's separate responsibility.
 ## Fixed MCP tool responses
 
 Register `ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
-`linktools.ai.capability` on the trial's `RuntimeFeatures` with `scope="runtime"`,
+`linktools.ai.capability` on the trial's `RuntimeFeatures`,
 then pass the single declaration or capture to `Runtime.open(features=...)`.
 This binds one
 case's immutable Asset to a borrowed `AssetStoreReader`. The host owns the

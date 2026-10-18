@@ -108,7 +108,7 @@ def _group() -> RuntimeFeatures[None]:
     for name in ("default", "worker"):
         group.agent(name, model="default", allow_tools=(), allow_skills=(),
                     allow_subagents=(), allow_capabilities=())
-    group.capability(_Unselected())
+    group.capability(_Unselected(), scope="agent")
     return group
 
 
@@ -334,7 +334,7 @@ async def test_runtime_capability_rejects_invalid_or_not_always_on_entries(kind:
 async def test_selected_capability_cannot_silently_replace_runtime_capability_with_the_same_id() -> None:
     backend = _Backend()
     group: RuntimeFeatures[None] = RuntimeFeatures("collision")
-    group.capability(_GlobalPolicy(_Backend()))
+    group.capability(_GlobalPolicy(_Backend()), scope="agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=(), allow_capabilities=("host.runtime_capability",))
     with pytest.raises(AIError) as raised:
@@ -415,7 +415,7 @@ async def test_runtime_capability_acquisition_failure_does_not_call_provider() -
 async def test_nested_native_id_conflict_cannot_replace_selected_capability() -> None:
     backend = _Backend()
     group = _group()
-    group.capability(_GlobalPolicy(_Backend()))
+    group.capability(_GlobalPolicy(_Backend()), scope="agent")
     group.agent("selected", allow_tools=(), allow_skills=(), allow_subagents=(),
                 allow_capabilities=("host.runtime_capability",))
     policies = _policies(group, CombinedCapability([_GlobalPolicy(backend)]))

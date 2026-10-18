@@ -22,7 +22,7 @@ async def run(project: Path) -> object:
     )
     workspace = Workspace.load(project)
     application = RuntimeFeatures[None]("application")
-    application.capability(WorkspaceCapability(workspace), scope="runtime")
+    application.capability(WorkspaceCapability(workspace))
     application.agent(
         "writer",
         revision=2,

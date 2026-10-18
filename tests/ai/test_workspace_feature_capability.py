@@ -26,7 +26,7 @@ async def test_workspace_capability_is_the_only_workspace_registration(tmp_path:
         RuntimeFeatures("workspace", workspace=workspace)
     capability = WorkspaceCapability(workspace)
     with pytest.raises(AIError) as invalid:
-        features.capability(capability)
+        features.capability(capability, scope="agent")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     assert not (await features.capture()).contributions
     features.capability(capability, scope="runtime")

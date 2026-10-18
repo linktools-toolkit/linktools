@@ -111,7 +111,7 @@ async def test_response_capability_scope_uniqueness_and_bootstrap_consumption():
         with pytest.raises(AttributeError):
             feature.fixture = fixture
         with pytest.raises(AIError) as caught:
-            RuntimeFeatures('wrong-scope').capability(feature)
+            RuntimeFeatures('wrong-scope').capability(feature, scope="agent")
         assert caught.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
         features = RuntimeFeatures('responses')
         features.capability(feature, scope='runtime')
