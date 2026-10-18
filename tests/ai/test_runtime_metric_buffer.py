@@ -185,9 +185,9 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
 ) -> None:
     monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
     store = _BlockingStore()
-    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 1)
     buffer = Metrics.from_store(
         store, namespace="close-completion",  # type: ignore[arg-type]
+        batch_size=1,
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     assert await buffer.try_record(_observation("completing")) is True
@@ -280,9 +280,9 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
     monkeypatch.setattr(write_cache, "_WRITE_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
     store = _CancellingStore()
-    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 1)
     buffer = Metrics.from_store(
         store, namespace="close-order",  # type: ignore[arg-type]
+        batch_size=1,
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     first = _observation("inflight")
@@ -417,9 +417,9 @@ async def test_metric_buffer_expired_queued_batch_does_not_start_another_window(
     clock = [0.0]
     monkeypatch.setattr(write_cache, "monotonic", lambda: clock[0])
     store = _RecordingStore()
-    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 2)
     buffer = Metrics.from_store(
         store, namespace="queued-window",  # type: ignore[arg-type]
+        batch_size=2,
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     try:
@@ -442,9 +442,9 @@ async def test_metric_buffer_flush_wakes_prefix_queued_behind_inflight_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _RecordingStore()
-    monkeypatch.setattr(write_cache, "_BATCH_SIZE", 2)
     buffer = Metrics.from_store(
         store, namespace="inflight-flush",  # type: ignore[arg-type]
+        batch_size=2,
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     try:
@@ -469,9 +469,9 @@ async def test_metric_buffer_timer_writes_without_another_observation(
 ) -> None:
     store = _RecordingStore()
     store.release.set()
-    monkeypatch.setattr(write_cache, "_FLUSH_INTERVAL_SECONDS", 0.01)
     buffer = Metrics.from_store(
         store, namespace="idle-window",  # type: ignore[arg-type]
+        flush_interval=0.01,
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     try:

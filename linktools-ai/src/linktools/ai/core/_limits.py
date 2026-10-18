@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prompt and model-context resource limits."""
+"""Execution resource limits and observation scheduling defaults."""
 
 from dataclasses import dataclass
+
+DEFAULT_TRACE_BATCH_SIZE = 128
+DEFAULT_TRACE_FLUSH_INTERVAL = 3.0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -24,4 +27,4 @@ class PromptLimits:
             raise ValueError("prompt limits must be positive integers")
 
 
-__all__ = ["PromptLimits"]
+__all__ = ["PromptLimits", "DEFAULT_TRACE_BATCH_SIZE", "DEFAULT_TRACE_FLUSH_INTERVAL"]

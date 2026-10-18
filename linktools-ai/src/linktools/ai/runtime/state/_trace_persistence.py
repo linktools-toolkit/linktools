@@ -9,13 +9,15 @@ from typing import Protocol
 
 from linktools.core import environ
 
+from ...core import (
+    DEFAULT_TRACE_BATCH_SIZE as _OBSERVATION_FLUSH_BOUNDARIES,
+    DEFAULT_TRACE_FLUSH_INTERVAL as _OBSERVATION_FLUSH_SECONDS,
+)
 from ...errors import AIError, ErrorCode
 from ._step_archive import _AgentRunHistoryLock, _ProjectionOffset
 from ._step_contracts import AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.state.trace")
-_OBSERVATION_FLUSH_SECONDS = 3.0
-_OBSERVATION_FLUSH_BOUNDARIES = 128
 
 
 class _FlushProjection(Protocol):
@@ -49,14 +51,20 @@ class TracePersistence:
         self._background_tasks = background_tasks
         self.scheduler_task: asyncio.Task[None] | None = None
         self.wake = asyncio.Event()
-        self._started_at: float | None = None
+
+    def configure(self, agent_run_id: str, *, batch_size: int, flush_interval: float) -> None:
+        """Bind this run's observation policy before its first boundary."""
+        offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
+        if offset.observation_boundaries or offset.observation_task is not None:
+            raise RuntimeError("observation batching cannot change during an active run")
+        offset.observation_batch_size = batch_size
+        offset.observation_flush_interval = flush_interval
 
     def reset(self) -> None:
         self.offsets.clear()
         self.dirty.clear()
         self.scheduler_task = None
         self.wake.clear()
-        self._started_at = None
 
     async def settle_scheduler(self) -> None:
         self.wake.set()
@@ -83,7 +91,12 @@ class TracePersistence:
             offset.observation_boundaries += 1
             offset.observation_execution_id = execution_id
             offset.observation_producer_generation = producer_generation
-            pressure = offset.observation_boundaries >= _OBSERVATION_FLUSH_BOUNDARIES
+            if schedule:
+                interval = offset.observation_flush_interval or _OBSERVATION_FLUSH_SECONDS
+                offset.observation_deadline = monotonic() + interval
+            pressure = offset.observation_boundaries >= (
+                offset.observation_batch_size or _OBSERVATION_FLUSH_BOUNDARIES
+            )
         if pressure:
             await self._flush_boundary(
                 agent_run_id, execution_id=execution_id,
@@ -101,8 +114,6 @@ class TracePersistence:
             if not task.done():
                 return
             task.result()
-        if self._started_at is None:
-            self._started_at = monotonic()
         self.scheduler_task = asyncio.create_task(
             self._run_observation_scheduler(), name="history-observation-scheduler",
         )
@@ -131,34 +142,36 @@ class TracePersistence:
                 and (offset.observation_task is None or not offset.observation_task.done())
             )
             if not queued:
-                self._started_at = None
                 return
-            if self._started_at is None:
-                self._started_at = monotonic()
-            if all(self.offsets[run_id].observation_task is not None for run_id in queued):
+            waiting = tuple(
+                run_id for run_id in queued if self.offsets[run_id].observation_task is None
+            )
+            if not waiting:
                 await self.wake.wait()
                 continue
-            remaining = max(
-                0.0, self._started_at + _OBSERVATION_FLUSH_SECONDS - monotonic(),
+            deadline = min(
+                self.offsets[run_id].observation_deadline or monotonic() for run_id in waiting
             )
             try:
-                await asyncio.wait_for(self.wake.wait(), remaining)
+                await asyncio.wait_for(self.wake.wait(), max(0.0, deadline - monotonic()))
             except asyncio.TimeoutError:
                 pass
             if self.wake.is_set():
                 continue
-            self._started_at = None
-            for agent_run_id in queued:
+            for agent_run_id in waiting:
                 async with self._history_lock.hold(agent_run_id):
                     offset = self.offsets.get(agent_run_id)
                     if (offset is None or not offset.observation_boundaries
                             or offset.observation_task is not None
-                            or agent_run_id not in self.dirty):
+                            or agent_run_id not in self.dirty
+                            or offset.observation_deadline is not None
+                            and offset.observation_deadline > monotonic()):
                         continue
                     execution_id = offset.observation_execution_id
                     if execution_id is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     offset.observation_boundaries = 0
+                    offset.observation_deadline = None
                     generation = offset.observation_producer_generation
                 task = asyncio.create_task(
                     self._run_scheduled_projection(
@@ -186,6 +199,9 @@ class TracePersistence:
             dirty = agent_run_id in self.dirty
             if dirty:
                 offset.observation_boundaries = max(1, offset.observation_boundaries)
+                if offset.observation_deadline is None:
+                    interval = offset.observation_flush_interval or _OBSERVATION_FLUSH_SECONDS
+                    offset.observation_deadline = monotonic() + interval
             else:
                 offset.observation_boundaries = 0
                 offset.observation_execution_id = None
@@ -202,6 +218,7 @@ class TracePersistence:
             if offset is None or task is asyncio.current_task():
                 return
             offset.observation_boundaries = 0
+            offset.observation_deadline = None
             self.wake.set()
             if task is None:
                 return

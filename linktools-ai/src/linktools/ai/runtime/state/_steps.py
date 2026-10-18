@@ -317,6 +317,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                 for event in events:
                     self._staging.append_event_local(event)
                 if offset is not None:
+                    configured = self.trace_persistence.offsets.get(record.agent_run_id)
+                    if configured is not None:
+                        offset.observation_batch_size = configured.observation_batch_size
+                        offset.observation_flush_interval = configured.observation_flush_interval
                     self.trace_persistence.offsets[record.agent_run_id] = offset
                 if offset is None or restored is not None and offset.checkpoints == 0:
                     self.trace_persistence.dirty.add(record.agent_run_id)

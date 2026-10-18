@@ -29,9 +29,14 @@ _WARNING_INTERVAL_SECONDS = 30.0
 
 class MetricRecording:
     """Own one dataset recording scope, never its borrowed store or cache."""
-    def __init__(self, metrics: Metrics, cache: object | None) -> None:
+    def __init__(
+        self, metrics: Metrics, cache: object | None, *,
+        batch_size: int = 128, flush_interval: float = 60.0,
+    ) -> None:
         self._metrics = metrics
-        self._scope = None if cache is None else BatchWriteScope(cache, self._write_batch)
+        self._scope = None if cache is None else BatchWriteScope(
+            cache, self._write_batch, batch_size=batch_size, flush_interval=flush_interval,
+        )
         self._accepting = True
         self._accepted = 0
         self._persisted = 0

@@ -82,6 +82,7 @@ class BatchWriteScope:
     def __init__(
         self, cache: object,
         write_batch: Callable[[tuple[_Entry, ...]], Awaitable[None]],
+        *, batch_size: int = 128, flush_interval: float = 60.0,
     ) -> None:
         if not isinstance(cache, _WriteBuffer) or not all(
             callable(getattr(cache, name, None)) for name in ("append", "read_batch", "ack")
@@ -89,11 +90,18 @@ class BatchWriteScope:
             raise TypeError("cache must provide append, read_batch and ack")
         if not callable(write_batch):
             raise TypeError("write_batch must be callable")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if (
+            isinstance(flush_interval, bool) or not isinstance(flush_interval, (int, float))
+            or not math.isfinite(flush_interval) or flush_interval <= 0
+        ):
+            raise ValueError("flush_interval must be finite and positive")
         self._cache = cache
         self._scope = uuid4().hex
         self._write_batch = write_batch
-        self._batch_size = _BATCH_SIZE
-        self._flush_interval = _FLUSH_INTERVAL_SECONDS
+        self._batch_size = batch_size
+        self._flush_interval = float(flush_interval)
         self._accepting = True
         self._stop_requested = False
         self._accepted = 0
@@ -710,7 +718,10 @@ class StorageBuffer(Generic[_Key, _Info]):
         self._hot = StorageReadCache(cache)
         self._hot_scope = uuid4().hex
         self._hot_keys: OrderedDict[_Key, str] = OrderedDict()
-        self._scope = BatchWriteScope(cache, self._consume_batch) if all(methods) else None
+        self._scope = BatchWriteScope(
+            cache, self._consume_batch, batch_size=_BATCH_SIZE,
+            flush_interval=_FLUSH_INTERVAL_SECONDS,
+        ) if all(methods) else None
         self._direct_active = 0
         self._direct_done = asyncio.Event()
         self._direct_done.set()

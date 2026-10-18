@@ -101,7 +101,9 @@ from linktools.ai.observe import Metrics
 from linktools.ai.storage import InMemoryCacheBackend
 
 cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
-metrics = Metrics.sqlite("metrics.sqlite3", cache=cache)
+metrics = Metrics.sqlite(
+    "metrics.sqlite3", cache=cache, batch_size=64, flush_interval=15.0,
+)
 recorder = metrics.recorder()
 try:
     accepted = await recorder.try_record(observation)
@@ -114,7 +116,11 @@ Automatic Agent and Task observations, including evaluation work in a Runtime,
 require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
-All Metrics constructors and factories accept `cache`. Only automatic recorders
+All Metrics constructors and factories accept `cache`, `batch_size=128`, and
+`flush_interval=60.0` (seconds). `batch_size` must be an integer from 1 to 256;
+`flush_interval` must be finite and positive. Booleans are invalid for both.
+These settings are validated when creating the dataset and inherited by each
+fresh recorder, including those owned by separate Runtimes. Only automatic recorders
 use its complete buffer group; otherwise they await the source in the caller,
 without a hidden local queue. `record`, `record_observations`, and queries keep
 their strong source semantics. Queries never add pending observations.
@@ -136,8 +142,9 @@ with `unconfirmed` preserving failed or unknown source outcomes.
 `StorageBuffer` separately provides final-value reads and writes over a source;
 it reuses the same scheduler rather than defining another pending queue.
 
-Automatic batches flush at 128 entries or 60 seconds after the first admission,
-whichever comes first; explicit flush and close wake partial batches. These
+Automatic batches flush at the configured entry threshold or interval after
+the first pending admission, whichever comes first (defaults: 128 entries and
+60 seconds); explicit flush and close wake partial batches. These
 are batching defaults, not query TTLs. The cache contains the encoded pending
 bytes using the existing Observation codec. Independent recorders own separate
 scopes and close only their own work; shared cache capacity remains shared.
@@ -270,8 +277,8 @@ require a new per-call cache option or a different Runtime profile.
 
 ## Runtime observation publication
 
-Metrics uses the cache's pending-write group with its 60-second/128-entry
-scheduler. Runtime retains its existing archive-owned publication scheduler,
+Metrics uses the cache's pending-write group with its configurable scheduler
+(defaults: 60 seconds or 128 entries). Runtime retains its existing archive-owned publication scheduler,
 coalescing public observations for up to three seconds or 128 boundaries.
 Recovery checkpoints and final conversation/result commits keep their own
 reliable transaction boundaries; terminal completion and close drain publication.

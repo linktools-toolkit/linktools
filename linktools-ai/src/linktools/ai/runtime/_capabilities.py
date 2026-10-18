@@ -122,6 +122,11 @@ async def compose_platform_capabilities(
                 if not enabled:
                     return None
                 bound_types.add(feature)
+                if isinstance(capability, TraceCapability) and isinstance(run_store, RuntimeAgentRunStore):
+                    run_store.trace_persistence.configure(
+                        agent_run_id, batch_size=capability.batch_size,
+                        flush_interval=capability.flush_interval,
+                    )
                 return capability.bind(service(persistence))
         return capability
 

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -48,12 +49,21 @@ _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 
 
 class Metrics:
-    """Metrics dataset facade without a user-visible lifecycle."""
+    """Close-free dataset; each recorder owns its batching lifetime.
+
+    With a write-capable cache, automatic recordings flush at batch_size or
+    flush_interval seconds from the first pending observation, whichever comes
+    first. Explicit writes and cache-free recording still await persistence.
+    """
 
     def __init__(
         self, store: MetricStore, *, namespace: str = "default",
         cache: object | None = None,
+        batch_size: int = 128, flush_interval: float = 60.0,
     ) -> None:
+        self._validate_batching(batch_size, flush_interval)
+        self._batch_size = batch_size
+        self._flush_interval = float(flush_interval)
         methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
         if any(method is not None for method in methods) and not all(callable(method) for method in methods):
             raise TypeError("cache must implement append, read_batch and ack together")
@@ -63,7 +73,9 @@ class Metrics:
 
     def recorder(self) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
-        return MetricRecording(self, self._cache)
+        return MetricRecording(
+            self, self._cache, batch_size=self._batch_size, flush_interval=self._flush_interval,
+        )
 
     @property
     def namespace(self) -> str:
@@ -72,31 +84,62 @@ class Metrics:
     @classmethod
     def in_memory(
         cls, *, namespace: str = "default", cache: object | None = None,
+        batch_size: int = 128, flush_interval: float = 60.0,
     ) -> Metrics:
-        return cls(InMemoryMetricStore(), namespace=namespace, cache=cache)
+        return cls(
+            InMemoryMetricStore(), namespace=namespace, cache=cache,
+            batch_size=batch_size, flush_interval=flush_interval,
+        )
 
     @classmethod
     def sqlite(
         cls, path: str | Path, *, namespace: str = "default",
         cache: object | None = None,
+        batch_size: int = 128, flush_interval: float = 60.0,
     ) -> Metrics:
-        return cls(SQLiteMetricStore(path), namespace=namespace, cache=cache)
+        cls._validate_batching(batch_size, flush_interval)
+        return cls(
+            SQLiteMetricStore(path), namespace=namespace, cache=cache,
+            batch_size=batch_size, flush_interval=flush_interval,
+        )
 
     @classmethod
     def sql(
         cls, engine: AsyncEngine, *, namespace: str = "default",
         cache: object | None = None,
+        batch_size: int = 128, flush_interval: float = 60.0,
     ) -> Metrics:
         from ._sql import SqlMetricStore
 
-        return cls(SqlMetricStore(engine), namespace=namespace, cache=cache)
+        cls._validate_batching(batch_size, flush_interval)
+        return cls(
+            SqlMetricStore(engine), namespace=namespace, cache=cache,
+            batch_size=batch_size, flush_interval=flush_interval,
+        )
 
     @classmethod
     def from_store(
         cls, store: MetricStore, *, namespace: str = "default",
         cache: object | None = None,
+        batch_size: int = 128, flush_interval: float = 60.0,
     ) -> Metrics:
-        return cls(store, namespace=namespace, cache=cache)
+        return cls(
+            store, namespace=namespace, cache=cache,
+            batch_size=batch_size, flush_interval=flush_interval,
+        )
+
+    @classmethod
+    def _validate_batching(cls, batch_size: int, flush_interval: float) -> None:
+        if (
+            isinstance(batch_size, bool) or not isinstance(batch_size, int)
+            or not 1 <= batch_size <= _MAX_RECORD_BATCH
+        ):
+            raise ValueError(f"batch_size must be an integer between 1 and {_MAX_RECORD_BATCH}")
+        if (
+            isinstance(flush_interval, bool) or not isinstance(flush_interval, (int, float))
+            or not math.isfinite(flush_interval) or flush_interval <= 0
+        ):
+            raise ValueError("flush_interval must be finite and positive")
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):

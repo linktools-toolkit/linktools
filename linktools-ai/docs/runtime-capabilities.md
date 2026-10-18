@@ -333,3 +333,18 @@ See the native [custom capability documentation](https://ai.pydantic.dev/capabil
 for public hook signatures and lifecycle. Provider quota details are documented
 by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 [Anthropic](https://platform.claude.com/docs/en/api/rate-limits).
+
+### Observation batch timing
+
+`TraceCapability(batch_size=128, flush_interval=3.0)` controls observation-only
+flush pressure (counted in observation boundaries) and maximum scheduled delay
+in seconds. Each run retains its own limits and deadline. A lower threshold or
+interval can make partial trace visible sooner at the cost of more writes.
+Explicit flush, tool-effect, checkpoint and terminal safety boundaries can
+publish earlier and cannot be delayed by these options. Cache configuration does
+not weaken those boundaries.
+
+Metrics recording has independent `batch_size=128, flush_interval=60.0` options
+on its dataset constructors. With `cache=None`, automatic observations remain
+synchronous; timing options do not introduce an in-memory queue. These settings
+are resource scheduling policy, not model-visible execution binding identity.

@@ -19,7 +19,7 @@ from ._ids import (
     agent_conversation_id,
     agent_run_id,
 )
-from ._limits import PromptLimits
+from ._limits import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL, PromptLimits
 from ._json import (
     ImmutableJsonMapping,
     JsonValue,
@@ -125,6 +125,8 @@ __all__ = [
     "Principal",
     "PrincipalKind",
     "PromptLimits",
+    "DEFAULT_TRACE_BATCH_SIZE",
+    "DEFAULT_TRACE_FLUSH_INTERVAL",
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",
