@@ -24,6 +24,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import HmacCursorSigner, agent_run_id, agent_conversation_id
 from linktools.ai.runtime import RuntimeDomain
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
+from linktools.ai.runtime._persistence_services import CheckpointService
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
@@ -211,7 +212,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             next_model_request_seq=high_water + 1,
         )
         request_context = await capability.before_model_request(ctx, SimpleNamespace())
-        await CheckpointCapability().bind(capability).before_model_request(ctx, request_context)
+        await CheckpointCapability().bind(CheckpointService(capability)).before_model_request(ctx, request_context)
         received = []
         b = ModelResponse(
             parts=[

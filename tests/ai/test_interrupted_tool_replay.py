@@ -19,6 +19,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
+from linktools.ai.runtime._persistence_services import TraceService
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
@@ -220,7 +221,7 @@ async def test_only_typed_unknown_effect_errors_are_unfinished_attempts(error: E
     capability = AgentRunCapture(
         recorder=recorder, agent_id="agent", agent_run_id="run",
     )
-    trace = TraceCapability().bind(capability)
+    trace = TraceCapability().bind(TraceService(capability))
     call = ToolCallPart("echo", {}, tool_call_id="call")
     definition = ToolDefinition(name="echo")
     context = SimpleNamespace(run_step=1)
@@ -310,3 +311,29 @@ async def test_unknown_attempts_still_validate_tool_identity_and_coordinates(cor
                 "run", execution_id="execution", tenant_id="tenant", events=events,
             )
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_runtime_composition_records_failed_tool_trace() -> None:
+    from pydantic_ai.models.test import TestModel
+    from linktools.ai.capability import AgentContext, RuntimeFeatures
+    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from .test_explicit_runtime_features import _FeatureModels
+
+    async def explode(context: AgentContext[None]) -> str:
+        raise RuntimeError("tool failed")
+
+    features = RuntimeFeatures("failed-tool-trace")
+    features.tool(explode, effect_policy="none")
+    features.agent("default", model="default", allow_tools=("explode",))
+    features.capability(TraceCapability(), scope="runtime")
+    async with Runtime.open(
+        "failed-tool-trace", features=features, storage=RuntimeStorage.in_memory(),
+        models=_FeatureModels(TestModel(call_tools=["explode"], custom_output_text="done")),
+    ) as runtime:
+        execution = await runtime.agents.get().start("invoke tool")
+        await execution.wait(timeout_seconds=5)
+        trace = await execution.trace()
+        failures = [item for item in trace.items if item.payload.get("kind") == "TOOL_ERROR"]
+        assert len(failures) == 1
+        assert failures[0].payload["tool_name"] == "explode"
