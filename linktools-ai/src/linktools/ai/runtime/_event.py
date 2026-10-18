@@ -1037,12 +1037,24 @@ class DefaultEventService:
 
     async def _stream_shared(
         self, execution_id: str, *, principal: Principal, after_event_seq: int,
+        initial_admission: tuple[int, str] | None = None,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         shared = self._live.shared
         assert shared is not None
         head = await self._executions.get_history_head(execution_id, tenant_id=principal.tenant_id)
         cursor = after_event_seq
         resumed = shared_stream_position(execution_id)
+        if (not initial_admission and resumed is None and after_event_seq == 0
+                and head is not None and head.state.value == "open"
+                and head.producer_generation == 0 and head.producer_claim_id is None):
+            # An observer before the first admission has not lost a preview.
+            async with aclosing(self._stream_durable(
+                execution_id, tenant_id=principal.tenant_id, after_event_seq=0, principal=principal,
+                initial_shared=True,
+            )) as durable:
+                async for event in durable:
+                    yield event
+            return
         generation = 0 if head is None else head.producer_generation
         position = 0 if resumed is None else resumed[1]
         claim = None if head is None else head.producer_claim_id
@@ -1051,7 +1063,8 @@ class DefaultEventService:
         ))
         identity = key.hex()
         gap = ((resumed is not None and resumed[0] != identity)
-               or (resumed is None and after_event_seq > 0))
+               or (resumed is None and after_event_seq > 0 and not initial_admission)
+               or (initial_admission is not None and initial_admission != (generation, claim)))
         if head is None or head.state.value != "open" or generation < 1 or not claim:
             gap = gap or resumed is not None
         else:
@@ -1196,6 +1209,7 @@ class DefaultEventService:
         tenant_id: str,
         after_event_seq: int,
         principal: Principal | None = None,
+        initial_shared: bool = False,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         cursor = after_event_seq
         poll_backoff = 1.0
@@ -1227,7 +1241,16 @@ class DefaultEventService:
             failure = self._worker_failure(execution_id, tenant_id=tenant_id)
             if failure is not None:
                 raise failure
-            execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+            initial_head = None
+            if initial_shared:
+                async def capture(_transaction):
+                    execution = await self._executions.get(execution_id, tenant_id=tenant_id)
+                    head = await self._executions.get_history_head(execution_id, tenant_id=tenant_id)
+                    return execution, head
+
+                execution, initial_head = await self._executions.state_store.read(capture)
+            else:
+                execution = await self._executions.get(execution_id, tenant_id=tenant_id)
             if execution is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
@@ -1243,7 +1266,7 @@ class DefaultEventService:
                 raise
             except Exception as error:
                 raise _ExecutionStreamFailure(error) from error
-            if is_local_producer and principal is not None:
+            if is_local_producer and principal is not None and not initial_shared:
                 # Only an initially durable observer may attach to a later local
                 # producer. Overflow and handoff replay must stay durable-only.
                 async with aclosing(self._stream_with_live(
@@ -1253,6 +1276,17 @@ class DefaultEventService:
                     async for event in stream:
                         yield event
                 return
+            if principal is not None and initial_shared:
+                head = initial_head
+                if (execution.agent_run_seq == 1 and head is not None and head.state.value == "open"
+                        and head.producer_generation > 0 and head.producer_claim_id):
+                    async with aclosing(self._stream_shared(
+                        execution_id, principal=principal, after_event_seq=cursor,
+                        initial_admission=(head.producer_generation, head.producer_claim_id),
+                    )) as stream:
+                        async for event in stream:
+                            yield event
+                    return
             if is_local_producer or principal is not None:
                 try:
                     await _wait_live_activity(

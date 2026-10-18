@@ -697,3 +697,68 @@ async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_st
         assert storage.cache is cache
     assert cache.open_keys == []
     assert not cache.closed
+
+
+@pytest.mark.asyncio
+async def test_first_admission_attach_rejects_changed_producer_identity() -> None:
+    from types import SimpleNamespace
+    from linktools.ai.core import canonical_json_bytes
+    from linktools.ai.runtime._shared_stream import stream_key
+
+    backend = InMemoryStreamBackend(max_bytes=10000)
+    writer = await backend.open_stream(stream_key("scope", "tenant", "execution", 7, "replacement"), b"owner")
+    await writer.append(1, canonical_json_bytes({
+        "kind": "delta", "type": "ASSISTANT_TEXT_DELTA", "text": "wrong admission",
+    }))
+    service, executions, _ = _event_service(backend)
+    executions.head = SimpleNamespace(
+        producer_generation=7, producer_claim_id="replacement", state=SimpleNamespace(value="open"),
+    )
+    stream = service._stream_shared(
+        "execution", principal=_principal(), after_event_seq=1, initial_admission=(4, "first"),
+    )
+    try:
+        items = [item async for item in stream]
+        assert items[0].event_type == "STREAM_RESET"
+        assert [item.durable_seq for item in items[1:]] == [2, 3]
+        assert all(item.event_type != "ASSISTANT_TEXT_DELTA" for item in items)
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_takeover", (False, True))
+async def test_early_shared_watch_does_not_attach_to_later_attempt(local_takeover: bool) -> None:
+    from types import SimpleNamespace
+    from linktools.ai.core import ExecutionStatus
+
+    backend = _CountingStreamBackend()
+    service, executions, _ = _event_service(backend, durable_count=0)
+    if local_takeover:
+        service._live.is_local_producer = lambda execution_id: True
+    reads = 0
+
+    async def get(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return SimpleNamespace(
+            status=ExecutionStatus.STARTED if reads == 1 else ExecutionStatus.SUCCEEDED,
+            event_seq=0, agent_run_seq=2,
+        )
+
+    async def read(callback):
+        return await callback(None)
+
+    executions.get = get
+    executions.state_store = SimpleNamespace(read=read)
+    executions.head = SimpleNamespace(
+        producer_generation=7, producer_claim_id="later", state=SimpleNamespace(value="open"),
+    )
+    stream = service._stream_durable(
+        "execution", tenant_id="tenant", after_event_seq=0, principal=_principal(), initial_shared=True,
+    )
+    try:
+        assert await asyncio.wait_for(_collect(stream), 5) == []
+        assert not backend.read_entered.is_set()
+    finally:
+        await stream.aclose()

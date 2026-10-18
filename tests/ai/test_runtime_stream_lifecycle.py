@@ -46,8 +46,10 @@ class _Streams(InMemoryStreamBackend):
 @asynccontextmanager
 async def _runtimes(tmp_path, cache):
     release = asyncio.Event()
+    entered = asyncio.Event()
 
     async def model(messages, info):
+        entered.set()
         yield "first "
         await release.wait()
         yield "last"
@@ -62,6 +64,7 @@ async def _runtimes(tmp_path, cache):
         async with Runtime.open("stream-lifecycle", models=models, capabilities=(group,), storage=storage) as reader:
             execution = await owner.agents.get().start("question")
             try:
+                await asyncio.wait_for(entered.wait(), 5)
                 yield owner, reader, storage, execution, release
             finally:
                 cache.cleanup_release.set()
@@ -215,3 +218,84 @@ async def test_cancelled_default_watch_read_releases_only_its_observer(tmp_path:
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
             await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_early", (False, True))
+async def test_remote_watch_before_first_admission_receives_later_preview(tmp_path: Path, monkeypatch, close_early: bool) -> None:
+    from linktools.ai.runtime._local import LocalExecutionBackend
+
+    admit = asyncio.Event()
+    observed_unclaimed = asyncio.Event()
+    release = asyncio.Event()
+    run = LocalExecutionBackend._run
+
+    async def delayed_run(self, *args, **kwargs):
+        await admit.wait()
+        return await run(self, *args, **kwargs)
+
+    async def model(messages, info):
+        yield "first "
+        await release.wait()
+        yield "last"
+
+    monkeypatch.setattr(LocalExecutionBackend, "_run", delayed_run)
+    cache = _Streams()
+    group = CapabilityGroup("early-preview")
+    group.agent("default", model="default", allow_tools=())
+    models = _Models(FunctionModel(stream_function=model))
+    path = tmp_path / "early.db"
+    async with Runtime.open("early-preview", models=models, capabilities=(group,),
+                            storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
+        reader_storage = RuntimeStorage.sqlite(path, cache=cache)
+        async with Runtime.open("early-preview", models=models, capabilities=(group,),
+                                storage=reader_storage) as reader:
+            execution = await owner.agents.get().start("question")
+            repository = reader_storage.execution.executions
+            read_head = repository.get_history_head
+
+            async def observed_head(*args, **kwargs):
+                head = await read_head(*args, **kwargs)
+                if head is not None and head.producer_generation == 0 and head.producer_claim_id is None:
+                    observed_unclaimed.set()
+                return head
+
+            monkeypatch.setattr(repository, "get_history_head", observed_head)
+            remote = await reader.executions.get(execution.execution_id)
+            stream = remote.watch(include_content=True)
+            observed = []
+
+            async def first_preview():
+                async for item in stream:
+                    observed.append(item.event)
+                    if item.event.event_type == "ASSISTANT_TEXT_DELTA":
+                        return item
+                raise AssertionError("preview missing")
+
+            first = asyncio.create_task(first_preview())
+            try:
+                await asyncio.wait_for(observed_unclaimed.wait(), 5)
+                assert cache.reads == 0 and not first.done()
+                if close_early:
+                    await asyncio.wait_for(reader.close(), 5)
+                    assert not reader._observation_sessions and not release.is_set()
+                    assert not admit.is_set() and cache.active_reads == 0
+                    return
+                admit.set()
+                item = await asyncio.wait_for(first, 5)
+                assert item.event.payload["text"] == "first "
+                assert any(event.event_type == "EXECUTION_STARTED" for event in observed)
+                sequences = [event.durable_seq for event in observed if event.durable_seq is not None]
+                assert sequences == sorted(set(sequences))
+                current = await repository.get(execution.execution_id, tenant_id=reader.tenant_id)
+                head = await read_head(execution.execution_id, tenant_id=reader.tenant_id)
+                assert current.agent_run_seq == 1 and not current.durable_trace
+                assert head.producer_generation > 1 and cache.reads > 0
+                assert not release.is_set()
+            finally:
+                admit.set()
+                release.set()
+                first.cancel()
+                await asyncio.gather(first, return_exceptions=True)
+                await stream.aclose()
+                assert (await execution.wait(timeout_seconds=5)).result.output == {"text": "first last"}

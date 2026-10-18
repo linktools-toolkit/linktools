@@ -438,6 +438,9 @@ stop a remote provider or prove cancellation or task migration.
 After a preview gap or admission change, the current watch uses durable replay
 for the remainder of that observation. A cursor containing only durable
 progress does not silently resume provisional text from another admission.
+An initial watch opened before any producer claim instead follows durable
+events until the first attempt is admitted, then may attach to that claim's
+shared preview. It does not attach to a later attempt or a changed claim.
 Realtime continuation across every recovery is therefore not guaranteed; the
 reset and authoritative history are the safe recovery result.
 
