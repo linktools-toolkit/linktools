@@ -12,7 +12,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.spec import AgentSpec
 
-from ._runtime_test_helpers import _Models, _UsageFunctionModel
+from ._runtime_test_helpers import _Models, _UsageFunctionModel, _persistence_capabilities
 
 
 @pytest.mark.asyncio
@@ -44,7 +44,7 @@ async def test_system_prompt_presence_matches_provider_observation_and_history(
         options["system_prompt"] = "Keep this system prompt"
     group.agent("default", **options)
     async with Runtime.open("system-prompts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group, _persistence_capabilities(trace=True))) as runtime:
         agent = runtime.agents.get()
         if case == "derive-none":
             agent = agent.derive(system_prompt=None)
@@ -84,7 +84,7 @@ async def test_imported_system_history_respects_explicit_replacement(
         ModelResponse(parts=[TextPart("previous")]),
     ), replace_history_system_prompt=replace_system)
     async with Runtime.open("imported-system", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group, _persistence_capabilities(trace=True))) as runtime:
         execution = await runtime.agents.get().start("question", input_context=imported)
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"
@@ -129,7 +129,7 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
         options["system_prompt"] = system_prompt
     group.agent("default", **options)
     async with Runtime.open("http-system", models=registry, storage=RuntimeStorage.filesystem(tmp_path),
-                            capabilities=(group,)) as runtime:
+                            capabilities=(group, _persistence_capabilities(trace=True))) as runtime:
         execution = await runtime.agents.get().start("question")
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"

@@ -75,3 +75,47 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
             assert calls == 2
         finally:
             release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ("result", "result_payload_size", "wait"))
+async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query: str,
+) -> None:
+    async def model(messages, info):
+        yield "finished"
+
+    group = CapabilityGroup("terminal-consumption")
+    group.agent("default", model="default", allow_tools=())
+    async with Runtime.open(
+        "terminal-consumption", models=_Models(FunctionModel(stream_function=model)),
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), capabilities=(group,),
+    ) as runtime:
+        await runtime.agents.get().create_session("session")
+        execution = await runtime.agents.get().session("session").start(
+            "first", idempotency_key="first",
+        )
+        await execution.wait()
+        service = runtime._execution_service
+        load = service._load_execution
+        confirmed = False
+
+        async def load_once(execution_id, *, tenant_id):
+            nonlocal confirmed
+            if confirmed:
+                raise AssertionError("terminal consumption already owns its confirmed status")
+            value = await load(execution_id, tenant_id=tenant_id)
+            assert value.status is ExecutionStatus.SUCCEEDED
+            confirmed = True
+            return value
+
+        monkeypatch.setattr(service, "_load_execution", load_once)
+        result = await getattr(service, query)(
+            execution.execution_id, principal=runtime.default_principal,
+        )
+        assert confirmed
+        if query == "result_payload_size":
+            assert result > 0
+        else:
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert result.output == {"text": "finished"}

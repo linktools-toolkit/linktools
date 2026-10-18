@@ -17,7 +17,7 @@ from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.web import create_app
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
 _HEADERS = {"X-LinkTools-Console": "1"}
 
@@ -97,7 +97,10 @@ async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding()
 @pytest.mark.asyncio
 async def test_session_execution_history_trace_result_and_metrics_use_runtime() -> None:
     metrics = Metrics.in_memory()
-    async with Runtime.open("web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), metrics=metrics) as runtime:
+    async with Runtime.open(
+        "web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), metrics=metrics,
+        capabilities=(_persistence_capabilities(trace=True),),
+    ) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:
             request = {"session_id": "web-session", "request_id": "new-session", "title": "Review <script>"}
             first = await http.post("/api/sessions", json=request, headers=_HEADERS)
@@ -278,7 +281,8 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
 
 @pytest.mark.asyncio
 async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_snapshot() -> None:
-    async with Runtime.open("web-stream", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("web-stream", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
+                            capabilities=(_persistence_capabilities(trace=True),)) as runtime:
         execution = await runtime.agents.get().start("hello")
         await execution.wait()
         async with client(create_app(runtime=runtime)) as http:
@@ -438,6 +442,7 @@ async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_use
     prompt = '{"error_diagnostics":{"exception_message":"user content"}}'
     async with Runtime.open(
         "web-failed-stream", models=_Models(_UsageFunctionModel(fail)), storage=RuntimeStorage.in_memory(),
+        capabilities=(_persistence_capabilities(trace=True),),
     ) as runtime:
         execution = await runtime.agents.get().start(prompt)
         await execution.wait()
@@ -608,7 +613,7 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
     try:
         async with Runtime.open(
             "web-end-recovery", models=_ToolModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(application,),
+            capabilities=(application, _persistence_capabilities(restart=True, trace=True)),
         ) as runtime, client(create_app(runtime=runtime)) as http:
             session = await runtime.agents.get("default").create_session("session")
             execution = await session.start("inspect", idempotency_key="turn")

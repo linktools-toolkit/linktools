@@ -18,7 +18,7 @@ from linktools.ai.evaluation import (
     EvaluationSpec, GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
     TaskCaseInput,
 )
-from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runtime, RuntimeStorage
+from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, DurableTraceCapability, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from linktools.ai.workspace import Workspace
 
@@ -53,6 +53,7 @@ class DelegatingModels(FixtureModels):
 
 def child_capabilities(revision: int, instruction: str) -> CapabilityGroup[None]:
     group = CapabilityGroup[None]("captured-child-consumer")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="Parent behavior", allow_tools=(),
                 allow_skills=(), allow_subagents=("child",))
     group.agent("child", revision=revision, model="default", system_prompt=instruction, allow_tools=(),

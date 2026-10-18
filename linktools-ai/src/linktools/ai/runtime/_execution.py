@@ -147,7 +147,7 @@ def _overlay_execution_correlation(
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
-def consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
+def consumed_terminal_query(method: "Callable[..., object]") -> "Callable[..., object]":
     @wraps(method)
     async def wrapped(
         self: "DefaultExecutionService",
@@ -161,7 +161,9 @@ def consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
                 result = await method(
                     self, execution_id, *args, principal=principal, **kwargs
                 )
-            await self._request_handoff_if_terminal(execution_id, principal.tenant_id)
+            # Successful consumers have already read and validated the terminal result.
+            # Retention still checks current dependency holds before releasing anything.
+            await self.request_terminal_handoff(execution_id, tenant_id=principal.tenant_id)
             return result
 
     return wrapped
@@ -2871,7 +2873,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._history_service.list(request)
 
-    @consumed_query
+    @consumed_terminal_query
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult:
@@ -2954,7 +2956,7 @@ class DefaultExecutionService:
         ) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
-    @consumed_query
+    @consumed_terminal_query
     async def result_payload_size(
         self, execution_id: str, *, principal: Principal
     ) -> int:
@@ -2974,7 +2976,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result.output.size
 
-    @consumed_query
+    @consumed_terminal_query
     async def wait(
         self,
         execution_id: str,

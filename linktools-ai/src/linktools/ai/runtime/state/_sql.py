@@ -158,12 +158,14 @@ class SqlStateStorageGroup:
         async with self._session() as session:
             async with session.begin():
                 await self._context.dialect.begin_consistent_read(session)
+                clock = _SqlTransactionClock(session, self._context)
                 transactions = {
                     store: _SqlTransaction(
                         session,
                         self._metadata,
                         self._context,
                         store.store_digest,
+                        clock=clock,
                     )
                     for store in members
                 }
@@ -190,12 +192,14 @@ class SqlStateStorageGroup:
             return await fn(active_state_group_transaction(self, members))
 
         async def execute(session: "AsyncSession") -> ValueT:
+            clock = _SqlTransactionClock(session, self._context)
             transactions = {
                 store: _SqlTransaction(
                     session,
                     self._metadata,
                     self._context,
                     store.store_digest,
+                    clock=clock,
                 )
                 for store in members
             }
@@ -545,6 +549,22 @@ class SqlStateStore:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
 
+class _SqlTransactionClock:
+    """Keep one database timestamp within one physical transaction."""
+
+    def __init__(self, session: "AsyncSession", context: SqlStorageContext) -> None:
+        self._session = session
+        self._context = context
+        self._now: datetime | None = None
+
+    async def now(self) -> datetime:
+        if self._now is None:
+            self._now = await self._context.run_statement(
+                self._context.dialect.database_now(self._session)
+            )
+        return self._now
+
+
 class _SqlTransaction:
     def __init__(
         self,
@@ -552,6 +572,8 @@ class _SqlTransaction:
         metadata: "MetaData",
         context: SqlStorageContext,
         store_digest: bytes,
+        *,
+        clock: _SqlTransactionClock | None = None,
     ) -> None:
         if not isinstance(store_digest, bytes) or len(store_digest) != 32:
             raise ValueError("store_digest must be a 32-byte digest")
@@ -564,7 +586,7 @@ class _SqlTransaction:
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
-        self._now: datetime | None = None
+        self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
 
     def _abort_mutation(self, error: BaseException) -> None:
@@ -587,11 +609,7 @@ class _SqlTransaction:
             raise
 
     async def now(self) -> datetime:
-        if self._now is None:
-            self._now = await self._context.run_statement(
-                self._context.dialect.database_now(self._session)
-            )
-        return self._now
+        return await self._clock.now()
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
         from sqlalchemy import select

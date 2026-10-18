@@ -3,15 +3,18 @@
 """Cancellation and capability error-boundary behavior."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 from linktools.ai.asset._sql import SqlAssetBackend
 from linktools.ai.capability import SubagentDelegate
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._agent_executor import (
     _cleanup_agent_run_resources,
@@ -38,6 +41,16 @@ from linktools.ai.task import (
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
 from linktools.ai.workspace import BubblewrapSandbox
+
+
+@pytest_asyncio.fixture
+async def execution_storage() -> AsyncIterator[RuntimeStorage]:
+    storage = RuntimeStorage.in_memory()
+    await storage.initialize(namespace="boundary", tenant_id="tenant")
+    try:
+        yield storage
+    finally:
+        await storage.close()
 
 
 def test_subagent_delegate_contract_requires_mapping_result() -> None:
@@ -270,7 +283,7 @@ async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> None:
+async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: RuntimeStorage) -> None:
     from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
 
     service = object.__new__(DefaultExecutionService)
@@ -278,6 +291,9 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> 
     service._handoff = HandoffGate()
 
     class Executions:
+        def __init__(self) -> None:
+            self.state_store = execution_storage.execution.executions.state_store
+
         async def acquire_dependency_hold(
             self,
             execution_id: str,

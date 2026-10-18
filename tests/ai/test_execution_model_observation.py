@@ -253,11 +253,14 @@ async def test_facade_forwards_metadata_mode() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite"])
-async def test_real_execution_metadata_live_and_final_handoff(backend, tmp_path) -> None:
+@pytest.mark.parametrize("backend", ["memory", "filesystem", "sqlite", "transient"])
+@pytest.mark.parametrize("durable_trace", [False, True])
+async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.capability import CapabilityGroup
-    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.runtime import (
+        DurableTraceCapability, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
+    )
     from .test_live_history_readback_integration import _Models
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -270,8 +273,11 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, tmp_path)
         "memory": lambda: RuntimeStorage.in_memory(),
         "filesystem": lambda: RuntimeStorage.filesystem(tmp_path / "state"),
         "sqlite": lambda: RuntimeStorage.sqlite(tmp_path / "state.db"),
+        "transient": lambda: RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient())),
     }[backend]()
     group = CapabilityGroup[None]("execution-observation")
+    if durable_trace:
+        group.capability(DurableTraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "execution-observation", models=_Models(_UsageFunctionModel(model)),
@@ -292,10 +298,19 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, tmp_path)
         finally:
             release.set()
         assert result.result.output == {"text": "private response"}
-        assert result.observation_error is None
         assert rows[0].item.status == "RUNNING"
-        assert rows[-1].item.status == "SUCCEEDED"
-        assert rows[-1].visibility == "durable_history"
+        if durable_trace and backend != "transient":
+            assert result.observation_error is None
+            assert rows[-1].item.status == "SUCCEEDED"
+            assert rows[-1].visibility == "durable_history"
+        else:
+            assert result.observation_error is not None
+            assert result.observation_error.origin == "stream"
+            assert result.observation_error.safe_details == {
+                "phase": "drain", "reason": "model_state_coverage_unavailable",
+            }
+            assert all(row.visibility == "local_staging" for row in rows)
+            assert (await execution.wait()).result.output == {"text": "private response"}
         assert all(not row.item.content_included and not row.item.request
                    and row.item.response is None for row in rows)
         assert all(row.root_execution_id == execution.execution_id for row in rows)
@@ -467,3 +482,182 @@ async def test_execution_final_metadata_remains_available_without_live_notificat
     assert metadata[-1].visibility == "durable_history"
     assert all(subscription.closed for subscription in bundle.runtime.history.subscriptions)
     assert not bundle.runtime._observation_sessions
+
+
+@pytest.mark.parametrize("local,durable", [(True, False), (False, True), (False, False)])
+def test_declared_model_coverage_cannot_lose_observed_cutoffs(local, durable) -> None:
+    from linktools.ai.runtime._history_projection import _model_interaction_update_ranges
+
+    boundary = ModelInteractionReadBoundary((), (), local, durable)
+    with pytest.raises(AIError) as caught:
+        _model_interaction_update_ranges(
+            "execution", boundary, (UsageReadCutoff("execution", 1, 1),), 200,
+        )
+    assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+@pytest.mark.parametrize("composed", [False, True])
+async def test_missing_model_coverage_preserves_previously_observed_durable_facts(
+    durable: bool, composed: bool,
+) -> None:
+    from linktools.ai.runtime._graph_projection import _GraphModelProjection
+
+    bundle = _bundle()
+    history = bundle.runtime.history
+    history.durable = durable
+    projection = _GraphModelProjection(history, _PRINCIPAL)
+    view, depth, _ = (await bundle.tree.capture("execution", principal=_PRINCIPAL))[0]
+    await projection.add("node", view, depth)
+    try:
+        first = [row async for _, row in projection.refresh("execution")]
+        assert len(first) == 1
+        assert first[0].visibility == ("durable_history" if durable else "local_staging")
+        unavailable = ModelInteractionReadBoundary((), (), False, False)
+
+        async def capture(*args, **kwargs):
+            return unavailable
+
+        async def updates(*args, **kwargs):
+            return unavailable, ()
+
+        history.capture_model_interaction_cutoffs = capture
+        if composed:
+            history.read_model_interaction_updates = updates
+        if durable:
+            with pytest.raises(AIError) as caught:
+                _ = [row async for row in projection.refresh("execution")]
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            assert [row async for row in projection.refresh("execution")] == []
+            assert projection.high_waters[("execution", 1)] == 1
+    finally:
+        await projection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composed", [False, True])
+async def test_model_cutoff_without_retained_rows_cannot_claim_local_only_coverage(composed: bool) -> None:
+    from linktools.ai.runtime._graph_projection import _GraphModelProjection
+
+    bundle = _bundle()
+    projection = _GraphModelProjection(bundle.runtime.history, _PRINCIPAL)
+    view, depth, _ = (await bundle.tree.capture("execution", principal=_PRINCIPAL))[0]
+    await projection.add("node", view, depth)
+    projection.high_waters[("execution", 1)] = 1
+    unavailable = ModelInteractionReadBoundary((), (), False, False)
+
+    async def capture(*args, **kwargs):
+        return unavailable
+
+    async def updates(*args, **kwargs):
+        return unavailable, ()
+
+    bundle.runtime.history.capture_model_interaction_cutoffs = capture
+    if composed:
+        bundle.runtime.history.read_model_interaction_updates = updates
+    try:
+        with pytest.raises(AIError) as caught:
+            _ = [row async for row in projection.refresh("execution")]
+        assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await projection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable_trace,durable_route,separate_owner", [
+    (True, True, False), (False, True, False), (True, False, False), (False, True, True),
+])
+async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
+    tmp_path, durable_trace: bool, durable_route: bool, separate_owner: bool,
+) -> None:
+    from linktools.ai.runtime._runtime_history import RuntimeHistory
+    from .test_model_capture_reads import _NAMESPACE as namespace, _publish, _reader, _service
+    from .test_incremental_projection_boundaries import _storage
+    from .test_step_projection import _execution
+
+    state = _storage("memory", tmp_path)
+    await state.initialize(namespace=namespace, tenant_id="tenant")
+    other = None
+    try:
+        await state.execution.executions.create_with_history_head(replace(_execution(), durable_trace=durable_trace))
+        if separate_owner:
+            other = _storage("memory", tmp_path)
+            await other.initialize(namespace=namespace, tenant_id="tenant")
+            await other.execution.executions.create_with_history_head(_execution())
+        reader = _reader(state if other is None else other)
+        reader._durable_history_available = durable_route
+        history = RuntimeHistory(_service(state, reader=reader), tenant_id="tenant")
+        after_cutoffs = (UsageReadCutoff("execution", 1, 1),)
+        if durable_trace and durable_route:
+            from linktools.ai.runtime import RuntimeDomain
+
+            run = await _publish(state)
+            before, _ = await history.read_model_interaction_updates("execution", principal=_PRINCIPAL)
+            assert before.cutoffs == after_cutoffs and before.durable_history_available
+            await state.run_store.read_store(RuntimeDomain.EXECUTION).release_agent_run(
+                run.agent_run_id, execution_id="execution",
+            )
+            history = RuntimeHistory(_service(state, reader=_reader(state)), tenant_id="tenant")
+        request = history.read_model_interaction_updates(
+            "execution", principal=_PRINCIPAL, after_cutoffs=after_cutoffs,
+        )
+        if separate_owner or durable_trace and durable_route:
+            with pytest.raises(AIError) as caught:
+                await request
+            assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            boundary, rows = await request
+            assert boundary == ModelInteractionReadBoundary((), (), False, False)
+            assert rows == ()
+    finally:
+        if other is not None:
+            await other.close()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_task_model_observation_keeps_canonical_success_after_staging_release() -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.core import TaskStatus
+    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+    from linktools.ai.task import TaskGraph, TaskNode
+    from ._runtime_test_helpers import _UsageFunctionModel
+    from .test_live_history_readback_integration import _Models
+
+    release = asyncio.Event()
+
+    async def model(messages, info):
+        await release.wait()
+        return ModelResponse(parts=[TextPart("answer")])
+
+    group = CapabilityGroup[None]("transient-task-observation")
+    group.agent("default", model="default", allow_tools=())
+    storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
+    async with Runtime.open(
+        "transient-task-observation", models=_Models(_UsageFunctionModel(model)),
+        storage=storage, capabilities=(group,),
+    ) as runtime:
+        task = runtime.tasks.from_agent("answer", runtime.agents.get())
+        graph = await runtime.tasks.bind(task).start(TaskGraph(
+            "answer", (TaskNode("answer", task=task, input=AgentTaskInput("question")),),
+        ), idempotency_key="once")
+        rows = []
+
+        async def observe(event):
+            if isinstance(event.event, TaskModelProjection):
+                rows.append(event.event)
+                if event.event.item.status == "RUNNING":
+                    release.set()
+
+        try:
+            result = await graph.wait(on_event=observe, timeout_seconds=5)
+        finally:
+            release.set()
+        assert rows and all(row.visibility == "local_staging" for row in rows)
+        assert result.result.status is TaskStatus.SUCCEEDED
+        assert result.observation_error is not None
+        assert result.observation_error.origin == "stream"
+        assert (await graph.wait()).result.status is TaskStatus.SUCCEEDED

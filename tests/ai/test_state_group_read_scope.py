@@ -4,14 +4,18 @@
 
 import asyncio
 import hashlib
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime.state._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup, InMemoryStateStore
@@ -246,6 +250,69 @@ async def test_state_group_read_scope_sql_opens_one_session_and_one_snapshot(
         assert await second.read(lambda tx: tx.scan_records()) == ()
         assert len(snapshots) == len(checkouts) == 2
         assert checkouts[0] is checkouts[1]
+
+
+@pytest.mark.parametrize(("writable", "outcome"), (
+    (False, "commit"), (False, "rollback"), (False, "cancel"),
+    (True, "commit"), (True, "rollback"), (True, "cancel"), (True, "retry"),
+))
+async def test_sql_group_clock_is_database_sourced_and_transaction_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writable: bool, outcome: str,
+) -> None:
+    async with _open_stores("sql", tmp_path / "sql") as (first, second, _):
+        dialect = first.context.dialect
+        database_now = dialect.database_now
+        samples = []
+        statements = []
+
+        async def sample_database_time(session):
+            await database_now(session)
+            value = datetime(2001, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=len(samples))
+            samples.append(value)
+            return value
+
+        monkeypatch.setattr(dialect, "database_now", sample_database_time)
+        event.listen(first.context.engine.sync_engine, "before_cursor_execute",
+                     lambda conn, cursor, statement, parameters, context, executemany:
+                     statements.append(statement))
+        group = first.storage_group
+        execute = group.mutate if writable else group.read_many
+
+        async def inspect(scope: StateGroupTransaction) -> None:
+            expected = await scope.transaction(first).now()
+            assert expected == samples[-1]
+            assert await scope.transaction(second).now() == expected
+            assert await first.read(lambda tx: tx.now()) == expected
+            assert await group.read_many((second,), lambda nested:
+                                         nested.transaction(second).now()) == expected
+
+        async def finish(scope: StateGroupTransaction) -> None:
+            await inspect(scope)
+            if outcome == "rollback":
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if outcome == "cancel":
+                raise asyncio.CancelledError
+            if outcome == "retry" and len(samples) == 1:
+                error = sqlite3.OperationalError("database is locked")
+                error.sqlite_errorcode = 5
+                error.sqlite_errorname = "SQLITE_BUSY"
+                raise OperationalError("clock transaction", {}, error)
+
+        if outcome in {"commit", "retry"}:
+            await execute((first, second), finish)
+        else:
+            with pytest.raises(AIError if outcome == "rollback" else asyncio.CancelledError):
+                await execute((first, second), finish)
+        attempts = 2 if outcome == "retry" else 1
+        assert len(samples) == attempts
+        clock_statements = tuple(statement for statement in statements if "strftime" in statement)
+        assert len(clock_statements) == attempts
+        await execute((second, first), inspect)
+        assert len(samples) == attempts + 1
+        assert samples[0] != samples[1]
+        # The pooled connection and a nested scope must not extend timestamp lifetime.
+        await first.read(lambda tx: tx.now())
+        assert len(samples) == attempts + 2
 
 
 async def test_state_group_read_scope_filesystem_releases_partial_locks_and_ignores_other_members(

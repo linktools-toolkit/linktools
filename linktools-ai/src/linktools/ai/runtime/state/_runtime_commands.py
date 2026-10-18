@@ -1784,15 +1784,11 @@ class RuntimeStateCommands:
             and conversation_agent_run is not None
             and conversation_checkpoint is not None
         ):
-            conversation_checkpoint = (
-                await self._conversation_run_store.relocate_conversation_checkpoint(
+            conversation_checkpoint, prepared_conversation = (
+                await self._conversation_run_store.prepare_conversation_checkpoint(
                     conversation_agent_run,
                     conversation_checkpoint,
                 )
-            )
-            prepared_conversation = await self._conversation_run_store.prepare_checkpoints(
-                conversation_agent_run,
-                (conversation_checkpoint,),
             )
         timeline_range: tuple[int, int] | None = None
         if prepared_conversation:

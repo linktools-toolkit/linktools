@@ -3,9 +3,11 @@
 """Regression coverage for local Runtime launch and stream ownership."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from linktools.ai.core import (
     ExecutionDeltaType,
     ExecutionStatus,
@@ -15,6 +17,7 @@ from linktools.ai.core import (
     ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._coordinator import _LocalRuntimeCoordinator
 from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
@@ -22,6 +25,16 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime.service_api import ExecutionStreamEvent
+
+
+@pytest_asyncio.fixture
+async def execution_storage() -> AsyncIterator[RuntimeStorage]:
+    storage = RuntimeStorage.in_memory()
+    await storage.initialize(namespace="boundary", tenant_id="tenant")
+    try:
+        yield storage
+    finally:
+        await storage.close()
 
 
 class _AllowAuthorization:
@@ -261,6 +274,9 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
 class _LaunchExecutions:
     tenant_id = "tenant"
 
+    def __init__(self, storage: RuntimeStorage) -> None:
+        self.state_store = storage.execution.executions.state_store
+
     async def get(self, execution_id: str, *, tenant_id: str) -> object:
         return SimpleNamespace(
             execution_id=execution_id,
@@ -271,9 +287,9 @@ class _LaunchExecutions:
         )
 
 
-def _launch_service(backend: object) -> tuple[DefaultExecutionService, list[str], list[str]]:
+def _launch_service(backend: object, storage: RuntimeStorage) -> tuple[DefaultExecutionService, list[str], list[str]]:
     service = object.__new__(DefaultExecutionService)
-    service._state = SimpleNamespace(executions=_LaunchExecutions())
+    service._state = SimpleNamespace(executions=_LaunchExecutions(storage))
     bridge = _ExecutionRuntimeBridge()
     bridge.bind(backend)  # type: ignore[arg-type]
     service._runtime_bridge = bridge
@@ -292,7 +308,7 @@ def _launch_service(backend: object) -> tuple[DefaultExecutionService, list[str]
 
 
 @pytest.mark.asyncio
-async def test_launch_normal_return_without_worker_abandons_prepared_stream() -> None:
+async def test_launch_normal_return_without_worker_abandons_prepared_stream(execution_storage: RuntimeStorage) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -301,7 +317,7 @@ async def test_launch_normal_return_without_worker_abandons_prepared_stream() ->
             del execution_id
             return False
 
-    service, prepared, abandoned = _launch_service(Backend())
+    service, prepared, abandoned = _launch_service(Backend(), execution_storage)
     await service._launch_started(
         SimpleNamespace(),
         SimpleNamespace(execution_id="execution", tenant_id="tenant"),
@@ -314,7 +330,7 @@ async def test_launch_normal_return_without_worker_abandons_prepared_stream() ->
 
 
 @pytest.mark.asyncio
-async def test_existing_worker_skips_new_prepared_reservation() -> None:
+async def test_existing_worker_skips_new_prepared_reservation(execution_storage: RuntimeStorage) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -323,7 +339,7 @@ async def test_existing_worker_skips_new_prepared_reservation() -> None:
             del execution_id
             return True
 
-    service, prepared, abandoned = _launch_service(Backend())
+    service, prepared, abandoned = _launch_service(Backend(), execution_storage)
     await service._launch_started(
         SimpleNamespace(),
         SimpleNamespace(execution_id="execution", tenant_id="tenant"),
@@ -336,7 +352,7 @@ async def test_existing_worker_skips_new_prepared_reservation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancellation_before_worker_installation_abandons_reservation() -> None:
+async def test_cancellation_before_worker_installation_abandons_reservation(execution_storage: RuntimeStorage) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -346,7 +362,7 @@ async def test_cancellation_before_worker_installation_abandons_reservation() ->
             del execution_id
             return False
 
-    service, prepared, abandoned = _launch_service(Backend())
+    service, prepared, abandoned = _launch_service(Backend(), execution_storage)
     with pytest.raises(asyncio.CancelledError):
         await service._launch_started(
             SimpleNamespace(),
@@ -360,7 +376,7 @@ async def test_cancellation_before_worker_installation_abandons_reservation() ->
 
 
 @pytest.mark.asyncio
-async def test_cancellation_after_worker_installation_retains_reservation() -> None:
+async def test_cancellation_after_worker_installation_retains_reservation(execution_storage: RuntimeStorage) -> None:
     class Backend:
         def __init__(self) -> None:
             self.installed = False
@@ -374,7 +390,7 @@ async def test_cancellation_after_worker_installation_retains_reservation() -> N
             del execution_id
             return self.installed
 
-    service, prepared, abandoned = _launch_service(Backend())
+    service, prepared, abandoned = _launch_service(Backend(), execution_storage)
     with pytest.raises(asyncio.CancelledError):
         await service._launch_started(
             SimpleNamespace(),

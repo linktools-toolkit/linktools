@@ -55,7 +55,7 @@ from linktools.ai.workspace import (
     SandboxSession,
 )
 
-from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel
+from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel, _persistence_capabilities
 from .test_tool_effect_semantics import _Bridge
 
 
@@ -634,7 +634,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
             "remote-recovery",
             models=_RemoteModels(),
             storage=storage,
-            capabilities=(_group(_spec(remote)),),
+            capabilities=(_group(_spec(remote)), _persistence_capabilities(restart=True)),
         ) as runtime:
             execution = await runtime.agents.get("default").start("echo")
             with pytest.raises(AIError) as raised:
@@ -656,7 +656,8 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
                 "remote-recovery",
                 models=_RemoteModels(),
                 storage=restored,
-                capabilities=(_group(_spec(remote, headers={"X-Rotated": "true"})),),
+                capabilities=(_group(_spec(remote, headers={"X-Rotated": "true"})),
+                              _persistence_capabilities(restart=True)),
             ) as runtime:
                 execution = await runtime.executions.get(execution_id)
                 resolution = await execution.resolve_tool_effect(

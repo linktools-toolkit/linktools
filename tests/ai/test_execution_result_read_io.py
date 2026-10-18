@@ -142,6 +142,7 @@ async def test_custom_result_repository_remains_authoritative(adapter: str, hist
                 return replace(record.result, output=output)
 
         class Independent(CustomResult):
+            state_store = repository.state_store
             get = repository.get
             get_header = repository.get_header
 

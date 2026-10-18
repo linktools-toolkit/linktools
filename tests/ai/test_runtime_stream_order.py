@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 import linktools.ai.runtime._event as event_module
@@ -112,9 +113,18 @@ class _AllowAll:
         del args, kwargs
 
 
+_ValueT = TypeVar("_ValueT")
+
+
+class _ReadStateStore:
+    async def read(self, callback: Callable[[object], Awaitable[_ValueT]]) -> _ValueT:
+        return await callback(None)
+
+
 class _ExecutionReader:
     def __init__(self, execution: ExecutionRecord) -> None:
         self.execution = execution
+        self.state_store = _ReadStateStore()
 
     async def get_header(self, execution_id: str, *, tenant_id: str) -> object:
         del execution_id, tenant_id
@@ -785,6 +795,7 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,
@@ -1264,6 +1275,7 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,
@@ -1330,6 +1342,7 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,
@@ -1386,6 +1399,7 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,

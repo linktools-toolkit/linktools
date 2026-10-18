@@ -10,7 +10,7 @@ from pydantic_ai.models.test import TestModel
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal
-from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, DurableTraceCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state import RuntimeDomain
 from .test_task_mixed_node_reliability import _TaskTestModels, _TaskTestModelBinding
@@ -32,6 +32,7 @@ class _NoToolsModels(_TaskTestModels):
 @pytest.mark.asyncio
 async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_path: Path) -> None:
     group = CapabilityGroup("context")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path)
@@ -138,6 +139,7 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
     instructions = work / "AGENTS.md"
     instructions.write_text("Historical repository instruction", encoding="utf-8")
     group = CapabilityGroup("context-instructions")
+    group.capability(DurableTraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     workspace = CapabilityGroup("workspace", workspace=Workspace.load(work))
     storage = RuntimeStorage.filesystem(tmp_path / "state")

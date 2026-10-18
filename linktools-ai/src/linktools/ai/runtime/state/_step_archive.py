@@ -1526,6 +1526,42 @@ class StateStepArchive(AgentRunStore):
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
+        return await self._relocate_conversation_checkpoint(run, checkpoint, existing_run)
+
+    async def prepare_conversation_checkpoint(
+        self,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+    ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch]:
+        """Relocate and prepare one conversation checkpoint from one metadata capture."""
+        self._ensure_open()
+        require_no_run_history_lock("StateStepArchive.prepare_conversation_checkpoint")
+        if (
+            type(self).relocate_conversation_checkpoint is not StateStepArchive.relocate_conversation_checkpoint
+            or type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
+        ):
+            relocated = await self.relocate_conversation_checkpoint(run, checkpoint)
+            return relocated, await self.prepare_checkpoints(run, (relocated,))
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        run_key = self._agent_run_key(run.agent_run_id)
+        head_key = self._history.head_key(self._history_id(run))
+        records = await self._store.read(lambda transaction: transaction.get_records((run_key, head_key)))
+        record = records.get(run_key)
+        existing_run = None if record is None else _decode_step(record.data)
+        relocated = await self._relocate_conversation_checkpoint(run, checkpoint, existing_run)
+        # Existing runs validate checkpoint bodies; prepare must recapture metadata
+        # after that I/O. A new run has no body reads between capture and preparation.
+        return relocated, await self._prepare_explicit_checkpoints(
+            run, (relocated,), observed_records=records if existing_run is None else None,
+        )
+
+    async def _relocate_conversation_checkpoint(
+        self,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+        existing_run: object | None,
+    ) -> AgentRunCheckpoint:
         before = 0
         if existing_run is not None:
             if existing_run != run:

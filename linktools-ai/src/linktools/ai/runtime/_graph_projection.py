@@ -79,6 +79,13 @@ class _GraphModelProjection:
         self, execution_id: str, *, boundary: ModelInteractionReadBoundary | None = None,
     ) -> AsyncIterator[tuple[str, TaskModelProjection]]:
         prefetched: dict[tuple[int, int], ModelInteractionItem] = {}
+        local_runs = {identity[1] for identity, row in self.rows.items()
+                      if identity[0] == execution_id and row.visibility == "local_staging"}
+        allow_unavailable = (
+            all(run in local_runs for identity, run in self.high_waters if identity == execution_id)
+            and not any(identity[0] == execution_id and row.visibility == "durable_history"
+                        for identity, row in self.rows.items())
+        )
         read_updates = getattr(self.history, "read_model_interaction_updates", None)
         if boundary is None and callable(read_updates):
             afters = {run: value for (identity, run), value in self.high_waters.items() if identity == execution_id}
@@ -96,7 +103,9 @@ class _GraphModelProjection:
                 boundary, items = await read_updates(
                     execution_id, principal=self.principal, after_cutoffs=after_cutoffs, limit=200,
                 )
-                ranges = _model_interaction_update_ranges(execution_id, boundary, after_cutoffs, 200)
+                ranges = _model_interaction_update_ranges(
+                    execution_id, boundary, after_cutoffs, 200, allow_unavailable=allow_unavailable,
+                )
                 if ranges and not items:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 expected = []
@@ -115,6 +124,12 @@ class _GraphModelProjection:
         boundary = await self.capture(execution_id) if boundary is None else boundary
         self.boundaries[execution_id] = boundary
         if self.history is None:
+            return
+        if (not boundary.cutoffs and not boundary.local_staging_available
+                and not boundary.durable_history_available):
+            if not allow_unavailable:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self.arm(execution_id)
             return
         node_id, view, depth = self.views[execution_id]
         visible_runs = {value.agent_run_seq for value in boundary.cutoffs}

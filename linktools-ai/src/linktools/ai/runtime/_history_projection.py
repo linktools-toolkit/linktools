@@ -523,11 +523,14 @@ class StepExecutionHistoryReader:
     ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
         """Capture identities and their first bounded suffix in one authorized scope."""
         async def read() -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
-            boundary = await self.capture_authorized_model_interaction_cutoffs(
+            record, boundary = await self._capture_authorized_model_interaction_cutoffs(
                 execution_id, tenant_id=tenant_id, executions=executions,
             )
             items: list[ModelInteractionItem] = []
-            for run, after, through in _model_interaction_update_ranges(execution_id, boundary, after_cutoffs, limit):
+            for run, after, through in _model_interaction_update_ranges(
+                execution_id, boundary, after_cutoffs, limit,
+                allow_unavailable=executions is self._executions and not self._durable_for(record),
+            ):
                 items.extend(await self.read_authorized_model_interaction_metadata(
                     execution_id, tenant_id=tenant_id, executions=executions, agent_run_seq=run,
                     after_model_request_seq=after, through_model_request_seq=through, limit=through - after,
@@ -541,16 +544,24 @@ class StepExecutionHistoryReader:
     ) -> ModelInteractionReadBoundary:
         """Read the service's post-authorization record with its model metadata."""
         async def read() -> ModelInteractionReadBoundary:
-            record = await executions.get(execution_id, tenant_id=tenant_id)
-            if record is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
-                return await self.capture_model_interaction_cutoffs(
-                    execution_id, tenant_id=tenant_id,
-                )
-            return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+            _, boundary = await self._capture_authorized_model_interaction_cutoffs(
+                execution_id, tenant_id=tenant_id, executions=executions,
+            )
+            return boundary
 
         return await self._read_model_metadata(executions, read)
+
+    async def _capture_authorized_model_interaction_cutoffs(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+    ) -> tuple[ExecutionRecord, ModelInteractionReadBoundary]:
+        record = await executions.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+            boundary = await self.capture_model_interaction_cutoffs(execution_id, tenant_id=tenant_id)
+        else:
+            boundary = await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+        return record, boundary
 
     async def _read_model_metadata(
         self, executions: ExecutionRepository, read: Callable[[], Awaitable[_ModelMetadataT]],
@@ -2166,7 +2177,7 @@ def _metadata_token(
 
 def _model_interaction_update_ranges(
     execution_id: str, boundary: ModelInteractionReadBoundary,
-    after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+    after_cutoffs: tuple[UsageReadCutoff, ...], limit: int, *, allow_unavailable: bool = False,
 ) -> tuple[tuple[int, int, int], ...]:
     remaining = validate_page_limit(limit)
     afters: dict[int, int] = {}
@@ -2175,6 +2186,9 @@ def _model_interaction_update_ranges(
         if cutoff.execution_id != execution_id or cutoff.agent_run_seq in afters:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         afters[cutoff.agent_run_seq] = cutoff.model_request_seq
+    if (allow_unavailable and not boundary.cutoffs and not boundary.local_staging_available
+            and not boundary.durable_history_available):
+        return ()
     current = {value.agent_run_seq: value.model_request_seq for value in boundary.cutoffs}
     if any(run not in current or after > current[run] for run, after in afters.items()):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
