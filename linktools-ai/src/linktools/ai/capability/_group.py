@@ -72,10 +72,14 @@ class RuntimeFeaturesCapture(Generic[AppT]):
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
     tool_retries: int = DEFAULT_TOOL_RETRIES
     output_retries: int = DEFAULT_OUTPUT_RETRIES
+    filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
             raise ValueError("capture group_id must be non-empty")
+        _validate_filter(self.filter)
         _validate_retry_defaults(self.tool_retries, self.output_retries)
         contributions = tuple(self.contributions)
         if any(
@@ -120,12 +124,15 @@ class RuntimeFeatures(Generic[AppT]):
         sandbox: "Sandbox | None" = None,
         tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
         output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
+        filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
         if assets is not None and not isinstance(assets, AssetStore):
             raise TypeError("assets must be AssetStore")
         _validate_retry_defaults(tool_retries, output_retries)
+        _validate_filter(filter)
+        self._filter = filter
         self._tool_retries = tool_retries
         self._output_retries = output_retries
         self._id = group_id
@@ -367,6 +374,7 @@ class RuntimeFeatures(Generic[AppT]):
             sandbox=self._sandbox,
             tool_retries=self._tool_retries,
             output_retries=self._output_retries,
+            filter=self._filter,
         )
         _logger.info(
             "capability group captured: group=%s contributions=%d instructions=%d "
@@ -377,6 +385,11 @@ class RuntimeFeatures(Generic[AppT]):
             None if source_revision is None else source_revision.value,
         )
         return capture
+
+
+def _validate_filter(value: object) -> None:
+    if value is not None and not callable(value):
+        raise TypeError("filter must be callable or None")
 
 
 def _validate_retry_defaults(tool_retries: int, output_retries: int) -> None:

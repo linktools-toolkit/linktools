@@ -32,7 +32,7 @@ The main ownership rules are:
 
 ## Application capability filtering
 
-`Runtime.open(..., capability_filter=...)` accepts an optional synchronous
+`RuntimeFeatures(..., filter=...)` accepts an optional synchronous
 `Callable[[AgentSpec, CapabilityContribution], bool]`. The compiler invokes it on
 captured `agent` (delegation target), `tool`, `skill`, `mcp` and generic `capability`
 contributions before resolving existing Agent selectors. The root Agent itself is
@@ -47,9 +47,9 @@ def available(agent, contribution):
     required = contribution.contract.get("metadata", {}).get("applies_to")
     return required is None or bool(set(required) & set(agent.metadata.get("tags", [])))
 
+group = RuntimeFeatures("application", filter=available)
 async with Runtime.open(
     "application", models=models, storage=storage, runtime_features=group,
-    capability_filter=available,
 ) as runtime:
     ...
 ```
@@ -59,6 +59,13 @@ capability_filter=available)` exposes the same candidate filtering for host
 inspection without constructing a model or Runtime. It returns visible declarations,
 not a fully resolved executable toolset; a management catalog need not materialize
 Workspace tools. Keep the unfiltered capture for global asset administration.
+
+A capture retains the current in-process filter policy without serializing it into
+assets or execution bindings. If the policy depends on captured metadata, use
+`dataclasses.replace(capture, filter=build_filter(capture))` and pass that capture
+to `Runtime.open(runtime_features=...)`. This keeps the same source revision and
+reader without loading the assets again. `Runtime.open` has no separate filter
+parameter.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
 expand the remaining candidates; explicit unavailable selections and preloads fail.
@@ -88,7 +95,7 @@ continuation, and durable recovery guarantees.
 Register native Pydantic AI behavior through the same `RuntimeFeatures` used for
 Agent declarations. The default `scope="agent"` keeps normal Agent selection;
 `scope="runtime"` applies host policy to every Runtime-owned Agent run,
-independently of `allow_capabilities` and `capability_filter`:
+independently of `allow_capabilities` and `RuntimeFeatures.filter`:
 
 ```python
 group.capability(global_rate_limit, id="host.rate-limit", scope="runtime")

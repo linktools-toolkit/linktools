@@ -175,7 +175,7 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     async def ping(_context: AgentContext[object]) -> str:
         return "pong"
 
-    group = RuntimeFeatures("application")
+    group = RuntimeFeatures("application", filter=lambda _agent, item: item.kind != "capability")
     group.tool(ping, effect_policy="none")
     group.agent("default", instructions="Be brief", allow_tools=("ping",), allow_capabilities=())
     group.capability(limiter, id="host.rate-limit", scope="runtime")
@@ -184,7 +184,6 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     async with Runtime.open(
         "quota-metadata", models=_Models(model), context=RuntimeContext(app),
         storage=RuntimeStorage.in_memory(), runtime_features=await group.capture(),
-        capability_filter=lambda _agent, item: item.kind != "capability",
     ) as runtime:
         execution = await runtime.agents.get().start("question", correlation={"request": "one"})
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

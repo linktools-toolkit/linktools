@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -138,8 +139,9 @@ async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_w
     policies = _policies(_group(), _GlobalPolicy(backend))
     async with Runtime.open(
         "runtime_capability", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), runtime_features=policies,
-        capability_filter=lambda _agent, item: item.kind != "capability",
+        storage=RuntimeStorage.in_memory(), runtime_features=replace(
+            await policies.capture(), filter=lambda _agent, item: item.kind != "capability",
+        ),
     ) as runtime:
         late = _Unselected()
         late.id = "host.late"

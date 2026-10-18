@@ -13,7 +13,7 @@ from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
 
 from ..asset import AssetStoreReader
-from ..agent import AgentCatalog, AgentCompiler, CapabilityFilter
+from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
     AgentContext,
     AssetSkillSource,
@@ -131,7 +131,6 @@ async def compose_runtime_components(
     authorization: "AuthorizationPolicy | None" = None,
     auto_recover: bool = True,
     tool_responses: ToolResponseFixture | None = None,
-    capability_filter: CapabilityFilter | None = None,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
@@ -251,7 +250,7 @@ async def compose_runtime_components(
                 if candidate.kind != "agent"
             ),
             agents=agents,
-            capability_filter=capability_filter,
+            capability_filter=captures[0].filter if captures else None,
         )
         root_agents = {
             agent_id: compiler.compile(agents[agent_id])
