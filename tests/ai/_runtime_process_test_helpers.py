@@ -164,6 +164,22 @@ def _runtime_process(
                 elif command == "await_model":
                     await asyncio.wait_for(entered.wait(), 10)
                     connection.send(await snapshot())
+                elif command == "cancel_events":
+                    events = await state.execution.events.list(
+                        execution_id, tenant_id=runtime.default_principal.tenant_id,
+                        after_event_seq=0, limit=100,
+                    )
+                    assert events.next_cursor is None
+                    connection.send({
+                        "requested": sum(
+                            event.event_type == "CANCEL_REQUESTED" for event in events.items
+                        ),
+                    })
+                elif command == "flush_trace":
+                    await state.run_store.flush_dirty_execution_projections(
+                        execution_id=execution_id,
+                    )
+                    connection.send(await snapshot())
                 elif command == "cancel":
                     result = await runtime.executions.cancel(
                         execution_id,
