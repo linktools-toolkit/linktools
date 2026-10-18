@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 import linktools.ai.runtime._event as event_module
@@ -32,6 +33,7 @@ from linktools.ai.runtime._event import (
     _LiveEvent,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor
 from linktools.ai.runtime.service_api import (
@@ -65,7 +67,7 @@ from ._runtime_test_helpers import execution_owner_fields
 def _binding_contract() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("default", model="default"),
+        agent_spec=AgentSpec("default", model="default", tool_retries=3, output_retries=3),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -82,6 +84,8 @@ def _execution(
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
+        restart_checkpoints=True,
+        durable_trace=True,
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,
@@ -110,9 +114,18 @@ class _AllowAll:
         del args, kwargs
 
 
+_ValueT = TypeVar("_ValueT")
+
+
+class _ReadStateStore:
+    async def read(self, callback: Callable[[object], Awaitable[_ValueT]]) -> _ValueT:
+        return await callback(None)
+
+
 class _ExecutionReader:
     def __init__(self, execution: ExecutionRecord) -> None:
         self.execution = execution
+        self.state_store = _ReadStateStore()
 
     async def get_header(self, execution_id: str, *, tenant_id: str) -> object:
         del execution_id, tenant_id
@@ -783,6 +796,7 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,
@@ -873,6 +887,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._pending_turns = _PendingExecutionTurns()
     backend._tenant_id = "tenant"
     backend._namespace = "stream-order"
     backend._agent_run_lifecycle = SimpleNamespace(
@@ -1262,6 +1277,7 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,
@@ -1328,6 +1344,7 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,
@@ -1384,6 +1401,7 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
 
     class _ExecutionRepo:
         tenant_id = "tenant"
+        state_store = _ReadStateStore()
 
         async def request_cancel(
             self,

@@ -51,10 +51,10 @@ async def _recoverable(
     try:
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, capabilities=(_capabilities(),),
+            storage=state, features=_capabilities(),
         ) as runtime, Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=other_state, capabilities=(_capabilities(),),
+            storage=other_state, features=_capabilities(),
         ) as other:
             try:
                 yield runtime, other, state, execution_id, calls, release

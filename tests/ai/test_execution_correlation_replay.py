@@ -38,7 +38,7 @@ def _replay_values(
 
 def test_execution_replay_uses_binding_digest() -> None:
     durable = AgentBindingContract(
-        agent_spec=AgentSpec("agent", description="durable label"),
+        agent_spec=AgentSpec("agent", description="durable label", tool_retries=3, output_retries=3),
         model_contract={"model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -46,7 +46,7 @@ def test_execution_replay_uses_binding_digest() -> None:
         output_schema={"type": "string"},
     )
     replayed = AgentBindingContract(
-        agent_spec=AgentSpec("agent", description="request label"),
+        agent_spec=AgentSpec("agent", description="request label", tool_retries=3, output_retries=3),
         model_contract={"model_identity": "test:model"},
         selected=(),
         subagents=(),

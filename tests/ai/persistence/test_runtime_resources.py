@@ -38,7 +38,7 @@ async def test_transient_runtime_storage_closes_repository_and_object_domains() 
         **{
             domain.value: RuntimeStorageRoute.transient()
             for domain in RuntimeDomain
-            if domain is not RuntimeDomain.RECOVERY
+            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         }
     )
     state = RuntimeStorage.from_plan(plan)

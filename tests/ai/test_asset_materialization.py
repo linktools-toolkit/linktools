@@ -23,7 +23,7 @@ from linktools.ai.asset import (
     validate_materialized_path,
 )
 from linktools.ai.asset import _materialization
-from linktools.ai.capability import CapabilityGroup, SkillResource, validate_resource_path
+from linktools.ai.capability import AssetCapability, RuntimeFeatures, SkillResource, validate_resource_path
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 
@@ -182,7 +182,7 @@ async def test_invalid_version_references_leave_no_projection(
     try:
         ref = await _file(store)
         if invalid == "integrity":
-            ref = replace(ref, etag="0" * 64)
+            ref = replace(ref, digest="0" * 64)
             expected = ErrorCode.STORAGE_INTEGRITY_ERROR
         elif invalid == "missing":
             ref = replace(ref, revision=StorageEntryRevision(999))
@@ -404,7 +404,9 @@ async def test_capability_capture_rejects_unmaterializable_resource_paths(
     await store.initialize()
     try:
         with pytest.raises(AIError) as error:
-            await CapabilityGroup("application", assets=store).capture()
+            asset_features = RuntimeFeatures("application")
+            asset_features.capability(AssetCapability(store), scope="runtime")
+            await asset_features.capture()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()

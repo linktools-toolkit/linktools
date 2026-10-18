@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Generic, TypeVar
 
 from ..core import (
@@ -28,8 +29,14 @@ class AgentContext(Generic[AppT]):
     session_metadata: Mapping[str, JsonValue]
     memory_scope: "str | None" = None
     correlation: CorrelationData = field(default_factory=dict)
+    deadline_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if self.deadline_at is not None and (
+            not isinstance(self.deadline_at, datetime)
+            or self.deadline_at.utcoffset() is None
+        ):
+            raise ValueError("deadline_at must be a timezone-aware datetime")
         if not isinstance(self.principal, Principal):
             raise TypeError("principal must be Principal")
         object.__setattr__(

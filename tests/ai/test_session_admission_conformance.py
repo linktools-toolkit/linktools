@@ -22,6 +22,8 @@ from linktools.ai.migrate import provision_database
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.observe import Observation
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
     DefaultExecutionService,
@@ -231,8 +233,9 @@ class _RejectingBackend:
         *,
         session_id: "str | None",
         expected_execution: object | None = None,
+        capture_metric: object = None,
     ) -> object:
-        del session_id, expected_execution
+        del session_id, expected_execution, capture_metric
         execution = commit.execution
         self.committed.append(execution.execution_id)
         repository = self._repository
@@ -278,7 +281,7 @@ class _RejectingBackend:
         del request, execution
         raise AssertionError("rejected start must not launch")
 
-    async def cancel(self, execution: object) -> CancelEffectOutcome:
+    async def cancel(self, execution: object, *, force: bool = False) -> CancelEffectOutcome:
         del execution
         return CancelEffectOutcome.CONFIRMED
 
@@ -303,7 +306,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             state.execution,
             state.object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
+            conversation=True, sessions=state.conversation.sessions,
             catalog=_BindingCatalog(),
             compiler=object(),
             runtime_bridge=runtime_bridge,
@@ -366,4 +369,104 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         )
         assert [item.execution_id for item in replayed] == [execution.execution_id]
     finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("commit_phase", "cancel_metric"),
+    (("normal", False), ("normal", True), ("after", False), ("after", True), ("before", False)),
+)
+async def test_rejected_start_preserves_admission_truth_and_cleanup_before_metrics(
+    commit_phase: str, cancel_metric: bool,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="rejected-start-metric", tenant_id="tenant")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    attempted: list[Observation] = []
+
+    class Recorder:
+        async def try_record(self, observation: Observation) -> bool:
+            attempted.append(observation)
+            entered.set()
+            await release.wait()
+            raise OSError("metric sink failed")
+
+    class Backend(_RejectingBackend):
+        async def commit_terminal_checkpoint(self, commit: object, *, session_id: str | None,
+                                             expected_execution: object = None,
+                                             capture_metric: object = None) -> object:
+            if commit_phase == "before":
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            result = await super().commit_terminal_checkpoint(
+                commit, session_id=session_id, expected_execution=expected_execution,
+            )
+            metrics = object.__new__(LocalExecutionBackend)
+            metrics._metric_recorder = Recorder()
+            metrics._namespace = "rejected-start-metric"
+            metrics._tenant_id = "tenant"
+            await metrics._record_committed_terminal(result, session_id=session_id, capture_metric=capture_metric)
+            if commit_phase == "after":
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            return result
+
+    backend = Backend(state.execution.executions, state.execution.idempotency)
+    bridge = _ExecutionRuntimeBridge()
+    bridge.bind(backend)
+    service = DefaultExecutionService(
+        state.execution, state.object_store(RuntimeDomain.EXECUTION), TenantAuthorizationPolicy(),
+        conversation=True, sessions=state.conversation.sessions, catalog=_BindingCatalog(), compiler=object(),
+        runtime_bridge=bridge, live_broker=LiveExecutionEventBroker(), history_reader=_History(),
+    )
+    caller: asyncio.Task[object] | None = None
+    try:
+        await state.conversation.sessions.create(_session())
+        request = ExecutionRequest(
+            user_prompt="hello", principal=Principal("owner", "tenant"),
+            idempotency_key="rejected-metric", memory_scope=None,
+            mode="run", planning=False, thinking=False,
+        )
+        caller = asyncio.create_task(service.start_for_session(
+            "agent", _binding().binding_digest, "session", request,
+        ))
+        if commit_phase == "before":
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            executions = await state.execution.executions.list_by_session("session", tenant_id="tenant")
+            assert len(executions) == 1
+            assert executions[0].status is ExecutionStatus.PENDING_START
+            assert not backend.aborted
+            assert not attempted
+            assert service._session_locks == {}
+            return
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert len(attempted) == 1
+        execution_id = attempted[0].correlation["linktools.execution_id"]
+        assert backend.aborted == [execution_id]
+        assert service._session_locks == {}
+        assert attempted[0].status == "FAILED"
+        assert attempted[0].error_code == ErrorCode.SESSION_BUSY.value
+        if cancel_metric:
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        else:
+            release.set()
+            if commit_phase == "after":
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+            else:
+                with pytest.raises(AIError) as original:
+                    await caller
+                assert original.value.code is ErrorCode.SESSION_BUSY
+        terminal = await state.execution.executions.get(execution_id, tenant_id="tenant")
+        assert terminal.status is ExecutionStatus.FAILED
+        assert terminal.error_code == ErrorCode.SESSION_BUSY.value
+    finally:
+        release.set()
+        if caller is not None:
+            await asyncio.gather(caller, return_exceptions=True)
         await state.close()

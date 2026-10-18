@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -42,6 +42,7 @@ from ..core import (
     OperationStatus,
     Page,
     Principal,
+    RUNTIME_OBJECT_STORE_ID,
     ResourceKind,
     ResourceRef,
     StopReason,
@@ -61,11 +62,14 @@ from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
+    ObjectRef,
     ObjectStore,
     PayloadPolicy,
     StoredPayload,
+    TurnCoordination,
     payload_fits_inline,
 )
+from ._conversation_capability import ConversationCapability
 from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
 from ._handoff import HandoffGate, HandoffState
@@ -103,7 +107,10 @@ from .service_api import (
     project_execution_view as _project_execution_view,
 )
 from .state import RuntimeDomain
+from ._pending_turn import _PendingExecutionTurns
+from ._pending_coordination import _PendingTurnCoordination
 from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._object_router import runtime_object_source_reads
 from .state._contracts import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -123,12 +130,13 @@ from .state._contracts import (
 )
 
 if TYPE_CHECKING:
+    from .state._store import StateTransaction
     from .recovery import (
         ExecutionRecoveryEffect,
         ResolveToolEffectRequest,
         ToolEffectResolutionResult,
     )
-    from .state._contracts import RuntimePayloadRef
+    from .state._contracts import RuntimePayloadRef, SessionRecord
 
 _logger = environ.get_logger("ai.runtime.execution")
 
@@ -143,7 +151,7 @@ def _overlay_execution_correlation(
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
-def consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
+def consumed_terminal_query(method: "Callable[..., object]") -> "Callable[..., object]":
     @wraps(method)
     async def wrapped(
         self: "DefaultExecutionService",
@@ -153,10 +161,10 @@ def consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
         **kwargs: object,
     ) -> object:
         async with self._execution_consumer(execution_id, principal.tenant_id):
-            result = await method(
-                self, execution_id, *args, principal=principal, **kwargs
-            )
-            await self._request_handoff_if_terminal(execution_id, principal.tenant_id)
+            with runtime_object_source_reads():
+                result = await method(
+                    self, execution_id, *args, principal=principal, **kwargs
+                )
             return result
 
     return wrapped
@@ -180,7 +188,9 @@ def _observed_query(method: "Callable[..., object]") -> "Callable[..., object]":
 
 
 class _ExecutionReleaseCallback(Protocol):
-    async def __call__(self, execution_id: str, *, tenant_id: str) -> bool: ...
+    async def __call__(
+        self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
+    ) -> bool: ...
 
 
 class _ExecutionTerminalVerifier(Protocol):
@@ -212,8 +222,10 @@ class _RepositoryInstructionResolver(Protocol):
     async def resolve(self, path: str) -> _RepositoryInstructionBundle: ...
 
 
-async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> bool:
-    del execution_id, tenant_id
+async def _no_release_terminal(
+    execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
+) -> bool:
+    del execution_id, tenant_id, terminal_commit
     return True
 
 
@@ -265,7 +277,7 @@ class ExecutionBackend(Protocol):
         *,
         expected_status: ExecutionStatus,
     ) -> ExecutionRecord: ...
-    async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
+    async def cancel(self, execution: ExecutionRecord, *, force: bool = False) -> "CancelEffectOutcome": ...
     def worker_failure(
         self, execution_id: str, *, tenant_id: str
     ) -> AIError | None: ...
@@ -291,6 +303,9 @@ class ExecutionBackend(Protocol):
     ) -> OperationLedgerRecord: ...
 
 
+_TerminalMetricDelivery = Callable[[], Awaitable[None]]
+
+
 class _ExecutionRuntimePort(ExecutionBackend, Protocol):
     async def commit_terminal_checkpoint(
         self,
@@ -298,6 +313,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         *,
         session_id: str | None,
         expected_execution: ExecutionRecord | None = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionTerminalCommitResult: ...
 
     async def verify_terminal_projection(
@@ -323,6 +339,13 @@ class _LiveExecutionStreamBroker(Protocol):
 class _ExecutionRuntimeBridge:
     def __init__(self) -> None:
         self._port: _ExecutionRuntimePort | None = None
+        self.pending_turns = _PendingExecutionTurns()
+        self.pending_start: Callable[
+            [ExecutionRequest, ExecutionStartReservation, "SessionRecord | None", TurnCoordination | None],
+            Awaitable[str | None],
+        ] | None = None
+        self.pending_promote: Callable[[str], Awaitable[None]] | None = None
+        self.pending_cancel_promote: Callable[[str], Awaitable[None]] | None = None
 
     def bind(self, runtime_port: _ExecutionRuntimePort) -> None:
         if self._port is not None:
@@ -366,9 +389,21 @@ class DefaultExecutionService:
         session_execution_ready: bool = True,
         task_admissions: TaskAdmissionRepository | None = None,
         tool_responses: ToolResponseFixture | None = None,
+        object_reader: "Callable[[RuntimeDomain, ObjectRef], Awaitable[bytes]] | None" = None,
+        restart_checkpoints: bool = False,
+        durable_trace: bool = False,
+        conversation: bool = False,
     ) -> None:
+        if any(not isinstance(value, bool) for value in (
+            restart_checkpoints, durable_trace, conversation,
+        )):
+            raise TypeError("execution persistence guarantees must be bool")
+        self._restart_checkpoints = restart_checkpoints
+        self._durable_trace = durable_trace
+        self._conversation = conversation
         self._state = state
         self._object_store = object_store
+        self._object_reader = object_reader
         self._sessions = sessions
         self._task_admissions = task_admissions
         self._tool_responses = tool_responses
@@ -396,7 +431,9 @@ class DefaultExecutionService:
         self._session_execution_ready = session_execution_ready
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
-        self._handoff = HandoffGate[tuple[str, str], None]()
+        self._handoff = HandoffGate[tuple[str, str], bool]()
+        self._accepting = True
+        self._admission_tasks: set[asyncio.Task[ExecutionHandle]] = set()
         self._detached_cancel_finalizers: set[asyncio.Task[CancelExecutionResult]] = (
             set()
         )
@@ -621,6 +658,8 @@ class DefaultExecutionService:
         tenant_id: str,
         hold_id: str,
     ) -> bool:
+        if self._runtime_bridge.pending_promote is not None:
+            await self._runtime_bridge.pending_promote(execution_id)
         created = await self._state.executions.acquire_dependency_hold(
             execution_id,
             tenant_id=tenant_id,
@@ -660,10 +699,10 @@ class DefaultExecutionService:
         await self._request_handoff_if_terminal(execution_id, tenant_id)
 
     async def request_terminal_handoff(
-        self, execution_id: str, *, tenant_id: str
+        self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
     ) -> None:
         key = tenant_id, execution_id
-        state, owner = await self._handoff.request_release(key)
+        state, owner = await self._handoff.request_release(key, value=terminal_commit)
         if owner:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
@@ -677,19 +716,21 @@ class DefaultExecutionService:
     async def _request_handoff_if_terminal(
         self, execution_id: str, tenant_id: str
     ) -> None:
-        current = await self._state.executions.get(execution_id, tenant_id=tenant_id)
+        current = await self._load_execution(execution_id, tenant_id=tenant_id)
         if current is not None and current.status in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
         }:
-            await self.request_terminal_handoff(execution_id, tenant_id=tenant_id)
+            await self.request_terminal_handoff(
+                execution_id, tenant_id=tenant_id, terminal_commit=current.conversation,
+            )
 
     async def _run_handoff_cleanup(
         self,
         execution_id: str,
         tenant_id: str,
-        state: HandoffState[None],
+        state: HandoffState[bool],
     ) -> None:
         key = tenant_id, execution_id
         waiter = self._local_waiter
@@ -699,10 +740,12 @@ class DefaultExecutionService:
                 await self.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
             return
         try:
-            released = await self._release_terminal(
-                execution_id,
-                tenant_id=tenant_id,
-            )
+            if state.release_value:
+                released = await self._release_terminal(
+                    execution_id, tenant_id=tenant_id, terminal_commit=True,
+                )
+            else:
+                released = await self._release_terminal(execution_id, tenant_id=tenant_id)
         except BaseException as error:
             await self._handoff.finish_release(key, state, succeeded=False)
             if not isinstance(error, Exception):
@@ -810,6 +853,9 @@ class DefaultExecutionService:
             correlation=normalized_correlation,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
+            restart_checkpoints=True,
+            durable_trace=True,
+            conversation=False,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -1713,7 +1759,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
             header,
         )
-        execution = await self._state.executions.get(
+        execution = await self._load_execution(
             existing.resource_id,
             tenant_id=request.principal.tenant_id,
         )
@@ -1832,7 +1878,7 @@ class DefaultExecutionService:
         )
         if existing is None:
             return None
-        execution = await self._state.executions.get(
+        execution = await self._load_execution(
             existing.resource_id,
             tenant_id=principal.tenant_id,
         )
@@ -1873,6 +1919,60 @@ class DefaultExecutionService:
         self, execution_id: str, *, principal: Principal
     ) -> tuple[ExecutionView, ...]:
         async with self._execution_consumer(execution_id, principal.tenant_id):
+            pending = self._runtime_bridge.pending_turns.get(execution_id, tenant_id=principal.tenant_id)
+            if pending is not None:
+                await self._authorize_execution(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+                if self._runtime_bridge.pending_turns.get(execution_id, tenant_id=principal.tenant_id) is pending:
+                    # Child admission first promotes this parent to source authority.
+                    return ()
+            repository = self._state.executions
+            if type(repository) is ExecutionRepositoryImpl:
+                header = await repository.get_header(
+                    execution_id, tenant_id=principal.tenant_id
+                )
+                remote_pending = None
+                if header is None:
+                    header = await self._authorize_execution(
+                        execution_id, principal, AuthorizationAction.EXECUTION_READ,
+                    )
+                    remote_pending = await self._runtime_bridge.pending_turns.read_remote_execution(
+                        execution_id, tenant_id=principal.tenant_id,
+                    )
+                    if remote_pending is not None:
+                        await self._authorize_loaded_execution(
+                            remote_pending, principal, AuthorizationAction.EXECUTION_READ,
+                            owner_principal_id=header.owner_principal_id,
+                        )
+                else:
+                    await self._authorization.authorize(
+                        principal, AuthorizationAction.EXECUTION_READ, header,
+                    )
+
+                async def read(
+                    _transaction: "StateTransaction",
+                ) -> tuple[ExecutionRecord | None, tuple[ExecutionView, ...]]:
+                    current = await repository.get(
+                        execution_id, tenant_id=principal.tenant_id,
+                    )
+                    if current is None:
+                        if remote_pending is not None:
+                            # A child cannot exist before its parent is promoted.
+                            return None, ()
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    children = await repository.list_children(
+                        execution_id, tenant_id=principal.tenant_id,
+                    )
+                    return current, tuple(_execution_view(child) for child in children)
+
+                # Authorization may await arbitrary application work; only the
+                # known metadata owner shares the post-authorization snapshot.
+                current, children = await repository.state_store.read(read)
+                if current is not None:
+                    await self._authorize_loaded_execution(
+                        current, principal, AuthorizationAction.EXECUTION_READ,
+                        owner_principal_id=header.owner_principal_id,
+                    )
+                return children
             await self._load_authorized(
                 execution_id, principal, AuthorizationAction.EXECUTION_READ
             )
@@ -1903,46 +2003,60 @@ class DefaultExecutionService:
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
-        if session_id is None:
-            return await self._start_unlocked(
-                binding_digest,
-                request,
-                session_id=session_id,
-                session_agent_id=session_agent_id,
-                previous_execution_id=previous_execution_id,
-                fork_base_execution_id=fork_base_execution_id,
-                conversation_agent_run_id=conversation_agent_run_id,
-                parent_execution_id=parent_execution_id,
-                root_execution_id=root_execution_id,
-                parent_invocation_id=parent_invocation_id,
-                lineage_kind=lineage_kind,
-                scope=scope,
-                prepare_local_stream=prepare_local_stream,
-                dependency_hold_id=dependency_hold_id,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
-                binding_contract=binding_contract,
-            )
-        async with self._session_guard(request.principal.tenant_id, session_id):
-            return await self._start_unlocked(
-                binding_digest,
-                request,
-                session_id=session_id,
-                session_agent_id=session_agent_id,
-                previous_execution_id=previous_execution_id,
-                fork_base_execution_id=fork_base_execution_id,
-                conversation_agent_run_id=conversation_agent_run_id,
-                parent_execution_id=parent_execution_id,
-                root_execution_id=root_execution_id,
-                parent_invocation_id=parent_invocation_id,
-                lineage_kind=lineage_kind,
-                scope=scope,
-                prepare_local_stream=prepare_local_stream,
-                dependency_hold_id=dependency_hold_id,
-                requires_task_invocation_capture=requires_task_invocation_capture,
-                budget_scope_id=budget_scope_id,
-                binding_contract=binding_contract,
-            )
+        if not self._conversation and (session_id is not None or fork_base_execution_id is not None):
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
+        try:
+            if session_id is None:
+                return await self._start_unlocked(
+                    binding_digest,
+                    request,
+                    session_id=session_id,
+                    session_agent_id=session_agent_id,
+                    previous_execution_id=previous_execution_id,
+                    fork_base_execution_id=fork_base_execution_id,
+                    conversation_agent_run_id=conversation_agent_run_id,
+                    parent_execution_id=parent_execution_id,
+                    root_execution_id=root_execution_id,
+                    parent_invocation_id=parent_invocation_id,
+                    lineage_kind=lineage_kind,
+                    scope=scope,
+                    prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                    binding_contract=binding_contract,
+                    capture_metric=capture_metric,
+                )
+            async with self._session_guard(request.principal.tenant_id, session_id):
+                return await self._start_unlocked(
+                    binding_digest,
+                    request,
+                    session_id=session_id,
+                    session_agent_id=session_agent_id,
+                    previous_execution_id=previous_execution_id,
+                    fork_base_execution_id=fork_base_execution_id,
+                    conversation_agent_run_id=conversation_agent_run_id,
+                    parent_execution_id=parent_execution_id,
+                    root_execution_id=root_execution_id,
+                    parent_invocation_id=parent_invocation_id,
+                    lineage_kind=lineage_kind,
+                    scope=scope,
+                    prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                    binding_contract=binding_contract,
+                    capture_metric=capture_metric,
+                )
+        finally:
+            if metric_delivery is not None:
+                await metric_delivery()
 
     async def _start_unlocked(
         self,
@@ -1964,6 +2078,7 @@ class DefaultExecutionService:
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionHandle:
         if budget_scope_id is not None and (
             not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
@@ -1985,6 +2100,8 @@ class DefaultExecutionService:
         if lineage_kind is ExecutionLineageKind.SUBAGENT:
             if parent_execution_id is None or not parent_invocation_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._runtime_bridge.pending_promote is not None:
+                await self._runtime_bridge.pending_promote(parent_execution_id)
             parent = await self._state.executions.get(
                 parent_execution_id,
                 tenant_id=request.principal.tenant_id,
@@ -2001,7 +2118,10 @@ class DefaultExecutionService:
         conversation_agent_run_id = conversation_agent_run_id
         session = None
         if session_id is not None and previous_execution_id is None:
-            session = await self._sessions.get(
+            await self._runtime_bridge.pending_turns.settle_session(
+                session_id, tenant_id=request.principal.tenant_id,
+            )
+            session = await self._load_session(
                 session_id, tenant_id=request.principal.tenant_id
             )
             if session is None:
@@ -2055,6 +2175,17 @@ class DefaultExecutionService:
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
         )
+        pending_turn = await self._runtime_bridge.pending_turns.lookup(
+            tenant_id=request.principal.tenant_id, scope=scope,
+            idempotency_key_digest=idempotency_key_digest, request_digest=request_digest,
+        )
+        if pending_turn is not None:
+            self._validate_replayed_execution(
+                pending_turn.execution, binding, request,
+                requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
+            )
+            return ExecutionHandle(pending_turn.execution.execution_id)
         existing = await self._state.idempotency.get(
             scope,
             idempotency_key_digest,
@@ -2066,7 +2197,7 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if existing.status is IdempotencyStatus.RESERVED:
-                pending = await self._state.executions.get(
+                pending = await self._load_execution(
                     existing.resource_id, tenant_id=request.principal.tenant_id
                 )
                 if pending is not None:
@@ -2100,13 +2231,14 @@ class DefaultExecutionService:
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
+                    capture_metric=capture_metric,
                 )
                 return ExecutionHandle(existing.resource_id)
             if existing.status in {
                 IdempotencyStatus.FAILED,
                 IdempotencyStatus.CANCELLED,
             }:
-                terminal = await self._state.executions.get(
+                terminal = await self._load_execution(
                     existing.resource_id,
                     tenant_id=request.principal.tenant_id,
                 )
@@ -2133,7 +2265,7 @@ class DefaultExecutionService:
                     else ErrorCode.EXECUTION_CANCELLED
                 )
                 raise _stable_idempotency_error(existing.error_code, fallback)
-            started = await self._state.executions.get(
+            started = await self._load_execution(
                 existing.resource_id, tenant_id=request.principal.tenant_id
             )
             if started is None:
@@ -2240,7 +2372,7 @@ class DefaultExecutionService:
                 instruction_path: str = "."
                 if session_id is not None:
                     if session is None:
-                        session = await self._sessions.get(
+                        session = await self._load_session(
                             session_id,
                             tenant_id=request.principal.tenant_id,
                         )
@@ -2291,9 +2423,13 @@ class DefaultExecutionService:
             stored_user_input=context.stored_user_input,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id or (None if request.budget is None else "execution:" + execution_id),
+            restart_checkpoints=(self._restart_checkpoints or requires_task_invocation_capture
+                                 or parent is not None and parent.restart_checkpoints),
+            durable_trace=(self._durable_trace or requires_task_invocation_capture
+                           or parent is not None and parent.durable_trace),
+            conversation=self._conversation,
         )
-        reservation = await self._state.executions.reserve_start(
-            ExecutionStartReservation(
+        proposed_reservation = ExecutionStartReservation(
                 execution,
                 IdempotencyRecord(
                     scope=scope,
@@ -2308,8 +2444,176 @@ class DefaultExecutionService:
                     updated_at=now,
                 ),
                 budget=request.budget,
-            )
         )
+        return await self._admit_execution_start(
+            request, proposed_reservation, binding, session,
+            prepare_local_stream=prepare_local_stream,
+            dependency_hold_id=dependency_hold_id,
+            requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
+            capture_metric=capture_metric,
+        )
+
+    async def _admit_execution_start(
+        self,
+        request: ExecutionRequest,
+        proposed_reservation: ExecutionStartReservation,
+        binding: AgentBinding,
+        session: "SessionRecord | None",
+        *,
+        prepare_local_stream: bool,
+        dependency_hold_id: str | None,
+        requires_task_invocation_capture: bool,
+        budget_scope_id: str | None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
+    ) -> ExecutionHandle:
+        if not self._accepting:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        coordinator = self._runtime_bridge.pending_turns.coordination
+        execution = proposed_reservation.execution
+        identity = proposed_reservation.idempotency
+
+        async def admit() -> ExecutionHandle:
+            if not self._accepting:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            coordination = None
+            if coordinator is not None:
+                coordination = await coordinator.claim(
+                    session_key=(f"session:{execution.session_id}" if execution.session_id is not None else
+                                 f"request:{identity.scope}:{identity.idempotency_key_digest}"),
+                    request_key=f"{identity.scope}:{identity.idempotency_key_digest}",
+                    request_digest=identity.request_digest,
+                    execution_id=execution.execution_id,
+                    owner_id=uuid.uuid4().hex,
+                    lease_seconds=30,
+                )
+                if coordination is None:
+                    raise AIError(ErrorCode.SESSION_BUSY)
+                if coordination.lease is None:
+                    return await self._join_coordinated_start(
+                        coordinator, coordination, request, binding,
+                        requires_task_invocation_capture=requires_task_invocation_capture,
+                        budget_scope_id=budget_scope_id,
+                    )
+            transferred = False
+            try:
+                if (execution.conversation and dependency_hold_id is None
+                        and self._runtime_bridge.pending_start is not None):
+                    pending_id = await ConversationCapability.prepare_turn(
+                        request, proposed_reservation, session, coordination,
+                        start_pending=self._runtime_bridge.pending_start,
+                        dependency_hold_id=dependency_hold_id,
+                    )
+                    if pending_id is not None:
+                        transferred = True
+                        return ExecutionHandle(pending_id)
+                return await self._reserve_and_launch_start(
+                    request, proposed_reservation, binding,
+                    prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                    capture_metric=capture_metric,
+                )
+            finally:
+                if (coordinator is not None and coordination is not None
+                        and coordination.lease is not None and not transferred):
+                    try:
+                        await coordinator.release(coordination.lease)
+                    except Exception:
+                        # Admission already has a source result or a known
+                        # failure. Cleanup failure cannot change that outcome;
+                        # the conditional claim expires on its own.
+                        _logger.warning(
+                            "execution admission claim cleanup failed: execution=%s",
+                            execution.execution_id,
+                            exc_info=environ.debug,
+                        )
+
+        if coordinator is None:
+            return await admit()
+        task = asyncio.create_task(admit(), name=f"execution-admission-{execution.execution_id}")
+        self._admission_tasks.add(task)
+        task.add_done_callback(self._admission_tasks.discard)
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+                if task.done():
+                    if task.cancelled():
+                        raise AIError(
+                            ErrorCode.STORAGE_COMMIT_UNKNOWN,
+                            safe_details={"phase": "execution_admission"},
+                        ) from error
+                    result = task.result()
+                    break
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    async def _join_coordinated_start(
+        self,
+        coordinator: _PendingTurnCoordination,
+        coordination: TurnCoordination,
+        request: ExecutionRequest,
+        binding: AgentBinding,
+        *,
+        requires_task_invocation_capture: bool,
+        budget_scope_id: str | None,
+    ) -> ExecutionHandle:
+        pause = 0.05
+        publication_deadline = asyncio.get_running_loop().time() + 3.0
+        while True:
+            record = await self._load_execution(
+                coordination.execution_id, tenant_id=request.principal.tenant_id,
+            )
+            if record is not None:
+                self._validate_replayed_execution(
+                    record, binding, request,
+                    requires_task_invocation_capture=requires_task_invocation_capture,
+                    budget_scope_id=budget_scope_id,
+                )
+                return ExecutionHandle(record.execution_id)
+            owner = await coordinator.read_owner(
+                coordination.execution_id, tenant_id=request.principal.tenant_id,
+            )
+            if owner is None or owner.owner_id != coordination.owner_id:
+                record = await self._load_source_execution(
+                    coordination.execution_id, tenant_id=request.principal.tenant_id,
+                )
+                if record is not None:
+                    self._validate_replayed_execution(
+                        record, binding, request,
+                        requires_task_invocation_capture=requires_task_invocation_capture,
+                        budget_scope_id=budget_scope_id,
+                    )
+                    return ExecutionHandle(record.execution_id)
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+            if asyncio.get_running_loop().time() >= publication_deadline:
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+            await asyncio.sleep(pause)
+            pause = min(1.0, pause * 2)
+
+    async def _reserve_and_launch_start(
+        self,
+        request: ExecutionRequest,
+        proposed_reservation: ExecutionStartReservation,
+        binding: AgentBinding,
+        *,
+        prepare_local_stream: bool,
+        dependency_hold_id: str | None,
+        requires_task_invocation_capture: bool,
+        budget_scope_id: str | None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
+    ) -> ExecutionHandle:
+        identity = proposed_reservation.idempotency
+        scope = identity.scope
+        idempotency_key_digest = identity.idempotency_key_digest
+        request_digest = identity.request_digest
+        reservation = await self._state.executions.reserve_start(proposed_reservation)
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -2333,6 +2637,7 @@ class DefaultExecutionService:
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
+                    capture_metric=capture_metric,
                 )
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
@@ -2389,6 +2694,7 @@ class DefaultExecutionService:
             request_digest=request_digest,
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
+            capture_metric=capture_metric,
         )
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
@@ -2425,6 +2731,7 @@ class DefaultExecutionService:
         request_digest: str,
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2443,6 +2750,7 @@ class DefaultExecutionService:
                     execution,
                     identity=identity,
                     error=error,
+                    capture_metric=capture_metric,
                 )
             raise
         if started is None:
@@ -2476,10 +2784,11 @@ class DefaultExecutionService:
         *,
         identity: ExecutionStartIdentity,
         error: AIError,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> ExecutionRecord:
         if error.code not in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        current = await self._state.executions.get(
+        current = await self._load_execution(
             execution.execution_id,
             tenant_id=self._state.executions.tenant_id,
         )
@@ -2499,6 +2808,13 @@ class DefaultExecutionService:
             or idempotency.request_digest != identity.request_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metric_delivery: _TerminalMetricDelivery | None = None
+        cancellation: asyncio.CancelledError | None = None
+
+        def capture_terminal_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
         if current.status in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
@@ -2559,14 +2875,38 @@ class DefaultExecutionService:
                     ),
                     session_id=None,
                     expected_execution=current,
+                    capture_metric=capture_terminal_metric,
                 )
+            except asyncio.CancelledError as cancelled:
+                cancellation = cancelled
+                try:
+                    observed = await self._load_execution(
+                        current.execution_id,
+                        tenant_id=self._state.executions.tenant_id,
+                    )
+                    observed_identity = await self._state.idempotency.get(
+                        identity.scope,
+                        identity.idempotency_key_digest,
+                        tenant_id=self._state.executions.tenant_id,
+                    )
+                except Exception as read_error:
+                    raise cancelled from read_error
+                if (
+                    observed is None
+                    or observed.status is not ExecutionStatus.FAILED
+                    or observed.error_code != error.code.value
+                    or observed_identity is None
+                    or observed_identity.status is not IdempotencyStatus.FAILED
+                ):
+                    raise
+                terminal = observed
             except AIError as commit_error:
                 if commit_error.code not in {
                     ErrorCode.STORAGE_CONFLICT,
                     ErrorCode.EXECUTION_RESULT_CONFLICT,
                 }:
                     raise
-                latest = await self._state.executions.get(
+                latest = await self._load_execution(
                     current.execution_id,
                     tenant_id=self._state.executions.tenant_id,
                 )
@@ -2591,6 +2931,13 @@ class DefaultExecutionService:
             terminal.execution_id,
             error.code.value,
         )
+        if metric_delivery is not None:
+            if capture_metric is not None:
+                capture_metric(metric_delivery)
+            else:
+                await metric_delivery()
+        if cancellation is not None:
+            raise cancellation
         return terminal
 
     async def _launch_started(
@@ -2635,7 +2982,7 @@ class DefaultExecutionService:
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        launch_record = await self._state.executions.get(
+        launch_record = await self._load_execution(
             execution.execution_id,
             tenant_id=self._state.executions.tenant_id,
         )
@@ -2656,7 +3003,8 @@ class DefaultExecutionService:
         if launch_record.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if launch_record.budget_scope_id is not None:
-            await self._state.budgets.read(launch_record.budget_scope_id)
+            usage = await self._state.budgets.read(launch_record.budget_scope_id)
+            request = replace(request, budget=usage.limits)
         if launch_record.agent_run_seq > 0:
             # A replay observes the admitted producer. Only explicit recovery
             # may obtain a new generation for an already claimed attempt.
@@ -2698,7 +3046,7 @@ class DefaultExecutionService:
                 self._live_broker.abandon_prepared_local_producer(
                     launch_record.execution_id
                 )
-            current = await self._state.executions.get(
+            current = await self._load_execution(
                 execution.execution_id,
                 tenant_id=self._state.executions.tenant_id,
             )
@@ -2729,7 +3077,7 @@ class DefaultExecutionService:
     async def budget_usage(
         self, execution_id: str, *, principal: Principal,
     ) -> BudgetUsage | None:
-        execution = await self._load_authorized(
+        execution = await self._load_observed_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ,
         )
         if execution.budget_scope_id is None:
@@ -2740,7 +3088,7 @@ class DefaultExecutionService:
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:
-        execution = await self._load_authorized(
+        execution = await self._load_observed_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ
         )
         if (
@@ -2765,14 +3113,30 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._history_service.list(request)
 
-    @consumed_query
+    @consumed_terminal_query
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult:
         execution = await self._load_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ
         )
-        return await self._result_from_execution(execution, tenant_id=principal.tenant_id)
+        return await self._consume_result_from_execution(execution, tenant_id=principal.tenant_id)
+
+    async def _consume_result_from_execution(
+        self, execution: ExecutionRecord, *, tenant_id: str
+    ) -> ExecutionResult:
+        result = await self._result_from_execution(execution, tenant_id=tenant_id)
+        stored = execution.result
+        if type(self._state.executions) is not ExecutionRepositoryImpl or (
+            stored is not None and stored.output is not None and stored.output.kind != "inline"
+        ):
+            # Body and custom-owner reads may yield after the terminal snapshot.
+            await self._request_handoff_if_terminal(execution.execution_id, tenant_id=tenant_id)
+        else:
+            await self.request_terminal_handoff(
+                execution.execution_id, tenant_id=tenant_id, terminal_commit=execution.conversation,
+            )
+        return result
 
     async def _result_from_execution(
         self, execution: ExecutionRecord, *, tenant_id: str
@@ -2820,7 +3184,12 @@ class DefaultExecutionService:
                 reference = result.output.ref
                 if reference is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                payload = await read_runtime_object(self._object_store, reference)
+                if self._object_reader is None:
+                    payload = await read_runtime_object(self._object_store, reference)
+                else:
+                    if reference.store_id != RUNTIME_OBJECT_STORE_ID:
+                        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                    payload = await self._object_reader(RuntimeDomain.EXECUTION, reference)
                 if result.output.encoding == "utf-8":
                     output = payload.decode("utf-8")
                 else:
@@ -2843,7 +3212,7 @@ class DefaultExecutionService:
         ) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
-    @consumed_query
+    @consumed_terminal_query
     async def result_payload_size(
         self, execution_id: str, *, principal: Principal
     ) -> int:
@@ -2861,9 +3230,15 @@ class DefaultExecutionService:
                   await repository.get_result(execution_id, tenant_id=principal.tenant_id))
         if result is None or result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if type(repository) is ExecutionRepositoryImpl:
+            await self.request_terminal_handoff(
+                execution_id, tenant_id=principal.tenant_id, terminal_commit=execution.conversation,
+            )
+        else:
+            await self._request_handoff_if_terminal(execution_id, tenant_id=principal.tenant_id)
         return result.output.size
 
-    @consumed_query
+    @consumed_terminal_query
     async def wait(
         self,
         execution_id: str,
@@ -2919,7 +3294,7 @@ class DefaultExecutionService:
                         )
                         if failure is not None:
                             raise failure
-                    return await self._result_from_execution(
+                    return await self._consume_result_from_execution(
                         execution, tenant_id=principal.tenant_id,
                     )
                 if self._backend is not None:
@@ -3030,6 +3405,8 @@ class DefaultExecutionService:
     async def fork(
         self, execution_id: str, request: ForkExecutionRequest
     ) -> ExecutionHandle:
+        if not self._conversation:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
@@ -3038,6 +3415,8 @@ class DefaultExecutionService:
             or not isinstance(previous.binding, AgentBindingContract)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not previous.conversation:
+            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
         if binding.binding_digest != binding_digest:
@@ -3074,29 +3453,45 @@ class DefaultExecutionService:
     async def cancel(
         self, execution_id: str, request: CancelExecutionRequest
     ) -> CancelExecutionResult:
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
         async with self._execution_consumer(execution_id, request.principal.tenant_id):
             finalizer = asyncio.create_task(
-                self._cancel_finalizer_with_handoff(execution_id, request),
+                self._cancel_finalizer_with_handoff(
+                    execution_id, request, capture_metric=capture_metric,
+                ),
                 name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
             )
             try:
-                return await asyncio.shield(finalizer)
+                result = await asyncio.shield(finalizer)
             except asyncio.CancelledError:
                 if finalizer.done():
-                    return finalizer.result()
-                self._detach_cancel_finalizer(finalizer, execution_id)
-                raise
+                    result = finalizer.result()
+                else:
+                    self._detach_cancel_finalizer(finalizer, execution_id)
+                    raise
+        if metric_delivery is not None:
+            await metric_delivery()
+        return result
 
     async def _cancel_finalizer_with_handoff(
         self,
         execution_id: str,
         request: CancelExecutionRequest,
+        *,
+        capture_metric: Callable[[_TerminalMetricDelivery], None],
     ) -> CancelExecutionResult:
         async with self._execution_consumer(
             execution_id,
             request.principal.tenant_id,
         ):
-            result = await self.cancel_authorized(execution_id, request)
+            result = await self.cancel_authorized(
+                execution_id, request, capture_metric=capture_metric,
+            )
             await self._request_handoff_if_terminal(
                 execution_id,
                 request.principal.tenant_id,
@@ -3148,6 +3543,15 @@ class DefaultExecutionService:
         task.add_done_callback(consume)
 
     async def preflight_close(self) -> None:
+        self._accepting = False
+        while True:
+            pending = tuple(task for task in self._admission_tasks if not task.done())
+            if not pending:
+                break
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in pending),
+                return_exceptions=True,
+            )
         while True:
             pending = tuple(
                 task for task in self._detached_cancel_finalizers if not task.done()
@@ -3170,11 +3574,15 @@ class DefaultExecutionService:
             )
 
     async def _cancel(
-        self, execution_id: str, request: CancelExecutionRequest
+        self, execution_id: str, request: CancelExecutionRequest,
+        *, capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
-        execution = await self._load_authorized(
-            execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL
-        )
+        execution = await self._load_cancel_execution(execution_id, request)
+        if self._runtime_bridge.pending_cancel_promote is not None:
+            await self._runtime_bridge.pending_cancel_promote(execution_id)
+            execution = await self._load_authorized(
+                execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL,
+            )
         operation_digest = canonical_sha256(
             {
                 "action": "execution.cancel",
@@ -3195,8 +3603,11 @@ class DefaultExecutionService:
                 OperationStatus.SUCCEEDED,
                 OperationStatus.CANCELLED,
             }:
+                settled = await self._load_execution(execution_id, tenant_id=request.principal.tenant_id)
+                if settled is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return CancelExecutionResult(
-                    execution_id, execution.status is ExecutionStatus.CANCELLED
+                    execution_id, settled.status is ExecutionStatus.CANCELLED
                 )
             if operation.status is OperationStatus.EFFECT_UNKNOWN:
                 resolved = await self._resolve_cancel_race(
@@ -3225,7 +3636,7 @@ class DefaultExecutionService:
                 now,
             )
             operation = await self._state.operations.append(operation)
-        latest = await self._state.executions.get(
+        latest = await self._load_execution(
             execution_id,
             tenant_id=request.principal.tenant_id,
         )
@@ -3253,6 +3664,12 @@ class DefaultExecutionService:
                 return resolved
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_terminal_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
+
         try:
             if execution.status is ExecutionStatus.CANCELLING:
                 cancelling = execution
@@ -3290,9 +3707,9 @@ class DefaultExecutionService:
                 await self._subagent_cancellation.cancel_children(
                     cancelling.execution_id, request.principal
                 )
-            outcome = await self._backend.cancel(cancelling)
+            outcome = await self._backend.cancel(cancelling, force=request.force)
             if outcome is CancelEffectOutcome.UNKNOWN:
-                recovery_current = await self._state.executions.get(
+                recovery_current = await self._load_execution(
                     execution_id,
                     tenant_id=request.principal.tenant_id,
                 )
@@ -3302,6 +3719,7 @@ class DefaultExecutionService:
                     return await self._cancel_recovery_required(
                         recovery_current,
                         request,
+                        capture_metric=capture_metric,
                     )
                 resolved = await self._resolve_cancel_race(
                     execution_id, request.principal.tenant_id, operation
@@ -3348,7 +3766,7 @@ class DefaultExecutionService:
                     OperationStatus.SUCCEEDED,
                     OperationStatus.CANCELLED,
                 }:
-                    latest = await self._state.executions.get(
+                    latest = await self._load_execution(
                         execution_id, tenant_id=request.principal.tenant_id
                     )
                     if latest is None or latest.status not in {
@@ -3363,7 +3781,7 @@ class DefaultExecutionService:
                 if current.status is OperationStatus.FAILED:
                     raise _stable_operation_error(current.error_code)
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            cancelling_current = await self._state.executions.get(
+            cancelling_current = await self._load_execution(
                 execution_id, tenant_id=request.principal.tenant_id
             )
             if cancelling_current is None:
@@ -3420,7 +3838,7 @@ class DefaultExecutionService:
                 OperationStatus.SUCCEEDED,
                 OperationStatus.CANCELLED,
             }:
-                latest = await self._state.executions.get(
+                latest = await self._load_execution(
                     execution_id, tenant_id=request.principal.tenant_id
                 )
                 if latest is None or latest.status not in {
@@ -3470,6 +3888,7 @@ class DefaultExecutionService:
                     terminal_commit,
                     session_id=cancelling_current.session_id,
                     expected_execution=cancelling_current,
+                    capture_metric=capture_terminal_metric,
                 )
             except AIError as error:
                 if error.code not in {
@@ -3500,7 +3919,7 @@ class DefaultExecutionService:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            recovery_current = await self._state.executions.get(
+            recovery_current = await self._load_execution(
                 execution_id,
                 tenant_id=request.principal.tenant_id,
             )
@@ -3511,6 +3930,7 @@ class DefaultExecutionService:
                 return await self._cancel_recovery_required(
                     recovery_current,
                     request,
+                    capture_metric=capture_metric,
                 )
             resolved = await self._resolve_cancel_race(
                 execution_id, request.principal.tenant_id, operation
@@ -3546,21 +3966,27 @@ class DefaultExecutionService:
                     operation.operation_id,
                 )
             raise
+        finally:
+            if metric_delivery is not None:
+                if capture_metric is not None:
+                    capture_metric(metric_delivery)
+                else:
+                    await metric_delivery()
         return CancelExecutionResult(execution_id, True)
 
     async def cancel_authorized(
         self,
         execution_id: str,
         request: CancelExecutionRequest,
+        *,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
-        execution = await self._load_authorized(
-            execution_id,
-            request.principal,
-            AuthorizationAction.EXECUTION_CANCEL,
-        )
+        execution = await self._load_cancel_execution(execution_id, request)
         if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-            return await self._cancel_recovery_required(execution, request)
-        return await self._cancel(execution_id, request)
+            return await self._cancel_recovery_required(
+                execution, request, capture_metric=capture_metric,
+            )
+        return await self._cancel(execution_id, request, capture_metric=capture_metric)
 
     async def recovery_effects(
         self,
@@ -3656,6 +4082,8 @@ class DefaultExecutionService:
         self,
         execution: ExecutionRecord,
         request: CancelExecutionRequest,
+        *,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None = None,
     ) -> CancelExecutionResult:
         operation_digest = canonical_sha256(
             {
@@ -3697,7 +4125,9 @@ class DefaultExecutionService:
                 AuthorizationAction.EXECUTION_RECOVER,
             )
             if latest.status is not ExecutionStatus.RECOVERY_REQUIRED:
-                return await self._cancel(execution.execution_id, request)
+                return await self._cancel(
+                    execution.execution_id, request, capture_metric=capture_metric,
+                )
             raise
         if (
             current.request_digest != operation_digest
@@ -3713,6 +4143,10 @@ class DefaultExecutionService:
             except ValueError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             raise AIError(code)
+        if request.force:
+            outcome = await self.runtime_backend().cancel(execution, force=True)
+            if outcome is CancelEffectOutcome.CONFIRMED:
+                return await self._cancel(execution.execution_id, request, capture_metric=capture_metric)
         return CancelExecutionResult(execution.execution_id, False)
 
     async def _resolve_cancel_race(
@@ -3721,7 +4155,7 @@ class DefaultExecutionService:
         tenant_id: str,
         operation: OperationLedgerRecord,
     ) -> "CancelExecutionResult | None":
-        current = await self._state.executions.get(execution_id, tenant_id=tenant_id)
+        current = await self._load_execution(execution_id, tenant_id=tenant_id)
         if current is None or current.status not in {
             ExecutionStatus.FINALIZING,
             ExecutionStatus.SUCCEEDED,
@@ -3954,21 +4388,175 @@ class DefaultExecutionService:
             return
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
+    async def _load_session(self, session_id: str, *, tenant_id: str) -> "SessionRecord | None":
+        return await self._sessions.state_store.read(
+            lambda _transaction: self._sessions.get(session_id, tenant_id=tenant_id)
+        )
+
+    async def _load_source_execution(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ExecutionRecord | None:
+        repository = self._state.executions
+        if type(repository) is ExecutionRepositoryImpl:
+            return await repository.get_fresh(execution_id, tenant_id=tenant_id)
+        return await repository.state_store.read(
+            lambda _transaction: repository.get(execution_id, tenant_id=tenant_id)
+        )
+
+    async def _load_execution(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
+        pending = await self._runtime_bridge.pending_turns.read_execution(execution_id, tenant_id=tenant_id)
+        if pending is not None:
+            return pending
+        record = await self._load_source_execution(execution_id, tenant_id=tenant_id)
+        if record is not None:
+            return record
+        pending = await self._runtime_bridge.pending_turns.read_remote_execution(
+            execution_id, tenant_id=tenant_id,
+        )
+        if pending is not None:
+            return pending
+        # Publication can disappear after the source read when its owner commits.
+        return await self._load_source_execution(execution_id, tenant_id=tenant_id)
+
+    async def _load_cancel_execution(
+        self, execution_id: str, request: CancelExecutionRequest,
+    ) -> ExecutionRecord:
+        execution = await self._load_authorized(
+            execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL,
+        )
+        pending_turns = self._runtime_bridge.pending_turns
+        tenant_id = request.principal.tenant_id
+        if pending_turns.get(execution_id, tenant_id=tenant_id) is not None or execution.status not in {
+            ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.CANCELLING,
+        }:
+            return execution
+
+        async def source_execution() -> ExecutionRecord | None:
+            source = await self._load_source_execution(execution_id, tenant_id=tenant_id)
+            if source is not None:
+                await self._authorize_loaded_execution(
+                    source, request.principal, AuthorizationAction.EXECUTION_CANCEL,
+                    owner_principal_id=execution.principal_id,
+                )
+            return source
+
+        source = await source_execution()
+        if source is not None:
+            return source
+        pending = await pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
+        if pending is not None:
+            await self._authorize_loaded_execution(
+                pending, request.principal, AuthorizationAction.EXECUTION_CANCEL,
+                owner_principal_id=execution.principal_id,
+            )
+            await pending_turns.cancel_remote(execution_id, tenant_id=tenant_id)
+        poll_backoff = 0.05
+        while True:
+            source = await source_execution()
+            if source is not None:
+                return source
+            pending = await pending_turns.read_remote_execution(execution_id, tenant_id=tenant_id)
+            if pending is None:
+                source = await source_execution()
+                if source is not None:
+                    return source
+                raise AIError(ErrorCode.EXECUTION_NOT_READY)
+            # The owner promotes and applies the ordinary cancellation protocol.
+            # A shared cancellation request is never a terminal source receipt.
+            await asyncio.sleep(poll_backoff)
+            poll_backoff = min(1.0, poll_backoff * 2)
+
     async def _load_authorized(
         self, execution_id: str, principal: Principal, action: AuthorizationAction
     ) -> ExecutionRecord:
-        header = await self._state.executions.get_header(
-            execution_id, tenant_id=principal.tenant_id
+        header = await self._authorize_execution(execution_id, principal, action)
+        record = await self._load_execution(execution_id, tenant_id=principal.tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorize_loaded_execution(
+            record, principal, action, owner_principal_id=header.owner_principal_id,
         )
+        return record
+
+    async def _load_observed_authorized(
+        self, execution_id: str, principal: Principal, action: AuthorizationAction
+    ) -> ExecutionRecord:
+        header = await self._authorize_execution(execution_id, principal, action)
+        record = await self._runtime_bridge.pending_turns.read_execution(
+            execution_id, tenant_id=principal.tenant_id,
+        )
+        if record is None:
+            record = await self._state.executions.get(
+                execution_id, tenant_id=principal.tenant_id,
+            )
+        if record is None:
+            record = await self._runtime_bridge.pending_turns.read_remote_execution(
+                execution_id, tenant_id=principal.tenant_id,
+            )
+        if record is None:
+            # Ordinary reads may retain a pre-commit miss after the owner releases.
+            record = await self._load_source_execution(
+                execution_id, tenant_id=principal.tenant_id,
+            )
+        if record is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorize_loaded_execution(
+            record, principal, action, owner_principal_id=header.owner_principal_id,
+        )
+        return record
+
+    async def _authorize_execution(
+        self, execution_id: str, principal: Principal, action: AuthorizationAction
+    ) -> ResourceRef:
+        pending = self._runtime_bridge.pending_turns.get(
+            execution_id, tenant_id=principal.tenant_id,
+        )
+        header = (ResourceRef(
+            ResourceKind.EXECUTION, execution_id, principal.tenant_id,
+            pending.execution.principal_id,
+        ) if pending is not None else await self._state.executions.get_header(
+            execution_id, tenant_id=principal.tenant_id,
+        ))
+        if header is None:
+            record = await self._runtime_bridge.pending_turns.read_remote_execution(
+                execution_id, tenant_id=principal.tenant_id,
+            )
+            if record is not None:
+                header = ResourceRef(
+                    ResourceKind.EXECUTION, execution_id, principal.tenant_id,
+                    record.principal_id,
+                )
+            else:
+                header = await self._load_source_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
-        record = await self._state.executions.get(
-            execution_id, tenant_id=principal.tenant_id
+        return header
+
+    async def _authorize_loaded_execution(
+        self, execution: ExecutionRecord, principal: Principal, action: AuthorizationAction,
+        *, owner_principal_id: str | None,
+    ) -> None:
+        if owner_principal_id is not None and execution.principal_id != owner_principal_id:
+            # A source winner retains its own authorization policy, even when
+            # an earlier remote observation described a different principal.
+            header = await self._load_source_header(execution.execution_id, tenant_id=principal.tenant_id)
+            if header is None:
+                header = ResourceRef(
+                    ResourceKind.EXECUTION, execution.execution_id, principal.tenant_id,
+                    execution.principal_id,
+                )
+            await self._authorization.authorize(principal, action, header)
+
+    async def _load_source_header(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ResourceRef | None:
+        repository = self._state.executions
+        if type(repository) is ExecutionRepositoryImpl:
+            return await repository.get_header_fresh(execution_id, tenant_id=tenant_id)
+        return await repository.state_store.read(
+            lambda _transaction: repository.get_header(execution_id, tenant_id=tenant_id)
         )
-        if record is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        return record
 
     async def load_authorized(
         self,

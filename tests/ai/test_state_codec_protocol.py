@@ -92,6 +92,8 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     primitives = fixture["stored_primitives"]
     record = decode_record(primitives["record"])
     assert record.kind == "golden"
+    assert record.storage_revision == primitives["record"]["storage_revision"]
+    assert encode_record(record) == primitives["record"]
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
@@ -260,6 +262,23 @@ def test_record_reader_ignores_additive_fields() -> None:
     )
 
 
+@pytest.mark.parametrize("value", (None, True, -1, "1"))
+def test_record_reader_rejects_invalid_storage_revision(value: object) -> None:
+    payload = dict(_fixture()["stored_primitives"]["record"])
+    payload["storage_revision"] = value
+    with pytest.raises(AIError) as raised:
+        decode_record(payload)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_record_reader_requires_storage_revision() -> None:
+    payload = dict(_fixture()["stored_primitives"]["record"])
+    payload.pop("storage_revision")
+    with pytest.raises(AIError) as raised:
+        decode_record(payload)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> None:
     future = {"v": CURRENT_DATA_VERSION + 1, "value": {"type": "future"}}
     assert parse_envelope(future).version == CURRENT_DATA_VERSION + 1
@@ -318,13 +337,15 @@ def test_golden_step_event_uses_current_event_type_wire() -> None:
 
 
 @pytest.mark.parametrize("persisted", (False, True))
-def test_declared_wire_defaults_restore_omitted_domain_fields(persisted: bool) -> None:
+def test_nullable_wire_fields_are_required(persisted: bool) -> None:
     head = TranscriptHeadRecord(TranscriptOwnerDomain.CONVERSATION, "history", 2, 1, HistoryQuality.COMPLETE)
     encode = _encode_persisted_domain if persisted else encode_domain
     payload = encode(head)
     del payload["fields"]["pending"]
     del payload["fields"]["pending_part_count"]
-    assert _decode_domain(payload, TranscriptHeadRecord, _CURRENT_CODEC, persisted=persisted) == head
+    with pytest.raises(AIError) as raised:
+        _decode_domain(payload, TranscriptHeadRecord, _CURRENT_CODEC, persisted=persisted)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.parametrize("value,field_name", (
@@ -396,7 +417,7 @@ def test_domain_decode_does_not_invoke_missing_field_factories(
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-@pytest.mark.parametrize("value", (True, -1, "0"))
+@pytest.mark.parametrize("value", (None, True, -1, "0"))
 def test_checkpoint_boundary_rejects_invalid_explicit_values(value: object) -> None:
     checkpoint = StoredAgentRunCheckpoint(
         "run", 1, datetime(2026, 9, 20, tzinfo=timezone.utc), "complete", "projection", 2,

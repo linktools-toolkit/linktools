@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -94,7 +94,7 @@ class _Store:
 async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() -> None:
     store = _Store()
     captured: list[int] = []
-    persistence = _AgentRunPersistenceCapability(
+    persistence = AgentRunCapture(
         recorder=AgentRunRecorder(
             store,  # type: ignore[arg-type]
             execution_id=None,
@@ -137,7 +137,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
-    persistence = _AgentRunPersistenceCapability(
+    persistence = AgentRunCapture(
         recorder=AgentRunRecorder(
             _Store(),  # type: ignore[arg-type]
             execution_id=None,

@@ -41,7 +41,7 @@ async def _seed_trace(storage: RuntimeStorage, count: int):
             idempotency_key=f"event-{index}",
         ), execution_id="execution")
     await storage.run_store.flush_execution_projection(run_id, execution_id="execution")
-    return storage.run_store.read_store(RuntimeDomain.EXECUTION), run_id
+    return storage.run_store.read_store(RuntimeDomain.TRACE), run_id
 
 
 async def _append_backdated_trace(storage: RuntimeStorage, run_id: str, count: int) -> None:

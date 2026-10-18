@@ -5,7 +5,7 @@
 import base64
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Generic, TypeVar
@@ -194,6 +194,17 @@ class _RepositoryBase:
 
         return await self._store.read(read)
 
+    async def _refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        # Native stores can repair their ordinary cache after a source fallback.
+        # Custom stores retain the existing mandatory StateStore contract.
+        from ._filesystem import FilesystemStateStore
+        from ._memory import InMemoryStateStore
+        from ._sql import SqlStateStore
+
+        if isinstance(self._store, (FilesystemStateStore, InMemoryStateStore, SqlStateStore)):
+            return await self._store.refresh_records(keys)
+        return await self._store.read(lambda transaction: transaction.get_records(keys))
+
     async def _insert(self, record: StoredRecord) -> None:
         await self._store.mutate(lambda transaction: transaction.insert_record(record))
 
@@ -279,7 +290,12 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def get(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
-        record = await self._record(self._key(self._kind, identity))
+        key = self._key(self._kind, identity)
+        record = (
+            await self._store.read_record(key)
+            if self._kind in {"session", "execution"}
+            else await self._record(key)
+        )
         return None if record is None else await self._decode(record, self._value_type)
 
     async def get_in_transaction(
@@ -293,7 +309,21 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         record = await transaction.get_record(self._key(self._kind, identity))
         return None if record is None else await self._decode(record, self._value_type)
 
+    async def get_fresh(self, identity: str, *, tenant_id: str) -> ValueT | None:
+        if tenant_id != self._tenant_id:
+            return None
+        key = self._key(self._kind, identity)
+        records = await self._refresh_records((key,))
+        record = records.get(key)
+        return None if record is None else await self._decode(record, self._value_type)
+
+    async def get_header_fresh(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
+        value = await self.get_fresh(identity, tenant_id=tenant_id)
+        return None if value is None else self._header(value, self._resource_kind, identity)
+
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
+        if tenant_id != self._tenant_id:
+            return None
         value = await self.get(identity, tenant_id=tenant_id)
         return (
             None
@@ -323,7 +353,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, current, next_record),
-                current.storage_version,
+                current.storage_revision,
             )
             return next_record
 
@@ -613,7 +643,7 @@ def project_record(
     parent: bytes | None = None,
     state: str | None = None,
     sort_key: str | None = None,
-    storage_version: int = 0,
+    storage_revision: int = 0,
 ) -> StoredRecord:
     """Project one logical value into its canonical physical Runtime record."""
     if scope is None:
@@ -640,7 +670,7 @@ def project_record(
         kind,
         sortable_identity(identity) if sort_key is None else sort_key,
         state,
-        storage_version,
+        storage_revision,
         lease_owner,
         lease_fence,
         lease_expires_at,
@@ -890,7 +920,7 @@ async def _replace_checked(
     transaction: StateTransaction, candidate: StoredRecord, expected: int
 ) -> None:
     if not await transaction.replace_record(
-        candidate, expected_storage_version=expected
+        candidate, expected_storage_revision=expected
     ):
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -910,7 +940,7 @@ def _projected_record(
     projected = repository._stored(
         current.kind, identity, value, state=_record_state(value)
     )
-    return replace(projected, storage_version=current.storage_version + 1)
+    return replace(projected, storage_revision=current.storage_revision + 1)
 
 
 def _require_session_identity(

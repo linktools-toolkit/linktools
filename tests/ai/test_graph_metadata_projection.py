@@ -12,7 +12,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionDeltaType, JsonValue, TaskStatus
 from linktools.ai.runtime import (
     AgentTaskInput, ExecutionTreeEvent, Runtime, RuntimeStorage,
@@ -37,11 +37,11 @@ async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) 
         storage = RuntimeStorage.sqlite(database, object_store=FilesystemObjectStore(tmp_path / "objects"))
     else:
         storage = RuntimeStorage.filesystem(tmp_path)
-    group = CapabilityGroup("metadata")
+    group = RuntimeFeatures("metadata")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "metadata-projection", models=FixtureModels() if models is None else models,
-        storage=storage, capabilities=(group,),
+        storage=storage, features=group,
     ) as runtime:
         yield runtime
 

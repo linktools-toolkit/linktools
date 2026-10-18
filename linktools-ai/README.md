@@ -6,8 +6,8 @@
 namespace
     + ModelRegistry
     + RuntimeStorage
-    + CapabilityGroup(s)
-        -> optional, independent Workspace and Sandbox via CapabilityGroup(...)
+    + one RuntimeFeatures or RuntimeFeaturesCapture
+        -> optional, independent Workspace and Sandbox via RuntimeFeatures(...)
         -> Runtime.open(...)
         -> captured capability/declaration candidates
         -> AgentCompiler
@@ -22,7 +22,7 @@ The main ownership rules are:
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
 - `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `CapabilityGroup` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
+- `RuntimeFeatures` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
 - `Runtime` is the composition root and owns the service graph.
@@ -32,7 +32,7 @@ The main ownership rules are:
 
 ## Application capability filtering
 
-`Runtime.open(..., capability_filter=...)` accepts an optional synchronous
+`RuntimeFeatures(..., filter=...)` accepts an optional synchronous
 `Callable[[AgentSpec, CapabilityContribution], bool]`. The compiler invokes it on
 captured `agent` (delegation target), `tool`, `skill`, `mcp` and generic `capability`
 contributions before resolving existing Agent selectors. The root Agent itself is
@@ -47,9 +47,9 @@ def available(agent, contribution):
     required = contribution.contract.get("metadata", {}).get("applies_to")
     return required is None or bool(set(required) & set(agent.metadata.get("tags", [])))
 
+group = RuntimeFeatures("application", filter=available)
 async with Runtime.open(
-    "application", models=models, storage=storage, capabilities=(group,),
-    capability_filter=available,
+    "application", models=models, storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -59,6 +59,29 @@ capability_filter=available)` exposes the same candidate filtering for host
 inspection without constructing a model or Runtime. It returns visible declarations,
 not a fully resolved executable toolset; a management catalog need not materialize
 Workspace tools. Keep the unfiltered capture for global asset administration.
+
+A capture retains the current in-process filter policy without serializing it into
+assets or execution bindings. If the policy depends on captured metadata, use
+`dataclasses.replace(capture, filter=build_filter(capture))` and pass that capture
+to `Runtime.open(features=...)`. This keeps the same source revision and
+reader without loading the assets again. `Runtime.open` has no separate filter
+parameter.
+
+`RuntimeFeatures` also owns the current host authorization policy and prompt
+limits: `RuntimeFeatures("application", authorization=policy, limits=PromptLimits(...))`.
+Capture it once and reuse that capture for `Runtime.open(features=...)`,
+`RuntimeHistory.open(features=...)`, or restored snapshot history. For restored
+history, features supplies only the authorization policy; the restored generation
+owns the storage routes and cache. The policy
+instance remains in process; it is not serialized as an execution identity.
+Omitting authorization uses the Runtime tenant policy. Prompt limits constrain
+model context and are separate from TaskGraph and snapshot limits.
+
+For a fixed MCP response fixture, register
+`ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
+`linktools.ai.capability` before capture. The fixture
+keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
+separate authorization, prompt-limit, or tool-response arguments.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
 expand the remaining candidates; explicit unavailable selections and preloads fail.
@@ -82,6 +105,35 @@ Use `RunBudget` at Agent, Session, or TaskGraph admission to share request/tool
 counts, observed tokens, and an admission deadline across the execution tree.
 See [shared run budgets](docs/run-budgets.md) for concurrency, unknown usage,
 continuation, and durable recovery guarantees.
+
+## Runtime-wide capabilities
+
+Register native Pydantic AI behavior through the same `RuntimeFeatures` used for
+Agent declarations. The default `scope="runtime"` applies host policy to every
+Runtime-owned Agent run,
+independently of `allow_capabilities` and `RuntimeFeatures.filter`. Use explicit
+`scope="agent"` for selectable behavior included in durable Agent bindings:
+
+```python
+group.capability(global_rate_limit, id="host.rate-limit")
+async with Runtime.open(
+    "application", models=models, storage=storage, features=group,
+) as runtime:
+    ...
+```
+
+A host can define its own `GlobalRateLimit` using native model/tool hooks, shared
+state and request/usage metadata. See [Runtime-wide capabilities](docs/runtime-capabilities.md)
+for a runnable RPM/TPM example, streaming/cancellation behavior, quota accounting
+and provider retry boundaries.
+
+Conversation, interrupted-run recovery, detailed trace and automatic Agent metrics
+are explicit, independent Runtime-scoped capabilities: `ConversationCapability`,
+`CheckpointCapability`, `TraceCapability`, and `MetricsCapability`. Durable storage
+alone enables none of them. `MetricsCapability(metrics=dataset)` supplies the shared
+recording dataset for automatic Agent, Task and Evaluation observations. Task, Evaluation and Artifact remain
+services and need no capability wrappers. See [feature guarantees and commit
+boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
 ## Evaluation
 
@@ -124,19 +176,22 @@ security, read-only operation and explicit recovery of stopped executors.
 ### Python
 
 ```python
-from linktools.ai import CapabilityGroup, Runtime, Workspace
+from linktools.ai import RuntimeFeatures, Runtime, Workspace
+from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeStorage
 
 workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
 storage = RuntimeStorage.in_memory()
+features = RuntimeFeatures("workspace")
+features.capability(WorkspaceCapability(workspace))
 
 async with Runtime.open(
     "default",
     models=models,
     storage=storage,
-    capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+    features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
         "review this change",
@@ -170,12 +225,14 @@ models.register_alias("default", "production")
 
 ## 2. Define application capabilities and Agents
 
-Use `CapabilityGroup` for direct application registrations:
+Use `RuntimeFeatures` for direct application registrations:
 
 ```python
-from linktools.ai import AgentContext, CapabilityGroup, Runtime
+from linktools.ai import AgentContext, RuntimeFeatures, Runtime
+from linktools.ai.capability import WorkspaceCapability
 
-application = CapabilityGroup[None]("application")
+application = RuntimeFeatures[None]("application")
+application.capability(WorkspaceCapability(workspace))
 
 @application.tool
 def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
@@ -194,36 +251,46 @@ async with Runtime.open(
     "default",
     models=models,
     storage=storage,
-    capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+    features=application,
 ) as runtime:
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
-Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
+Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `RuntimeFeatures.tool()` and `RuntimeFeatures.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
 LinkTools-owned Tool declarations carry their runtime metadata in
-`ToolDefinition.metadata`. `CapabilityGroup.tool()` writes the registered
+`ToolDefinition.metadata`. `RuntimeFeatures.tool()` writes the registered
 `effect_policy`, `plan_safe`, and `tool_class=business` values there; Workspace
 and MCP owners declare their own effect policy, class, path, and context
 metadata. Plan filtering, sandbox selection, leaf effect handling, and compaction consume
 these declarations instead of inferring behavior from Tool names.
 
-`CapabilityGroup.agent()` creates an `AgentSpec`; the declaration carries its explicit positive `revision` in the single v1 wire contract.
+`RuntimeFeatures.agent()` creates an `AgentSpec`; the declaration carries its explicit positive `revision` in the single v1 wire contract.
 
 ## 3. Workspace and declaration assets
 
-`CapabilityGroup("workspace", workspace=workspace)` contributes the stable
+Registering `WorkspaceCapability(workspace)` at Runtime scope contributes the stable
 Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
 MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
-`AssetStore` with `CapabilityGroup(..., assets=store)`. A store-backed group
+`AssetStore` to `AssetCapability(store)` and register that capability with
+`features.capability(assets)`. A store-backed group
 captures the declaration metadata visible when capture begins. Assets added
 afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
-identities or layouts fail closed.
+identities or layouts fail closed. Omitting `AssetCapability` contributes no Asset declarations.
+
+```python
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
+
+assets = AssetCapability(store)
+features = RuntimeFeatures("application")
+features.capability(assets)
+capture = await features.capture()
+```
 
 Every Asset kind uses `AssetVersionRef` for byte-version reads through
 `AssetStore.resolve_versions()` and `read_versions()`. Agent, Skill, MCP, and
@@ -247,7 +314,7 @@ expose local rule files through `DirectoryAssetBackend` and a
 
 For downstream declaration formats or custom kinds such as `worker` or
 `audit`, implement `CapabilityLoader` and register it for its input Asset
-kind with `group.loader("audit", loader)`. One kind has exactly one loader;
+kind with `assets.loader("audit", loader)`. One kind has exactly one loader;
 registering `agent`, `skill`, `mcp`, or `rule` replaces that built-in
 parser slot instead of chaining with it. Every loader receives the same
 `CapabilityLoadContext`: `read()` / `read_many()` read the captured
@@ -257,7 +324,7 @@ values for execution-bound resources. Loaders return normal
 instruction-only inputs such as Rule. Use
 `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP
 declarations. Resource-backed declarations remain owned by the same
-CapabilityGroup AssetStore; a custom loader may change declaration format or
+AssetCapability AssetStore; a custom loader may change declaration format or
 layout but does not implement a second version store. No additional
 Registry/Provider abstraction is required.
 
@@ -296,13 +363,13 @@ Shared MCP configuration uses the common `mcpServers` JSON shape through
 auto-discover a project `.mcp.json` or treat arbitrary flat MCP JSON Assets as
 shared configuration. The host or a custom `CapabilityLoader` explicitly
 chooses the source and revision, then registers each resulting
-`MCPServerSpec` with `CapabilityGroup.mcp(server)` (or returns it from a
-loader) into the same `CapabilityGroup.capture()` path.
+`MCPServerSpec` with `RuntimeFeatures.mcp(server)` (or returns it from a
+loader) into the same `RuntimeFeatures.capture()` path.
 Supported transports are stdio, Streamable HTTP (`http` and
 `streamable-http` authoring names), and explicit legacy `sse`; LinkTools
 does not fall back from one remote transport to another.
 
-`CapabilityGroup.capture()` returns a `CapabilityGroupCapture`. Pass that
+`RuntimeFeatures.capture()` returns a `RuntimeFeaturesCapture`. Pass that
 capture to `Runtime.open()` when the host also needs to inspect the same
 captured contributions; this avoids parsing the source declarations twice.
 The capture contains the group id, contributions, captured Rule instructions,
@@ -419,10 +486,10 @@ so specify the transport for remote servers:
 
 ```python
 import os
-from linktools.ai import CapabilityGroup
+from linktools.ai import RuntimeFeatures
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector
 
-group = CapabilityGroup("services")
+group = RuntimeFeatures("services")
 server = group.mcp(MCPServerSpec(
     "security",
     transport="streamable-http",
@@ -433,17 +500,17 @@ server = group.mcp(MCPServerSpec(
 ))
 assert server.id == "security"
 group.agent("reviewer", allow_tools=(mcp_server_selector("security"),))
-# Pass capabilities=(group,) to Runtime.open(...).
+# Pass features=group to Runtime.open(...).
 ```
 
 Import a shared configuration explicitly, then register its declarations:
 
 ```python
 from pathlib import Path
-from linktools.ai import CapabilityGroup
+from linktools.ai import RuntimeFeatures
 from linktools.ai.spec import MCPServerSpecAdapter
 
-group = CapabilityGroup("services")
+group = RuntimeFeatures("services")
 servers = MCPServerSpecAdapter().decode_config(
     Path("services.json").read_bytes(), revision=1,
 )
@@ -519,7 +586,7 @@ publishing, and arbitrary third-party configuration import are out of scope.
 
 ### Execution sandbox
 
-Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `CapabilityGroup(..., sandbox=...)`; the Workspace can come from the same or another group. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
+Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `RuntimeFeatures(..., sandbox=...)`; register `WorkspaceCapability(workspace)` and configure Sandbox on that same RuntimeFeatures object. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
 
 When no Sandbox is configured, LinkTools uses its built-in `LocalSandbox`
 adapter for supervised host processes, including stdio MCP without a Workspace.
@@ -566,7 +633,8 @@ immutable policy. Rules are root-relative POSIX patterns; an empty rule set
 denies reads, and resource rules are keyed by `SandboxResource.id`:
 
 ```python
-from linktools.ai import CapabilityGroup, Workspace
+from linktools.ai import RuntimeFeatures, Workspace
+from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy
 
 readonly = ReadOnlySandboxPolicy(
@@ -574,11 +642,11 @@ readonly = ReadOnlySandboxPolicy(
     resource_paths={"review": ("**",)},
 )
 workspace = Workspace.load("/workspace/project")
-group = CapabilityGroup(
+group = RuntimeFeatures(
     "workspace",
-    workspace=workspace,
     sandbox=LocalSandbox(read_policy=readonly),
 )
+group.capability(WorkspaceCapability(workspace))
 ```
 
 With a read-only policy, Bubblewrap mounts the Workspace read-only and never creates hidden-path mount points there. Provision its hidden directories (including `.linktools`) before opening the sandbox; a missing or unsafe mount point causes startup to fail with `SANDBOX_UNAVAILABLE`.
@@ -651,6 +719,16 @@ The binding contract does not persist Python output import paths or duplicate id
 
 ## 6. Sessions and executions
 
+This example requires `ConversationCapability()` registered at Runtime scope
+on the same declaration before opening the Runtime:
+
+```python
+from linktools.ai.runtime import ConversationCapability
+
+application.capability(ConversationCapability())
+# Open with Runtime.open(..., features=application) after registration.
+```
+
 ```python
 agent = runtime.agents.get("audit")
 session = await agent.create_session("chat-1")
@@ -673,8 +751,10 @@ URL and uploaded-file content remains an external reference: Runtime persists
 its declared metadata and does not implicitly download it. Inline binary
 content and workspace file inputs are materialized as bytes before execution
 reservation when their durable contract requires it. Model transport retries
-use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
-to `tool_retries=10`, and output correction defaults to `output_retries=3`.
+use `max_retries=2` with a fixed `retry_delay=1.0`; Agent `tool_retries` and `output_retries` default to `None`.
+`RuntimeFeatures` supplies `3` for both unless configured otherwise; an explicit
+Agent value, including `0`, wins. The compiler resolves retries before durable
+binding, so recovery retains the admitted values across Runtime reconfiguration.
 
 Model attachments use one string list, `input_types`, which defaults to empty.
 Plain prompt text is unaffected; there is no `text` category. The built-in names
@@ -845,7 +925,9 @@ page = await runtime.executions.list(
 ```
 
 `RuntimeHistory.open()` provides the same read-only execution metadata and
-history projections without loading a ModelRegistry or compiling Agents.
+history projections without loading a ModelRegistry or compiling Agents. Pass the
+same `features=` declaration or capture when capabilities configure custom storage
+routes or caches; read-only opening does not activate hooks or metrics recording.
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
 or raw error diagnostics. Its optional `ExecutionInfo.capability_refs` contains
@@ -988,7 +1070,7 @@ async with Runtime.open(
     ...
 ```
 
-`RuntimeStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the storage composition directly. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `RuntimeStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `RuntimeStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeStorage snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
+`RuntimeStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the storage composition directly. Use the same `features=` declaration or capture for `Runtime.open`, `RuntimeHistory.open` and `RuntimeSnapshot.create` when configuring module routes. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `RuntimeStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `RuntimeStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeStorage snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
 binding metadata; portable RuntimeStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
@@ -1082,7 +1164,7 @@ The top-level composition API is intentionally small:
 from linktools.ai import (
     Agent,
     AgentContext,
-    CapabilityGroup,
+    RuntimeFeatures,
     Execution,
     Runtime,
     Session,
@@ -1094,7 +1176,7 @@ Package-specific public contracts remain available from their owning packages,
 for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 `linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
 These include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
-`CapabilityGroupCapture`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
+`RuntimeFeaturesCapture`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.
 

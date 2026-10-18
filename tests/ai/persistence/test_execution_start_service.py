@@ -123,7 +123,7 @@ class _Launcher:
         self.calls += 1
         await asyncio.sleep(0.01)
 
-    async def cancel(self, execution: object) -> CancelEffectOutcome:
+    async def cancel(self, execution: object, *, force: bool = False) -> CancelEffectOutcome:
         del execution
         return CancelEffectOutcome.CONFIRMED
 

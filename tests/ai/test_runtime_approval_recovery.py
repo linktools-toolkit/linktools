@@ -51,7 +51,7 @@ def test_deferred_call_id_preserves_durable_projection(
 def _binding() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("default", model="default"),
+        agent_spec=AgentSpec("default", model="default", tool_retries=3, output_retries=3),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -155,8 +155,8 @@ def _commands(state: RuntimeStorage, namespace: str) -> RuntimeStateCommands:
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
         conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
-        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
-        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.TRACE),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
         background_tasks=set(),
     )
 

@@ -44,7 +44,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 "remote-task-cancellation",
                 models=_RemoteModels(),
                 storage=storage,
-                capabilities=(_group(_spec(remote)),),
+                features=_group(_spec(remote)),
             ) as runtime:
                 task = runtime.tasks.from_agent(
                     "remote.echo", runtime.agents.get("default")
@@ -96,7 +96,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 "remote-task-cancellation",
                 models=_RemoteModels(),
                 storage=restored,
-                capabilities=(_group(_spec(remote)),),
+                features=_group(_spec(remote)),
             ) as runtime:
                 task = runtime.tasks.from_agent(
                     "remote.echo", runtime.agents.get("default")

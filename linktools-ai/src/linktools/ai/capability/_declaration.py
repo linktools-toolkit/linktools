@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Asset-backed declaration loaders for CapabilityGroup."""
+"""Asset-backed declaration loaders for RuntimeFeatures."""
 
 from __future__ import annotations
 

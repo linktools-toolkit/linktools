@@ -10,7 +10,8 @@ import traceback
 
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import CheckpointCapability, ConversationCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -21,8 +22,12 @@ from ._runtime_test_helpers import _Models
 _NAMESPACE = "recovery-ownership"
 
 
-def _capabilities() -> CapabilityGroup:
-    group = CapabilityGroup(_NAMESPACE)
+def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
+    group = RuntimeFeatures(_NAMESPACE)
+    if conversation:
+        group.capability(ConversationCapability(), scope="runtime")
+    group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -64,7 +69,7 @@ def _runtime_process(
         state = _storage(Path(database), phase)
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, capabilities=(_capabilities(),),
+            storage=state, features=_capabilities(conversation=mode == "session"),
         ) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
@@ -158,6 +163,22 @@ def _runtime_process(
                     connection.send(await snapshot())
                 elif command == "await_model":
                     await asyncio.wait_for(entered.wait(), 10)
+                    connection.send(await snapshot())
+                elif command == "cancel_events":
+                    events = await state.execution.events.list(
+                        execution_id, tenant_id=runtime.default_principal.tenant_id,
+                        after_event_seq=0, limit=100,
+                    )
+                    assert events.next_cursor is None
+                    connection.send({
+                        "requested": sum(
+                            event.event_type == "CANCEL_REQUESTED" for event in events.items
+                        ),
+                    })
+                elif command == "flush_trace":
+                    await state.run_store.flush_dirty_execution_projections(
+                        execution_id=execution_id,
+                    )
                     connection.send(await snapshot())
                 elif command == "cancel":
                     result = await runtime.executions.cancel(

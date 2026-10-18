@@ -270,6 +270,7 @@ class StepExecutionHistoryReader:
         tool_operations: "_ToolOperationHistoryReader | None" = None,
         notifications: "_ModelInteractionNotifications | None" = None,
         durable_history_available: bool = True,
+        transient_store: _ExecutionHistoryStore | None = None,
     ) -> None:
         try:
             validate_persistence_namespace(namespace)
@@ -278,10 +279,36 @@ class StepExecutionHistoryReader:
         self._namespace = namespace
         self._executions = executions
         self._store = store
+        self._transient_store = transient_store
         self._cursor_signer = cursor_signer
         self._tool_operations = tool_operations
         self._notifications = notifications
         self._durable_history_available = durable_history_available
+        self._pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None
+
+    def bind_pending_execution_reader(
+        self, reader: Callable[..., Awaitable[ExecutionRecord | None]],
+    ) -> None:
+        """Attach the same Runtime-owned pending records used by execution queries."""
+        self._pending_execution = reader
+
+    async def _read_execution(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository | None = None,
+    ) -> ExecutionRecord | None:
+        repository = self._executions if executions is None else executions
+        if repository is self._executions and self._pending_execution is not None:
+            pending = await self._pending_execution(execution_id, tenant_id=tenant_id)
+            if pending is not None:
+                return pending
+        return await repository.get(execution_id, tenant_id=tenant_id)
+
+    def _store_for(self, record: ExecutionRecord) -> _ExecutionHistoryStore:
+        if not record.durable_trace and self._transient_store is not None:
+            return self._transient_store
+        return self._store
+
+    def _durable_for(self, record: ExecutionRecord) -> bool:
+        return record.durable_trace and self._durable_history_available
 
     async def trace(
         self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int,
@@ -296,7 +323,7 @@ class StepExecutionHistoryReader:
             "step_index": step_index,
             "tool_call_id": tool_call_id,
         }
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         limit = validate_page_limit(limit)
@@ -311,7 +338,6 @@ class StepExecutionHistoryReader:
         entries: Sequence[tuple[ExecutionRecord, int]], cursor: str | None,
         limit: int, filters: Mapping[str, JsonValue],
     ) -> Page[ExecutionTraceItem]:
-        store = self._store
         sources = await self._capture_sources(entries, tenant_id, cast("int | None", filters["agent_run_seq"]))
         by_identity = {(source.record.execution_id, source.agent_run_seq): source for source in sources}
         state = _decode_trace_cursor(cursor, tenant_id=tenant_id, execution_id=execution_id,
@@ -333,7 +359,7 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             run_id = make_agent_run_id(namespace=self._namespace, tenant_id=tenant_id,
                                       execution_id=coordinate[0], agent_run_seq=coordinate[1])
-            event, = await store.list_event_range(agent_run_id=run_id, start=coordinate[2] - 1, end=coordinate[2])
+            event, = await self._store_for(source.record).list_event_range(agent_run_id=run_id, start=coordinate[2] - 1, end=coordinate[2])
             mapped = _trace_item(source.record, source.agent_run_seq, source.depth, coordinate[2] - 1, event)
             if mapped is None or any(value is not None and mapped.payload.get(name) != value for name, value in filters.items()):
                 raise AIError(ErrorCode.CURSOR_INVALID)
@@ -356,7 +382,7 @@ class StepExecutionHistoryReader:
                 elif suffix == cursor_key[1:4]:
                     after_sequence = coordinate[2] - 1
             while True:
-                batch = await store.list_trace_events(
+                batch = await self._store_for(source.record).list_trace_events(
                     agent_run_id=run_id, event_high_water=high_water,
                     after_timestamp=after_timestamp, after_sequence=after_sequence,
                     limit=min(64, limit + 1),
@@ -430,7 +456,7 @@ class StepExecutionHistoryReader:
             "part_index": part_index,
         }
         limit = validate_page_limit(limit)
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
@@ -508,21 +534,51 @@ class StepExecutionHistoryReader:
         )
         return Page(selected, next_cursor)
 
+    async def read_authorized_model_interaction_updates(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+        after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        """Capture identities and their first bounded suffix in one authorized scope."""
+        async def read() -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+            record, boundary = await self._capture_authorized_model_interaction_cutoffs(
+                execution_id, tenant_id=tenant_id, executions=executions,
+            )
+            items: list[ModelInteractionItem] = []
+            for run, after, through in _model_interaction_update_ranges(
+                execution_id, boundary, after_cutoffs, limit,
+                allow_unavailable=executions is self._executions and not self._durable_for(record),
+            ):
+                items.extend(await self.read_authorized_model_interaction_metadata(
+                    execution_id, tenant_id=tenant_id, executions=executions, agent_run_seq=run,
+                    after_model_request_seq=after, through_model_request_seq=through, limit=through - after,
+                ))
+            return boundary, tuple(items)
+
+        return await self._read_model_metadata(executions, read)
+
     async def capture_authorized_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
     ) -> ModelInteractionReadBoundary:
         """Read the service's post-authorization record with its model metadata."""
         async def read() -> ModelInteractionReadBoundary:
-            record = await executions.get(execution_id, tenant_id=tenant_id)
-            if record is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
-                return await self.capture_model_interaction_cutoffs(
-                    execution_id, tenant_id=tenant_id,
-                )
-            return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+            _, boundary = await self._capture_authorized_model_interaction_cutoffs(
+                execution_id, tenant_id=tenant_id, executions=executions,
+            )
+            return boundary
 
         return await self._read_model_metadata(executions, read)
+
+    async def _capture_authorized_model_interaction_cutoffs(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+    ) -> tuple[ExecutionRecord, ModelInteractionReadBoundary]:
+        record = await self._read_execution(execution_id, tenant_id=tenant_id, executions=executions)
+        if record is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+            boundary = await self.capture_model_interaction_cutoffs(execution_id, tenant_id=tenant_id)
+        else:
+            boundary = await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
+        return record, boundary
 
     async def _read_model_metadata(
         self, executions: ExecutionRepository, read: Callable[[], Awaitable[_ModelMetadataT]],
@@ -547,7 +603,7 @@ class StepExecutionHistoryReader:
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionReadBoundary:
         """Capture committed identities and declared run coverage without tree discovery."""
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._capture_model_interaction_cutoffs(execution_id, record, tenant_id=tenant_id)
@@ -561,9 +617,9 @@ class StepExecutionHistoryReader:
             namespace=self._namespace, tenant_id=tenant_id,
             execution_id=execution_id, agent_run_seq=sequence,
         ) for sequence in range(1, record.agent_run_seq + 1))
-        captured = await self._store.capture_history(run_ids)
+        captured = await self._store_for(record).capture_history(run_ids)
         cutoffs: list[UsageReadCutoff] = []
-        available = self._durable_history_available
+        available = self._durable_for(record)
         conversation_id = make_agent_conversation_id(
             namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
         )
@@ -578,9 +634,9 @@ class StepExecutionHistoryReader:
             cutoffs.append(UsageReadCutoff(execution_id, sequence, value.model_interaction_count))
         if record.agent_run_seq == 0 and record.status is ExecutionStatus.SUCCEEDED:
             available = False
-        local_available = (not self._durable_history_available and bool(run_ids)
+        local_available = (not self._durable_for(record) and bool(run_ids)
                            and captured[run_ids[-1]].run is not None)
-        durable_cutoffs = tuple(cutoffs) if self._durable_history_available else tuple(
+        durable_cutoffs = tuple(cutoffs) if self._durable_for(record) else tuple(
             UsageReadCutoff(value.execution_id, value.agent_run_seq, 0) for value in cutoffs
         )
         return ModelInteractionReadBoundary(tuple(cutoffs), durable_cutoffs, local_available, available)
@@ -592,7 +648,7 @@ class StepExecutionHistoryReader:
     ) -> tuple[ModelInteractionItem, ...]:
         """Read authorized execution and bounded request metadata in one owner scope."""
         async def read() -> tuple[ModelInteractionItem, ...]:
-            record = await executions.get(execution_id, tenant_id=tenant_id)
+            record = await self._read_execution(execution_id, tenant_id=tenant_id, executions=executions)
             if record is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
@@ -620,7 +676,7 @@ class StepExecutionHistoryReader:
         limit = _validate_model_metadata_range(
             agent_run_seq, after_model_request_seq, through_model_request_seq, limit,
         )
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return await self._read_model_interaction_metadata(
@@ -642,15 +698,22 @@ class StepExecutionHistoryReader:
             namespace=self._namespace, tenant_id=tenant_id,
             execution_id=execution_id, agent_run_seq=agent_run_seq,
         )
-        run = await self._store.get_agent_run(agent_run_id=run_id)
+        store = self._store_for(record)
+        if type(store) is ModelInteractionStateStepArchive:
+            run, interactions = await store.read_model_interactions_with_run(
+                agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
+            )
+        else:
+            run = await store.get_agent_run(agent_run_id=run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _validate_agent_run(run, run_id, make_agent_conversation_id(
             namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
         ), agent_run_seq)
-        interactions = await self._store.list_model_interactions(
-            agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
-        )
+        if type(store) is not ModelInteractionStateStepArchive:
+            interactions = await store.list_model_interactions(
+                agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
+            )
         selected: dict[int, ModelInteractionItem] = {}
         for interaction in interactions:
             if (not isinstance(interaction, (ModelInteractionRecord, StagedModelInteraction)) or interaction.agent_run_id != run_id
@@ -665,11 +728,26 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(selected[sequence] for sequence in expected)
 
+    async def subscribe_authorized_model_interactions(
+        self, execution_id: str, *, tenant_id: str, executions: ExecutionRepository,
+    ) -> ModelInteractionSubscription | None:
+        """Keep the post-authorization read without repeating the same owner lookup."""
+        if await self._read_execution(execution_id, tenant_id=tenant_id, executions=executions) is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if executions is not self._executions or type(executions) is not ExecutionRepositoryImpl:
+            return await self.subscribe_model_interactions(execution_id, tenant_id=tenant_id)
+        return self._subscribe_model_interactions(execution_id, tenant_id=tenant_id)
+
     async def subscribe_model_interactions(
         self, execution_id: str, *, tenant_id: str,
     ) -> ModelInteractionSubscription | None:
-        if await self._executions.get(execution_id, tenant_id=tenant_id) is None:
+        if await self._read_execution(execution_id, tenant_id=tenant_id) is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return self._subscribe_model_interactions(execution_id, tenant_id=tenant_id)
+
+    def _subscribe_model_interactions(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ModelInteractionSubscription | None:
         if self._notifications is None:
             return None
         return self._notifications.subscribe_model_interactions(make_agent_conversation_id(
@@ -698,7 +776,7 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
         filters = {name: value for name, value in selectors.items() if value is not None}
         limit = validate_page_limit(limit)
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._recursive_history_tree(
@@ -786,7 +864,7 @@ class StepExecutionHistoryReader:
                 agent_run_seq=source.agent_run_seq,
             )
             fetch_limit = min(remaining, available)
-            interactions = await self._store.list_model_interactions(
+            interactions = await self._store_for(source.record).list_model_interactions(
                 agent_run_id=agent_run_id, after_model_request_seq=after_model_request_seq, limit=fetch_limit,
             )
             if len(interactions) != fetch_limit:
@@ -811,7 +889,8 @@ class StepExecutionHistoryReader:
         for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
             resolved_values: tuple[object, ...]
             if include_content or include_client_requests:
-                resolved_values = tuple(await self._store.resolve_model_interactions(
+                source = source_by_identity[(occurrence_group[0].source_execution_id, occurrence_group[0].agent_run_seq)]
+                resolved_values = tuple(await self._store_for(source.record).resolve_model_interactions(
                     tuple(value.interaction for value in occurrence_group),
                     include_client_requests=include_client_requests,
                     include_content=include_content,
@@ -869,7 +948,7 @@ class StepExecutionHistoryReader:
         limit: int,
     ) -> Page[AttachmentFact]:
         limit = validate_page_limit(limit)
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 
@@ -920,7 +999,7 @@ class StepExecutionHistoryReader:
                 after_sequence = 0
                 while after_sequence < high_water and len(facts) < target:
                     batch_limit = min(256, high_water - after_sequence)
-                    values = await self._store.list_model_interactions(
+                    values = await self._store_for(record).list_model_interactions(
                         agent_run_id=agent_run_id, after_model_request_seq=after_sequence, limit=batch_limit,
                     )
                     if len(values) != batch_limit:
@@ -977,7 +1056,7 @@ class StepExecutionHistoryReader:
         tenant_id: str,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
-        record = await self._executions.get(
+        record = await self._read_execution(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -1025,7 +1104,7 @@ class StepExecutionHistoryReader:
             after_sequence = 0
             while after_sequence < cutoff.model_request_seq:
                 batch_limit = min(500, cutoff.model_request_seq - after_sequence)
-                values = await self._store.list_model_interactions(
+                values = await self._store_for(record).list_model_interactions(
                     agent_run_id=agent_run_id,
                     after_model_request_seq=after_sequence,
                     limit=batch_limit,
@@ -1346,6 +1425,7 @@ class StepExecutionHistoryReader:
             end=range_end,
             from_cursor=from_cursor,
             capture=source.capture,
+            store=self._store_for(source.record),
         )
         if event_high_water > source.capture.event_count:
             raise AIError(ErrorCode.CURSOR_INVALID)
@@ -1363,7 +1443,7 @@ class StepExecutionHistoryReader:
         async for message in messages:
             saw_message = True
             if inline_events is None:
-                message_events = await self._store.read_history_associations(
+                message_events = await self._store_for(source.record).read_history_associations(
                     agent_run_id=agent_run_id, message_seqs=(message_index + 1,),
                     tool_call_ids=(), event_high_water=event_high_water,
                 )
@@ -1407,7 +1487,7 @@ class StepExecutionHistoryReader:
                 if part_index is not None and value.part_index != part_index:
                     continue
                 if inline_events is None and value.tool_call_id is not None and value.tool_call_id not in tool_metadata:
-                    call_events = await self._store.read_history_associations(
+                    call_events = await self._store_for(source.record).read_history_associations(
                         agent_run_id=agent_run_id, message_seqs=(),
                         tool_call_ids=(value.tool_call_id,), event_high_water=event_high_water,
                     )
@@ -1441,7 +1521,7 @@ class StepExecutionHistoryReader:
                     if len(original_sequences) > 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if original_sequences:
-                        original_messages = [original async for original in self._store.iter_message_range(
+                        original_messages = [original async for original in self._store_for(source.record).iter_message_range(
                             agent_run_id=agent_run_id, start=original_sequences[0] - 1, end=original_sequences[0],
                         )]
                         if len(original_messages) != 1 or not isinstance(original_messages[0], ModelResponse):
@@ -1505,19 +1585,19 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
 
     async def _message_range(
-        self, agent_run_id: str, *, start: int, end: int,
+        self, agent_run_id: str, *, store: _ExecutionHistoryStore, start: int, end: int,
         from_cursor: bool, capture: AgentRunHistoryCapture,
     ) -> AsyncIterator[object]:
         if start < 0 or end < start or end > capture.message_count or from_cursor and start == end:
             raise AIError(ErrorCode.CURSOR_INVALID)
         complete_end = min(end, capture.transcript_message_count)
         if start < complete_end:
-            async for message in self._store.iter_message_range(
+            async for message in store.iter_message_range(
                 agent_run_id=agent_run_id, start=start, end=complete_end,
             ):
                 yield message
         if end > capture.transcript_message_count:
-            pending = await self._store.read_pending_message(capture)
+            pending = await store.read_pending_message(capture)
             if pending is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             yield pending
@@ -1526,7 +1606,7 @@ class StepExecutionHistoryReader:
         self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
     ) -> Page[TranscriptItem]:
         limit = validate_page_limit(limit)
-        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._read_execution(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if record.agent_run_seq == 0:
@@ -1571,7 +1651,7 @@ class StepExecutionHistoryReader:
             ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
 
-        captured = await self._store.capture_history((agent_run_id,), include_pending=True)
+        captured = await self._store_for(record).capture_history((agent_run_id,), include_pending=True)
         capture = captured.get(agent_run_id)
         if capture is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1603,6 +1683,7 @@ class StepExecutionHistoryReader:
             end=high_water,
             from_cursor=cursor is not None,
             capture=capture,
+            store=self._store_for(record),
         )
         agent_conversation_id = make_agent_conversation_id(
             namespace=self._namespace,
@@ -1667,9 +1748,13 @@ class StepExecutionHistoryReader:
             for sequence in range(1, record.agent_run_seq + 1)
             if selected_run_sequence is None or sequence == selected_run_sequence
         )
-        captured = await self._store.capture_history(
-            tuple(value[3] for value in candidates), include_pending=include_pending,
-        )
+        captured: dict[str, AgentRunHistoryCapture] = {}
+        for durable in (True, False):
+            selected = tuple(value for value in candidates if value[0].durable_trace is durable)
+            if selected:
+                captured.update(await self._store_for(selected[0][0]).capture_history(
+                    tuple(value[3] for value in selected), include_pending=include_pending,
+                ))
         sources: list[_HistorySource] = []
         for record, depth, sequence, run_id in candidates:
             capture = captured.get(run_id)
@@ -2105,6 +2190,35 @@ def _metadata_token(
     if not raw.isdigit():
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return int(raw)
+
+
+def _model_interaction_update_ranges(
+    execution_id: str, boundary: ModelInteractionReadBoundary,
+    after_cutoffs: tuple[UsageReadCutoff, ...], limit: int, *, allow_unavailable: bool = False,
+) -> tuple[tuple[int, int, int], ...]:
+    remaining = validate_page_limit(limit)
+    afters: dict[int, int] = {}
+    for cutoff in after_cutoffs:
+        _validate_model_metadata_range(cutoff.agent_run_seq, 0, cutoff.model_request_seq, limit)
+        if cutoff.execution_id != execution_id or cutoff.agent_run_seq in afters:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        afters[cutoff.agent_run_seq] = cutoff.model_request_seq
+    if (allow_unavailable and not boundary.cutoffs and not boundary.local_staging_available
+            and not boundary.durable_history_available):
+        return ()
+    current = {value.agent_run_seq: value.model_request_seq for value in boundary.cutoffs}
+    if any(run not in current or after > current[run] for run, after in afters.items()):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    ranges = []
+    for cutoff in boundary.cutoffs:
+        if cutoff.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        after = afters.get(cutoff.agent_run_seq, 0)
+        count = min(remaining, cutoff.model_request_seq - after)
+        if count > 0:
+            ranges.append((cutoff.agent_run_seq, after, after + count))
+            remaining -= count
+    return tuple(ranges)
 
 
 def _validate_model_metadata_range(

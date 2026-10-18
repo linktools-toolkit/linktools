@@ -12,12 +12,15 @@ import pytest
 pytest.importorskip("starlette")
 pytest.importorskip("uvicorn")
 
-from linktools.ai.capability import CapabilityGroup
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import (
+    CheckpointCapability, ConversationCapability, MetricsCapability,
+    Runtime, RuntimeHistory, RuntimeStorage, TraceCapability,
+)
 from linktools.ai.web import create_app
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
 _HEADERS = {"X-LinkTools-Console": "1"}
 
@@ -97,7 +100,14 @@ async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding()
 @pytest.mark.asyncio
 async def test_session_execution_history_trace_result_and_metrics_use_runtime() -> None:
     metrics = Metrics.in_memory()
-    async with Runtime.open("web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), metrics=metrics) as runtime:
+    features = RuntimeFeatures("web-test")
+    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(TraceCapability(), scope="runtime")
+    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
+    async with Runtime.open(
+        "web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
+        features=features,
+    ) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:
             request = {"session_id": "web-session", "request_id": "new-session", "title": "Review <script>"}
             first = await http.post("/api/sessions", json=request, headers=_HEADERS)
@@ -178,7 +188,9 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
         return await original(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    async with Runtime.open("web-busy", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    features = RuntimeFeatures("web-busy")
+    features.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("web-busy", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
             assert created.status_code == 201
@@ -229,7 +241,9 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
         return await original(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    async with Runtime.open("web-clients", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    features = RuntimeFeatures("web-clients")
+    features.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("web-clients", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         app = create_app(runtime=runtime)
         async with client(app) as first, client(app) as second:
             clients = (first, second)
@@ -278,7 +292,8 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
 
 @pytest.mark.asyncio
 async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_snapshot() -> None:
-    async with Runtime.open("web-stream", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    async with Runtime.open("web-stream", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
+                            features=_persistence_capabilities(trace=True)) as runtime:
         execution = await runtime.agents.get().start("hello")
         await execution.wait()
         async with client(create_app(runtime=runtime)) as http:
@@ -301,7 +316,9 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
 @pytest.mark.asyncio
 async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_path: Path) -> None:
     storage = RuntimeStorage.from_root(tmp_path)
-    async with Runtime.open("default", models=RuntimeUsageModels(), storage=storage) as runtime:
+    features = RuntimeFeatures("web-history")
+    features.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("default", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         execution = await runtime.agents.get().start("saved", session_id="session")
         await execution.wait()
         identity = execution.execution_id
@@ -438,6 +455,7 @@ async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_use
     prompt = '{"error_diagnostics":{"exception_message":"user content"}}'
     async with Runtime.open(
         "web-failed-stream", models=_Models(_UsageFunctionModel(fail)), storage=RuntimeStorage.in_memory(),
+        features=_persistence_capabilities(trace=True),
     ) as runtime:
         execution = await runtime.agents.get().start(prompt)
         await execution.wait()
@@ -579,7 +597,9 @@ async def test_default_http_port_accepts_browser_canonical_host_and_origin() -> 
 @pytest.mark.asyncio
 async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
     identity = "../team/conversation?notes#你好"
-    async with Runtime.open("opaque-web", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+    features = RuntimeFeatures("opaque-web")
+    features.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("opaque-web", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": identity, "request_id": "create-opaque", "title": "Opaque session"}, headers=_HEADERS)
             assert created.status_code == 201, created.text
@@ -606,9 +626,11 @@ async def test_end_recovery_required_execution_uses_durable_cancel_and_replays_r
         started=started, release=release,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "web-end-recovery", models=_ToolModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(application,),
+            features=application,
         ) as runtime, client(create_app(runtime=runtime)) as http:
             session = await runtime.agents.get("default").create_session("session")
             execution = await session.start("inspect", idempotency_key="turn")

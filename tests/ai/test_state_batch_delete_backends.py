@@ -99,7 +99,7 @@ async def test_batch_delete_cascades_owners_and_reads_staged_deletes(
             assert await transaction.get_record(deleted.key_digest) == deleted
             assert await transaction.resolve_alias(_alias(deleted).alias_digest) == deleted.key_digest
             assert await transaction.list_facts(FactQuery(_fact(deleted).stream_digest)) == (_fact(deleted),)
-            assert await transaction.guard_record(deleted.key_digest, expected_storage_version=0)
+            assert await transaction.guard_record(deleted.key_digest, expected_storage_revision=0)
             await transaction.insert_alias(staged_alias)
             await transaction.insert_fact(_fact(deleted, 2))
             await transaction.insert_record(staged)
@@ -211,7 +211,7 @@ async def test_sql_batch_delete_later_chunk_conflict_rolls_back_entire_batch(tmp
             await transaction._execute(update(table).where(
                 table.c.store_digest == store.store_digest.hex(),
                 table.c.key_digest == records[-1].key_digest.hex(),
-            ).values(storage_version=1))
+            ).values(storage_revision=1))
             await transaction.delete_records(keys)
 
         with pytest.raises(AIError) as raised:

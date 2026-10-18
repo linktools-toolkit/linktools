@@ -16,9 +16,14 @@ from ._evaluation_scope import EvaluationTrialScope, EvaluationTrialScopeCallbac
 from ._input_capture import AgentInputCapture, CaptureInputRequest, CaptureGraphRequest, ExecutionInputCaptureRef
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
+from ._conversation_capability import ConversationCapability
+from ._metrics_capability import MetricsCapability
+from ._persistence_capabilities import (
+    TraceCapability,
+    CheckpointCapability,
+)
 from ._execution_context import ExecutionInputContext
 from ._tool_response_fixture import ToolResponseFixture
-from ._metrics import MetricFlushResult, MetricBufferStatus
 from ._runtime_history import ExecutionInfo, RuntimeHistory
 from ._snapshot import (
     RestoredRuntime,
@@ -186,9 +191,11 @@ __all__ = [
     "RetryExecutionRequest",
     "RuntimeDomain",
     "RuntimeContext",
+    "CheckpointCapability",
+    "TraceCapability",
+    "ConversationCapability",
+    "MetricsCapability",
     "RuntimeHistory",
-    "MetricFlushResult",
-    "MetricBufferStatus",
     "RuntimeRetentionMode",
     "RuntimeStorage",
     "RuntimeStoragePlan",

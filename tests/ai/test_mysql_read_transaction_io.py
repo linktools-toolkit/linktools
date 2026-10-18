@@ -253,7 +253,7 @@ async def test_mysql_group_read_reuses_snapshot_and_restores_borrowed_engine(_se
                 async def update(write):
                     for store in (writer_first, writer_second):
                         assert await write.transaction(store).replace_record(
-                            replace(value, storage_version=1, data={"value": 2}), expected_storage_version=0,
+                            replace(value, storage_revision=1, data={"value": 2}), expected_storage_revision=0,
                         )
                 await writer_first.storage_group.mutate((writer_first, writer_second), update)
             import contextvars

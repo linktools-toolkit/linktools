@@ -6,11 +6,13 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TypeVar
+from uuid import uuid4
 
 from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
 from ._memory_transaction import _MemoryTransaction, _validate_transaction_integrity
+from ._record_cache import StateRecordCache
 from ._store import (
     StateCallback,
     StateGroupCallback,
@@ -125,6 +127,8 @@ class InMemoryStateStorageGroup:
                 return result
             finally:
                 reset_state_transaction(token)
+                for store in members:
+                    await store._reads.invalidate()
 
     def _transaction(
         self,
@@ -151,7 +155,7 @@ class InMemoryStateStorageGroup:
 class InMemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
-    def __init__(self, group: InMemoryStateStorageGroup | None = None) -> None:
+    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: object | None = None) -> None:
         self._records: dict[bytes, StoredRecord] = {}
         self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}
@@ -161,6 +165,7 @@ class InMemoryStateStore:
         self._lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
+        self._reads = StateRecordCache(self, cache, scope=f"memory:{uuid4().hex}")
         self._storage_group = group or InMemoryStateStorageGroup()
 
     @property
@@ -176,7 +181,23 @@ class InMemoryStateStore:
     async def close(self) -> None:
         self._closed = True
         self._initialized = False
+        await self._reads.close()
         _logger.debug("memory StateStore closed")
+
+    async def read_record(self, key: bytes) -> StoredRecord | None:
+        """Read ordinary committed metadata with bounded cache freshness."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_record(key)
+
+    async def read_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Read ordinary metadata; explicit transaction scopes stay source-only."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_records(keys)
+
+    async def refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Refresh an ordinary batch without changing authoritative read scopes."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.refresh_records(keys)
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()

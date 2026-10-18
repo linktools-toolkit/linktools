@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Absent system prompts never become empty provider or history messages."""
 
+from linktools.ai.runtime import TraceCapability
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.spec import AgentSpec
 
@@ -33,7 +34,7 @@ async def test_system_prompt_presence_matches_provider_observation_and_history(
         sent_instructions.append(info.instructions)
         return ModelResponse(parts=[TextPart("done")])
 
-    group = CapabilityGroup("system-prompts")
+    group = RuntimeFeatures("system-prompts")
     options = {"instructions": ("Keep independent instructions",), "allow_tools": (),
                "allow_skills": (), "allow_subagents": ()}
     if case == "empty":
@@ -43,8 +44,9 @@ async def test_system_prompt_presence_matches_provider_observation_and_history(
     elif case in {"text", "derive-none", "derive-empty"}:
         options["system_prompt"] = "Keep this system prompt"
     group.agent("default", **options)
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("system-prompts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         agent = runtime.agents.get()
         if case == "derive-none":
             agent = agent.derive(system_prompt=None)
@@ -77,14 +79,15 @@ async def test_imported_system_history_respects_explicit_replacement(
                             for part in message.parts if isinstance(part, SystemPromptPart)])
         return ModelResponse(parts=[TextPart("done")])
 
-    group = CapabilityGroup("imported-system")
+    group = RuntimeFeatures("imported-system")
     group.agent("default", allow_tools=(), allow_skills=(), allow_subagents=())
     imported = ExecutionInputContext.from_messages((
         ModelRequest(parts=[SystemPromptPart(existing), UserPromptPart("earlier")]),
         ModelResponse(parts=[TextPart("previous")]),
     ), replace_history_system_prompt=replace_system)
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("imported-system", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         execution = await runtime.agents.get().start("question", input_context=imported)
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"
@@ -122,14 +125,15 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
         return _response(request)
 
     registry, _clients = _registry(monkeypatch, handler)
-    group = CapabilityGroup("http-system")
+    group = RuntimeFeatures("http-system")
     options = {"instructions": ("Preserve independent HTTP instructions",), "allow_tools": (),
                "allow_skills": (), "allow_subagents": ()}
     if case != "omitted":
         options["system_prompt"] = system_prompt
     group.agent("default", **options)
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("http-system", models=registry, storage=RuntimeStorage.filesystem(tmp_path),
-                            capabilities=(group,)) as runtime:
+                            features=group) as runtime:
         execution = await runtime.agents.get().start("question")
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"

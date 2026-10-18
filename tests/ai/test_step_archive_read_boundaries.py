@@ -31,7 +31,7 @@ async def _archive(tmp_path: Path, backend: str = "memory"):
         await repository.state_store.mutate(
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         yield state, archive, AgentRunRecord("run", metadata={"context": "x" * 16_384})
     finally:
         await state.close()
@@ -143,8 +143,8 @@ async def test_observation_commit_keeps_validation_and_fencing(
                 payload["fields"] = fields
                 envelope["payload"] = payload
                 assert await transaction.replace_record(
-                    replace(record, data=encode_envelope(envelope), storage_version=record.storage_version + 1),
-                    expected_storage_version=record.storage_version,
+                    replace(record, data=encode_envelope(envelope), storage_revision=record.storage_revision + 1),
+                    expected_storage_revision=record.storage_revision,
                 )
 
             await archive.state_store.mutate(corrupt)
@@ -231,3 +231,149 @@ async def test_projection_verification_reads_each_context_projection_once(
         monkeypatch.setattr(_MemoryTransaction, "get_records", read_many)
         assert await archive.verify_execution_projection_head(projection)
         assert reads == 1, "verification must use one coherent context projection capture"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_projection_admission_advances_history_once_and_rolls_back_invalid_requests(
+    tmp_path: Path, backend: str,
+) -> None:
+    from .test_model_interaction_records import _running
+
+    async with _archive(tmp_path, backend) as (state, archive, run):
+        repository = state.execution.executions
+        before = await repository.get_history_head("execution", tenant_id="tenant")
+        invalid = replace(_running(), agent_run_id="different")
+        with pytest.raises(AIError) as raised:
+            await archive.sync_prepared_projection(
+                run, events=(), checkpoints=(), interactions=(invalid,),
+                execution_id="execution", producer_generation=1,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await archive.get_agent_run(agent_run_id=run.agent_run_id) is None
+        assert await repository.get_history_head("execution", tenant_id="tenant") == before
+        assert await archive.sync_prepared_projection(
+            run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
+        ) is None
+        admitted = await repository.get_history_head("execution", tenant_id="tenant")
+        assert admitted.revision == before.revision + 1
+        assert await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
+        assert await archive.sync_prepared_projection(
+            run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
+        ) is None
+        assert await repository.get_history_head("execution", tenant_id="tenant") == admitted
+
+
+@pytest.mark.asyncio
+async def test_projection_uses_batched_owner_admission_without_existence_preread(tmp_path: Path) -> None:
+    from sqlalchemy import event
+
+    async with _archive(tmp_path, "sqlite") as (_state, archive, run):
+        await archive.register_agent_run(run, execution_id="execution")
+        engine = archive.state_store.storage_group.context.engine.sync_engine
+        counts = []
+        for preread in (True, False):
+            statements = []
+            def capture(_connection, _cursor, statement, _parameters, _context, _many):
+                statements.append(statement.lstrip().upper())
+            async def project(transaction):
+                if preread:
+                    assert await transaction.get_record(archive._agent_run_key(run.agent_run_id)) is not None
+                await archive.sync_projection_in_transaction(
+                    transaction, run, events=(), checkpoints=(), execution_id="execution",
+                    producer_generation=1,
+                )
+            event.listen(engine, "before_cursor_execute", capture)
+            try:
+                await archive.state_store.storage_group.mutate(
+                    archive.transaction_stores,
+                    lambda group: project(group.transaction(archive.state_store)),
+                )
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+            counts.append(sum(sql.startswith("SELECT") for sql in statements))
+        assert counts[1] < counts[0]
+        print("projection SELECT preread, batched:", counts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_concurrent_empty_projection_admissions_advance_history_once(tmp_path: Path, backend: str) -> None:
+    import asyncio
+
+    async with _archive(tmp_path, backend) as (state, archive, run):
+        repository = state.execution.executions
+        before = await repository.get_history_head("execution", tenant_id="tenant")
+        async def project():
+            return await archive.sync_prepared_projection(
+                run, events=(), checkpoints=(), execution_id="execution", producer_generation=1,
+            )
+        results = await asyncio.gather(project(), project(), return_exceptions=True)
+        assert any(result is None for result in results)
+        for result in results:
+            if result is not None:
+                assert isinstance(result, AIError) and result.code is ErrorCode.STORAGE_CONFLICT
+                assert await project() is None
+        after = await repository.get_history_head("execution", tenant_id="tenant")
+        assert after.revision == before.revision + 1
+        assert await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
+
+
+@pytest.mark.asyncio
+async def test_projection_keeps_custom_private_override_and_public_none_result(tmp_path: Path) -> None:
+    from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
+
+    async with _archive(tmp_path) as (_state, archive, run):
+        calls = []
+        class CustomArchive(ModelInteractionStateStepArchive):
+            async def _sync_projection_in_transaction(self, *args, **kwargs):
+                calls.append(True)
+                await super()._sync_projection_in_transaction(*args, **kwargs)
+                # Existing overrides may discard the private implementation result.
+                return None
+        recovery = _state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        custom = CustomArchive(
+            recovery.state_store, object_store=None, namespace="archive-boundaries",
+            tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
+        )
+        assert await custom.sync_prepared_projection(run, events=(), checkpoints=()) is None
+        assert calls == [True]
+        assert await custom.get_agent_run(agent_run_id=run.agent_run_id) == run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_checkpoint_null_boundary_rejects_reads_instead_of_using_current_head(
+    tmp_path: Path, backend: str,
+) -> None:
+    from linktools.ai.runtime.state._codec import _encode_step_envelope
+    from linktools.ai.runtime.state._store import FactQuery
+
+    async with _archive(tmp_path, backend) as (_state, archive, run):
+        message = ModelResponse(parts=[TextPart("checkpoint")])
+        checkpoint = AgentRunCheckpoint("run", 1, [message], transcript_message_count_before=0)
+        prepared, = (await archive.prepare_checkpoints(run, (checkpoint,))).checkpoints
+        assert prepared.stored.transcript_message_count == 1
+        await archive.sync_prepared_projection(
+            run, events=(), checkpoints=(prepared,),
+            execution_id="execution", producer_generation=1,
+        )
+        encoded = _encode_step_envelope(prepared.stored)
+        encoded["value"]["payload"]["fields"]["transcript_message_count"] = None
+
+        async def corrupt(transaction) -> None:
+            facts = await transaction.list_facts(FactQuery(archive._stream("run", "checkpoint")))
+            assert len(facts) == 1
+            owner = await transaction.get_record(archive._agent_run_key("run"))
+            assert owner is not None
+            await transaction.guard_record(owner.key_digest, expected_storage_revision=owner.storage_revision)
+            await transaction.delete_fact_streams(owner.key_digest)
+            await transaction.insert_fact(replace(facts[0], data=encoded))
+
+        await archive.state_store.mutate(corrupt)
+        with pytest.raises(AIError) as latest:
+            await archive.latest_checkpoint(agent_run_id="run")
+        assert latest.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with pytest.raises(AIError) as verify:
+            await archive.verify_checkpoint_projection(agent_run_id="run", checkpoint=checkpoint)
+        assert verify.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

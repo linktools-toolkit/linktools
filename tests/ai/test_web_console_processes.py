@@ -43,7 +43,7 @@ async def test_web_reads_live_process_history_without_taking_ownership(tmp_path:
     try:
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=RuntimeStorage.sqlite(database), capabilities=(_capabilities(),),
+            storage=RuntimeStorage.sqlite(database), features=_capabilities(),
         ) as runtime, RuntimeHistory.open(
             _NAMESPACE, storage=RuntimeStorage.sqlite(database),
         ) as history, client(create_app(runtime=runtime)) as writable, client(create_app(history=history)) as readonly:
@@ -97,7 +97,7 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
         storage = RuntimeStorage.sqlite(database)
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=storage, capabilities=(_capabilities(),),
+            storage=storage, features=_capabilities(),
         ) as runtime, client(create_app(runtime=runtime)) as http:
             if cancel_first:
                 await _wait_for_committed(
@@ -155,7 +155,7 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
                 assert not calls
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=RuntimeStorage.sqlite(database), capabilities=(_capabilities(),),
+            storage=RuntimeStorage.sqlite(database), features=_capabilities(),
         ) as runtime, client(create_app(runtime=runtime)) as http:
             if control == "cancel_after_exit":
                 replay = await http.post(

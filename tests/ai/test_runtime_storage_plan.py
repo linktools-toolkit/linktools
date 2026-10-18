@@ -22,7 +22,7 @@ def test_runtime_storage_plan_allows_sqlite_without_an_explicit_object_store(
         **{
             domain.value: route
             for domain in RuntimeDomain
-            if domain is not RuntimeDomain.RECOVERY
+            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         }
     )
 

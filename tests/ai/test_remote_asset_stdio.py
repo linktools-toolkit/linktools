@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Pinned non-file Asset packages execute as isolated, run-owned stdio trees."""
 
+from linktools.ai.runtime import TraceCapability
+
 import asyncio
 import json
 import os
@@ -25,7 +27,7 @@ from linktools.ai.asset import (
     MaterializedAssets,
     SqlAssetBackend,
 )
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_asset_database
@@ -283,8 +285,10 @@ def _sandbox(kind: str, monkeypatch: pytest.MonkeyPatch) -> Sandbox | None:
     return LocalSandbox() if kind == "local" else None
 
 
-def _group(store: AssetStore, sandbox: Sandbox | None) -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("assets", assets=store, sandbox=sandbox)
+def _group(store: AssetStore, sandbox: Sandbox | None) -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("assets", sandbox=sandbox)
+    group_assets = AssetCapability(store)
+    group.capability(group_assets, scope="runtime")
     group.agent("default", allow_tools=(mcp_tool_selector("probe", "probe"),))
     return group
 
@@ -334,9 +338,11 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
     sandbox = _sandbox(sandbox_kind, monkeypatch)
     async with _store(backend_kind, tmp_path) as store:
         await _put_package(store, _package(log=log))
+        features = _group(store, sandbox)
+        features.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "asset-stdio", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(_group(store, sandbox),),
+            features=features,
         ) as runtime:
             await store.put(AssetKey("mcp", "probe/data/value.txt"), b"new-head-data")
             await store.put(AssetKey("mcp", "probe/sibling.py"), b'IMPORTED = "new-head-module"\n')
@@ -377,7 +383,7 @@ async def test_resource_arguments_use_the_package_working_directory(
         await _put_package(store, _package(command=command, argument=argument))
         async with Runtime.open(
             "asset-resource-argument", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(_group(store, sandbox),),
+            features=_group(store, sandbox),
         ) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
@@ -410,7 +416,7 @@ async def test_concurrent_runs_own_independent_trees_until_their_processes_close
         await _put_package(store, _package(command=sys.executable, log=log))
         async with Runtime.open(
             "asset-concurrency", models=_ProbeModels(hold), storage=RuntimeStorage.in_memory(),
-            capabilities=(_group(store, sandbox),),
+            features=_group(store, sandbox),
         ) as runtime:
             first = asyncio.create_task(runtime.agents.get("default").run("first", timeout_seconds=15))
             second = None
@@ -468,7 +474,7 @@ async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
         await _put_package(store, _package(command=sys.executable, log=log, mode=mode))
         async with Runtime.open(
             "asset-init-failure", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(_group(store, sandbox),),
+            features=_group(store, sandbox),
         ) as runtime:
             execution = await runtime.agents.get("default").start("probe")
             if mode == "hang-init":
@@ -510,7 +516,7 @@ async def test_native_directory_package_keeps_original_files(
     try:
         async with Runtime.open(
             "native-asset-stdio", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(_group(store, sandbox),),
+            features=_group(store, sandbox),
         ) as runtime:
             result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result

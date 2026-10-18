@@ -515,7 +515,7 @@ def _validate_record(
         or isinstance(record.revision, bool)
         or record.revision < 1
         or _record_version(record) is None
-        or "storage_version" in record.metadata
+        or "storage_revision" in record.metadata
         or record.metadata.get("path") != logical_path
         or not isinstance(record.metadata.get("operation_id"), str)
     ):

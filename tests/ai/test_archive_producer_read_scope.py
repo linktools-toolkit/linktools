@@ -34,7 +34,7 @@ async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
     state = RuntimeStorage.sqlite(tmp_path / "producer.db")
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
-    archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+    archive = state.run_store.read_store(RuntimeDomain.TRACE)
     seal = ExecutionHistorySealRecord("execution", (), 0)
     open_head = outcome in {"new_generation", "same_generation"}
     head = ExecutionHistoryHeadRecord(

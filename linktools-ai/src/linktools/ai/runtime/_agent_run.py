@@ -30,7 +30,7 @@ from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
 from ._tool import ToolOperationBridge
 from ._tool_boundary import RepositoryInstructionBoundary
-from .state import RuntimeDomain
+from .state import RuntimeDomain, CheckpointPersistence
 from .state._contracts import LoadedModelContext
 from .state._step_contracts import AgentRunStore
 from .state._steps import ExecutionTerminalSealPlan
@@ -58,9 +58,8 @@ class _AgentRunLifecycle(Protocol):
         agent_run_id: str,
         execution_id: "str | None" = None,
     ) -> None: ...
-    async def materialize_recovery_checkpoint(
-        self, *, agent_run_id: str, require_complete: bool
-    ) -> None: ...
+    @property
+    def checkpoint_persistence(self) -> CheckpointPersistence: ...
     async def verify_terminal_attempts(
         self,
         *,
@@ -214,22 +213,3 @@ class _AgentRunRunner:
         if isinstance(result, DeferredToolRequests):
             return _AgentRunDeferred(result)
         return _AgentRunCompleted(result)
-
-
-async def _agent_run_messages(
-    store: AgentRunStore,
-    agent_run_id: str,
-    *,
-    include_interrupted: bool = False,
-) -> list[ModelMessage]:
-    checkpoint = await store.latest_checkpoint(
-        agent_run_id=agent_run_id,
-        include_interrupted=include_interrupted,
-    )
-    if checkpoint is None:
-        raise LookupError(agent_run_id)
-    return list(
-        checkpoint.messages
-        if checkpoint.context_messages is None
-        else checkpoint.context_messages
-    )

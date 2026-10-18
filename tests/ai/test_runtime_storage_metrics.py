@@ -7,11 +7,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import MetricsCapability, Runtime, RuntimeStorage
 from pydantic_ai.models.test import TestModel
 
 
@@ -49,8 +49,9 @@ class _Models:
         return _ModelBinding()
 
 
-def _agent_group() -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("application")
+def _agent_group(metrics: Metrics) -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("application")
+    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -65,8 +66,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
         "default",
         models=_Models(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
-        metrics=metrics,
+        features=_agent_group(metrics),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """Run-local transcript identities and terminal boundary facts."""
 
+from linktools.ai.runtime import TraceCapability
 from datetime import datetime, timezone
 from functools import partial
 
 import pytest
 from pydantic_ai.messages import (
-    ModelRequest,
     ModelResponse,
     RetryPromptPart,
     ToolCallPart,
@@ -47,7 +47,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
         reader = StepExecutionHistoryReader(
             namespace="history",
             executions=state.execution.executions,
-            store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+            store=state.run_store.read_store(RuntimeDomain.TRACE),
             notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )
@@ -268,7 +268,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     from pydantic_ai.messages import BinaryContent, FilePart, TextPart
     from pydantic_ai.models import CompletedStreamedResponse
     from pydantic_ai.models.function import FunctionModel
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
     from linktools.ai.runtime import Runtime
     from .test_live_history_readback_integration import _Models
@@ -302,13 +302,14 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     async def unused(messages, info):
         return ModelResponse(parts=[TextPart("unused")])
 
-    group = CapabilityGroup("partial")
+    group = RuntimeFeatures("partial")
     group.agent("default", model="default")
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "partial",
         models=_Models(Model(unused)),
         storage=RuntimeStorage.in_memory(),
-        capabilities=(group,),
+        features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None
@@ -395,6 +396,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
     archive.runs[run.agent_run_id] = run
     archive.interactions[run.agent_run_id] = [interaction]
     record = SimpleNamespace(
+        durable_trace=True,
         execution_id="execution",
         status=ExecutionStatus.STARTED,
         binding_kind="agent",

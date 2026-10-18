@@ -3,6 +3,8 @@
 
 """Workspace capability projection and materialization contracts."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from pathlib import Path
 
@@ -11,7 +13,7 @@ from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
     CapabilityContribution,
-    CapabilityGroup,
+    RuntimeFeatures,
     ToolCallFailed,
     tool_class_from_metadata,
     workspace_capabilities,
@@ -47,7 +49,8 @@ from pydantic_ai.usage import RunUsage
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace)._contributions
+        item for item in workspace_features("workspace", workspace=workspace)._contributions
+        if item.kind == "tool"
     )
 
 
@@ -274,7 +277,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
     tool_classes: set[str],
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    snapshot = await CapabilityGroup("workspace", workspace=workspace).capture()
+    snapshot = await workspace_features("workspace", workspace=workspace).capture()
     spec = AgentSpec(
         "agent",
         allow_tools=selectors,
@@ -306,7 +309,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     workspace = Workspace.load(tmp_path)
-    snapshot = await CapabilityGroup("workspace", workspace=workspace).capture()
+    snapshot = await workspace_features("workspace", workspace=workspace).capture()
     for selectors in (("new_tool",), ("*", "new_tool")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
@@ -390,7 +393,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        snapshot = await CapabilityGroup(
+        snapshot = await workspace_features(
             "workspace",
             workspace=workspace,
             assets=store,
@@ -414,9 +417,9 @@ async def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
     groups = (
-        CapabilityGroup("workspace", workspace=workspace),
-        CapabilityGroup("workspace", workspace=workspace, sandbox=sandbox),
-        CapabilityGroup("workspace", workspace=workspace, sandbox=DisabledSandbox()),
+        workspace_features("workspace", workspace=workspace),
+        workspace_features("workspace", workspace=workspace, sandbox=sandbox),
+        workspace_features("workspace", workspace=workspace, sandbox=DisabledSandbox()),
     )
     snapshots = [await group.capture() for group in groups]
     projected = tuple(
@@ -445,7 +448,7 @@ def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> Non
 
 
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
-    group = CapabilityGroup[object]("custom")
+    group = RuntimeFeatures[object]("custom")
     with pytest.raises(AIError) as raised:
         group.capability(_SpoofedSandboxCapability())
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -616,7 +619,7 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
-    group = CapabilityGroup("workspace", workspace=workspace, sandbox=DisabledSandbox())
+    group = workspace_features("workspace", workspace=workspace, sandbox=DisabledSandbox())
 
     with pytest.raises(AIError) as raised:
         await group.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
@@ -634,11 +637,12 @@ async def test_workspace_group_does_not_discover_declarations(
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
 
-    group = CapabilityGroup("workspace", workspace=workspace, sandbox=sandbox)
+    group = workspace_features("workspace", workspace=workspace, sandbox=sandbox)
     snapshot = await group.capture()
 
     assert group.workspace is workspace
     assert snapshot.sandbox is sandbox
     assert snapshot
-    assert all(item.kind == "tool" for item in snapshot.contributions)
+    assert all(item.kind == "tool" or (item.kind == "capability" and item.id == "runtime.workspace")
+               for item in snapshot.contributions)
     assert sandbox.sessions == []

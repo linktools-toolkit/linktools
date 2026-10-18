@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, TraceCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -54,17 +54,19 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
         monkeypatch.setattr(LocalExecutionBackend, "_commit_success", pause_success)
 
-    group = CapabilityGroup("remote-cancel-release")
+    group = RuntimeFeatures("remote-cancel-release")
+    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     try:
         async with Runtime.open(
             "remote-cancel-release", models=_Models(FunctionModel(stream_function=model)),
-            storage=owner_storage, capabilities=(group,),
+            storage=owner_storage, features=group,
         ) as owner, Runtime.open(
             "remote-cancel-release", models=_Models(FunctionModel(stream_function=model)),
-            storage=remote_storage, capabilities=(group,),
+            storage=remote_storage, features=group,
         ) as remote:
             await owner.agents.get("default").create_session("session")
             session = owner.agents.get("default").session("session")
@@ -107,8 +109,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
                 run_stores = (owner_storage.run_store, remote_storage.run_store)
-                observation_tasks = {store._observation_task for store in run_stores
-                                     if store._observation_task is not None}
+                observation_tasks = {store.trace_persistence.scheduler_task for store in run_stores
+                                     if store.trace_persistence.scheduler_task is not None}
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
                     asyncio.gather(asyncio.shield(worker), return_exceptions=True), 10,
@@ -144,8 +146,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         tasks = observation_tasks | backend._checkpoint_tasks
                         for store in run_stores:
                             tasks.update(store._background_tasks)
-                            if store._observation_task is not None:
-                                tasks.add(store._observation_task)
+                            if store.trace_persistence.scheduler_task is not None:
+                                tasks.add(store.trace_persistence.scheduler_task)
                         tasks.difference_update(joined)
                         if not tasks:
                             return
@@ -158,8 +160,8 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 ) == sealed
                 assert (await execution.history(include_content=True)).items == history.items
                 run_store = owner_storage.run_store
-                assert run_store._projection_dirty == set()
-                assert run_store._projection_offsets == {}
+                assert run_store.trace_persistence.dirty == set()
+                assert run_store.trace_persistence.offsets == {}
                 assert run_store._durability_flights == {}
                 assert run_store._execution_producers == {}
                 assert run_store._staging._runs == {}
@@ -227,17 +229,18 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
             ToolCallPart("slow", {}, tool_call_id="slow-call"),
         ])
 
-    group = CapabilityGroup("individual-tool-cancel")
+    group = RuntimeFeatures("individual-tool-cancel")
+    group.capability(TraceCapability(), scope="runtime")
     group.tool(fast, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("fast", "slow"))
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     async with Runtime.open(
         "individual-tool-cancel", models=_Models(_UsageFunctionModel(model)),
-        storage=owner_storage, capabilities=(group,),
+        storage=owner_storage, features=group,
     ) as owner, Runtime.open(
         "individual-tool-cancel", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), capabilities=(group,),
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
     ) as remote:
         execution = await owner.agents.get("default").start("run both")
         try:
@@ -286,7 +289,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     from linktools.ai.capability import AgentContext
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.runtime.state._sql import _SqlTransaction
-    from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
+    from linktools.ai.runtime.state._trace_persistence import TracePersistence
 
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -304,30 +307,31 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         del messages, info
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
-    group = CapabilityGroup("projection-cancel-conflict")
+    group = RuntimeFeatures("projection-cancel-conflict")
+    group.capability(TraceCapability(), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     original_replace = _SqlTransaction.replace_record
 
-    async def project_before_cancel_replace(transaction, record, *, expected_storage_version):
+    async def project_before_cancel_replace(transaction, record, *, expected_storage_revision):
         if record.kind == "execution" and record.state == "CANCELLING" and not cancel_read.is_set():
             cancel_read.set()
             assert projection is not None
             await asyncio.wait_for(asyncio.shield(projection), 10)
         return await original_replace(
-            transaction, record, expected_storage_version=expected_storage_version,
+            transaction, record, expected_storage_revision=expected_storage_revision,
         )
 
     # Keep the batch pending until the cancel CAS, rather than race a timer.
-    monkeypatch.setattr(RuntimeAgentRunStore, "_schedule_observation_flush", lambda self: None)
+    monkeypatch.setattr(TracePersistence, "schedule", lambda self: None)
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
-        storage=owner_storage, capabilities=(group,),
+        storage=owner_storage, features=group,
     ) as owner, Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), capabilities=(group,),
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
     ) as remote:
         execution = await owner.agents.get("default").start("run tool")
         try:
@@ -353,7 +357,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             after = await repository.get(execution.execution_id, tenant_id=tenant)
             after_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
             assert before_stored is not None and after_stored is not None
-            assert after_stored.storage_version > before_stored.storage_version
+            assert after_stored.storage_revision > before_stored.storage_revision
             assert after_stored.data == before_stored.data
             assert before is not None and after is not None
             assert after.status is before.status is ExecutionStatus.STARTED

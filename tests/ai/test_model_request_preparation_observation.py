@@ -18,7 +18,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
@@ -30,6 +30,7 @@ from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime._model_interaction import StagedContextInline, model_identity, request_envelope
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
+from linktools.ai.runtime import MetricsCapability, TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_model_interaction_regressions import _interaction
@@ -111,9 +112,10 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
             )
             return request_context
 
-    group = CapabilityGroup("prepared-input")
-    group.capability(PrepareRequest(), id="prepare-request")
-    group.capability(_ChangeRequestAfterResponse(), id="change-after-response")
+    group = RuntimeFeatures("prepared-input")
+    group.capability(TraceCapability(), scope="runtime")
+    group.capability(PrepareRequest(), id="prepare-request", scope="agent")
+    group.capability(_ChangeRequestAfterResponse(), id="change-after-response", scope="agent")
     group.agent("default", model="default", system_prompt="candidate-only behavior",
                 allow_tools=(), allow_skills=(), allow_subagents=())
     imported = ExecutionInputContext.from_messages((
@@ -123,8 +125,9 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
     metric_store = InMemoryMetricStore()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
+    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open("prepared-input", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            capabilities=(group,), metrics=metrics) as runtime:
+                            features=group) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

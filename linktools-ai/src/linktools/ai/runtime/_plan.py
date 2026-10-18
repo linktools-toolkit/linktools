@@ -125,7 +125,7 @@ class RuntimePlanStore:
                     await transaction.insert_record(next_record)
                 elif not await transaction.replace_record(
                     next_record,
-                    expected_storage_version=current.storage_version,
+                    expected_storage_revision=current.storage_revision,
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 _logger.debug(
@@ -160,7 +160,7 @@ class RuntimePlanStore:
             kind=_KIND,
             sort_key="plan:" + self._key.hex(),
             state=None,
-            storage_version=1 if current is None else current.storage_version + 1,
+            storage_revision=1 if current is None else current.storage_revision + 1,
             lease_owner=None,
             lease_fence=0,
             lease_expires_at=None,
@@ -176,9 +176,9 @@ def _decode_payload(record: StoredRecord | None) -> tuple[list[PlanItem], int]:
         return [], 0
     if (
         record.kind != _KIND
-        or isinstance(record.storage_version, bool)
-        or not isinstance(record.storage_version, int)
-        or record.storage_version < 1
+        or isinstance(record.storage_revision, bool)
+        or not isinstance(record.storage_revision, int)
+        or record.storage_revision < 1
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = record.data
@@ -203,7 +203,7 @@ def _decode_payload(record: StoredRecord | None) -> tuple[list[PlanItem], int]:
         items = _validated_items(decoded_items)
     except (KeyError, TypeError, ValueError, AIError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    return items, record.storage_version
+    return items, record.storage_revision
 
 
 def _validated_items(items: list[PlanItem]) -> list[PlanItem]:

@@ -14,6 +14,7 @@ from linktools.ai.storage import (
     MetadataLoad,
     StorageOverlay,
     StorageRevision,
+    StorageRevisionSource,
 )
 
 
@@ -39,6 +40,45 @@ class _PausedMetadataBackend(InMemoryAssetBackend):
     async def close(self) -> None:
         self.closed = True
         await super().close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warm", (False, True))
+@pytest.mark.parametrize("use_source", (False, True))
+async def test_metadata_readers_share_one_source_observation(warm: bool, use_source: bool) -> None:
+    class Backend(InMemoryAssetBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.head_reads = 0
+            self.metadata_reads = 0
+
+        async def head_revision(self) -> StorageRevision | None:
+            self.head_reads += 1
+            return await super().head_revision()
+
+        async def load_metadata(
+            self, after_revision: StorageRevision | None = None,
+        ) -> MetadataLoad[AssetKey, AssetInfo]:
+            self.metadata_reads += 1
+            return await super().load_metadata(after_revision)
+
+    backend = Backend()
+    key = AssetKey("test", "concurrent-read")
+    written = await backend.put(key, b"value")
+    view = LayerMetadataView(
+        backend, LayerRefreshPolicy.REVISIONED,
+        revision_source=StorageRevisionSource(backend) if use_source else None,
+    )
+    try:
+        if warm:
+            await view.refresh()
+            backend.head_reads = backend.metadata_reads = 0
+        values = await asyncio.gather(*(view.refresh() for _ in range(16)))
+        assert all(value.entries[key] == written.info for value in values)
+        assert backend.metadata_reads == (0 if warm else 1)
+        assert backend.head_reads == (1 if warm else 0)
+    finally:
+        await backend.close()
 
 
 @pytest.mark.asyncio
@@ -259,3 +299,92 @@ async def test_shared_metadata_snapshot_observes_writes_before_new_reader(warm: 
         release.set()
         await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_late_warm_reader_does_not_reuse_a_stale_revision_hint() -> None:
+    backend = InMemoryAssetBackend()
+    key = AssetKey("test", "updated")
+    old = await backend.put(key, b"old")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Source:
+        async def head_revision(self) -> StorageRevision:
+            started.set()
+            await release.wait()
+            return old.info.store_revision
+
+        async def revision_bumped(self, revision: StorageRevision) -> None:
+            pass
+
+    view = LayerMetadataView(backend, LayerRefreshPolicy.REVISIONED, revision_source=Source())
+    await view.refresh()
+    first = asyncio.create_task(view.refresh())
+    second = None
+    try:
+        await started.wait()
+        new = await backend.put(key, b"new")
+        second = asyncio.create_task(view.refresh())
+        await asyncio.sleep(0)
+        release.set()
+        await first
+        assert (await second).entries[key] == new.info
+    finally:
+        release.set()
+        await asyncio.gather(first, *(() if second is None else (second,)), return_exceptions=True)
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_late_warm_reader_does_not_reuse_a_completed_stale_flight() -> None:
+    source_started, source_release = asyncio.Event(), asyncio.Event()
+    late_head_started, late_head_release = asyncio.Event(), asyncio.Event()
+
+    class Backend(InMemoryAssetBackend):
+        async def head_revision(self) -> StorageRevision | None:
+            revision = await super().head_revision()
+            late_head_started.set()
+            await late_head_release.wait()
+            return revision
+
+    backend = Backend()
+    key = AssetKey("test", "updated")
+    old = await backend.put(key, b"old")
+
+    class Source:
+        calls = 0
+
+        async def head_revision(self) -> StorageRevision:
+            self.calls += 1
+            if self.calls == 1:
+                source_started.set()
+                await source_release.wait()
+            else:
+                # The late probe resumes before this flight's completion callbacks.
+                late_head_release.set()
+            return old.info.store_revision
+
+        async def revision_bumped(self, revision: StorageRevision) -> None:
+            pass
+
+    view = LayerMetadataView(backend, LayerRefreshPolicy.REVISIONED, revision_source=Source())
+    await view.refresh()
+    first = asyncio.create_task(view.refresh())
+    second = third = None
+    try:
+        await source_started.wait()
+        new = await backend.put(key, b"new")
+        second = asyncio.create_task(view.refresh())
+        await asyncio.sleep(0)
+        source_release.set()
+        await late_head_started.wait()
+        third = asyncio.create_task(view.refresh())
+        assert (await second).entries[key] == new.info
+    finally:
+        source_release.set()
+        late_head_release.set()
+        await asyncio.gather(
+            *(task for task in (first, second, third) if task is not None),
+            return_exceptions=True,
+        )
+        await backend.close()

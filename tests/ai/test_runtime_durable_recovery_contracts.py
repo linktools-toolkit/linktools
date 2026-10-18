@@ -51,13 +51,13 @@ def _node(
     )
 
 
-def test_default_output_retries_do_not_change_canonical_agent_payload() -> None:
+def test_output_retry_authoring_preserves_unresolved_and_explicit_values() -> None:
     codec = AgentSpecCodec()
     implicit = codec.to_contract_payload(AgentSpec("agent"))
     explicit = codec.to_contract_payload(AgentSpec("agent", output_retries=3))
 
-    assert implicit == explicit
-    assert implicit["output_retries"] == 3
+    assert implicit["output_retries"] is None
+    assert explicit["output_retries"] == 3
     assert codec.to_contract_payload(AgentSpec("agent", output_retries=0))["output_retries"] == 0
 
 

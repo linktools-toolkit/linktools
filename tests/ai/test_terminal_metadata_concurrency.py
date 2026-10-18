@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Terminal ownership preserves concurrent dependency retention metadata."""
 
+from linktools.ai.runtime import ConversationCapability, TraceCapability
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionStatus,
@@ -135,17 +136,20 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         "_commit_execution_terminal_checkpoint_locked_body",
         interleave,
     )
-    group = CapabilityGroup("terminal-metadata")
+    group = RuntimeFeatures("terminal-metadata")
     group.agent(
         "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
     )
     state = _storage(tmp_path, backend, split_session)
+    group.capability(TraceCapability(), scope="runtime")
+    if split_session:
+        group.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open(
         "terminal-metadata",
         models=FixtureModels(),
         storage=state,
         context=CONTEXT,
-        capabilities=(group,),
+        features=group,
     ) as runtime:
         agent = runtime.agents.get()
         if split_session:
@@ -282,7 +286,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     stored = await transaction.get_record(key)
                     assert stored is not None
                     await transaction.delete_record(
-                        key, expected_storage_version=stored.storage_version
+                        key, expected_storage_revision=stored.storage_revision
                     )
 
                 await repository.state_store.mutate(remove_seal)

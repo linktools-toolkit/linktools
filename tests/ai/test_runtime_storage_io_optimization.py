@@ -147,7 +147,7 @@ async def test_filesystem_fact_batch_limits_stream_and_subject_staging(
 
             assert await transaction.guard_record(
                 owner,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             ) is not None
             monkeypatch.setattr(transaction, "_write", write)
             monkeypatch.setattr(transaction._cache, "load_fact_subjects", load_subjects)
@@ -226,7 +226,7 @@ async def test_filesystem_fact_batch_stages_each_stream_once(
         async def append(transaction: _FilesystemTransaction) -> None:
             assert await transaction.guard_record(
                 owner,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             ) is not None
             original_write = transaction._write
 
@@ -346,10 +346,10 @@ async def test_session_model_context_reuses_observed_projection(
     expected = LoadedModelContext(())
     projection_reads = 0
 
-    async def load_projection(_owner_id: str) -> ContextProjection:
+    async def load_metadata(_owner_id: str) -> tuple[ContextProjection, None]:
         nonlocal projection_reads
         projection_reads += 1
-        return projection
+        return projection, None
 
     async def load_projected(
         owner_id: str,
@@ -359,7 +359,7 @@ async def test_session_model_context_reuses_observed_projection(
         assert observed is projection
         return expected
 
-    monkeypatch.setattr(repository, "load_projection", load_projection)
+    monkeypatch.setattr(repository, "_load_context_metadata", load_metadata)
     monkeypatch.setattr(
         repository,
         "_load_model_context_from_projection",

@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import (
-    _AgentRunPersistenceCapability,
+from linktools.ai.runtime import TraceCapability
+from linktools.ai.runtime._run_hooks import (
+    AgentRunCapture,
 )
 from linktools.ai.runtime._history_projection import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
@@ -121,7 +122,7 @@ def _persistence(
         execution_id=None,
         agent_run_id=agent_run_id,
     )
-    persistence = _AgentRunPersistenceCapability(
+    persistence = AgentRunCapture(
         recorder=run_recorder,
         agent_id="usage-test",
         agent_run_id=agent_run_id,
@@ -137,7 +138,7 @@ def _persistence(
         journal=journal,
         interaction_recorder=run_recorder,
     )
-    capabilities = [observation, persistence]
+    capabilities = [observation, persistence, TraceCapability().bind(persistence)]
     if reverse_registration:
         capabilities.reverse()
     return CombinedCapability(capabilities)

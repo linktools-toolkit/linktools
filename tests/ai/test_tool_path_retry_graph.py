@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Workspace argument correction stays inside the agent's bounded tool loop."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -11,10 +13,10 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, TraceCapability
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.workspace import Workspace
 
@@ -68,14 +70,15 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
             )])
         return ModelResponse(parts=[TextPart("files read")])
 
-    group = CapabilityGroup("path-correction")
+    group = workspace_features("path-correction", workspace=Workspace.load(tmp_path))
+    group.capability(TraceCapability(), scope="runtime")
     group.tool(record_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "record_effect"),
                 tool_retries=2 if retry_limit is None else retry_limit)
     async with Runtime.open(
         "path-correction", models=_Models(_UsageFunctionModel(model)),
         storage=RuntimeStorage.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)), group),
+        features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("path.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("path-graph", (

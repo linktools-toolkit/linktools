@@ -35,7 +35,7 @@ from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding(agent_id: str = "agent") -> AgentBindingContract:
-    spec = AgentSpec(agent_id)
+    spec = AgentSpec(agent_id, tool_retries=3, output_retries=3)
     return AgentBindingContract(
         agent_spec=spec,
         model_contract={},
@@ -656,6 +656,7 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = object.__new__(DefaultExecutionService)
+    service._conversation = True
     child = _record(subagent=True, parent_invocation_id="delegate-call")
     monkeypatch.setattr(
         service,
@@ -834,6 +835,7 @@ async def test_tree_close_keeps_child_live_cleanup_authoritative_failure():
             if self.key == "child":
                 raise cause
     class Live:
+        shared = None
         def claim_local_producer(self, key):
             return Subscription(key)
         def is_local_producer(self, key):

@@ -19,7 +19,8 @@ from linktools.ai.runtime.state._steps import (
 )
 
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime import CheckpointCapability
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     BoundaryToolset,
@@ -124,7 +125,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
 async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
     agent_run_id = "completed-run"
     store = _RecordingAgentRunStore()
-    persistence = _AgentRunPersistenceCapability(
+    persistence = AgentRunCapture(
         recorder=AgentRunRecorder(
             store,
             execution_id=None,
@@ -138,7 +139,7 @@ async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
     result = await agent.run(
         "finish",
         run_id=agent_run_id,
-        capabilities=(persistence,),
+        capabilities=(persistence, CheckpointCapability().bind(persistence)),
     )
 
     assert result.output == "ok"

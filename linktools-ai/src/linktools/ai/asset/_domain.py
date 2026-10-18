@@ -48,7 +48,7 @@ class AssetVersionRef:
     key: AssetKey
     layer_id: str
     revision: StorageEntryRevision
-    etag: str
+    digest: str
     size: int
 
     def __post_init__(self) -> None:
@@ -59,9 +59,9 @@ class AssetVersionRef:
         if not isinstance(self.revision, StorageEntryRevision):
             raise TypeError("asset version revision must be StorageEntryRevision")
         if (
-            not isinstance(self.etag, str)
-            or len(self.etag) != 64
-            or any(character not in "0123456789abcdef" for character in self.etag)
+            not isinstance(self.digest, str)
+            or len(self.digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.digest)
             or isinstance(self.size, bool)
             or not isinstance(self.size, int)
             or self.size < 0
@@ -75,7 +75,7 @@ class AssetVersionRef:
             "id": self.key.id,
             "layer_id": self.layer_id,
             "revision": self.revision.value,
-            "etag": self.etag,
+            "digest": self.digest,
             "size": self.size,
         }
 
@@ -84,7 +84,7 @@ class AssetVersionRef:
         return (
             self.key == info.key
             and self.revision == info.revision
-            and self.etag == info.etag
+            and self.digest == info.digest
             and self.size == info.size
         )
 
@@ -96,7 +96,7 @@ class AssetVersionRef:
             "id",
             "layer_id",
             "revision",
-            "etag",
+            "digest",
             "size",
         }:
             raise ValueError("asset version payload is invalid")
@@ -107,7 +107,7 @@ class AssetVersionRef:
         identity = value.get("id")
         layer_id = value.get("layer_id")
         revision = value.get("revision")
-        etag = value.get("etag")
+        digest = value.get("digest")
         size = value.get("size")
         if (
             not isinstance(kind, str)
@@ -115,7 +115,7 @@ class AssetVersionRef:
             or not isinstance(layer_id, str)
             or isinstance(revision, bool)
             or not isinstance(revision, int)
-            or not isinstance(etag, str)
+            or not isinstance(digest, str)
             or isinstance(size, bool)
             or not isinstance(size, int)
         ):
@@ -124,7 +124,7 @@ class AssetVersionRef:
             AssetKey(kind, identity),
             layer_id,
             StorageEntryRevision(revision),
-            etag,
+            digest,
             size,
         )
 
@@ -144,7 +144,7 @@ class AssetInfo:
     key: AssetKey
     revision: StorageEntryRevision
     store_revision: StorageRevision
-    etag: str
+    digest: str
     size: int
     status: StorageEntryStatus
     modified_at: datetime
@@ -155,19 +155,19 @@ class AssetInfo:
         if (
             self.size < 0
             or not isinstance(self.status, StorageEntryStatus)
-            or len(self.etag) != 64
-            or any(character not in "0123456789abcdef" for character in self.etag)
+            or len(self.digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.digest)
         ):
             raise ValueError("asset metadata is invalid")
         if self.modified_at.tzinfo is None:
             raise ValueError("asset metadata requires a timezone-aware timestamp")
         object.__setattr__(self, "metadata", ImmutableJsonMapping(normalize_storage_metadata(self.metadata)))
         if self.status is not StorageEntryStatus.NORMAL and (
-            self.size != 0 or self.etag != hashlib.sha256(b"").hexdigest()
+            self.size != 0 or self.digest != hashlib.sha256(b"").hexdigest()
         ):
             raise ValueError("non-normal asset metadata must not contain file content")
         if self.content is not None and (
-            self.content.digest != self.etag or self.content.size != self.size
+            self.content.digest != self.digest or self.content.size != self.size
         ):
             raise ValueError("asset content descriptor does not match metadata")
 

@@ -60,7 +60,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
         "artifact_id",
         "execution_id",
         "producer",
-        "media_type",
+        "mime_type",
         "object_ref",
         "created_at",
     }
@@ -74,7 +74,7 @@ def test_session_fork_receipt_is_not_a_durable_wire_type() -> None:
 
 def test_transcript_head_uses_stored_record_as_its_only_revision_owner() -> None:
     head = TranscriptHeadRecord(
-        TranscriptOwnerDomain.EXECUTION,
+        TranscriptOwnerDomain.TRACE,
         "run",
         3,
         1,

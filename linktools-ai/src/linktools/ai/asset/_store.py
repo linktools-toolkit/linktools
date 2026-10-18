@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Raw file AssetStore backed by StorageOverlay."""
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -23,6 +25,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import (
+    CacheBackend,
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
@@ -33,6 +36,7 @@ from ..storage import (
     StorageRevision,
     StorageLocatedInfo,
     StorageWriteState,
+    StorageValueValidator,
 )
 from ..storage import ObjectRef, ObjectStore, read_object
 from ._domain import AssetBackend, AssetInfo, AssetKey, AssetVersionRef
@@ -79,8 +83,11 @@ class AssetStoreReader(Protocol):
         ...
 
 
-class AssetCacheAdapter:
-    """Cache raw Asset file bytes using immutable metadata."""
+class AssetContentCache:
+    """Bind a borrowed cache backend to immutable Asset metadata and bytes."""
+
+    def __init__(self, backend: CacheBackend) -> None:
+        self.backend = backend
 
     def cache_key(self, key: AssetKey, info: AssetInfo) -> str:
         return ":".join(
@@ -89,7 +96,7 @@ class AssetCacheAdapter:
                 key.kind,
                 key.id,
                 str(info.revision.value),
-                info.etag,
+                info.digest,
             )
         )
 
@@ -100,6 +107,25 @@ class AssetCacheAdapter:
         if len(value) < 32 or value[:32] != hashlib.sha256(value[32:]).digest():
             raise ValueError("asset cache payload is invalid")
         return value[32:]
+
+
+class _AssetValueValidator:
+    def __init__(
+        self, validator: StorageValueValidator[AssetKey, bytes, AssetInfo] | None,
+    ) -> None:
+        self._validator = validator
+
+    def validate_value(self, key: AssetKey, value: bytes, info: AssetInfo) -> None:
+        if len(value) != info.size or hashlib.sha256(value).hexdigest() != info.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._validator is not None:
+            self._validator.validate_value(key, value, info)
+
+
+@dataclass(slots=True)
+class _AssetVersionRead:
+    task: asyncio.Task[bytes] | None = None
+    readers: int = 0
 
 
 class AssetStore:
@@ -114,7 +140,11 @@ class AssetStore:
             raise TypeError("storage must be StorageOverlay")
         if any(not isinstance(backend, AssetBackend) for backend in storage.backends):
             raise TypeError("AssetStore backends must implement AssetBackend")
+        if not isinstance(storage.validator, _AssetValueValidator):
+            storage.validator = _AssetValueValidator(storage.validator)
         self._storage = storage
+        self._version_flights: dict[tuple[int, AssetVersionRef], _AssetVersionRead] = {}
+        self._version_reads: set[asyncio.Future[None]] = set()
         self._ready = False
         self._closing = False
         self._closed = False
@@ -156,10 +186,18 @@ class AssetStore:
             return
         self._closing = True
         self._ready = False
+        cancelled = False
+        while self._version_reads:
+            try:
+                await asyncio.wait(tuple(self._version_reads))
+            except asyncio.CancelledError:
+                cancelled = True
         await self._storage.close()
         self._closing = False
         self._closed = True
         _logger.debug("asset store closed")
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         """Return current effective file metadata and status."""
@@ -371,7 +409,7 @@ class AssetStore:
                     key,
                     location.layer,
                     info.revision,
-                    info.etag,
+                    info.digest,
                     info.size,
                 )
             )
@@ -383,32 +421,83 @@ class AssetStore:
     ) -> "tuple[bytes, ...]":
         """Read referenced Asset bytes and verify their size and digest."""
         self._ensure_ready()
-        values: list[bytes] = []
-        for ref in refs:
-            if not isinstance(ref, AssetVersionRef):
-                raise TypeError("refs must contain AssetVersionRef values")
-            if ref.layer_id == "primary":
-                backend = self._storage.primary
-            else:
-                matches = tuple(
-                    layer.backend
-                    for layer in self._storage.layers
-                    if layer.id == ref.layer_id
-                )
-                if len(matches) != 1:
-                    raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
-                backend = matches[0]
-            value = await backend.get_at_revision(
-                ref.key,
-                ref.revision,
-            )
-            if value is None:
-                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
-            data = bytes(value)
-            if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.etag:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values.append(data)
-        return tuple(values)
+        completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._version_reads.add(completed)
+        try:
+            values: list[bytes] = []
+            for ref in refs:
+                if not isinstance(ref, AssetVersionRef):
+                    raise TypeError("refs must contain AssetVersionRef values")
+                if ref.layer_id == "primary":
+                    backend = self._storage.primary
+                else:
+                    matches = tuple(
+                        layer.backend
+                        for layer in self._storage.layers
+                        if layer.id == ref.layer_id
+                    )
+                    if len(matches) != 1:
+                        raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
+                    backend = matches[0]
+                values.append(await self._read_version(backend, ref))
+            return tuple(values)
+        finally:
+            self._version_reads.discard(completed)
+            completed.set_result(None)
+
+    async def _read_version(self, backend: AssetBackend, ref: AssetVersionRef) -> bytes:
+        identity = (id(backend), ref)
+        flight = self._version_flights.get(identity)
+        if flight is None:
+            flight = _AssetVersionRead()
+            self._version_flights[identity] = flight
+            flight.task = asyncio.create_task(self._load_version(backend, ref, flight))
+
+            def finished(task: asyncio.Task[bytes]) -> None:
+                if self._version_flights.get(identity) is flight:
+                    del self._version_flights[identity]
+                if not task.cancelled():
+                    task.exception()
+
+            flight.task.add_done_callback(finished)
+        task = flight.task
+        assert task is not None
+        flight.readers += 1
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if flight.readers == 1:
+                if self._version_flights.get(identity) is flight:
+                    del self._version_flights[identity]
+                task.cancel()
+                # The last reader owns source cleanup, including a backend
+                # that delays or suppresses cancellation while releasing I/O.
+                while not task.done():
+                    try:
+                        await asyncio.wait((task,))
+                    except asyncio.CancelledError:
+                        pass
+                if not task.cancelled():
+                    task.result()
+            raise
+        finally:
+            flight.readers -= 1
+
+    async def _load_version(
+        self, backend: AssetBackend, ref: AssetVersionRef, flight: _AssetVersionRead
+    ) -> bytes:
+        identity = (id(backend), ref)
+        if self._version_flights.get(identity) is flight:
+            del self._version_flights[identity]
+        # Only readers admitted before source I/O starts share this observation.
+        # Historical existence cannot be checked without reading the version.
+        value = await backend.get_at_revision(ref.key, ref.revision)
+        if value is None:
+            raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+        data = bytes(value)
+        if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return data
 
     async def list_info_with_locations(
         self,
@@ -475,7 +564,7 @@ class AssetStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value = values[0]
             info = infos[key]
-            content_key = f"v{_SNAPSHOT_VERSION}/asset-content/{info.etag}"
+            content_key = f"v{_SNAPSHOT_VERSION}/asset-content/{info.digest}"
             await _put_snapshot_object(object_store, content_key, value)
             entries.append(_snapshot_entry(info, content_key))
         if await self.current_revision() != captured_revision:
@@ -571,7 +660,7 @@ def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
         "key": {"kind": info.key.kind, "id": info.key.id},
         "entry_revision": info.revision.value,
         "store_revision": info.store_revision.value,
-        "etag": info.etag,
+        "digest": info.digest,
         "size": info.size,
         "status": info.status.value,
         "modified_at": info.modified_at.isoformat(),
@@ -579,7 +668,7 @@ def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
         "content": {
             "store_id": "snapshot",
             "key": content_key,
-            "digest": info.etag,
+            "digest": info.digest,
             "size": info.size,
         },
     }
@@ -639,7 +728,7 @@ class _SnapshotAssetStore(AssetStore):
             await read_object(
                 self._object_store,
                 content_key,
-                expected_digest=info.etag,
+                expected_digest=info.digest,
                 expected_size=info.size,
             )
             entries[info.key] = info
@@ -675,7 +764,7 @@ class _SnapshotAssetStore(AssetStore):
         return await read_object(
             self._object_store,
             content_key,
-            expected_digest=info.etag,
+            expected_digest=info.digest,
             expected_size=info.size,
         )
 
@@ -751,7 +840,7 @@ class _SnapshotAssetStore(AssetStore):
                     key,
                     "snapshot",
                     info.revision,
-                    info.etag,
+                    info.digest,
                     info.size,
                 )
             )
@@ -910,13 +999,13 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
         ):
             raise ValueError
         key = AssetKey(str(key_payload["kind"]), str(key_payload["id"]))
-        etag = str(raw["etag"])
+        digest = str(raw["digest"])
         size = int(raw["size"])
         info = AssetInfo(
             key=key,
             revision=StorageEntryRevision(int(raw["entry_revision"])),
             store_revision=StorageRevision(str(raw["store_revision"])),
-            etag=etag,
+            digest=digest,
             size=size,
             status=StorageEntryStatus(str(raw["status"])),
             modified_at=datetime.fromisoformat(str(raw["modified_at"])),
@@ -924,7 +1013,7 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
         )
         if (
             content.get("store_id") != "snapshot"
-            or content.get("digest") != info.etag
+            or content.get("digest") != info.digest
             or content.get("size") != info.size
         ):
             raise ValueError
@@ -1014,4 +1103,4 @@ def _info_key(value: "AssetInfo | StorageLocatedInfo[AssetInfo]") -> AssetKey:
     return value.info.key if isinstance(value, StorageLocatedInfo) else value.key
 
 
-__all__ = ["AssetCacheAdapter", "AssetStore"]
+__all__ = ["AssetContentCache", "AssetStore"]

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, Principal, ResourceRef, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -48,7 +49,7 @@ async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Runtim
     storage = RuntimeStorage.sqlite(path / "state.sqlite")
     policy = Policy()
     async with Runtime.open("evidence-read", storage=storage, models=ModelRegistry(),
-                            context=CONTEXT, authorization=policy) as runtime:
+                            context=CONTEXT, features=RuntimeFeatures("authorization", authorization=policy)) as runtime:
         target = Task("evidence-read.target", echo, effect_policy="none")
         scorer = Task("evidence-read.score", exact, effect_policy="none")
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), tuple(

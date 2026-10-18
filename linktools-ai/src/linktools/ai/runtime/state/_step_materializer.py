@@ -15,8 +15,8 @@ from ._steps import RuntimeAgentRunStore
 
 _STEP_DOMAINS = (
     RuntimeDomain.CONVERSATION,
-    RuntimeDomain.EXECUTION,
-    RuntimeDomain.RECOVERY,
+    RuntimeDomain.TRACE,
+    RuntimeDomain.CHECKPOINT,
 )
 
 
@@ -47,6 +47,7 @@ def build_runtime_agent_run_store(
         archives[domain] = ModelInteractionStateStepArchive(
             stores[domain],
             object_store=objects.object_store(domain),
+            object_reader=objects.read_object,
             namespace=namespace,
             tenant_id=tenant_id,
             runtime_domain=domain,
@@ -55,17 +56,19 @@ def build_runtime_agent_run_store(
                 history_repository if domain is RuntimeDomain.CONVERSATION else None
             ),
             execution_repository=(
-                execution_repository if domain is RuntimeDomain.EXECUTION else None
+                execution_repository if domain is RuntimeDomain.TRACE else None
             ),
         )
     return RuntimeAgentRunStore(
         StagingAgentRunStore(),
+        execution_repository=execution_repository,
+        tenant_id=tenant_id,
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
-        execution_archive=archives.get(RuntimeDomain.EXECUTION),
-        recovery_archive=archives.get(RuntimeDomain.RECOVERY),
+        execution_archive=archives.get(RuntimeDomain.TRACE),
+        recovery_archive=archives.get(RuntimeDomain.CHECKPOINT),
         conversation_retention=plan.route(RuntimeDomain.CONVERSATION).retention,
-        execution_retention=plan.route(RuntimeDomain.EXECUTION).retention,
-        recovery_retention=plan.route(RuntimeDomain.RECOVERY).retention,
+        execution_retention=plan.route(RuntimeDomain.TRACE).retention,
+        recovery_retention=plan.route(RuntimeDomain.CHECKPOINT).retention,
     )
 
 

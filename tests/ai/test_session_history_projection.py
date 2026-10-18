@@ -75,7 +75,7 @@ async def _advance(
     if expected is not None and session.continuation is not None:
         assert session.continuation.agent_run_id == expected.agent_run_id
         effective_expected = session.continuation
-    message_count = await state.run_store.conversation_message_count(
+    message_count = await state.run_store.conversation_persistence.conversation_message_count(
         history_id=session.history_id,
         agent_run_id=next_cursor.agent_run_id,
         tenant_id="tenant",
@@ -107,7 +107,7 @@ async def _advance(
         )
 
 
-def _service(state: RuntimeStorage) -> DefaultSessionService:
+def _service(state: RuntimeStorage, *, conversation_enabled: bool = False) -> DefaultSessionService:
     return DefaultSessionService(
         state.conversation,
         state.execution.executions,
@@ -115,6 +115,7 @@ def _service(state: RuntimeStorage) -> DefaultSessionService:
         object(),
         HmacCursorSigner("session", b"session-key"),
         history_reader=_reader(state),
+        conversation_enabled=conversation_enabled,
     )
 
 
@@ -344,7 +345,7 @@ async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
             "session-history-uncommitted-run",
             ("stale",),
         )
-        service = _service(state)
+        service = _service(state, conversation_enabled=True)
         principal = Principal("owner", "tenant")
 
         await service.fork(
@@ -382,7 +383,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
         agent_run_id = "session-history-fork-run"
         await _materialize(state, agent_run_id, ("A",))
         await _advance(state, None, ConversationCursor(agent_run_id))
-        service = _service(state)
+        service = _service(state, conversation_enabled=True)
         principal = Principal("owner", "tenant")
         await service.fork(
             "agent",

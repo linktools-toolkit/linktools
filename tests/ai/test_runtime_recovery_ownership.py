@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Shared SQL startup observes live producers; explicit recovery owns takeover."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -12,7 +14,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
@@ -119,10 +121,10 @@ async def test_sql_runtime_session_admission_remains_independent(
     try:
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=first_state, capabilities=(_capabilities(),),
+            storage=first_state, features=_capabilities(conversation=True),
         ) as first_runtime, Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=second_state, capabilities=(_capabilities(),),
+            storage=second_state, features=_capabilities(conversation=True),
         ) as second_runtime:
             await first_runtime.agents.get("default").create_session("first")
             if not same_session:
@@ -184,10 +186,10 @@ async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
     try:
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=first_state, capabilities=(_capabilities(),),
+            storage=first_state, features=_capabilities(),
         ) as first_runtime, Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=winner_state, capabilities=(_capabilities(),),
+            storage=winner_state, features=_capabilities(),
         ) as winner_runtime:
             backend = first_runtime._execution_service.runtime_backend()
             recover = backend.recover_execution
@@ -276,10 +278,10 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
     try:
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=original_model)),
-            storage=owner_state, capabilities=(_capabilities(),),
+            storage=owner_state, features=_capabilities(),
         ) as owner, Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=recovered_model)),
-            storage=winner_state, capabilities=(_capabilities(),),
+            storage=winner_state, features=_capabilities(),
         ) as winner:
             execution = await owner.agents.get("default").start("Wait", idempotency_key="start")
             await asyncio.wait_for(owner_entered.wait(), 10)
@@ -343,7 +345,7 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
                 await watched
                 pytest.fail("Watch ended before the winning producer reached its boundary")
             assert not waited.done()
-            assert owner_state.run_store._projection_dirty == set()
+            assert owner_state.run_store.trace_persistence.dirty == set()
             assert owner_state.run_store._durability_flights == {}
             assert owner_state.run_store._execution_producers == {}
             assert owner_state.run_store._staging._runs == {}
@@ -418,12 +420,11 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     workspace = Workspace.load(
         tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")),
     )
-    application = CapabilityGroup("application")
+    application = workspace_features("application", workspace=workspace)
     application.agent("default", model="default", allow_tools=("read_file",))
-    capabilities = (CapabilityGroup("workspace", workspace=workspace), application)
     original_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     async with Runtime.open(
-        _NAMESPACE, models=_ToolModels(), storage=original_state, capabilities=capabilities,
+        _NAMESPACE, models=_ToolModels(), storage=original_state, features=application,
     ) as original:
         execution = await original.agents.get("default").start("read a file")
         tenant = original.default_principal.tenant_id
@@ -459,7 +460,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     states = [RuntimeStorage.sqlite(tmp_path / "runtime.db") for _ in range(2)]
     async with AsyncExitStack() as stack:
         opened = await asyncio.gather(*(stack.enter_async_context(Runtime.open(
-            _NAMESPACE, models=_ToolModels(), storage=state, capabilities=capabilities,
+            _NAMESPACE, models=_ToolModels(), storage=state, features=application,
         )) for state in states), return_exceptions=True)
         assert not any(isinstance(value, BaseException) for value in opened), opened
         assert claims == 2
@@ -508,7 +509,7 @@ async def test_observer_attached_before_recovery_receives_resumed_live_deltas(
         await asyncio.to_thread(owner.crash)
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=RuntimeStorage.sqlite(database), capabilities=(_capabilities(),),
+            storage=RuntimeStorage.sqlite(database), features=_capabilities(),
         ) as runtime:
             execution = await runtime.executions.get(execution_id)
             watching = asyncio.create_task(observe(execution))

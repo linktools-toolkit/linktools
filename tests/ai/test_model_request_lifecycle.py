@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -28,7 +28,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage, RunUsage
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
@@ -43,6 +43,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 from linktools.ai.observe._memory import InMemoryMetricStore
+from linktools.ai.runtime import MetricsCapability, TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
 
@@ -874,21 +875,11 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
                 raise ValueError("compaction provider failure")
             return ModelResponse(parts=[TextPart("summary")])
 
-        async def record(
-            _context: RunContext[Any],
-            fact: ModelRequestFact,
-            phase: str,
-            _model: Model,
-            _response: ModelResponse | None,
-            _error: BaseException | None,
-            _messages: object,
-            _model_settings: object,
-            _parameters: object,
-            _streaming: bool,
-            _source_messages: object,
-            _client_requests: object = None,
-        ) -> None:
-            facts.append((phase, fact))
+        async def publish(event_type: ExecutionEventType, payload: JsonValue) -> None:
+            phase = "started" if event_type is ExecutionEventType.MODEL_REQUEST_STARTED else (
+                "completed" if outcome == "succeeded" else "failed"
+            )
+            facts.append((phase, journal.current(1)))
             if phase in {"completed", "failed"}:
                 finish_entered.set()
                 await release_finish.wait()
@@ -907,12 +898,22 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
             execution_id="execution",
             agent_run_id="run",
         )
+        store = StagingAgentRunStore()
+        run_recorder = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
+        await run_recorder.register_agent_run(AgentRunRecord(
+            "run", agent_conversation_id="conversation", agent_id="agent",
+        ))
+        capability = ModelObservationCapability(
+            None, source_namespace="workspace", tenant_id="tenant",
+            execution_id="execution", session_id=None, agent_run_id="run", agent_id="agent",
+            journal=journal, interaction_recorder=run_recorder, event_sink=publish,
+        )
         wrapped = _ObservedCompactionModel(
             model,
             ctx=context,  # type: ignore[arg-type]
             journal=journal,
             observer=None,
-            recorder=record,
+            recorder=capability.record_external_model_request,
             source_messages=(),
         )
         task = asyncio.create_task(
@@ -932,6 +933,8 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
         expected_phase = "completed" if outcome == "succeeded" else "failed"
         assert [phase for phase, _fact in facts] == ["started", expected_phase]
         assert facts[-1][1].status == expected_status
+        values = await store.list_model_interactions(agent_run_id="run")
+        assert [(value.model_request_seq, value.status) for value in values] == [(1, expected_status)]
 
     asyncio.run(scenario())
 
@@ -1176,7 +1179,8 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
 ) -> None:
     async def scenario() -> None:
         models = _BlockingModels()
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
         group.agent("default", model="default", allow_tools=())
         storage_path = tmp_path / "runtime-storage"
         storage = (
@@ -1189,8 +1193,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(group,),
-            metrics=Metrics.in_memory(),
+            features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("TOP_SECRET_PROMPT")
             wait_task = asyncio.create_task(execution.wait())
@@ -1245,8 +1248,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
                 "default",
                 models=models,  # type: ignore[arg-type]
                 storage=RuntimeStorage.filesystem(storage_path),
-                capabilities=(group,),
-                metrics=Metrics.in_memory(),
+                features=group,
             ) as reopened:
                 assert reopened.history is not None
                 page = await reopened.history.model_interactions(
@@ -1269,7 +1271,8 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
 ) -> None:
     async def scenario() -> None:
         models = _BlockingModels(first_tool=True)
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
 
         def complete(_context: object) -> str:
             return "tool completed"
@@ -1282,8 +1285,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(group,),
-            metrics=Metrics.in_memory(),
+            features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())
@@ -1299,7 +1301,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                 ]
                 assert first.next_cursor is not None
 
-                archive = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+                archive = storage.run_store.read_store(RuntimeDomain.TRACE)
                 original_list = archive.list_model_interactions
                 archive_read_started = asyncio.Event()
                 allow_archive_read_to_return = asyncio.Event()
@@ -1372,7 +1374,8 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
 ) -> None:
     async def scenario() -> None:
         models = _BlockingModels()
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
         group.agent("default", model="default", allow_tools=())
         storage = RuntimeStorage.filesystem(tmp_path / "content-storage")
 
@@ -1380,8 +1383,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=storage,
-            capabilities=(group,),
-            metrics=Metrics.in_memory(),
+            features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("preserve content")
             wait_task = asyncio.create_task(execution.wait())
@@ -1442,9 +1444,10 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
                 broker: runtime_event.LiveExecutionEventBroker,
                 *,
                 max_bytes: int = runtime_event._DEFAULT_BUFFER_BYTES,
+                shared: runtime_event.SharedStreamPublisher | None = None,
             ) -> None:
                 del max_bytes
-                original_init(broker, max_bytes=1)
+                original_init(broker, max_bytes=1, shared=shared)
 
             monkeypatch.setattr(
                 runtime_event.LiveExecutionEventBroker,
@@ -1468,7 +1471,8 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
             note_replay,
         )
         models = _BlockingModels(first_tool=True)
-        group = CapabilityGroup[object]("application")
+        group = RuntimeFeatures[object]("application")
+        group.capability(TraceCapability(), scope="runtime")
 
         def complete(_context: object) -> str:
             return "tool completed"
@@ -1477,14 +1481,14 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
         group.agent("default", model="default", allow_tools=("complete",))
         metric_store = InMemoryMetricStore()
         metrics = Metrics.from_store(metric_store, namespace="model-lifecycle-fallback")
+        group.capability(MetricsCapability(metrics=metrics), scope="runtime")
         metric_start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
         async with Runtime.open(
             "default",
             models=models,  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            capabilities=(group,),
-            metrics=metrics,
+            features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("continue")
             wait_task = asyncio.create_task(execution.wait())

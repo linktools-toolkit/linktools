@@ -21,9 +21,10 @@ from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
+    AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillCapability,
     SkillResource,
     SkillDefinition,
@@ -458,7 +459,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                                 "id": "review/guide.md",
                                 "layer_id": "",
                                 "revision": 1,
-                                "etag": "a" * 64,
+                                "digest": "a" * 64,
                                 "size": 1,
                             },
                             "executable_bits": 0,
@@ -527,7 +528,7 @@ def test_business_tool_rejects_reserved_mcp_transport_prefix() -> None:
     async def reserved(_ctx: RunContext[None]) -> str:
         return "ok"
 
-    group = CapabilityGroup[None]("business")
+    group = RuntimeFeatures[None]("business")
     with pytest.raises(AIError) as error:
         group.tool(reserved, name="mcp__reserved")
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -541,7 +542,7 @@ async def test_business_tool_metadata_is_captured_in_tool_contract() -> None:
     ) -> str:
         return value
 
-    group = CapabilityGroup[None]("business")
+    group = RuntimeFeatures[None]("business")
     tool = group.tool(
         business_tool,
         effect_policy="replay_safe",
@@ -564,7 +565,7 @@ async def test_business_tool_adapter_preserves_sync_execution_and_ctx_keyword() 
     def blocking_tool(_context: object, ctx: str) -> str:
         return ctx if release.wait(0.2) else "blocked"
 
-    group = CapabilityGroup[None]("business")
+    group = RuntimeFeatures[None]("business")
     tool = group.tool(blocking_tool, effect_policy="none")
     toolset = FunctionToolset([tool])
     context = tool_run_context()
@@ -591,7 +592,7 @@ async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> 
     async def business_tool(_context: object, ctx: str) -> str:
         return ctx
 
-    group = CapabilityGroup[None]("business")
+    group = RuntimeFeatures[None]("business")
     tool = group.tool(business_tool, effect_policy="none")
     toolset = FunctionToolset([tool])
     context = tool_run_context()
@@ -614,6 +615,8 @@ def test_runtime_domain_object_store_trait_has_one_owner() -> None:
         RuntimeDomain.TASK,
         RuntimeDomain.EVALUATION,
         RuntimeDomain.RECOVERY,
+        RuntimeDomain.TRACE,
+        RuntimeDomain.CHECKPOINT,
     }
     assert {
         domain
@@ -875,7 +878,9 @@ async def _capture_mcp_resource_versions(
     store: AssetStore,
     server: MCPServerSpec,
 ) -> tuple[AssetVersionRef, ...]:
-    capture = await CapabilityGroup("application", assets=store).capture()
+    asset_features = RuntimeFeatures("application")
+    asset_features.capability(AssetCapability(store), scope="runtime")
+    capture = await asset_features.capture()
     contribution = next(
         item
         for item in capture.contributions
@@ -916,7 +921,7 @@ async def test_mcp_resource_capture_is_stable_and_includes_binary_files() -> Non
 
         assert first_versions == second_versions
         assert {
-            item.key.id: item.etag
+            item.key.id: item.digest
             for item in first_versions
         } == {
             "server/data.bin": hashlib.sha256(binary).hexdigest(),
@@ -1322,7 +1327,7 @@ def test_mcp_server_token_preserves_model_name_projection(server_id: str) -> Non
 
 @pytest.mark.parametrize("effect_policy", ("none", "replay_safe", "non_replay_safe"))
 def test_registered_tool_effect_policy_reaches_runtime_boundary(effect_policy: str) -> None:
-    group = CapabilityGroup[None]("business")
+    group = RuntimeFeatures[None]("business")
     tool = group.tool(_business, effect_policy=effect_policy)
     descriptor = managed_tool_descriptor_from_metadata(tool.tool_def.metadata)
     assert descriptor == ManagedToolDescriptor(
@@ -1363,7 +1368,7 @@ def test_invalid_tool_vocabulary_preserves_boundary_errors(
         ManagedToolDescriptor(effect_owner="none", **metadata)
     if field == "effect_policy":
         with pytest.raises(AIError) as raised:
-            CapabilityGroup[None]("business").tool(_business, effect_policy=value)
+            RuntimeFeatures[None]("business").tool(_business, effect_policy=value)
         assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
@@ -1391,4 +1396,4 @@ def test_tool_vocabulary_preserves_unhashable_input_error_boundaries(field: str)
         ManagedToolDescriptor(effect_owner="none", **values)
     if field == "effect_policy":
         with pytest.raises(TypeError):
-            CapabilityGroup[None]("business").tool(_business, effect_policy=[])
+            RuntimeFeatures[None]("business").tool(_business, effect_policy=[])

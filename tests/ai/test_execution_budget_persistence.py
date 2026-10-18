@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Historical executions retain Agent limits without a shared run budget."""
+"""Executions without a shared run budget retain their accepted Agent limits."""
 
 import base64
 import hashlib
@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
@@ -25,14 +25,14 @@ from linktools.ai.runtime.state._contracts import ExecutionRecord
 from . import _runtime_test_helpers as helpers
 
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_4609177e.json"
+_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_current.json"
 
 
 def _restore_fixture(tmp_path: Path) -> tuple[Path, str, str]:
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
     assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
-    assert b"budget_scope_id" not in sql
+    assert b"budget_scope_id" in sql
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
@@ -72,7 +72,7 @@ async def test_sqlite_execution_without_shared_budget_keeps_public_history(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_sqlite_retry_preserves_historical_agent_usage_limit(
+async def test_sqlite_retry_preserves_accepted_agent_usage_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path, _session_execution_id, execution_id = _restore_fixture(tmp_path)
@@ -82,11 +82,11 @@ async def test_sqlite_retry_preserves_historical_agent_usage_limit(
         return ModelResponse(parts=[TextPart("over limit")], usage=RequestUsage(output_tokens=303))
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
     application.agent("default", revision=2, model="default", allow_tools=())
     async with Runtime.open(
         "older-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as runtime:
         original = await runtime.executions.get(execution_id)
         assert await original.budget_usage() is None

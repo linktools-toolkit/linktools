@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import json
 import mimetypes
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, TypeVar, cast
@@ -15,7 +16,7 @@ from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, UserContent
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
 from ..core import PromptLimits
 from ..model import ModelBinding, validate_model_input, validate_model_inputs
@@ -782,34 +783,70 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
             )
 
 
-class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
-    def __init__(
+class WorkspaceCapability(AbstractCapability[AgentContext[object]]):
+    """Expose selected Workspace tools through a Runtime-owned sandbox session.
+
+    Register at Runtime scope. Agent tool selection controls visibility, while
+    Workspace path access and sandbox ownership remain Runtime facilities.
+    """
+
+    id: str | None = "runtime.workspace"
+
+    def __init__(self, workspace: Workspace) -> None:
+        if not isinstance(workspace, Workspace):
+            raise TypeError("workspace must be Workspace")
+        self._workspace = workspace
+        self._bound = False
+        self._toolset: AbstractToolset[AgentContext[object]] | None = None
+
+    @property
+    def workspace(self) -> Workspace:
+        return self._workspace
+
+    def tool_definitions(self) -> tuple[Tool[Any], ...]:
+        """Return stable declarations for Agent selection and durable bindings."""
+        return _workspace_tool_definitions(self.workspace)
+
+    def bind(
         self,
-        selected_tool_names: tuple[str, ...],
-        session: SandboxSession | None,
-        policy: WorkspacePolicy,
-        limits: PromptLimits,
+        selected_tool_names: Sequence[str],
         *,
+        session: SandboxSession | None,
+        limits: PromptLimits | None = None,
         model_binding: ModelBinding | None = None,
-    ) -> None:
-        self.id = _WORKSPACE_SANDBOX_CAPABILITY_ID
-        self._selected_tool_names = selected_tool_names
-        self._session = session
-        self._policy = policy
-        self._limits = limits
-        self._model_binding = model_binding
+        wrap_toolset: Callable[
+            [AbstractToolset[AgentContext[object]]],
+            AbstractToolset[AgentContext[object]],
+        ] | None = None,
+    ) -> "WorkspaceCapability":
+        """Build isolated per-run tools without modifying this declaration."""
+        selected_limits = PromptLimits() if limits is None else limits
+        if not isinstance(selected_limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
+        selected = frozenset(selected_tool_names)
+        unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS_BY_NAME)
+        if unknown:
+            raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
+        if selected and session is None:
+            raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
+        bound = copy(self)
+        bound._bound = True
+        bound._toolset = None
+        if selected:
+            toolset = _WorkspaceSandboxToolset(
+                tuple(item.name for item in workspace_tool_declarations() if item.name in selected),
+                session, self.workspace.policy, selected_limits, model_binding=model_binding,
+            )
+            bound._toolset = toolset if wrap_toolset is None else wrap_toolset(toolset)
+        return bound
 
-    def get_instructions(self) -> InstructionPart:
-        return _WORKSPACE_INSTRUCTIONS
+    def get_instructions(self) -> InstructionPart | None:
+        return _WORKSPACE_INSTRUCTIONS if self._bound and self._toolset is not None else None
 
-    def get_toolset(self) -> _WorkspaceSandboxToolset:
-        return _WorkspaceSandboxToolset(
-            self._selected_tool_names,
-            self._session,
-            self._policy,
-            self._limits,
-            model_binding=self._model_binding,
-        )
+    def get_toolset(self) -> AbstractToolset[AgentContext[object]] | None:
+        if not self._bound:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._toolset
 
 
 def _workspace_tool_definitions(workspace: Workspace) -> tuple[Tool[Any], ...]:
@@ -848,34 +885,10 @@ def workspace_capabilities(
     model_binding: ModelBinding | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
-    selected_limits = PromptLimits() if limits is None else limits
-    if not isinstance(selected_limits, PromptLimits):
-        raise TypeError("limits must be PromptLimits")
-    selected = frozenset(selected_tool_names)
-    unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS_BY_NAME)
-    if unknown:
-        raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
-    if not selected:
-        return ()
-    if session is None:
-        raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
-    ordered = tuple(
-        item.name for item in workspace_tool_declarations() if item.name in selected
+    bound = WorkspaceCapability(workspace).bind(
+        selected_tool_names, session=session, limits=limits, model_binding=model_binding,
     )
-    _logger.debug(
-        "workspace capability materialized: tools=%s session_open=%s",
-        ordered,
-        session is not None,
-    )
-    return (
-        _WorkspaceCapability(
-            ordered,
-            session,
-            workspace.policy,
-            selected_limits,
-            model_binding=model_binding,
-        ),
-    )
+    return () if bound.get_toolset() is None else (bound,)
 
 
 def _workspace_tool(
@@ -974,6 +987,7 @@ def _workspace_tool_rejected(
 
 
 __all__ = [
+    "WorkspaceCapability",
     "WorkspaceToolDeclaration",
     "workspace_tool_declarations",
     "workspace_capabilities",

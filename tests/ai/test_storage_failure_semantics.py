@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.asset import (
-    AssetCacheAdapter,
+    AssetContentCache,
     AssetKey,
     AssetRoot,
     InMemoryAssetBackend,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import InMemoryContentCache, StorageOverlay
+from linktools.ai.storage import InMemoryCacheBackend, StorageOverlay
 from linktools.ai.workspace._root import load_config
 
 
@@ -121,16 +121,16 @@ async def test_corrupt_cache_falls_back_to_origin() -> None:
     info = await backend.stat(key)
     assert info is not None
 
-    class _CorruptingCacheAdapter(AssetCacheAdapter):
+    class _CorruptingContentCache(AssetContentCache):
         def from_cache(self, value: bytes) -> bytes:
             if value == b"corrupt":
                 raise ValueError("corrupt cache")
             return super().from_cache(value)
 
-    adapter = _CorruptingCacheAdapter()
-    cache = InMemoryContentCache(max_bytes=1024)
-    await cache.put(adapter.cache_key(key, info), b"corrupt")
-    storage = StorageOverlay(backend, cache=cache, cache_adapter=adapter)
+    cache = InMemoryCacheBackend(max_bytes=1024)
+    content_cache = _CorruptingContentCache(cache)
+    await cache.put(content_cache.cache_key(key, info), b"corrupt")
+    storage = StorageOverlay(backend, content_cache=content_cache)
 
     assert await storage.get(key) == b"value"
 
@@ -143,13 +143,12 @@ async def test_invalid_cached_value_falls_back_to_valid_origin() -> None:
     info = await backend.stat(key)
     assert info is not None
 
-    adapter = AssetCacheAdapter()
-    cache = InMemoryContentCache(max_bytes=1024)
-    await cache.put(adapter.cache_key(key, info), adapter.to_cache(b"value"))
+    cache = InMemoryCacheBackend(max_bytes=1024)
+    content_cache = AssetContentCache(cache)
+    await cache.put(content_cache.cache_key(key, info), content_cache.to_cache(b"value"))
     storage = StorageOverlay(
         backend,
-        cache=cache,
-        cache_adapter=adapter,
+        content_cache=content_cache,
         validator=_Validator(fail_once=True),
     )
 
@@ -163,8 +162,7 @@ async def test_preload_propagates_origin_validation_failure() -> None:
     await backend.put(key, b"value")
     storage = StorageOverlay(
         backend,
-        cache=InMemoryContentCache(max_bytes=1024),
-        cache_adapter=AssetCacheAdapter(),
+        content_cache=AssetContentCache(InMemoryCacheBackend(max_bytes=1024)),
         validator=_Validator(),
     )
 

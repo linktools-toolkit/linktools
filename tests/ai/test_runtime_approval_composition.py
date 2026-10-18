@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Composed Runtime approval-wait regression."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -68,7 +70,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         if backend == "memory"
         else RuntimeStorage.filesystem(tmp_path / "runtime-state")
     )
-    application = CapabilityGroup("application")
+    application = workspace_features("application", workspace=workspace)
     application.agent(
         "default",
         model="default",
@@ -79,7 +81,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         "default",
         models=_ToolModels(),  # type: ignore[arg-type]
         storage=state,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+        features=application,
     ) as runtime:
         execution = await runtime.agents.get("default").start("read a file")
         record = None

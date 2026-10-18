@@ -41,12 +41,20 @@ def test_explicit_recovery_finishes_orphaned_cancel_without_restarting_model(tmp
         remote = _RuntimeProcess(
             tmp_path / "runtime.db", execution_id=owner.initial["execution_id"],
         )
+        # This scenario starts after the owner's pending observations are durable.
+        # A projection racing cancellation has its own explicit-CAS retry contract.
+        flushed = owner.request("flush_trace")
+        assert flushed["status"] == "STARTED"
+        assert flushed["generation"] == owner.initial["generation"]
+        assert flushed["model_calls"] == 1
         cancelled = remote.request("cancel")
         assert cancelled["status"] == "CANCELLING"
         assert cancelled["cancelled"] is False
+        assert remote.request("cancel_events") == {"requested": 1}
         owner.crash()
         recovered = remote.request("recover")
         assert recovered["status"] == "CANCELLED"
+        assert remote.request("cancel_events") == {"requested": 1}
         assert remote.request("result") == {
             "status": "CANCELLED", "output": None, "model_calls": 0,
         }

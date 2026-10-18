@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -102,8 +102,8 @@ class _TaskTestModels:
         return _TaskTestModelBinding()
 
 
-def _agent_group() -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("application")
+def _agent_group() -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("application")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -420,7 +420,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         "sqlite-dynamic-watch",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=storage,
-        capabilities=(_agent_group(),),
+        features=_agent_group(),
     ) as runtime:
         agent_task = runtime.tasks.from_agent(
             "sqlite.watch.agent",
@@ -609,7 +609,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         "sqlite-dynamic-watch",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=reopened_storage,
-        capabilities=(_agent_group(),),
+        features=_agent_group(),
     ) as runtime:
         agent_task = runtime.tasks.from_agent(
             "sqlite.watch.agent",
@@ -666,7 +666,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        capabilities=(_agent_group(),),
+        features=_agent_group(),
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)
@@ -752,7 +752,7 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        capabilities=(_agent_group(),),
+        features=_agent_group(),
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)
@@ -816,7 +816,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
-        capabilities=(_agent_group(),),
+        features=_agent_group(),
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)
@@ -1074,11 +1074,11 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
         )
         candidate = replace(
             candidate,
-            storage_version=record.storage_version + 1,
+            storage_revision=record.storage_revision + 1,
         )
         assert await transaction.replace_record(
             candidate,
-            expected_storage_version=record.storage_version,
+            expected_storage_revision=record.storage_revision,
         )
 
     await repository.state_store.mutate(corrupt)
@@ -1127,11 +1127,11 @@ async def test_task_admission_readback_rejects_corrupt_graph_identity() -> None:
         candidate = replace(
             record,
             data=encoded.data,
-            storage_version=record.storage_version + 1,
+            storage_revision=record.storage_revision + 1,
         )
         assert await transaction.replace_record(
             candidate,
-            expected_storage_version=record.storage_version,
+            expected_storage_revision=record.storage_revision,
         )
 
     await repository.state_store.mutate(corrupt)

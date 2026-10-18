@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Retry preserves imported pre-input context and its memory isolation."""
 
+from linktools.ai.runtime import ConversationCapability, TraceCapability
 from pathlib import Path
 
 import pytest
+from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionInputContext, Runtime, RuntimeStorage
@@ -19,8 +21,9 @@ from .test_captured_execution_context import _NoToolsModels
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata_size", [16, 80_000], ids=["inline", "object"])
-async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, metadata_size: int) -> None:
-    group = CapabilityGroup("retry-context")
+@pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
+async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, metadata_size: int, trace: bool) -> None:
+    group = RuntimeFeatures("retry-context")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     context = ExecutionInputContext.from_messages(
         (ModelRequest(parts=[UserPromptPart("earlier question")]),
@@ -29,29 +32,39 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         replace_history_system_prompt=True,
     )
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, capabilities=(group,)) as runtime:
+    if trace:
+        group.capability(TraceCapability(), scope="runtime")
+    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == ("inline" if metadata_size == 16 else "object")
-        retry = await source.retry("replacement prompt")
-        assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
+        with capture_run_messages() as messages:
+            retry = await source.retry("replacement prompt")
+            assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(retry.execution_id, CaptureInputRequest(principal, "retry-context-capture"))
         captured = await runtime._input_captures.read_agent(capture, principal=principal)
         assert captured.input_context.digest == context.digest
-        interactions = await retry.model_interactions(include_content=True)
-        request = str(interactions.items[0].request)
-        assert "earlier question" in request and "earlier answer" in request
-        assert "replacement prompt" in request
-        assert "superseded prompt" not in request
+        requests = [str(messages)]
+        if trace:
+            interactions = await retry.model_interactions(include_content=True)
+            requests.append(str(interactions.items[0].request))
+        for request in requests:
+            assert "earlier question" in request and "earlier answer" in request
+            assert "replacement prompt" in request
+            assert "superseded prompt" not in request
 
 
 @pytest.mark.asyncio
-async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path) -> None:
-    group = CapabilityGroup("retry-parity")
+@pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
+async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path, trace: bool) -> None:
+    group = RuntimeFeatures("retry-parity")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+    if trace:
+        group.capability(TraceCapability(), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         first = await agent.start("historical question", principal=principal)
@@ -63,24 +76,28 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
         imported = await agent.start(captured.prompt, principal=principal, input_context=captured.input_context)
         await imported.wait()
         for source in (fork, imported):
-            retry = await source.retry("replacement question")
-            assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
-            interactions = await retry.model_interactions(include_content=True)
-            request = str(interactions.items[0].request)
-            assert "historical question" in request
-            assert "replacement question" in request
-            assert "superseded question" not in request
+            with capture_run_messages() as messages:
+                retry = await source.retry("replacement question")
+                assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
+            requests = [str(messages)]
+            if trace:
+                interactions = await retry.model_interactions(include_content=True)
+                requests.append(str(interactions.items[0].request))
+            for request in requests:
+                assert "historical question" in request
+                assert "replacement question" in request
+                assert "superseded question" not in request
 
 
 @pytest.mark.asyncio
 async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -> None:
-    group = CapabilityGroup("retry-memory")
+    group = RuntimeFeatures("retry-memory")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path)
     context = ExecutionInputContext.from_messages((), memory={
         "facts.txt": {"content": "accepted memory", "version": "m1:" + "1" * 64},
     })
-    async with Runtime.open("retry-memory", models=_NoToolsModels(), storage=storage, capabilities=(group,)) as runtime:
+    async with Runtime.open("retry-memory", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         with pytest.raises(AIError) as raised:

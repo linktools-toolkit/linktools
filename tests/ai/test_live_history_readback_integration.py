@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Live event locators read the same transcript before and after archival."""
 
+from linktools.ai.runtime import TraceCapability
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
@@ -9,9 +10,9 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, Page
 from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
 
@@ -93,14 +94,15 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
             ToolCallPart("slow", {"value": "slow-argument"}, tool_call_id="slow-call"),
         ])
 
-    group = CapabilityGroup("live-history")
+    group = RuntimeFeatures("live-history")
     group.tool(quick, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("quick", "slow"),
                 system_prompt="Coordinate system prompt", instructions=("Coordinate instructions",))
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "live-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("run both tools")
         principal = runtime.default_principal
@@ -263,13 +265,14 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
             tool_call_id="same-call",
         )])
 
-    group = CapabilityGroup("child-history")
+    group = RuntimeFeatures("child-history")
     group.tool(echo, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=("echo",), allow_subagents=())
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "child-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("delegate")
         principal = runtime.default_principal
@@ -324,11 +327,12 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
         await release.wait()
         return ModelResponse(parts=[TextPart("archived answer")])
 
-    group = CapabilityGroup("raw-parts")
+    group = RuntimeFeatures("raw-parts")
     group.agent("default", model="default", system_prompt="Coordinate system prompt",
                 instructions=("Coordinate instructions",))
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("raw-parts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get("default").start("run both tools")
         try:

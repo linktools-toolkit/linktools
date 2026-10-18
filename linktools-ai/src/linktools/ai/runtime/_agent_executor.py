@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from copy import copy
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -25,7 +26,7 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
-    Capability,
+    WrapperCapability,
     CapabilityOrdering,
     PrepareTools,
     ProcessEventStream,
@@ -81,7 +82,7 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    workspace_capabilities,
+    WorkspaceCapability,
 )
 from ..core import (
     ExecutionDeltaType,
@@ -107,13 +108,14 @@ from ..workspace import (
 )
 
 from ._budget import RunBudgetContext, RunBudgetCapability
-from ._capabilities import compose_platform_capabilities
+from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from ._agent_run_recorder import AgentRunRecorder
 from .state._steps import RuntimeAgentRunStore
 from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._memory import MemoryStore
+from ._metrics_capability import MetricsCapability
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
@@ -128,7 +130,6 @@ from ._tool_boundary import (
 )
 from ._tool_metrics import (
     ToolMetricsCapability,
-    _ToolMetricContext,
 )
 from ._tool_return_codec import (
     rehydrate_deferred_tool_results,
@@ -244,6 +245,7 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
+        runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]] = (),
         asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
         sandbox: Sandbox | None = None,
@@ -252,6 +254,7 @@ class AgentExecutor:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
+        self._runtime_capabilities = tuple(runtime_capabilities)
         self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
         self._sandbox = sandbox
@@ -350,31 +353,34 @@ class AgentExecutor:
                 primary_error = mapped
                 raise mapped from error
         finally:
-            self._record_agent_run(
+            observation = self._capture_agent_run(
                 scope,
                 metric_id=metric_id,
                 metric_started=metric_started,
                 result=result,
                 primary_error=primary_error,
             )
-            if scope.usage_sink is not None:
-                usage = (
-                    result.usage
-                    if isinstance(result, AgentExecutionResult)
-                    else _usage_metrics(run_usage)
-                )
-                try:
-                    scope.usage_sink(usage)
-                except Exception:
-                    if primary_error is None:
-                        raise
-                    _logger.error(
-                        "usage sink failed after agent execution failure: step=%s",
-                        scope.agent_run_id,
-                        exc_info=False,
+            try:
+                if scope.usage_sink is not None:
+                    usage = (
+                        result.usage
+                        if isinstance(result, AgentExecutionResult)
+                        else _usage_metrics(run_usage)
                     )
+                    try:
+                        scope.usage_sink(usage)
+                    except Exception:
+                        if primary_error is None:
+                            raise
+                        _logger.error(
+                            "usage sink failed after agent execution failure: step=%s",
+                            scope.agent_run_id,
+                            exc_info=False,
+                        )
+            finally:
+                await self._record_agent_run(observation)
 
-    def _record_agent_run(
+    def _capture_agent_run(
         self,
         scope: _AgentRunScope,
         *,
@@ -382,7 +388,7 @@ class AgentExecutor:
         metric_started: int | None,
         result: AgentExecutionOutcome | None,
         primary_error: BaseException | None,
-    ) -> None:
+    ) -> Observation | None:
         if self._metrics is None or metric_id is None or metric_started is None:
             return
         if isinstance(primary_error, asyncio.CancelledError):
@@ -408,27 +414,33 @@ class AgentExecutor:
         if scope.context.session_id is not None:
             correlation["session_id"] = scope.context.session_id
         try:
-            self._metrics.try_record(
-                Observation(
-                    version=1,
-                    observation_id=metric_id,
-                    kind="linktools.agent.run",
-                    occurred_at=datetime.now(timezone.utc),
-                    source_namespace=scope.context.namespace,
-                    tenant_id=scope.context.principal.tenant_id,
-                    status=status,
-                    error_code=error_code,
-                    correlation=correlation,
-                    dimensions={"agent_id": scope.binding.compiled_agent.spec.id},
-                    measurements=(
-                        MetricMeasurement(
-                            "latency_ns",
-                            1,
-                            monotonic_ns() - metric_started,
-                        ),
+            return Observation(
+                version=1,
+                observation_id=metric_id,
+                kind="linktools.agent.run",
+                occurred_at=datetime.now(timezone.utc),
+                source_namespace=scope.context.namespace,
+                tenant_id=scope.context.principal.tenant_id,
+                status=status,
+                error_code=error_code,
+                correlation=correlation,
+                dimensions={"agent_id": scope.binding.compiled_agent.spec.id},
+                measurements=(
+                    MetricMeasurement(
+                        "latency_ns",
+                        1,
+                        monotonic_ns() - metric_started,
                     ),
-                )
+                ),
             )
+        except Exception:
+            _logger.exception("agent metric observation rejected")
+
+    async def _record_agent_run(self, observation: Observation | None) -> None:
+        if self._metrics is None or observation is None:
+            return
+        try:
+            await self._metrics.try_record(observation)
         except Exception:
             _logger.exception("agent metric observation rejected")
 
@@ -606,6 +618,7 @@ class AgentExecutor:
                         skill_sources=skill_sources,
                         deferred_pause_sink=record_deferred_step,
                         metrics=self._metrics,
+                        runtime_capabilities=self._runtime_capabilities,
                         model_journal=model_journal,
                         sandbox=self._sandbox,
                     )
@@ -665,9 +678,13 @@ class AgentExecutor:
                             if operation.status
                             not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
                         )
+                        requires_checkpoint = (
+                            not isinstance(scope.run_store, RuntimeAgentRunStore)
+                            or any(scope.run_store.execution_persistence(scope.agent_run_id))
+                        )
                         if (
                             run is None
-                            or checkpoint is None
+                            or (requires_checkpoint and checkpoint is None)
                             or unresolved
                             or run.agent_conversation_id != scope.agent_conversation_id
                         ):
@@ -886,6 +903,7 @@ async def _materialize_agent(
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
+    runtime_capabilities: Sequence[AbstractCapability[AgentContext[object]]],
     model_journal: ModelRequestJournal,
     sandbox: Sandbox | None,
 ) -> tuple[
@@ -939,26 +957,6 @@ async def _materialize_agent(
 
     if workspace_names and scope.workspace is None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    workspace_capability_values = (
-        ()
-        if scope.workspace is None
-        else workspace_capabilities(
-            scope.workspace,
-            workspace_names,
-            limits=scope.limits,
-            session=scope.sandbox_session,
-            model_binding=compiled_agent.model,
-        )
-    )
-    if workspace_capability_values:
-        workspace_guidance = workspace_capability_values[0].get_instructions()
-        if workspace_guidance is not None:
-            capabilities.append(
-                Capability(
-                    id="linktools.ai.workspace-guidance",
-                    instructions=workspace_guidance,
-                )
-            )
     if repository_boundary is not None or scope.repository_instructions is not None:
         capabilities.append(
             _RepositoryInstructionCapability(
@@ -991,11 +989,17 @@ async def _materialize_agent(
         )
     )
 
+    metric_feature = next(
+        (leaf for template in runtime_capabilities for leaf in runtime_feature_leaves(template)
+         if isinstance(leaf, MetricsCapability)),
+        None,
+    )
+    if metrics is not None and metric_feature is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     tool_metrics = (
         None
         if metrics is None
-        else _ToolMetricContext(
-            metrics,
+        else metric_feature.bind_tool_observer(
             source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
@@ -1041,29 +1045,38 @@ async def _materialize_agent(
         capabilities.append(RunBudgetCapability(scope.budget))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
-    workspace_toolset_values = tuple(
-        toolset
-        for capability in workspace_capability_values
-        if (toolset := capability.get_toolset()) is not None
-    )
-    if workspace_toolset_values:
-        raw_toolsets.append(
-            BoundaryToolset(
-                workspace_toolset_values,
-                workspace_descriptors,
-                id="linktools.workspace",
-                permission_policy=(
-                    None
-                    if scope.workspace is None
-                    else scope.workspace.policy.tool_permissions
-                ),
-                sandbox_session=scope.sandbox_session,
-                tool_operations=scope.tool_operations,
-                tool_metrics=tool_metrics,
-                budget=scope.budget,
-                repository_boundary=repository_boundary,
-            )
+    def wrap_workspace_toolset(
+        toolset: AbstractToolset[AgentContext[object]],
+    ) -> AbstractToolset[AgentContext[object]]:
+        return BoundaryToolset(
+            (toolset,), workspace_descriptors, id="linktools.workspace",
+            permission_policy=None if scope.workspace is None else scope.workspace.policy.tool_permissions,
+            sandbox_session=scope.sandbox_session,
+            tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
+            budget=scope.budget, repository_boundary=repository_boundary,
         )
+
+    def bind_workspace(
+        capability: AbstractCapability[AgentContext[object]],
+    ) -> AbstractCapability[AgentContext[object]]:
+        if isinstance(capability, WrapperCapability):
+            wrapped = capability.wrapped.visit_and_replace(bind_workspace)
+            if wrapped is capability.wrapped:
+                return capability
+            rebound = copy(capability)
+            rebound.wrapped = wrapped
+            return rebound
+        if isinstance(capability, WorkspaceCapability):
+            return capability.bind(
+                workspace_names, session=scope.sandbox_session, limits=scope.limits,
+                model_binding=compiled_agent.model, wrap_toolset=wrap_workspace_toolset,
+            )
+        return capability
+
+    bound_runtime_capabilities = tuple(
+        bound for template in runtime_capabilities
+        if (bound := template.visit_and_replace(bind_workspace)) is not None
+    )
     if compiled_agent.mcp_servers:
         from ._mcp import materialize_mcp_capabilities
 
@@ -1102,8 +1115,7 @@ async def _materialize_agent(
         if scope.event_sink is not None:
             await scope.event_sink(DurableBoundary(event_type, payload))
 
-    model_observation = ModelObservationCapability(
-        metrics,
+    model_observation_kwargs = dict(
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
@@ -1116,8 +1128,14 @@ async def _materialize_agent(
         event_sink=publish_model_request_event,
         budget=scope.budget,
     )
+    model_observation = (
+        ModelObservationCapability(None, **model_observation_kwargs)
+        if metrics is None
+        else metric_feature.bind_model_observer(**model_observation_kwargs)
+    )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
+        runtime_capabilities=bound_runtime_capabilities,
         agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
@@ -1139,6 +1157,16 @@ async def _materialize_agent(
         recorder=run_recorder,
         budget=scope.budget,
     )
+    existing_ids: set[str] = set()
+
+    def register_capability_id(capability: AbstractCapability[object]) -> None:
+        if capability.id is not None:
+            if capability.id in existing_ids:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            existing_ids.add(capability.id)
+
+    for capability in (*capabilities, *platform):
+        capability.apply(register_capability_id)
     capabilities.extend(platform)
 
     business_output_type: object

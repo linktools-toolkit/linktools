@@ -60,7 +60,7 @@ pytestmark = pytest.mark.asyncio
 
 def _binding_contract() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model="default"),
+        agent_spec=AgentSpec("agent", model="default", tool_retries=3, output_retries=3),
         model_contract={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
@@ -121,7 +121,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
         assert stored.data == {
             "nested": {"value": "original"},
         }
-        assert stored.storage_version == 0
+        assert stored.storage_revision == 0
     finally:
         await store.close()
 
@@ -348,8 +348,8 @@ def _runtime_commands(
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
         conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
-        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
-        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.TRACE),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 
@@ -788,7 +788,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         assert await second.mutate(
             lambda transaction: transaction.guard_record(
                 record_key,
-                expected_storage_version=0,
+                expected_storage_revision=0,
             )
         ) is None
         with pytest.raises(AIError) as raised:

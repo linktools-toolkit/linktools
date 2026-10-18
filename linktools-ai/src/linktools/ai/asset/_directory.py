@@ -267,7 +267,7 @@ class DirectoryAssetBackend:
         return (
             VersionSummary(
                 info.revision,
-                info.etag,
+                info.digest,
                 info.size,
                 info.modified_at,
                 info.status,
@@ -330,7 +330,7 @@ class DirectoryAssetBackend:
                     content = read_bytes(content_path)
                     entry = _DirectoryEntry(
                         key,
-                        _etag(content),
+                        _digest(content),
                         len(content),
                         datetime.fromtimestamp(stat.st_mtime, timezone.utc),
                     )
@@ -402,7 +402,7 @@ class DirectoryAssetBackend:
 
         def read_entry() -> _DirectoryEntry:
             content = read_bytes(path)
-            return _DirectoryEntry(key, _etag(content), len(content), modified_at)
+            return _DirectoryEntry(key, _digest(content), len(content), modified_at)
 
         entry = await asyncio.to_thread(read_entry)
         self._entries[key] = (signature, entry)
@@ -424,7 +424,7 @@ def _store_revision(entries: "Sequence[_DirectoryEntry]") -> StorageRevision:
                 {
                     "kind": entry.key.kind,
                     "id": entry.key.id,
-                    "etag": entry.digest,
+                    "digest": entry.digest,
                     "modified_at": entry.modified_at.isoformat(),
                 }
                 for entry in entries
@@ -433,7 +433,7 @@ def _store_revision(entries: "Sequence[_DirectoryEntry]") -> StorageRevision:
     )
 
 
-def _etag(value: bytes) -> str:
+def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 

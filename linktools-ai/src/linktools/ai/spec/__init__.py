@@ -5,6 +5,7 @@
 from ._adapter import AgentSpecAdapter, MCPServerSpecAdapter, SkillSpecAdapter
 from ._codec import AgentSpecCodec, MCPServerSpecCodec, SkillSpecCodec, SpecCodec
 from ._contract import (
+    DEFAULT_AGENT_RETRIES,
     AgentSpec,
     AgentUsageLimits,
     MCPServerSpec,
@@ -37,6 +38,7 @@ from ._naming import mcp_server_name_token
 from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 __all__ = [
+    "DEFAULT_AGENT_RETRIES",
     "CapabilityRef",
     "AgentSpec",
     "AgentSpecCodec",

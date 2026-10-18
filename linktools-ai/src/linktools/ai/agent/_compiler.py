@@ -3,6 +3,7 @@
 """Deterministic Agent selection, binding, and exact historical recovery."""
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from inspect import iscoroutine
 from types import MappingProxyType
 from typing import Literal, TypeAlias
@@ -14,9 +15,11 @@ from ..capability import (
     SkillDefinition,
     workspace_tool_declarations,
 )
+from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
 from ..spec import (
+    DEFAULT_AGENT_RETRIES,
     AgentSpec,
     AgentSpecCodec,
     MCPServerSpec,
@@ -38,6 +41,17 @@ from ._output import OutputBinding, bind_output, restore_output
 CapabilityFilter: TypeAlias = Callable[[AgentSpec, CapabilityContribution[object]], bool]
 
 
+@dataclass(frozen=True)
+class _AgentDefaults:
+    tool_retries: int = DEFAULT_AGENT_RETRIES
+    output_retries: int = DEFAULT_AGENT_RETRIES
+
+    def __post_init__(self) -> None:
+        if self.tool_retries is None or self.output_retries is None:
+            raise ValueError("agent retry defaults must be resolved")
+        AgentSpec("defaults", tool_retries=self.tool_retries, output_retries=self.output_retries)
+
+
 class AgentCompiler:
     """Own the single Agent-level selection boundary for a captured candidate set."""
 
@@ -48,9 +62,16 @@ class AgentCompiler:
         candidates: Sequence[CapabilityContribution[object]],
         agents: Mapping[str, AgentSpec],
         capability_filter: CapabilityFilter | None = None,
+        defaults: Mapping[str, JsonValue] | None = None,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        settings = ImmutableJsonMapping({} if defaults is None else defaults)
+        agent_settings = settings.get("agent", {})
+        if not isinstance(agent_settings, dict):
+            raise TypeError("agent defaults must be a JSON object")
+        self._defaults = _AgentDefaults(**agent_settings)
+        candidates = tuple(item for item in candidates if item.scope == "agent")
         generic = tuple(item for item in candidates if item.kind == "capability")
         declarations = tuple(
             sorted(
@@ -88,6 +109,11 @@ class AgentCompiler:
         """Compile one current declaration from the captured candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
+        spec = replace(
+            spec,
+            tool_retries=self._defaults.tool_retries if spec.tool_retries is None else spec.tool_retries,
+            output_retries=self._defaults.output_retries if spec.output_retries is None else spec.output_retries,
+        )
         model = self._models.resolve(spec.model)
         declarations = tuple(item for item in self._candidates if item.kind != "agent")
         delegates = tuple(
@@ -129,6 +155,7 @@ class AgentCompiler:
         The optional synchronous filter runs before Agent selectors are resolved.
         It is not an authorization policy or a durable callback. Agent candidates
         are delegation targets; the root Agent declaration is never filtered.
+        Runtime-scoped host policies are not Agent candidates and bypass this filter.
         """
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
@@ -143,7 +170,7 @@ class AgentCompiler:
             if identity in identities:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             identities.add(identity)
-            if item.kind == "agent" and item.id == spec.id:
+            if item.scope == "runtime" or (item.kind == "agent" and item.id == spec.id):
                 continue
             if capability_filter is not None:
                 included = capability_filter(spec, item)

@@ -4,53 +4,29 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from time import monotonic_ns
-from typing import TYPE_CHECKING, Any, cast
+from copy import copy
+from typing import TYPE_CHECKING
 
 from linktools.core import environ
-from pydantic_ai import CallToolsNode, ModelRequestNode
-from pydantic_ai.capabilities import (
-    AbstractCapability,
-    AgentNode,
-    CapabilityOrdering,
-    NodeResult,
-)
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart
-from pydantic_ai.models import ModelRequestContext
-from pydantic_ai.run import AgentRunResult
-from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
-from ._budget import RunBudgetContext
-from ._compaction import (
-    ExternalModelRequestRecorder,
-    CompactionCapability,
-    CompactionPolicy,
-)
 from ._agent_run_recorder import AgentRunRecorder
+from ._budget import RunBudgetContext
+from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
+from ._conversation_capability import ConversationCapability
 from ._harness import HarnessPlanStoreAdapter
-from ._harness_memory import (
-    build_harness_memory,
-    select_harness_memory_tools,
-)
+from ._harness_memory import build_harness_memory, select_harness_memory_tools
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
-from ._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY, _await_request_handoff
-from ._metric_capability import ModelObservationCapability
+from ._persistence_capabilities import CheckpointCapability, TraceCapability
 from ._plan import RuntimePlanStore
-from .state._step_contracts import (
-    TOOL_ERROR_CODE_METADATA_KEY,
-    AgentRunCheckpoint,
-    AgentRunRecord,
-    CheckpointState,
-    AgentRunStore,
-)
+from ._run_hooks import AgentRunCapture
+from .state._step_contracts import AgentRunStore
+from .state._steps import RuntimeAgentRunStore
 
 if TYPE_CHECKING:
     from ._journal import ModelRequestJournal
@@ -59,308 +35,17 @@ _MEMORY_CAPABILITY_ID = "linktools.ai.memory"
 _logger = environ.get_logger("ai.runtime.capabilities")
 
 
-@dataclass(kw_only=True, eq=False)
-class _AgentRunPersistenceCapability(AbstractCapability[None]):
-    """Persist Runtime-owned step events, raw occurrences, and recovery checkpoints."""
-
-    recorder: AgentRunRecorder = field(repr=False, compare=False)
-    agent_id: str
-    agent_run_id: str
-    parent_agent_run_id: str | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
-    id: str | None = field(
-        default="linktools.ai.step-persistence",
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    deferred_pause_sink: Callable[[int], None] | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    _last_observed_step_index: int | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _last_checkpoint_transcript_count: int = field(
-        default=0,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _last_checkpoint_context: tuple[ModelMessage, ...] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _last_checkpoint_state: CheckpointState | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _last_checkpoint_pending_index: int | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _replay_request_captured: bool = field(default=False, init=False, repr=False, compare=False)
-    _live_messages: Sequence[ModelMessage] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _tool_started_ns: dict[str, int] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.recorder, AgentRunRecorder):
-            raise TypeError("recorder must be AgentRunRecorder")
-        if not self.agent_run_id or self.recorder.agent_run_id != self.agent_run_id:
-            raise ValueError("Runtime AgentRun identity is invalid")
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="innermost")
-
-    async def before_run(self, ctx: PydanticRunContext[None]) -> None:
-        self._live_messages = ctx.messages
-        await self.recorder.register_agent_run(
-            AgentRunRecord(
-                agent_run_id=self.agent_run_id,
-                agent_conversation_id=ctx.conversation_id,
-                parent_agent_run_id=self.parent_agent_run_id,
-                agent_id=self.agent_id,
-                metadata=dict(self.metadata),
-                started_at=datetime.now(timezone.utc),
-            )
-        )
-        transcript = self.recorder.transcript_messages()
-        self._last_checkpoint_transcript_count = len(transcript)
-        self._replay_request_captured = self.recorder.request_already_captured(ctx.messages)
-        await self.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
-
-    async def before_model_request(
-        self,
-        ctx: PydanticRunContext[None],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        self._live_messages = ctx.messages
-        if ctx.messages and isinstance(ctx.messages[-1], ModelRequest):
-            if self._replay_request_captured:
-                # A resumed outstanding request already has its raw occurrence.
-                self._replay_request_captured = False
-            else:
-                self.recorder.append_transcript_message(ctx.messages[-1])
-        await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
-        return request_context
-
-    async def after_node_run(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        node: AgentNode[None],
-        result: NodeResult[None],
-    ) -> NodeResult[None]:
-        self._live_messages = ctx.messages
-        self._last_observed_step_index = ctx.run_step
-        if isinstance(node, ModelRequestNode):
-            response = None
-            if isinstance(result, CallToolsNode):
-                response = result.model_response
-            elif ctx.messages and isinstance(ctx.messages[-1], ModelResponse):
-                response = ctx.messages[-1]
-            if response is not None:
-                # The recorder captured this response with its request identity.
-                # It must be recoverable before any tool effect.
-                await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
-        if isinstance(node, CallToolsNode):
-            pending = result.request if isinstance(result, ModelRequestNode) else None
-            await self._save_checkpoint(
-                ctx,
-                messages=ctx.messages,
-                pending=pending,
-                state="complete",
-            )
-        return result
-
-    async def after_run(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        self._live_messages = result.all_messages()
-        self.recorder.finish_transcript()
-        interrupted = isinstance(result.output, DeferredToolRequests)
-        if interrupted:
-            if self._last_observed_step_index is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self.deferred_pause_sink is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            self.deferred_pause_sink(self._last_observed_step_index)
-        await self._save_checkpoint(
-            ctx,
-            messages=result.all_messages(),
-            state="interrupted" if interrupted else "complete",
-        )
-        await self.recorder.record_event(
-            "AGENT_RUN_INTERRUPTED" if interrupted else "AGENT_RUN_SUCCEEDED",
-            ctx.run_step,
-        )
-        return result
-
-    async def on_run_error(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        error: BaseException,
-    ) -> AgentRunResult[Any]:
-        messages = self._live_messages or ctx.messages
-        self.recorder.finish_transcript(interrupted=True)
-        await self._save_checkpoint(
-            ctx,
-            messages=messages,
-            state="interrupted",
-        )
-        await self.recorder.record_event(
-            "AGENT_RUN_FAILED",
-            ctx.run_step,
-            error=repr(error),
-        )
-        raise error
-
-    def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:
-        sequence = self.recorder.model_request_seq_for_tool_call(tool_call_id)
-        return (
-            {}
-            if sequence is None
-            else {MODEL_REQUEST_SEQ_METADATA_KEY: str(sequence)}
-        )
-
-    async def before_tool_execute(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        if call.tool_call_id in self._tool_started_ns:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._tool_started_ns[call.tool_call_id] = monotonic_ns()
-        await self.recorder.record_tool_start(call, ctx.run_step)
-        return args
-
-    async def after_tool_execute(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        result: Any,
-    ) -> Any:
-        del args
-        started_ns = self._tool_started_ns.pop(call.tool_call_id, None)
-        if started_ns is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        metadata = self._tool_request_metadata(call.tool_call_id)
-        metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
-        self.recorder.remember_tool_execution(
-            call.tool_call_id,
-            metadata=metadata,
-        )
-        return result
-
-    async def on_tool_execute_error(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        error: Exception,
-    ) -> Any:
-        del args
-        started_ns = self._tool_started_ns.pop(call.tool_call_id, None)
-        if started_ns is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        metadata = self._tool_request_metadata(call.tool_call_id)
-        metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
-        if isinstance(error, AIError):
-            metadata[TOOL_ERROR_CODE_METADATA_KEY] = error.code.value
-        async def record_failure() -> None:
-            await self.recorder.record_event(
-                "TOOL_CALL_FAILED",
-                ctx.run_step,
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-                error=repr(error),
-                metadata=metadata,
-            )
-            await self.recorder.commit_history_boundary()
-
-        interrupted = await _await_request_handoff(record_failure())
-        if interrupted:
-            raise asyncio.CancelledError from error
-        raise error
-
-    def remember_context_projection(
-        self,
-        source: Sequence[ModelMessage],
-        projected: Sequence[ModelMessage] | None,
-    ) -> None:
-        self.recorder.remember_context_projection(source, projected)
-
-    async def _save_checkpoint(
-        self,
-        ctx: PydanticRunContext[None],
-        *,
-        messages: Sequence[ModelMessage],
-        pending: ModelMessage | None = None,
-        state: CheckpointState,
-    ) -> None:
-        context_messages, pending_index = self.recorder.checkpoint_context(
-            messages,
-            pending=pending,
-        )
-        frozen_context = tuple(context_messages)
-        raw = self.recorder.transcript_messages()
-        if (
-            self._last_checkpoint_context == frozen_context
-            and self._last_checkpoint_transcript_count == len(raw)
-            and self._last_checkpoint_state == state
-            and self._last_checkpoint_pending_index == pending_index
-        ):
-            return
-        await self.recorder.save_checkpoint(
-            AgentRunCheckpoint(
-                agent_run_id=self.agent_run_id,
-                step_index=ctx.run_step,
-                messages=list(raw),
-                agent_conversation_id=ctx.conversation_id,
-                parent_agent_run_id=self.parent_agent_run_id,
-                agent_id=self.agent_id,
-                state=state,
-                context_messages=context_messages,
-                transcript_message_count_before=self._last_checkpoint_transcript_count,
-                pending_request_index=pending_index,
-            )
-        )
-        self._last_checkpoint_transcript_count = len(raw)
-        self._last_checkpoint_context = frozen_context
-        self._last_checkpoint_state = state
-        self._last_checkpoint_pending_index = pending_index
+def runtime_feature_leaves(
+    capability: AbstractCapability[None],
+) -> tuple[AbstractCapability[None], ...]:
+    """Inspect declared feature leaves through native containers and wrappers."""
+    if isinstance(capability, WrapperCapability):
+        return runtime_feature_leaves(capability.wrapped)
+    if isinstance(capability, CombinedCapability):
+        return tuple(leaf for child in capability.capabilities for leaf in runtime_feature_leaves(child))
+    leaves: list[AbstractCapability[None]] = []
+    capability.apply(leaves.append)
+    return tuple(leaves)
 
 
 async def compose_platform_capabilities(
@@ -385,6 +70,7 @@ async def compose_platform_capabilities(
     model_request_recorder: "ExternalModelRequestRecorder | None" = None,
     recorder: AgentRunRecorder | None = None,
     budget: RunBudgetContext | None = None,
+    runtime_capabilities: Sequence[AbstractCapability[None]] = (),
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     run_recorder = recorder or AgentRunRecorder(
@@ -392,7 +78,14 @@ async def compose_platform_capabilities(
         execution_id=execution_id,
         agent_run_id=agent_run_id,
     )
-    persistence = _AgentRunPersistenceCapability(
+    guarantees = (True, True, True)
+    if isinstance(run_store, RuntimeAgentRunStore):
+        guarantees = run_store.execution_persistence(agent_run_id)
+    async def require_active_producer() -> None:
+        if isinstance(run_store, RuntimeAgentRunStore):
+            await run_store.require_active_producer(agent_run_id)
+
+    persistence = AgentRunCapture(
         recorder=run_recorder,
         agent_id=agent_id,
         agent_run_id=agent_run_id,
@@ -407,8 +100,36 @@ async def compose_platform_capabilities(
             ),
         },
         deferred_pause_sink=deferred_pause_sink,
+        producer_guard=require_active_producer,
     )
     capabilities.append(persistence)
+    bound_types: set[type[object]] = set()
+
+    def bind(capability: AbstractCapability[None]) -> AbstractCapability[None] | None:
+        if isinstance(capability, WrapperCapability):
+            wrapped = capability.wrapped.visit_and_replace(bind)
+            if wrapped is None:
+                return None
+            if wrapped is capability.wrapped:
+                return capability
+            rebound = copy(capability)
+            rebound.wrapped = wrapped
+            return rebound
+        for enabled, feature in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability)):
+            if isinstance(capability, feature):
+                if not enabled:
+                    return None
+                bound_types.add(feature)
+                return capability.bind(persistence)
+        return capability
+
+    for template in runtime_capabilities:
+        bound = template.visit_and_replace(bind)
+        if bound is not None:
+            capabilities.append(bound)
+    for enabled, feature in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability)):
+        if enabled and feature not in bound_types:
+            capabilities.append(feature().bind(persistence))
     selected_memory = select_harness_memory_tools(tool_policy)
     if memory_scope is not None and selected_memory:
         if memory_store is None:
@@ -457,4 +178,5 @@ async def compose_platform_capabilities(
 
 __all__ = [
     "compose_platform_capabilities",
+    "runtime_feature_leaves",
 ]

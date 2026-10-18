@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
@@ -17,7 +17,7 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import InstructionPart, ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
+from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
 
 from ..capability import (
     AgentContext,
@@ -33,13 +33,14 @@ from ..capability import (
 )
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ..observe import Observation
 from ..workspace import SandboxSession, ToolPermissionPolicy
 from ._budget import RunBudgetContext
 from ._attachment import bind_tool_return_attachments
 from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
-    _ToolMetricContext,
+    ToolMetricContext,
 )
 
 
@@ -117,7 +118,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         permission_policy: ToolPermissionPolicy | None = None,
         sandbox_session: SandboxSession | None = None,
         tool_operations: ToolOperationBridge | None = None,
-        tool_metrics: _ToolMetricContext | None = None,
+        tool_metrics: ToolMetricContext | None = None,
         budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
     ) -> None:
@@ -211,7 +212,12 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         descriptor = self._descriptors.get(name)
-        if descriptor is None or tool.toolset is not self:
+        owner = tool.toolset
+        seen: set[int] = set()
+        while isinstance(owner, WrapperToolset) and id(owner) not in seen:
+            seen.add(id(owner))
+            owner = owner.wrapped
+        if descriptor is None or owner is not self:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         path_fields = descriptor.workspace_path_fields
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
@@ -253,13 +259,13 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                         "Correct them and retry."
                     )
                 signal = ToolCallRetry(message)
-                self._record_pre_effect_error(
+                await self._record_pre_effect_error(
                     raw_call,
                     tool.tool_def,
                     signal,
                 )
                 raise signal from error
-            self._record_pre_effect_error(
+            await self._record_pre_effect_error(
                 raw_call,
                 tool.tool_def,
                 error,
@@ -281,7 +287,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                 approved=ctx.tool_call_approved,
             )
         except Exception as error:
-            self._record_pre_effect_error(
+            await self._record_pre_effect_error(
                 call,
                 tool.tool_def,
                 error,
@@ -322,6 +328,11 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         stopping = False
         leaf_active = True
         heartbeat_error: BaseException | None = None
+        observation: Observation | None = None
+
+        def capture(value: Observation) -> None:
+            nonlocal observation
+            observation = value
 
         async def renew() -> None:
             nonlocal decision, heartbeat_error
@@ -344,7 +355,9 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             nonlocal leaf_active
             try:
                 try:
-                    result = await self._invoke(call, tool.tool_def, final_args, invoke)
+                    result = await self._invoke(
+                        call, tool.tool_def, final_args, invoke, capture=capture,
+                    )
                 finally:
                     leaf_active = False
                     # A leaf may suppress cancellation; loss still forbids its success.
@@ -418,6 +431,10 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
                     cancelled = True
+            # Settlement and its heartbeat cleanup own effect classification;
+            # a metric cancellation must never turn a committed effect unknown.
+            if observation is not None and self._tool_metrics is not None:
+                await self._tool_metrics.record(observation)
             if cancelled:
                 raise asyncio.CancelledError
 
@@ -437,6 +454,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
         handler: Any,
+        *,
+        capture: Callable[[Observation], None] | None = None,
     ) -> Any:
         if self._tool_metrics is None:
             return await handler(args)
@@ -446,9 +465,10 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             args=args,
             handler=handler,
             suppress_cancel=lambda: False,
+            capture=capture,
         )
 
-    def _record_pre_effect_error(
+    async def _record_pre_effect_error(
         self,
         call: ToolCallPart,
         tool_def: ToolDefinition,
@@ -458,7 +478,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             return
         if isinstance(error, (ApprovalRequired, CallDeferred, SkipToolExecution)):
             return
-        self._tool_metrics.record_error(
+        await self._tool_metrics.record_error(
             call=call,
             tool_def=tool_def,
             error=error,

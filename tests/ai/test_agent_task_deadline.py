@@ -4,16 +4,16 @@
 
 import asyncio
 import multiprocessing
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, CheckpointCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
 from linktools.ai.task import TaskGraph, TaskNode
 
@@ -22,10 +22,36 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ("model", "tool", "unknown_tool", "subagent"))
-async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(phase: str) -> None:
+async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
+    phase: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     entered = asyncio.Event()
     cancelled = asyncio.Event()
     finished = asyncio.Event()
+    initial_time = datetime.now(timezone.utc)
+    loop = asyncio.get_running_loop()
+    clock_resumed_at: float | None = None
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            elapsed = 0 if clock_resumed_at is None else loop.time() - clock_resumed_at
+            current_time = initial_time + timedelta(seconds=elapsed)
+            return current_time.replace(tzinfo=None) if tz is None else current_time.astimezone(tz)
+
+    wait_execution = RuntimeAgentTaskRunner._wait_execution
+
+    async def wait_after_work_started(self, *args, **kwargs):
+        nonlocal clock_resumed_at
+        await entered.wait()
+        clock_resumed_at = loop.time()
+        return await wait_execution(self, *args, **kwargs)
+
+    # Exclude setup from the deadline, then let real elapsed time drive the
+    # original wait and cancellation after the intended work has started.
+    for module in ("_agent_task", "_execution", "_local"):
+        monkeypatch.setattr(f"linktools.ai.runtime.{module}.datetime", Clock)
+    monkeypatch.setattr(RuntimeAgentTaskRunner, "_wait_execution", wait_after_work_started)
 
     async def work() -> str:
         entered.set()
@@ -51,21 +77,20 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(ph
             return ModelResponse(parts=[TextPart(await work())])
         return ModelResponse(parts=[ToolCallPart("slow", {})])
 
-    group = CapabilityGroup("deadline")
+    group = RuntimeFeatures("deadline")
     group.tool(slow, effect_policy="non_replay_safe" if phase == "unknown_tool" else "none")
     group.agent("default", model="default", allow_tools=() if phase in {"model", "subagent"} else ("slow",),
                 allow_skills=(), allow_subagents=("child",) if phase == "subagent" else ())
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "deadline", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(
             TaskGraph("deadline", (TaskNode("agent", task=task, input=AgentTaskInput("work"), timeout_seconds=0.3),)),
             idempotency_key="start",
         )
-        await asyncio.wait_for(entered.wait(), 2)
         result = (await run.wait(timeout_seconds=3)).result
         node, = (await run.state()).node_states
         execution = await runtime.executions.inspect(node.execution_id, principal=runtime.default_principal)
@@ -89,28 +114,53 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(ph
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("earlier", ("node", "graph", "graph_only", "none"))
-async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_budget(earlier: str) -> None:
+async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_budget(
+    earlier: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
     cancelled = asyncio.Event()
+    current_time = datetime.now(timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return current_time.replace(tzinfo=None) if tz is None else current_time.astimezone(tz)
+
+    wait_execution = RuntimeAgentTaskRunner._wait_execution
+
+    async def wait_after_model_started(self, *args, **kwargs):
+        nonlocal current_time
+        await entered.wait()
+        if earlier != "none":
+            current_time += timedelta(seconds=1)
+        return await wait_execution(self, *args, **kwargs)
+
+    # First establish a real shared-budget reservation, then expire only the
+    # tighter limit. Startup speed must not decide whether a request exists.
+    for module in ("_agent_task", "_execution", "_local", "state._budget"):
+        monkeypatch.setattr(f"linktools.ai.runtime.{module}.datetime", Clock)
+    monkeypatch.setattr(RuntimeAgentTaskRunner, "_wait_execution", wait_after_model_started)
 
     async def model(messages, info):
         del messages, info
+        entered.set()
         if earlier != "none":
             try:
-                await asyncio.sleep(30)
+                await asyncio.Event().wait()
             except asyncio.CancelledError:
                 cancelled.set()
                 raise
         return ModelResponse(parts=[TextPart("done")])
 
-    group = CapabilityGroup("deadline-budget")
+    group = RuntimeFeatures("deadline-budget")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "deadline-budget", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), capabilities=(group,),
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         budget = RunBudget(model_requests=4, deadline_at=(
-            None if earlier == "none" else datetime.now(timezone.utc) + timedelta(seconds=3 if earlier == "node" else 0.3)
+            None if earlier == "none" else current_time + timedelta(seconds=3 if earlier == "node" else 0.3)
         ))
         run = await runtime.tasks.bind(task).start(
             TaskGraph("deadline-budget", (TaskNode(
@@ -133,11 +183,12 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
             assert node.error_code == (ErrorCode.EXECUTION_WAIT_TIMEOUT if earlier == "node" else ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED).value
 
 
-def _recovery_group(subagent: bool, change: str = "none") -> CapabilityGroup:
+def _recovery_group(subagent: bool, change: str = "none") -> RuntimeFeatures:
     async def marker(value: str) -> str:
         return value
 
-    group = CapabilityGroup("deadline-recovery")
+    group = RuntimeFeatures("deadline-recovery")
+    group.capability(CheckpointCapability(), scope="runtime")
     group.tool(marker, effect_policy="non_replay_safe" if change == "tool" else "none")
     group.agent("default", model="default", allow_tools=(), allow_skills=(),
                 allow_subagents=("child",) if subagent else ())
@@ -174,7 +225,7 @@ def _start_interrupted_graph(
         group = _recovery_group(subagent)
         async with Runtime.open(
             "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), capabilities=(group,),
+            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), features=group,
         ) as runtime:
             task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
             run = await runtime.tasks.bind(task).start(
@@ -255,7 +306,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
     group = _recovery_group(subagent, change)
     runtime_context = Runtime.open(
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), capabilities=(group,),
+        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), features=group,
     )
     runtime = await runtime_context.__aenter__()
     try:
@@ -324,7 +375,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
     storage = RuntimeStorage.sqlite(path) if subagent else RuntimeStorage.filesystem(path)
     async with Runtime.open(
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, capabilities=(group,),
+        storage=storage, features=group,
     ) as runtime:
         original_binding = (await storage.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,

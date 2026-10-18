@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,
@@ -77,13 +77,13 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             await self.default.authorize(principal, action, resource)
 
     authorization = Authorization()
-    group = CapabilityGroup("native-graph-recovery")
+    group = RuntimeFeatures("native-graph-recovery", authorization=authorization)
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     try:
         async with Runtime.open(
             "native-graph-recovery", models=_Models(FunctionModel(stream_function=model)),
-            storage=storage, capabilities=(group,), authorization=authorization,
+            storage=storage, features=group,
         ) as runtime:
             task = runtime.tasks.from_agent("test.native-captured-agent", runtime.agents.get("default"))
             engine = runtime.tasks.bind(task)
@@ -147,7 +147,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
         storage = RuntimeStorage.filesystem(tmp_path / "state")
         async with Runtime.open(
             "native-graph-recovery", models=_Models(FunctionModel(stream_function=model)),
-            storage=storage, capabilities=(group,), authorization=authorization,
+            storage=storage, features=group,
         ) as runtime:
             task = runtime.tasks.from_agent("test.native-captured-agent", runtime.agents.get("default"))
             engine = runtime.tasks.bind(task)
@@ -207,12 +207,12 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
         await release.wait()
         yield "original worker answer"
 
-    group = CapabilityGroup("local-graph-recovery")
+    group = RuntimeFeatures("local-graph-recovery")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     async with Runtime.open(
         "local-graph-recovery", models=_Models(FunctionModel(stream_function=model)),
-        storage=storage, capabilities=(group,),
+        storage=storage, features=group,
     ) as runtime:
         try:
             task = runtime.tasks.from_agent("test.local-agent", runtime.agents.get("default"))

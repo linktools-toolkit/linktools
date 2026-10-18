@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Workspace model-facing contract regressions."""
 
+from ._runtime_test_helpers import workspace_features
+
 import json
 from pathlib import Path
 
 import pytest
 from linktools.ai.capability import (
-    CapabilityGroup,
+    RuntimeFeatures,
     ToolCallRetry,
     workspace_capabilities,
 )
@@ -17,7 +19,8 @@ from linktools.ai.workspace import LocalSandbox, Workspace
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace)._contributions
+        item for item in workspace_features("workspace", workspace=workspace)._contributions
+        if item.kind == "tool"
     )
 
 from linktools.ai.workspace._sandbox_protocol import (

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Historical child and graph captures run through the public evaluation API."""
 
+from ._runtime_test_helpers import workspace_features
+
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -11,14 +13,14 @@ from pydantic_ai.messages import ModelMessage, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
     TaskCaseInput,
 )
-from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runtime, RuntimeStorage
+from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, TraceCapability, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from linktools.ai.workspace import Workspace
 
@@ -51,8 +53,9 @@ class DelegatingModels(FixtureModels):
         return FunctionModel(stream_function=respond)
 
 
-def child_capabilities(revision: int, instruction: str) -> CapabilityGroup[None]:
-    group = CapabilityGroup[None]("captured-child-consumer")
+def child_capabilities(revision: int, instruction: str, *, workspace: Workspace) -> RuntimeFeatures[None]:
+    group = workspace_features("captured-child-consumer", workspace=workspace)
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="Parent behavior", allow_tools=(),
                 allow_skills=(), allow_subagents=("child",))
     group.agent("child", revision=revision, model="default", system_prompt=instruction, allow_tools=(),
@@ -70,8 +73,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions.write_text("Historical child repository context", encoding="utf-8")
     state = tmp_path / "state"
     async with Runtime.open("child-capture-consumer", models=models, storage=RuntimeStorage.filesystem(state),
-            context=CONTEXT, capabilities=(child_capabilities(1, "Historical child behavior"),
-                CapabilityGroup("workspace", workspace=Workspace.load(work)))) as runtime:
+            context=CONTEXT, features=child_capabilities(1, "Historical child behavior", workspace=Workspace.load(work))) as runtime:
         parent = await runtime.agents.get().start("delegate this work", principal=PRINCIPAL,
                                                 idempotency_key="create-real-child")
         assert (await parent.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -94,8 +96,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions.write_text("Changed live repository context", encoding="utf-8")
     scorer = Task("consumer.captured-child-score", exact, effect_policy="none")
     async with Runtime.open("child-capture-consumer", models=models, storage=RuntimeStorage.filesystem(state),
-            context=CONTEXT, capabilities=(child_capabilities(2, "Changed current child behavior"),
-                CapabilityGroup("workspace", workspace=Workspace.load(work)))) as runtime:
+            context=CONTEXT, features=child_capabilities(2, "Changed current child behavior", workspace=Workspace.load(work))) as runtime:
         historical = await runtime.tasks.from_agent_capture("consumer.tool-child", capture, principal=PRINCIPAL)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("tool-child", 1), cases=(
             CaseSpec.from_capture(CaseRef("tool-child", "original", 1), capture=capture, expected=source_result.output),

@@ -15,9 +15,9 @@ No runtime enable-tools registry or implicit format converter is introduced.
 The professional configuration selects `run_command` and `read_file` as tools,
 plus a nonempty `allow_skills` to materialize `list_skills` and `load_skill`.
 Add discovery/search only when required. `create_directory`, `file_info` and
-legacy host entry points remain available when deliberately selected.
+the explicit host entry points remain available when deliberately selected.
 An edit-only configuration keeps `edit_file`; it is not upgraded to whole-file
-write permission. Broad `*` selectors and the implicit compatibility default Agent
+write permission. Broad `*` selectors and the implicit default Agent
 remain broad (the full 14-tool catalog), not a minimal profile. The minimal writer
 example explicitly selects the four modern file tools.
 
@@ -171,7 +171,7 @@ pre-read is added. An optional expected_hash compares complete original bytes;
 a missing target with a supplied hash conflicts. Streaming edits use bounded
 chunks and same-filesystem staging, still requiring O(N) IO and temporary disk.
 
-## Migration and compatibility
+## Tool selection and behavior contracts
 
 * Model-visible `read_file` uses behavior revision 3 for unified reads with MIME
   admission. `write_file`, `search_files`, and `attach_files` use revision 2.
@@ -183,9 +183,9 @@ chunks and same-filesystem staging, still requiring O(N) IO and temporary disk.
   recursive basename intent. Old search `*.py` recursive intent likewise becomes
   `**/*.py`; directory prefixes must be rebased to the supplied path.
 * Sandbox host `read_file`, `search_files`, `find_files`, `attach_files` tool and
-  legacy edit_file remain available under their committed contracts. New bounded
+  `edit_file` remain available under their current contracts. New bounded
   host APIs are `read_text`, `inspect_file`, `list_files`, and `search_text`.
-* Historical attach_files source/IDs and original messages are never rewritten.
+* Captured `attach_files` source/IDs and original messages are never rewritten.
 
 ## Extension example
 

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Evaluation launch intents own local, application-provided Runtime scopes."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
@@ -18,7 +20,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionStatus, JsonValue, OperationKind, OperationLedgerRecord, OperationStatus, Principal,
     TaskStatus, canonical_sha256, service_principal,
@@ -32,6 +34,7 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import CheckpointCapability
 from linktools.ai.runtime import (
     EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine, TaskGraphRun,
 )
@@ -86,7 +89,7 @@ _UNSCOPED_MANIFEST_WIRE = """
     "input_projection":{"$mapping":[["kind","task"],["version",1]]},"output_contract":{"$mapping":[]},
     "required":true,"rubric":null,"slot_id":"score",
     "task":{"$dataclass":"task_ref","fields":{"id":"score","revision":1}},"task_contract":{"$mapping":[]}}}]},
-  "source_experiment_id":null,"source_trials":{"$tuple":[]},
+  "source_experiment_id":null,"source_trials":{"$tuple":[]},"trial_scope_required":false,
   "trials":{"$tuple":[{"$dataclass":"evaluation_trial_plan","fields":{
     "candidate_slot_id":"target","case_ref":{"$dataclass":"evaluation_case_ref","fields":{
       "case_id":"case","dataset_id":"dataset","revision":1}},"repetition":1,"trial_id":"trial"}}]}
@@ -94,13 +97,15 @@ _UNSCOPED_MANIFEST_WIRE = """
 """
 
 
-def test_unscoped_manifest_wire_preserves_identity_and_scoped_mode_changes_it() -> None:
+def test_current_manifest_wire_requires_scope_flag_and_scoped_mode_changes_identity() -> None:
     wire = json.loads(_UNSCOPED_MANIFEST_WIRE)
     unscoped = decode_domain(wire, EvaluationManifest)
     assert not unscoped.trial_scope_required
+    assert encode_domain(unscoped) == wire
     assert unscoped.digest == "bba3e1f0b12a4ed3432f9aed120b7faceb73b331817113d0826b0a9bb0b65eec"
     start = unscoped.to_mapping()
     start.pop("experiment_id")
+    assert "trial_scope_required" not in start
     assert canonical_sha256(start) == "0580399011dde8221ae4856d8187620674736393c9d1ea34270792ca2901923b"
 
     scoped = replace(unscoped, trial_scope_required=True)
@@ -111,8 +116,11 @@ def test_unscoped_manifest_wire_preserves_identity_and_scoped_mode_changes_it() 
     assert decode_domain(encode_domain(scoped), EvaluationManifest) == scoped
     assert decode_domain(encode_domain(unscoped), EvaluationManifest) == unscoped
 
-    wire["fields"]["trial_scope_required"] = False
-    assert decode_domain(wire, EvaluationManifest) == unscoped
+    del wire["fields"]["trial_scope_required"]
+    with pytest.raises(AIError) as missing:
+        decode_domain(wire, EvaluationManifest)
+    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert missing.value.safe_details["missing_fields"] == ["trial_scope_required"]
     wire["fields"]["trial_scope_required"] = "false"
     with pytest.raises(AIError) as malformed:
         decode_domain(wire, EvaluationManifest)
@@ -196,7 +204,7 @@ class Scopes:
             async with Runtime.open(
                 self.namespace, models=ModelRegistry(), storage=child_storage,
                 context=RuntimeContext(workspace, tenant_id=self.tenant_id),
-                capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(workspace)),),
+                features=workspace_features("workspace", workspace=Workspace.load(workspace)),
                 auto_recover=False,
             ) as child:
                 self.opened.append(scope)
@@ -288,7 +296,7 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
     planning_models = FixtureModels()
     children: list[tuple[EvaluationTrialScope, FixtureModels]] = []
     closed: list[EvaluationTrialScope] = []
-    group = CapabilityGroup[None]("scoped-agent")
+    group = RuntimeFeatures[None]("scoped-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     body = b"private captured attachment"
 
@@ -301,7 +309,7 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
     scorer = Task("scopes.agent-score", score, effect_policy="none")
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     async with Runtime.open(NAMESPACE, models=planning_models, storage=storage, context=CONTEXT,
-                            capabilities=(group,)) as runtime:
+                            features=group) as runtime:
         target = runtime.tasks.from_agent("scopes.agent", runtime.agents.get())
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("agent-input", 1), (
             CaseSpec.agent(CaseRef("agent-input", "one", 1),
@@ -319,7 +327,7 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
             child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
             try:
                 async with Runtime.open(NAMESPACE, models=models, storage=child_storage, context=CONTEXT,
-                                        capabilities=(group,), auto_recover=False) as child:
+                                        features=group, auto_recover=False) as child:
                     child_target = child.tasks.from_agent("scopes.agent", child.agents.get())
                     assert child_target.ref == target.ref
                     assert child_target.contract == target.contract
@@ -363,7 +371,8 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     child_stores: list[RuntimeStorage] = []
     model_prompts: list[str] = []
     interrupted = True
-    group = CapabilityGroup[Path]("recoverable-scoped-agent")
+    group = RuntimeFeatures[Path]("recoverable-scoped-agent")
+    group.capability(CheckpointCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     class RecoveringModels(FixtureModels):
@@ -403,13 +412,16 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         marker = workspace / "retained.txt"
         if not marker.exists():
             marker.write_text("application-owned recovery workspace", encoding="utf-8")
+        group = workspace_features("recoverable-scoped-agent", workspace=Workspace.load(workspace))
+        group.capability(CheckpointCapability(), scope="runtime")
+        group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
         models = RecoveringModels(interrupt=interrupted and descriptor.scorer_slot_id is None)
         child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
         token = _SCOPE_CONTEXT.set(descriptor)
         try:
             async with Runtime.open(NAMESPACE, models=models, storage=child_storage,
                 context=RuntimeContext(workspace, tenant_id=PRINCIPAL.tenant_id),
-                capabilities=(group, CapabilityGroup("workspace", workspace=Workspace.load(workspace))),
+                features=group,
                 auto_recover=False) as child:
                 target = child.tasks.from_agent("scopes.recovery-agent", child.agents.get())
                 opened.append((descriptor, workspace))
@@ -438,7 +450,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     try:
         async with Runtime.open(NAMESPACE, models=planning_models, storage=storage, context=CONTEXT,
-                                capabilities=(group,), auto_recover=False) as runtime:
+                                features=group, auto_recover=False) as runtime:
             target = runtime.tasks.from_agent("scopes.recovery-agent", runtime.agents.get())
             dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("recoverable-agent", 1), (
                 CaseSpec.agent(CaseRef("recoverable-agent", "one", 1), prompt="immutable recovery prompt",
@@ -481,7 +493,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
         reopened_models = FixtureModels()
         reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
         async with Runtime.open(NAMESPACE, models=reopened_models, storage=reopened, context=CONTEXT,
-                                capabilities=(group,), auto_recover=False) as runtime:
+                                features=group, auto_recover=False) as runtime:
             target = runtime.tasks.from_agent("scopes.recovery-agent", runtime.agents.get())
             engine = runtime.tasks.bind(target, scorer)
             resumed = await runtime.evaluations.reconcile(experiment_id, engine=engine, principal=PRINCIPAL,
@@ -910,8 +922,8 @@ async def test_cancel_before_admission_never_opens_a_trial_scope(
 
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
         context=RuntimeContext(tmp_path if shared_live else None, tenant_id=PRINCIPAL.tenant_id),
-        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),)
-                     if shared_live else ()) as runtime:
+        features=workspace_features("workspace", workspace=Workspace.load(tmp_path))
+                     if shared_live else None) as runtime:
         engine = runtime.tasks.bind(*tasks)
         request = await _request(runtime, tasks,
             policy=EvaluationPolicy(external_effects="live" if shared_live else "deny"))
@@ -953,7 +965,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
     tasks = (Task("scopes.target", target, effect_policy="replay_safe"),
              Task("scopes.score", score, effect_policy="none"))
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-    workspace = CapabilityGroup("workspace", workspace=Workspace.load(tmp_path))
+    workspace = workspace_features("workspace", workspace=Workspace.load(tmp_path))
 
     @asynccontextmanager
     async def scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -963,7 +975,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
             async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=child_storage,
                 context=RuntimeContext(tmp_path if child_environment in {"app", "both"} else None,
                                        tenant_id=PRINCIPAL.tenant_id),
-                capabilities=(workspace,) if child_environment in {"workspace", "both"} else (),
+                features=workspace if child_environment in {"workspace", "both"} else None,
                 auto_recover=False) as child:
                 opened.append(descriptor)
                 yield child.tasks.bind(*tasks)
@@ -973,7 +985,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage,
         context=RuntimeContext(tmp_path if child_environment == "bare" else None,
                                tenant_id=PRINCIPAL.tenant_id),
-        capabilities=(workspace,) if child_environment == "bare" else ()) as runtime:
+        features=workspace if child_environment == "bare" else None) as runtime:
         request = await _request(runtime, tasks, policy=EvaluationPolicy(external_effects="live"))
         run = await runtime.evaluations.start(request, engine=runtime.tasks.bind(*tasks), trial_scope=scope)
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
@@ -1033,7 +1045,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
     reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened,
         context=RuntimeContext(tmp_path, tenant_id=PRINCIPAL.tenant_id),
-        capabilities=(CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),),
+        features=workspace_features("workspace", workspace=Workspace.load(tmp_path)),
         auto_recover=False) as runtime:
         engine = runtime.tasks.bind(*tasks)
         resumed = await runtime.evaluations.reconcile(run.experiment_id, engine=engine,

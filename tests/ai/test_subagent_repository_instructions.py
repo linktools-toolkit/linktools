@@ -90,7 +90,7 @@ class _Launcher:
         del request, execution
         self.launches += 1
 
-    async def cancel(self, execution: object) -> CancelEffectOutcome:
+    async def cancel(self, execution: object, *, force: bool = False) -> CancelEffectOutcome:
         del execution
         return CancelEffectOutcome.CONFIRMED
 

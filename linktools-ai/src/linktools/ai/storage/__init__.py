@@ -3,13 +3,13 @@
 """Static exports for the domain-independent storage kernel."""
 
 from ._cache import (
-    ContentCache,
-    FilesystemContentCache,
-    InMemoryContentCache,
-    TieredContentCache,
+    CacheBackend,
+    FilesystemCacheBackend,
+    InMemoryCacheBackend,
+    TieredCacheBackend,
 )
 from ._composition import (
-    CacheAdapter,
+    ContentCache,
     StorageLayer,
     StorageLocation,
     StorageOverlay,
@@ -117,20 +117,36 @@ from ._object_sql import SqlObjectStore, build_object_sql_metadata
 from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
+from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
+from ._turn import TurnCoordination, TurnCoordinationBackend
+
+from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
+
 __all__ = [
+    "TurnCoordination",
+    "TurnCoordinationBackend",
+    "StreamBackend",
+    "StreamWriter",
+    "StreamBatch",
+    "InMemoryStreamBackend",
+    "StorageBuffer",
+    "StorageReadCache",
+    "BatchWriteFlushResult",
+    "BatchWriteScope",
+    "BatchWriteStatus",
     "TABLE_PREFIX",
     "AtomicBatchStorageWriter",
     "BatchStorageReader",
     "BatchStorageWriter",
-    "CacheAdapter",
     "ContentCache",
-    "FilesystemContentCache",
+    "CacheBackend",
+    "FilesystemCacheBackend",
     "FilesystemJournal",
     "FilesystemLeaseCoordinator",
     "FilesystemMutationLock",
     "FilesystemObjectStore",
     "FilesystemWriterLock",
-    "InMemoryContentCache",
+    "InMemoryCacheBackend",
     "InMemoryObjectStore",
     "InsertResult",
     "IntegrityViolationKind",
@@ -187,7 +203,7 @@ __all__ = [
     "StorageWriteState",
     "StorageWriter",
     "StoredPayload",
-    "TieredContentCache",
+    "TieredCacheBackend",
     "TransientObjectStore",
     "VersionSummary",
     "VersionedStorage",

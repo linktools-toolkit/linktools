@@ -12,7 +12,7 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ModelMessage, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import JsonValue, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -192,7 +192,7 @@ async def test_native_graph_named_outputs_preserve_dependencies_and_successful_n
 @pytest.mark.parametrize("projected", (False, True), ids=("literal", "projected"))
 async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp_path: Path, projected: bool) -> None:
     models = FixtureModels()
-    group = CapabilityGroup[None]("consumer-judge")
+    group = RuntimeFeatures[None]("consumer-judge")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     projected_samples: list[ScoringInput] = []
 
@@ -203,7 +203,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
         return "Grade the data: " + json.dumps({"answer": sample.target_output, "expected": sample.expected, "rubric": sample.rubric})
 
     target = Task("consumer.judge-target", echo, effect_policy="none")
-    async with Runtime.open("judge-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, capabilities=(group,)) as runtime:
+    async with Runtime.open("judge-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=group) as runtime:
         judge = runtime.tasks.from_agent("consumer.judge", runtime.agents.get(), build_input=build_input if projected else None)
         scorer = replace(rule_scorer(judge), rubric={"criterion": "semantic equality"})
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("judge", 1), cases=(
@@ -556,9 +556,9 @@ async def test_trial_deadline_cancels_slow_target_and_next_target_gets_its_own_d
 async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence(tmp_path: Path) -> None:
     models = FixtureModels()
     body = b"A fixed original attachment\x00with bytes."
-    group = CapabilityGroup[None]("attachment-consumer")
+    group = RuntimeFeatures[None]("attachment-consumer")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("attachment-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, capabilities=(group,)) as runtime:
+    async with Runtime.open("attachment-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=group) as runtime:
         target = runtime.tasks.from_agent("consumer.attachment-target", runtime.agents.get())
         received: list[bytes] = []
 

@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Page, Runtime, RuntimeHistory, SessionTurn
+from linktools.ai.runtime import ConversationCapability, Page, Runtime, RuntimeHistory, SessionTurn
 from linktools.ai.runtime.state import RuntimeStorage
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -18,14 +18,15 @@ from ._runtime_test_helpers import RuntimeUsageModels
 
 @pytest.mark.asyncio
 async def test_in_memory_session_run_restores_timeline() -> None:
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
+    application.capability(ConversationCapability(), scope="runtime")
     application.agent("default", model="default", allow_tools=())
 
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(application,),
+        features=application,
     ) as runtime:
         session = await runtime.agents.get("default").create_session("session")
         first = (await session.run("hello", timeout_seconds=10)).result
@@ -58,7 +59,8 @@ async def test_in_memory_session_run_restores_timeline() -> None:
 async def test_session_timeline_fork_reads_match_live_and_reopened_history(
     tmp_path: Path, backend: str,
 ) -> None:
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
+    application.capability(ConversationCapability(), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     storage = (
         RuntimeStorage.in_memory()
@@ -84,7 +86,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=storage,
-        capabilities=(application,),
+        features=application,
     ) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get("default").create_session("parent")

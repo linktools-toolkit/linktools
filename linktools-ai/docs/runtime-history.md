@@ -2,9 +2,24 @@
 
 Observation events identify progress; the corresponding Runtime domain owns
 its recorded content. Live progress can arrive before its history is persisted.
-Retained execution routes coalesce observation writes with one Runtime-owned
-timer. The first queued observation starts a one-second window; the shared
-tick flushes queued runs. A run reaching 16 observation boundaries flushes
+Detailed execution persistence requires `TraceCapability()` registered
+at Runtime scope; storage retention alone does not select it. Without this
+capability, the owning Runtime exposes its existing live staging content while
+retained locally. Final results follow execution retention; Session history
+requires `ConversationCapability()` and follows conversation retention. See
+[optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
+
+For runs with restart checkpoints disabled, model-boundary control checks may
+reuse one execution/history-head observation captured within the last three
+seconds. Both records share the same source capture and expiry. Without a hot
+record cache, each check reads the source. Tool admission, recovery checkpoints,
+terminal commits and result consumption retain their authoritative transaction
+checks. Task-owned runs and their delegated descendants keep source-only model control
+checks, including on transient execution routes.
+
+With durable trace enabled, retained execution routes coalesce observation writes
+with one Runtime-owned timer. The first queued observation starts a three-second window; the shared
+tick flushes queued runs. A run reaching 128 observation boundaries flushes
 earlier. Each run keeps its own transaction and completion barrier, so a blocked
 run does not stop another run's publication. An idle Runtime performs no flush.
 Storage latency and contention can extend publication time. A blocked provider
@@ -16,7 +31,8 @@ results may be published while sibling tools are still running; their pending
 transcript group contains complete results, not half-received tool bodies.
 While a retained model request is `RUNNING`, its public interaction contains
 identity/status metadata and empty request/response content. The prepared input
-stays with the active request; required recovery captures remain unchanged.
+stays with the active request. Separately enabled restart checkpoints preserve
+recovery context without publishing public trace.
 Completion or a controlled abnormal end publishes the actual prepared input and
 any received response. Requesting content early does not force a write or provider completion.
 Complete outgoing raw input may already be captured before provider completion;
@@ -26,8 +42,8 @@ may be refined during preparation without changing request identity or start tim
 With shared retained backing storage, independently opened
 `RuntimeHistory.open(...)` readers see the committed prefix while the execution
 is active. An immediate read after a live notification can be empty; a fresh
-read after publication includes the new facts. Recovery checkpoints remain
-durable independently of public observation publication. Terminal handoffs and
+read after publication includes the new facts. Opted-in recovery checkpoints
+remain durable independently of public observation publication. Terminal handoffs and
 Runtime close drain queued observations before completing. Separate in-memory
 storage instances do not share state. An explicit TRANSIENT execution route
 exposes active content immediately in its owning Runtime/process and discards
@@ -270,11 +286,12 @@ query can observe the completed association.
 
 ## Visibility, paging and persistence
 
-For retained execution routes, public history reads the canonical EXECUTION
-owner. Admission, prepared model requests, completed response parts, and
+For executions admitted with durable trace and a retained execution route,
+public history reads the canonical EXECUTION owner. Admission, prepared model requests, completed response parts, and
 model-facing tool returns enter the next observation batch; raw streaming
-deltas do not become complete history parts. Checkpoint and terminal operations
-force pending observations through their required commit boundary. A public
+deltas do not become complete history parts. Terminal operations and Runtime
+close drain queued observations. Restart checkpoint commits remain independent
+of public observation publication. A public
 read captures the committed run identity and transcript, event, and model-request
 high-water marks together. Immutable body references can then be resolved
 outside that read boundary. Readers do not fall back to producer-local staging
@@ -387,13 +404,57 @@ to its later terminal state. Missing identities inside a declared range,
 inconsistent ownership, and conflicting terminal metadata raise integrity errors
 rather than fabricating coverage. An uncommitted start is not publicly visible.
 
+For bounded live refreshes, `runtime.history.read_model_interaction_updates()`
+returns `(boundary, items)`. Optional `after_cutoffs` contains per-run known
+prefixes as `UsageReadCutoff` values; omitted runs start at zero. The operation
+captures current admitted identities and reads at most `limit` metadata items
+across all runs (default 200). The budget is allocated to run suffixes in boundary
+order; returned ranges may be short, including omission of later runs. An
+unchanged suffix returns an empty tuple with its current boundary. To finish a larger captured range, use
+`read_model_interaction_metadata()` with the returned boundary's fixed ceilings;
+calling the update operation again captures a new boundary.
+
+The built-in update operation authorizes once before reading its fresh boundary
+and first metadata page in one short metadata-owner scope. Authorization runs
+outside that scope. Later pages authorize independently and may observe newer
+lifecycle states without expanding their captured identities. Custom services
+may optionally implement this public operation; otherwise `RuntimeHistory`
+composes their existing capture and metadata operations, preserving their
+authorization and overrides. Custom history readers and service subclasses keep
+that same existing-operation composition.
+
+Live graph and execution observers use the update operation for new suffixes
+and contiguous active tails. Sparse active ranges retain separate bounded reads.
+This changes the number of internal authorization callbacks for a live refresh,
+not the requirement to authorize each public query. Subscriptions still precede
+snapshots. Final compensation still fixes model cutoffs before tree replay and
+reads model states afterward; it does not reuse live prefetched rows.
+
 ## Execution ownership and recovery
 
 SQL and SQLite permit several Runtime instances to use one namespace. Opening
 another Runtime does not take over an admitted or running execution, or finish
 an unhanded-off cancellation. Separate sessions can run concurrently; one
 session's active-execution admission still uses its existing optimistic claim.
-Runtime does not add an ownership heartbeat or a namespace-wide database lock.
+The ordinary durable path does not add an ownership heartbeat or a
+namespace-wide database lock. Eligible deferred turns use the optional cache
+turn-coordination lease while a turn has no database record; see
+[independent commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
+
+With `ConversationCapability()` and non-transient conversation storage,
+successful standalone executions retain
+their actual final model context for
+`execution.fork`, including imported history and tool calls and returns, even
+without durable trace. This single canonical terminal checkpoint follows the
+conversation storage route and remains available after reopening durable storage;
+it does not retain the full intermediate trace or enable restart checkpoints.
+An execution without the admitted conversation guarantee cannot gain fork support
+from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
+
+For eligible terminal-only source turns, this context joins the existing final
+owner batch in one database write transaction. Object bodies still have their
+own I/O. Fork and retry executions retain their existing durable-path admission
+and do not inherit that one-write-transaction guarantee.
 
 After an executor crashes, confirm it has stopped, then call the existing
 `runtime.executions.recover(execution_id, principal=...)`. Recovery competes for
@@ -443,8 +504,9 @@ derive from the graph recovery request, so retrying a partly recovered graph
 does not take over an already recovered child again. A later recovery boundary
 requires a new graph recovery key.
 
-Filesystem execution storage retains automatic crash recovery because its
-existing writer lock supplies exclusive ownership. SQL startup can still finish
+Filesystem execution storage can automatically recover admitted checkpoint-enabled
+executions because its existing writer lock supplies exclusive ownership.
+Storage alone does not grant restart recovery. SQL startup can still finish
 durably handed-off work, including deferred continuations, prepared terminal
 handoffs, and terminal cleanup. A plain `FINALIZING` status alone is not proof
 that an active producer relinquished ownership.

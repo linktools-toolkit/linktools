@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -24,12 +24,12 @@ from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CO
 @pytest.mark.asyncio
 async def test_historical_agent_capture_restores_original_structured_output_binding(tmp_path: Path) -> None:
     models = FixtureModels()
-    group = CapabilityGroup[None]("historical-consumer")
+    group = RuntimeFeatures[None]("historical-consumer")
     group.agent("default", model="default", system_prompt="Preserve the original behavior.",
                 allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("consumer.historical-score", exact, effect_policy="none")
     async with Runtime.open("historical-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, capabilities=(group,)) as runtime:
+                            context=CONTEXT, features=group) as runtime:
         source = await runtime.agents.get().start("the original question", output=ScoreBundle,
             principal=PRINCIPAL, idempotency_key="historical-source")
         source_result = (await source.wait(timeout_seconds=10)).result

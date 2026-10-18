@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Captured input reprojection retains inline workspace attachment occurrences."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, UserContent
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import TaskStatus, WorkspaceFileInput
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
@@ -45,7 +47,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
     if file_change == "deleted":
         suffix.write_text("SUFFIX ORIGINAL", encoding="utf-8")
     models = FixtureModels()
-    group = CapabilityGroup("inline-capture")
+    group = workspace_features("inline-capture", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def project(context: AgentTaskInputContext) -> tuple[UserContent | WorkspaceFileInput, ...]:
@@ -54,7 +56,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
 
     async with Runtime.open("inline-capture", models=models, context=CONTEXT,
             storage=RuntimeStorage.in_memory(),
-            capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
+            features=group) as runtime:
         target = runtime.tasks.from_agent("inline.agent", runtime.agents.get(),
                                           build_input=project if projected else None)
         scorer = Task("inline.score", _score_graph, effect_policy="none")
@@ -121,7 +123,7 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
     attachment = work / "unused.txt"
     attachment.write_text("NOT ACCEPTED", encoding="utf-8")
     models = FixtureModels()
-    group = CapabilityGroup("irreversible-capture")
+    group = workspace_features("irreversible-capture", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def discard(context: AgentTaskInputContext) -> str:
@@ -129,7 +131,7 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
 
     async with Runtime.open("irreversible-capture", models=models, context=CONTEXT,
             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
+            features=group) as runtime:
         target = runtime.tasks.from_agent("irreversible.agent", runtime.agents.get(), build_input=discard)
         scorer = Task("irreversible.score", _score_graph, effect_policy="none")
         engine = runtime.tasks.bind(target, scorer)

@@ -330,7 +330,7 @@ This is a breaking pre-release change with no compatibility aliases:
 - AssetStore and StorageOverlay no longer expose layer-ambiguous numeric history.
   Capture layer-qualified references with AssetStore.resolve_versions(keys) and
   read them with read_versions(refs); numeric history remains backend-local
-- Local Skill resources use DirectoryAssetBackend and CapabilityGroup.capture(),
+- Local Skill resources use DirectoryAssetBackend and RuntimeFeatures.capture(),
   then AssetSkillSource with the captured reader and SkillSourceRef
 - EvaluationRun.report becomes create_report; RuntimeEvaluations.compare becomes
   create_comparison_report. These methods create and persist reports

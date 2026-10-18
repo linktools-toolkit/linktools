@@ -316,7 +316,7 @@ def test_allowed_model_change_does_not_allow_prompt_or_environment_changes() -> 
     from linktools.ai.spec import AgentSpec
 
     def candidate(revision: int, model: str, prompt: str = "Answer") -> CandidateContract:
-        binding = AgentBindingContract(AgentSpec("agent", model=model, system_prompt=prompt, revision=revision),
+        binding = AgentBindingContract(AgentSpec("agent", model=model, system_prompt=prompt, revision=revision, tool_retries=3, output_retries=3),
             {"model_identity": model}, (), (), "text", {"type": "string"})
         return CandidateContract("model", TaskRef("target", revision), None,
             ({"id": "target", "revision": revision, "type": "agent", "config": {

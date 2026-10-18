@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
@@ -44,7 +44,7 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
         effects.append("unknown-write")
         raise RuntimeError("external outcome is uncertain")
 
-    group = CapabilityGroup[None]("application")
+    group = RuntimeFeatures[None]("application")
     group.tool(slow, effect_policy="non_replay_safe")
     group.tool(unknown, effect_policy="non_replay_safe")
     for name, tools in (
@@ -59,7 +59,7 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
             "cancel-unknown-sibling",
             models=_TaskTestModels(),
             storage=storage,
-            capabilities=(group,),
+            features=group,
         ) as runtime:
             unknown_task = runtime.tasks.from_agent(
                 "review.unknown", runtime.agents.get("unknown")

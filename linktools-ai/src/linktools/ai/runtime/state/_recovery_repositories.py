@@ -88,7 +88,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, value),
-                record.storage_version,
+                record.storage_revision,
             )
             return value
 
@@ -123,7 +123,7 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, stored, value),
-                stored.storage_version,
+                stored.storage_revision,
             )
             values.append(value)
         return tuple(values)
@@ -189,7 +189,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, value),
-                record.storage_version,
+                record.storage_revision,
             )
             return value
 
@@ -224,7 +224,7 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, stored, value),
-                stored.storage_version,
+                stored.storage_revision,
             )
             values.append(value)
         return tuple(values)
@@ -392,9 +392,9 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
                     self._KIND, execution_id, next_record,
                     state=_record_state(next_record),
                 ),
-                storage_version=current_record.storage_version + 1,
+                storage_revision=current_record.storage_revision + 1,
             ),
-            current_record.storage_version,
+            current_record.storage_revision,
         )
         return next_record
 
@@ -530,7 +530,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             if missing_aliases:
                 guarded = await transaction.guard_record(
                     record.key_digest,
-                    expected_storage_version=record.storage_version,
+                    expected_storage_revision=record.storage_revision,
                 )
                 if guarded is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -627,7 +627,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     if alias_key is None:
                         guarded = await transaction.guard_record(
                             existing_record.key_digest,
-                            expected_storage_version=existing_record.storage_version,
+                            expected_storage_revision=existing_record.storage_revision,
                         )
                         if guarded is None:
                             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -948,7 +948,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             expires = now + timedelta(seconds=lease_seconds)
             if not await transaction.update_record_lease(
                 record.key_digest,
-                expected_storage_version=record.storage_version,
+                expected_storage_revision=record.storage_revision,
                 lease_owner=current.owner,
                 lease_fence=current.fence,
                 lease_expires_at=expires,
@@ -1249,7 +1249,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         value: ToolOperationRecord,
     ) -> None:
         candidate = _projected_record(self, record, value)
-        await _replace_checked(transaction, candidate, record.storage_version)
+        await _replace_checked(transaction, candidate, record.storage_revision)
 
 
 def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) -> bool:
@@ -1361,9 +1361,9 @@ class RecoveryApprovalRepositoryImpl(_ApprovalRepositoryImpl):
                             value,
                             state=value.status.value,
                         ),
-                        storage_version=stored.storage_version + 1,
+                        storage_revision=stored.storage_revision + 1,
                     ),
-                    stored.storage_version,
+                    stored.storage_revision,
                 )
             )
             values.append(value)
@@ -1414,9 +1414,9 @@ class RecoveryExternalCallRepositoryImpl(_ExternalCallRepositoryImpl):
                             value,
                             state=value.status.value,
                         ),
-                        storage_version=stored.storage_version + 1,
+                        storage_revision=stored.storage_revision + 1,
                     ),
-                    stored.storage_version,
+                    stored.storage_revision,
                 )
             )
             values.append(value)

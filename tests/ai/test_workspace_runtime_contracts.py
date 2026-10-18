@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 """Regression tests for workspace RuntimeStorage composition."""
 
+from ._runtime_test_helpers import workspace_features
+
 import pytest
 from linktools.ai.asset import (
     AssetStore,
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
-from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
 from pydantic_ai_harness.memory import Memory
@@ -138,7 +139,7 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
         created_record = await store._record("memory/notes.md")
         assert created_record is not None
         assert created_record.revision == 1
-        assert "storage_version" not in created_record.metadata
+        assert "storage_revision" not in created_record.metadata
         current = await store.read("memory/notes.md", max_chars=100)
         assert current is not None
         assert current.version == created.version
@@ -153,7 +154,7 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
         updated_record = await store._record("memory/notes.md")
         assert updated_record is not None
         assert updated_record.revision == 2
-        assert "storage_version" not in updated_record.metadata
+        assert "storage_revision" not in updated_record.metadata
         deleted = await store.delete(
             "memory/notes.md",
             expected_version=updated.version,
@@ -193,12 +194,15 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     store = AssetStore(StorageOverlay(source))
     await store.initialize()
 
-    snapshot = await CapabilityGroup("workspace", assets=store).capture()
+    asset_features = RuntimeFeatures("workspace")
+    asset_features.capability(AssetCapability(store), scope="runtime")
+    snapshot = await asset_features.capture()
 
     assert [(item.kind, item.id) for item in snapshot.contributions] == [
         ("agent", "default"),
         ("mcp", "local"),
         ("skill", "review"),
+        ("capability", "runtime.assets"),
     ]
 
 
@@ -210,11 +214,15 @@ def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
+    from linktools.ai.runtime import ConversationCapability
+
+    features = workspace_features("workspace", workspace=workspace)
+    features.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open(
         "default",
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        features=features,
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
@@ -232,7 +240,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        features=features,
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
@@ -242,7 +250,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         "default",
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        features=features,
     ) as runtime:
         loaded = await runtime.sessions.get(
             created.session_id,

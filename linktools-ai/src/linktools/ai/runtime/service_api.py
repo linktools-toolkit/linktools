@@ -1129,7 +1129,7 @@ class TaskModelProjection:
 class ExecutionObservationEvent:
     """Execution-tree or metadata delivery with an independent observation cursor.
 
-    The nested tree cursor remains a legacy tree-only checkpoint. Model metadata
+    The nested tree cursor is a tree-only checkpoint. Model metadata
     reuses the outer cursor and is compensated again on every reconnection.
     """
 
@@ -1554,8 +1554,9 @@ class SessionService(Protocol):
         principal: Principal,
         cursor: str | None = None,
         limit: int = 100,
+        max_age: float = 0,
     ) -> SessionDetail:
-        """Reconcile admission and return a freshly captured session and timeline."""
+        """Read a complete display; positive max_age permits bounded stale display values."""
         ...
     async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
     async def history(

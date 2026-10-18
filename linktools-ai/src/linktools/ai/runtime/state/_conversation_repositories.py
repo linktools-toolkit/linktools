@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Conversation-domain repository implementations."""
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
@@ -127,6 +128,28 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         head = await self._decode(record, TranscriptHeadRecord)
         return head.message_count
 
+    async def get_with_head(
+        self, history_id: str, *, tenant_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        """Read display membership with the store's bounded record freshness."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        records = await self._store.read_records((
+            self._key("conversation_history", history_id),
+            self._key("transcript_head", history_id),
+        ))
+        return await self._decode_with_head(records, history_id)
+
+    async def get_with_head_fresh(
+        self, history_id: str, *, tenant_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        """Confirm a newer display's history membership and repair older facts."""
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        records = await self._refresh_records((
+            self._key("conversation_history", history_id),
+            self._key("transcript_head", history_id),
+        ))
+        return await self._decode_with_head(records, history_id)
+
     async def get_with_head_in_transaction(
         self,
         transaction: StateTransaction,
@@ -139,6 +162,13 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         history_key = self._key("conversation_history", history_id)
         head_key = self._key("transcript_head", history_id)
         records = await transaction.get_records((history_key, head_key))
+        return await self._decode_with_head(records, history_id)
+
+    async def _decode_with_head(
+        self, records: Mapping[bytes, StoredRecord], history_id: str,
+    ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
+        history_key = self._key("conversation_history", history_id)
+        head_key = self._key("transcript_head", history_id)
         record = records.get(history_key)
         if record is None:
             return None
@@ -368,9 +398,9 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                             child_history_id,
                             child,
                         ),
-                        storage_version=current.storage_version + 1,
+                        storage_revision=current.storage_revision + 1,
                     ),
-                    current.storage_version,
+                    current.storage_revision,
                 )
                 await ensure_projection()
                 return child
@@ -663,7 +693,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if (
                 await transaction.guard_record(
                     self._key("session", source_session_id),
-                    expected_storage_version=source_stored.storage_version,
+                    expected_storage_revision=source_stored.storage_revision,
                 )
                 is None
             ):
@@ -1150,7 +1180,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if replayed:
                 return value, True
             candidate = _projected_record(self, current, proposed)
-            await _replace_checked(transaction, candidate, current.storage_version)
+            await _replace_checked(transaction, candidate, current.storage_revision)
             await self._bump_list_generation(transaction, value.owner_principal_id)
             return proposed, False
 
@@ -1185,7 +1215,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, proposed),
-                record.storage_version,
+                record.storage_revision,
             )
             await self._bump_list_generation(transaction, current.owner_principal_id)
             return proposed
@@ -1292,7 +1322,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     raise AIError(ErrorCode.SESSION_BUSY)
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
-            await _replace_checked(transaction, candidate, current.storage_version)
+            await _replace_checked(transaction, candidate, current.storage_revision)
             if not release:
                 sequence = await transaction.next_sequence(
                     self._timeline_sequence_key(session_id)
@@ -1357,7 +1387,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             await _replace_checked(
                 transaction,
                 _projected_record(self, record, next_value),
-                record.storage_version,
+                record.storage_revision,
             )
             await self._bump_list_generation(transaction, current.owner_principal_id)
             return next_value
@@ -1405,6 +1435,54 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     async def _decode_history(self, record: StoredRecord) -> ConversationHistoryRecord:
         return _decode_enveloped_domain(record.data, ConversationHistoryRecord)
+
+    async def pending_turn_commit_in_transaction(
+        self, transaction: StateTransaction, *, session_id: str, execution_id: str,
+    ) -> SessionTurnCommitRef:
+        turns = await transaction.list_facts(FactQuery(
+            self._timeline_stream(session_id), subject_digest=self._timeline_subject(execution_id),
+        ))
+        if len(turns) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        turn = self._decode_timeline_turn(session_id, turns[0])
+        record = await transaction.get_record(self._timeline_commit_key(session_id, turn.turn_seq))
+        if turn.execution_id != execution_id or record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        committed = self._decode_timeline_commit(session_id, turn.turn_seq, record)
+        if committed.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return committed
+
+    async def commit_pending_turn_in_transaction(
+        self, transaction: StateTransaction, *, expected: SessionRecord,
+        execution_id: str, next_cursor: ConversationCursor,
+        start_message_index: int, end_message_index: int,
+    ) -> SessionRecord:
+        _require_tenant(expected, self._tenant_id)
+        record = await transaction.get_record(self._key("session", expected.session_id))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(record, SessionRecord)
+        if (current != expected or current.status is not SessionStatus.OPEN
+                or current.active_execution_id is not None):
+            raise AIError(ErrorCode.SESSION_BUSY)
+        final = replace(current, continuation=next_cursor, history_quality="complete",
+                        revision=current.revision + 1, updated_at=await transaction.now())
+        await _replace_checked(transaction, _projected_record(self, record, final), record.storage_revision)
+        sequence_key = self._timeline_sequence_key(current.session_id)
+        sequences = await transaction.reserve_sequences({
+            sequence_key: 1, self._list_generation_key(current.owner_principal_id): 1,
+            self._list_generation_key(): 1,
+        })
+        sequence = sequences[sequence_key]
+        await transaction.insert_fact(StoredFact(
+            self._timeline_stream(current.session_id), sequence, record.key_digest, "session_turn",
+            self._timeline_subject(execution_id), None, {"version": 1, "execution_id": execution_id},
+        ))
+        await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommitRef(
+            current.session_id, sequence, execution_id, start_message_index, end_message_index,
+        )))
+        return final
 
     async def advance_continuation_in_transaction(
         self,
@@ -1454,7 +1532,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         await _replace_checked(
             transaction,
             _projected_record(self, record, next_value),
-            record.storage_version,
+            record.storage_revision,
         )
         await self._bump_list_generation(transaction, current.owner_principal_id)
         return next_value

@@ -11,11 +11,11 @@ from typing import Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
 from pydantic_ai import Tool
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import AssetStore, AssetStoreReader
-from ..core import JsonValue
+from ..asset import AssetStoreReader
+from ..core import AuthorizationPolicy, ImmutableJsonMapping, JsonValue, PromptLimits
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
@@ -28,6 +28,7 @@ from ..spec import (
 )
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
+from ._asset import AssetCapability
 from ._context import AgentContext
 from ._contribution import (
     CapabilityContribution,
@@ -36,18 +37,17 @@ from ._contribution import (
     _validate_revision,
 )
 from ._declaration import (
-    BuiltinDeclarationLoader,
     _bind_mcp_contribution,
 )
-from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
-from ._skill import SkillDefinition
+from ._loading import CapabilityLoadContext
 from ._tool_metadata import (
     ToolEffectPolicy,
     is_tool_effect_policy,
     tool_metadata,
     validate_tool_metadata,
 )
-from ._workspace import _workspace_tool_definitions, workspace_tool_declarations
+from ._workspace import WorkspaceCapability, workspace_tool_declarations
+from ._tool_responses import ToolResponsesCapability
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.capability.group")
@@ -57,7 +57,7 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityGroupCapture(Generic[AppT]):
+class RuntimeFeaturesCapture(Generic[AppT]):
     """Declarations and a versioned Asset reader captured from one revision."""
 
     group_id: str
@@ -67,10 +67,20 @@ class CapabilityGroupCapture(Generic[AppT]):
     instructions: RepositoryInstructions
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
+    authorization: AuthorizationPolicy | None = field(default=None, repr=False, compare=False)
+    limits: PromptLimits = field(default_factory=PromptLimits)
+    defaults: Mapping[str, JsonValue] = field(default_factory=dict)
+    filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
             raise ValueError("capture group_id must be non-empty")
+        if not isinstance(self.limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
+        _validate_filter(self.filter)
+        object.__setattr__(self, "defaults", _freeze_defaults(self.defaults))
         contributions = tuple(self.contributions)
         if any(
             not isinstance(value, CapabilityContribution)
@@ -103,44 +113,48 @@ class CapabilityGroupCapture(Generic[AppT]):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
 
-class CapabilityGroup(Generic[AppT]):
+class RuntimeFeatures(Generic[AppT]):
     """Register and capture one named set of runtime candidate definitions."""
 
     def __init__(
         self,
         group_id: str,
         *,
-        assets: "AssetStore | None" = None,
-        workspace: "Workspace | None" = None,
         sandbox: "Sandbox | None" = None,
+        authorization: AuthorizationPolicy | None = None,
+        limits: PromptLimits | None = None,
+        defaults: Mapping[str, JsonValue] | None = None,
+        filter: Callable[[AgentSpec, CapabilityContribution[object]], bool] | None = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
-        if assets is not None and not isinstance(assets, AssetStore):
-            raise TypeError("assets must be AssetStore")
-        if workspace is not None and not isinstance(workspace, Workspace):
-            raise TypeError("workspace must be Workspace")
+        self._defaults = _freeze_defaults({} if defaults is None else defaults)
+        _validate_filter(filter)
+        self._authorization = authorization
+        self._limits = PromptLimits() if limits is None else limits
+        if not isinstance(self._limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
+        self._filter = filter
         self._id = group_id
-        self._store = assets
-        self._workspace = workspace
+        self._asset_capability: AssetCapability[AppT] | None = None
+        self._tool_responses_registered = False
+        self._workspace: Workspace | None = None
         self._sandbox = sandbox
-        self._loaders: dict[str, CapabilityLoader[AppT]] = {}
         self._contributions: list[CapabilityContribution[AppT]] = []
-        if workspace is not None:
-            declarations = {item.name: item for item in workspace_tool_declarations()}
-            self._contributions.extend(
-                CapabilityContribution.from_opaque(
-                    "tool", tool.name, tool, revision=declarations[tool.name].revision,
-                )
-                for tool in _workspace_tool_definitions(workspace)
-            )
-        if assets is not None:
-            for kind in ("agent", "skill", "mcp", "rule"):
-                self._loaders[kind] = BuiltinDeclarationLoader(kind)
 
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def defaults(self) -> Mapping[str, JsonValue]:
+        """Return frozen, namespaced settings for declaration-time consumers."""
+        return self._defaults
+
+    @property
+    def authorization(self) -> AuthorizationPolicy | None:
+        """Return the current borrowed policy without loading declarations."""
+        return self._authorization
 
     @property
     def workspace(self) -> "Workspace | None":
@@ -149,11 +163,6 @@ class CapabilityGroup(Generic[AppT]):
     @property
     def sandbox(self) -> "Sandbox | None":
         return self._sandbox
-
-    @property
-    def assets(self) -> "AssetStore | None":
-        """Return the explicit AssetStore used by this capability group."""
-        return self._store
 
     def tool(
         self,
@@ -193,20 +202,81 @@ class CapabilityGroup(Generic[AppT]):
         id: "str | None" = None,
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
+        scope: Literal["agent", "runtime"] = "runtime",
     ) -> "AbstractCapability[AgentContext[AppT]]":
-        """Register one Agent-selectable Pydantic runtime behavior capability."""
+        """Register Runtime-wide behavior, or explicitly opt into Agent selection.
+
+        Runtime-scoped capabilities bypass Agent selection and are current host
+        policy, outside durable Agent bindings. They must not defer loading.
+        """
+        if not isinstance(capability, AbstractCapability):
+            raise TypeError("capability must be an AbstractCapability")
         _validate_revision(revision)
         capability_id = _capability_registration_id(capability, id)
         _validate_external_capability_id(capability_id)
-        self._contributions.append(
-            CapabilityContribution.from_opaque(
-                "capability",
-                capability_id,
-                capability,
-                revision=revision,
-                config=config,
-            )
+        contribution = CapabilityContribution.from_opaque(
+            "capability", capability_id, capability, revision=revision,
+            config=config, scope=scope,
         )
+        workspace_capabilities: list[WorkspaceCapability] = []
+        asset_capabilities: list[AssetCapability[AppT]] = []
+        response_capabilities: list[ToolResponsesCapability[AppT]] = []
+
+        def collect(value: AbstractCapability[object]) -> None:
+            if isinstance(value, WrapperCapability):
+                collect(value.wrapped)
+            elif isinstance(value, CombinedCapability):
+                for child in value.capabilities:
+                    collect(child)
+            elif isinstance(value, ToolResponsesCapability):
+                response_capabilities.append(value)
+            elif isinstance(value, AssetCapability):
+                asset_capabilities.append(value)
+            elif isinstance(value, WorkspaceCapability):
+                workspace_capabilities.append(value)
+            else:
+                def collect_leaf(leaf: AbstractCapability[object]) -> None:
+                    if isinstance(leaf, ToolResponsesCapability):
+                        response_capabilities.append(leaf)
+                    elif isinstance(leaf, WorkspaceCapability):
+                        workspace_capabilities.append(leaf)
+                    elif isinstance(leaf, AssetCapability):
+                        asset_capabilities.append(leaf)
+
+                value.apply(collect_leaf)
+
+        collect(capability)
+        if response_capabilities:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "ToolResponsesCapability requires Runtime scope")
+            if self._tool_responses_registered or len(response_capabilities) != 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        if asset_capabilities:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                              "AssetCapability requires Runtime scope")
+            if self._asset_capability is not None or len(asset_capabilities) != 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        if workspace_capabilities:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                              "WorkspaceCapability requires Runtime scope")
+            if self._workspace is not None or len(workspace_capabilities) != 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            workspace_capability = workspace_capabilities[0]
+            declarations = {item.name: item for item in workspace_tool_declarations()}
+            tools = tuple(
+                CapabilityContribution.from_opaque(
+                    "tool", tool.name, tool, revision=declarations[tool.name].revision,
+                )
+                for tool in workspace_capability.tool_definitions()
+            )
+            self._workspace = workspace_capability.workspace
+            self._contributions.extend(tools)
+        if asset_capabilities:
+            self._asset_capability = asset_capabilities[0]
+        self._tool_responses_registered |= bool(response_capabilities)
+        self._contributions.append(contribution)
         return capability
 
     def agent(
@@ -225,8 +295,8 @@ class CapabilityGroup(Generic[AppT]):
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
-        tool_retries: int = AgentSpec.DEFAULT_TOOL_RETRIES,
-        output_retries: int = AgentSpec.DEFAULT_OUTPUT_RETRIES,
+        tool_retries: int | None = None,
+        output_retries: int | None = None,
         description: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
@@ -262,52 +332,23 @@ class CapabilityGroup(Generic[AppT]):
         self._contributions.append(CapabilityContribution.from_declaration(server))
         return server
 
-    def loader(
-        self,
-        kind: str,
-        loader: CapabilityLoader[AppT],
-    ) -> CapabilityLoader[AppT]:
-        """Register the sole loader for one input Asset kind, replacing its slot."""
-        if not isinstance(kind, str) or not kind.strip():
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if not callable(getattr(loader, "load", None)):
-            raise TypeError("loader must implement load")
-        source_kind = getattr(loader, "source_kind", None)
-        if source_kind is not None and source_kind != kind:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        self._loaders[kind] = loader
-        return loader
-
-    async def capture(self) -> "CapabilityGroupCapture[AppT]":
+    async def capture(self) -> "RuntimeFeaturesCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
+        authorization, limits = self._authorization, self._limits
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
-        loaders = tuple(self._loaders.items())
-        store = self._store
         context: CapabilityLoadContext | None = None
         source_revision: StorageRevision | None = None
         asset_reader: AssetStoreReader | None = None
-        if store is not None:
-            context = await CapabilityLoadContext.capture(self._id, store)
-            for _kind, loader in loaders:
-                loaded = await loader.load(context)
-                for value in loaded:
-                    _validate_skill_source(value, context)
-                    if isinstance(value, (AgentSpec, SkillDefinition, MCPServerSpec)):
-                        item = CapabilityContribution.from_declaration(value)
-                    elif isinstance(value, CapabilityContribution):
-                        item = value
-                    elif isinstance(value, RepositoryInstructionDocument):
-                        instruction_documents.append(value)
-                        continue
-                    else:
-                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                    contributions.append(item)
-            await context.verify_source_revision()
+        if self._asset_capability is not None:
+            context, loaded = await self._asset_capability.capture(self._id)
+            for value in loaded:
+                if isinstance(value, RepositoryInstructionDocument):
+                    instruction_documents.append(value)
+                else:
+                    contributions.append(value)
             source_revision = context.source_revision
             asset_reader = context.asset_reader
-        elif loaders:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         captured_items = tuple(
             _freeze_contribution(
                 _bind_mcp_contribution(item, context)
@@ -323,7 +364,7 @@ class CapabilityGroup(Generic[AppT]):
             key=lambda item: (item.kind, item.id, item.revision),
         )
         capture_contributions = tuple((*declarations, *generic))
-        capture = CapabilityGroupCapture(
+        capture = RuntimeFeaturesCapture(
             self._id,
             capture_contributions,
             source_revision,
@@ -331,6 +372,10 @@ class CapabilityGroup(Generic[AppT]):
             RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
             sandbox=self._sandbox,
+            authorization=authorization,
+            limits=limits,
+            defaults=self._defaults,
+            filter=self._filter,
         )
         _logger.info(
             "capability group captured: group=%s contributions=%d instructions=%d "
@@ -343,32 +388,16 @@ class CapabilityGroup(Generic[AppT]):
         return capture
 
 
-def _validate_skill_source(
-    value: object,
-    context: CapabilityLoadContext,
-) -> None:
-    if isinstance(value, CapabilityContribution):
-        if value.kind != "skill" or not isinstance(value.value, SkillDefinition):
-            return
-        definition = value.value
-    elif isinstance(value, SkillDefinition):
-        definition = value
-    else:
-        return
-    source_ref = definition.source_ref
-    if source_ref is None:
-        return
-    if source_ref.source_id != context.group_id:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    versions = tuple(item.asset for item in source_ref.resources)
-    try:
-        captured = context.bind_versions(tuple(ref.key for ref in versions))
-    except AIError as error:
-        if error.code is ErrorCode.SNAPSHOT_CONFLICT:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        raise
-    if versions != captured:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+def _validate_filter(value: object) -> None:
+    if value is not None and not callable(value):
+        raise TypeError("filter must be callable or None")
+
+
+def _freeze_defaults(value: Mapping[str, JsonValue]) -> ImmutableJsonMapping:
+    frozen = ImmutableJsonMapping(value)
+    if any(not isinstance(section, dict) for section in frozen.values()):
+        raise TypeError("defaults namespaces must contain JSON objects")
+    return frozen
 
 
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
@@ -462,4 +491,4 @@ def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
         seen.add(identity)
 
 
-__all__ = ["CapabilityGroup", "CapabilityGroupCapture"]
+__all__ = ["RuntimeFeatures", "RuntimeFeaturesCapture"]

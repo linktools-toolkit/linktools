@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Attachment acceptance survives request preparation and archive pagination."""
 
+from linktools.ai.runtime import TraceCapability
 import asyncio
 import hashlib
 from pathlib import Path
@@ -24,7 +25,7 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, HmacCursorSigner
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionInputContext, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
@@ -238,16 +239,17 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
         _attachment_request("call"),
         _attachment_request("second-call"),
     ])
-    group = CapabilityGroup("attachment-pagination")
-    group.capability(PausePreparation(), id="pause-preparation")
+    group = RuntimeFeatures("attachment-pagination")
+    group.capability(PausePreparation(), id="pause-preparation", scope="agent")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     models.contract = {**models.contract, "vision": True}
     first = None
     started_items = ()
+    group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "attachment-pagination", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(group,),
+        features=group,
     ) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"

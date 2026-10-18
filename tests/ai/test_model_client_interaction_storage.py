@@ -86,7 +86,7 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         run = AgentRunRecord("run")
-        source = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        source = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         requests = _requests(large=large)
         records = await source.prepare_interactions(run, (_staged(requests),), lambda _: b"{}")
         record = records[0]
@@ -110,9 +110,9 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
         await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
-        target = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        target = storage.run_store.read_store(RuntimeDomain.TRACE)
         relocated = await target.prepare_relocated_interactions(archived, resolved)
-        assert relocated[0].client_requests[0].body.content.source_domain is RuntimeDomain.EXECUTION
+        assert relocated[0].client_requests[0].body.content.source_domain is RuntimeDomain.TRACE
         await target.sync_projection(run, events=(), checkpoints=(), interactions=relocated, execution_id="execution")
         assert await target.resolve_model_interactions(relocated, include_client_requests=True) == resolved
         await source.release_agent_run("run")
@@ -127,14 +127,16 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
     storage = RuntimeStorage.in_memory()
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}")
         assert _decode_step_envelope(_encode_step_envelope(record)).client_requests == requests
         assert await archive.resolve_model_interaction(record, include_client_requests=True) == (None, None, None, requests)
-        earlier = _encode_persisted_domain(record)
-        del earlier["fields"]["client_requests"]
-        old = _decode_domain(earlier, ModelInteractionRecord, _CURRENT_CODEC, persisted=True)
-        assert old.client_requests is None
+        missing_capture_field = _encode_persisted_domain(record)
+        del missing_capture_field["fields"]["client_requests"]
+        with pytest.raises(AIError) as missing:
+            _decode_domain(missing_capture_field, ModelInteractionRecord, _CURRENT_CODEC, persisted=True)
+        assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert missing.value.safe_details["missing_fields"] == ["client_requests"]
         with pytest.raises(ValueError, match="unfinished"):
             replace(record, status="RUNNING", duration_ns=None, finished_at=None, client_requests=())
     finally:
@@ -147,7 +149,7 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
     storage = RuntimeStorage.in_memory()
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}")
         if corruption == "codec":
             encoded = _encode_persisted_domain(record)
@@ -164,10 +166,10 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
             body = replace(body, raw_size=body.raw_size + 1)
         elif corruption == "compressed_bytes":
             body = replace(body, content=RuntimePayloadRef(
-                StoredPayload.inline_bytes(b"not zlib"), RuntimeDomain.RECOVERY,
+                StoredPayload.inline_bytes(b"not zlib"), RuntimeDomain.CHECKPOINT,
             ))
         else:
-            body = replace(body, content=replace(body.content, source_domain=RuntimeDomain.EXECUTION))
+            body = replace(body, content=replace(body.content, source_domain=RuntimeDomain.TRACE))
         invalid = replace(record, client_requests=(replace(request, body=body),))
         with pytest.raises(AIError) as raised:
             await archive.resolve_model_interaction(invalid, include_client_requests=True)
@@ -186,10 +188,10 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     requests = _requests(large=True)
     try:
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(requests),), lambda _: b"{}")
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records)
-        references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=RuntimeDomain.RECOVERY)))
+        references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=RuntimeDomain.CHECKPOINT)))
         assert len(references) == 2
         retained = await storage.purge_unreferenced_objects(references, exclusive=Offline())
         assert retained.retained == references
@@ -209,10 +211,10 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
     restored = RuntimeStorage.from_root(restored_root)
     await restored.initialize(namespace="native-client", tenant_id="tenant")
     try:
-        archive = restored.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = restored.run_store.read_store(RuntimeDomain.CHECKPOINT)
         records = await archive.list_model_interactions(agent_run_id="run")
         assert await archive.resolve_model_interactions(records, include_client_requests=True) == [(None, None, None, requests)]
-        references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=RuntimeDomain.RECOVERY)))
+        references = tuple(set(iter_runtime_object_refs(_encode_persisted_domain(records[0]), default_domain=RuntimeDomain.CHECKPOINT)))
         await archive.release_agent_run("run")
         result = await restored.purge_unreferenced_objects(references, exclusive=Offline())
         assert result.deleted == references
@@ -224,7 +226,7 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
 async def test_volatile_archive_and_staging_keep_original_attempt_views() -> None:
     from linktools.ai.runtime.state._model_interaction_store import ModelInteractionInMemoryStepArchive
 
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.CHECKPOINT)
     await archive.initialize()
     try:
         requests = _requests(large=True)
@@ -245,7 +247,7 @@ async def test_volatile_archive_and_staging_keep_original_attempt_views() -> Non
         storage.run_store.stage_model_interaction(staged)
         assert await storage.run_store.resolve_model_interaction(staged, include_client_requests=True) == (None, None, None, requests)
         from linktools.ai.runtime._transient_history import TransientExecutionHistoryStore
-        source = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        source = storage.run_store.read_store(RuntimeDomain.TRACE)
         transient = TransientExecutionHistoryStore(source, storage.run_store)
         assert await transient.list_model_interactions(agent_run_id="run") == [staged]
         assert await transient.resolve_model_interactions((staged,)) == [(None, None, None, None)]
@@ -286,13 +288,13 @@ async def test_sdk_recovery_projection_and_native_bytes_remain_separate(
             request_envelope_digest=intern(b'{"streaming":true}')[0],
             response_context=build_context_projection((), sdk_response, intern),
         )
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (staged,), payloads.__getitem__)
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records)
-        objects = storage.object_store(RuntimeDomain.RECOVERY)
+        objects = storage.object_store(RuntimeDomain.CHECKPOINT)
         original_open = objects.open
         raw_keys = {ref.key for _, ref in iter_runtime_object_refs(
-            _encode_persisted_domain(records[0]), default_domain=RuntimeDomain.RECOVERY,
+            _encode_persisted_domain(records[0]), default_domain=RuntimeDomain.CHECKPOINT,
         )}
 
         async def reject_raw_open(key):
@@ -330,18 +332,18 @@ async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
-        objects = storage.object_store(RuntimeDomain.RECOVERY)
+        objects = storage.object_store(RuntimeDomain.CHECKPOINT)
         original_put = objects.put
         references = []
 
         async def put_then_cancel(key, chunks, **kwargs):
             from linktools.ai.storage import ObjectRef
             stat = await original_put(key, chunks, **kwargs)
-            references.append((RuntimeDomain.RECOVERY, ObjectRef("runtime", key, stat.digest, stat.size)))
+            references.append((RuntimeDomain.CHECKPOINT, ObjectRef("runtime", key, stat.digest, stat.size)))
             raise asyncio.CancelledError
 
         monkeypatch.setattr(objects, "put", put_then_cancel)
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         with pytest.raises(asyncio.CancelledError):
             await archive.prepare_interactions(AgentRunRecord("run"), (_staged(_requests(large=True)),), lambda _: b"{}")
         assert await archive.list_model_interactions(agent_run_id="run") == []
@@ -359,7 +361,7 @@ async def test_interrupted_record_preserves_observed_incomplete_response() -> No
     try:
         requests = (_requests()[1],)
         staged = replace(_staged(requests), status="INTERRUPTED", duration_ns=None, finished_at=None)
-        archive = storage.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
         records = await archive.prepare_interactions(AgentRunRecord("run"), (staged,), lambda _: b"{}")
         await archive.sync_projection(AgentRunRecord("run"), events=(), checkpoints=(), interactions=records)
         loaded = await archive.list_model_interactions(agent_run_id="run")

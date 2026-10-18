@@ -4,7 +4,7 @@
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TypeAlias
@@ -95,12 +95,15 @@ class RuntimeInputCaptures:
         authorization: AuthorizationPolicy,
         execution: ExecutionService,
         materializer: ExecutionInputMaterializer,
+        *,
+        prepare_pending_capture: Callable[[str, Principal], Awaitable[None]] | None = None,
     ) -> None:
         self._namespace = namespace
         self._storage = storage
         self._authorization = authorization
         self._execution = execution
         self._materializer = materializer
+        self._prepare_pending_capture = prepare_pending_capture
         self._objects = storage.object_store(RuntimeDomain.TASK)
 
     def _key(self, tenant_id: str, kind: str, identity: str) -> str:
@@ -379,7 +382,13 @@ class RuntimeInputCaptures:
 
     async def capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         principal = request.principal
-        header = await self._storage.execution.executions.get_header(execution_id, tenant_id=principal.tenant_id)
+        repository = self._storage.execution.executions
+        header = await repository.get_header(execution_id, tenant_id=principal.tenant_id)
+        if header is None and self._prepare_pending_capture is not None:
+            await self._prepare_pending_capture(execution_id, principal)
+            header = await repository.state_store.read(
+                lambda _transaction: repository.get_header(execution_id, tenant_id=principal.tenant_id)
+            )
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT, header)
@@ -399,7 +408,10 @@ class RuntimeInputCaptures:
 
     async def _capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
         principal = request.principal
-        record = await self._storage.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+        repository = self._storage.execution.executions
+        record = await repository.state_store.read(
+            lambda _transaction: repository.get(execution_id, tenant_id=principal.tenant_id)
+        )
         if record is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         await self._authorize(principal, ResourceKind.EXECUTION, execution_id, AuthorizationAction.EXECUTION_READ, record.principal_id)

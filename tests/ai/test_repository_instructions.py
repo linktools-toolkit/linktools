@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 import os
 from pathlib import Path
@@ -16,7 +18,7 @@ from linktools.ai.asset import (
     InMemoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -45,7 +47,9 @@ async def _capture_rules(root: Path) -> RepositoryInstructions:
     )
     await store.initialize()
     try:
-        return (await CapabilityGroup("assets", assets=store).capture()).instructions
+        asset_features = RuntimeFeatures("assets")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        return (await asset_features.capture()).instructions
     finally:
         await store.close()
 
@@ -274,7 +278,9 @@ async def test_rule_assets_follow_capability_capture_and_reject_duplicate_source
     try:
         key = AssetKey("rule", "nested/review.md")
         await store.put(key, b"---\nscope: src\n---\nfirst")
-        capture = await CapabilityGroup("rules", assets=store).capture()
+        asset_features = RuntimeFeatures("rules")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         assert capture.instructions.documents == (
             RepositoryInstructionDocument("rule:nested/review", "src", "first"),
         )
@@ -285,7 +291,9 @@ async def test_rule_assets_follow_capability_capture_and_reject_duplicate_source
             await capture.verify_source_revision()
         assert stale_error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
-        fresh = await CapabilityGroup("rules", assets=store).capture()
+        asset_features_2 = RuntimeFeatures("rules")
+        asset_features_2.capability(AssetCapability(store), scope="runtime")
+        fresh = await asset_features_2.capture()
         assert fresh.instructions.documents[0].content == "second"
         duplicate = RepositoryInstructionDocument("rule:duplicate", ".", "same")
         with pytest.raises(AIError) as duplicate_error:
@@ -303,7 +311,9 @@ async def test_rule_asset_id_must_be_canonical() -> None:
     try:
         await store.put(AssetKey("rule", "../outside.md"), b"unsafe")
         with pytest.raises(AIError) as error:
-            await CapabilityGroup("rules", assets=store).capture()
+            asset_features = RuntimeFeatures("rules")
+            asset_features.capability(AssetCapability(store), scope="runtime")
+            await asset_features.capture()
         assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
     finally:
         await store.close()
@@ -338,10 +348,7 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
             "rule-assets",
             models=runtime_test_helpers.RuntimeUsageModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            capabilities=(
-                CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),
-                CapabilityGroup("rules", assets=store),
-            ),
+            features=workspace_features("rules", assets=store, workspace=Workspace.load(tmp_path)),
         ) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

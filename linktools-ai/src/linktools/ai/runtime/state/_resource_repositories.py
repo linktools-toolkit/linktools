@@ -122,8 +122,8 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             else:
                 value = await self._decode(current, MemoryRecord)
                 if (
-                    isinstance(current.storage_version, bool)
-                    or current.storage_version < 0
+                    isinstance(current.storage_revision, bool)
+                    or current.storage_revision < 0
                     or value.revision < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -133,7 +133,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 await _replace_checked(
                     transaction,
                     _projected_record(self, current, next_value),
-                    current.storage_version,
+                    current.storage_revision,
                 )
             await _insert_operation(
                 transaction,
@@ -216,8 +216,8 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             if expected_revision == 0:
                 value = await self._decode(current, MemoryRecord)
                 if (
-                    isinstance(current.storage_version, bool)
-                    or current.storage_version < 0
+                    isinstance(current.storage_revision, bool)
+                    or current.storage_revision < 0
                     or value.revision < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -230,8 +230,8 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 return False, False
             value = await self._decode(current, MemoryRecord)
             if (
-                isinstance(current.storage_version, bool)
-                or current.storage_version < 0
+                isinstance(current.storage_revision, bool)
+                or current.storage_revision < 0
                 or value.revision < 1
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -239,7 +239,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if not await transaction.delete_record(
                 key,
-                expected_storage_version=current.storage_version,
+                expected_storage_revision=current.storage_revision,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await _insert_operation(

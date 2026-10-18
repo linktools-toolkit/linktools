@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import PromptLimits, RuntimeContext, RuntimeHistory, RuntimeStorage
@@ -87,10 +88,7 @@ async def test_runtime_body_error_wins_over_cleanup_error(
             context=RuntimeContext(None),
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(),
-            metrics=None,
-            limits=PromptLimits(),
-            authorization=None,
+            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
         ):
             raise ValueError("body secret")
 
@@ -113,10 +111,7 @@ async def test_runtime_body_error_wins_when_close_succeeds(
             context=RuntimeContext(None),
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(),
-            metrics=None,
-            limits=PromptLimits(),
-            authorization=None,
+            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
         ):
             raise ValueError("body secret")
 
@@ -135,10 +130,7 @@ async def test_runtime_close_error_still_propagates_after_success(
             context=RuntimeContext(None),
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(),
-            metrics=None,
-            limits=PromptLimits(),
-            authorization=None,
+            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
         ):
             pass
     assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
@@ -163,10 +155,7 @@ async def test_runtime_construction_error_wins_when_cleanup_fails(
             context=RuntimeContext(None),
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(),
-            metrics=None,
-            limits=PromptLimits(),
-            authorization=None,
+            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
         ):
             pass
 
@@ -185,10 +174,7 @@ async def test_runtime_cancellation_wins_when_cleanup_fails(
             context=RuntimeContext(None),
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(),
-            metrics=None,
-            limits=PromptLimits(),
-            authorization=None,
+            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
         ):
             raise asyncio.CancelledError
 
@@ -210,10 +196,7 @@ async def test_secondary_cleanup_log_excludes_business_payload(
             context=RuntimeContext(None),
             models=ModelRegistry.openai(model="test-model"),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(),
-            metrics=None,
-            limits=PromptLimits(),
-            authorization=None,
+            features=RuntimeFeatures("lifecycle", limits=PromptLimits()),
         ):
             raise ValueError("body secret")
 

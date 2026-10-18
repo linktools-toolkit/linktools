@@ -15,8 +15,9 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import (
+    AssetCapability,
     AssetSkillSource,
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillCapability,
     SkillDefinition,
     SkillSourceRegistry,
@@ -40,7 +41,9 @@ async def test_skill_aliases_capture_exact_keys_and_frozen_resources(
     resource = AssetKey("skill", f"{_ROOT}/Guide.md")
     await asset_store.put(declaration, _DECLARATION)
     await asset_store.put(resource, b"original guide")
-    capture = await CapabilityGroup("skills", assets=asset_store).capture()
+    asset_features = RuntimeFeatures("skills")
+    asset_features.capability(AssetCapability(asset_store), scope="runtime")
+    capture = await asset_features.capture()
     definition = capture.contributions[0].value
     assert isinstance(definition, SkillDefinition)
     assert definition.id == _ROOT
@@ -73,7 +76,9 @@ async def test_skill_aliases_capture_exact_keys_and_frozen_resources(
     restored = AssetStore.from_snapshot(snapshot, object_store=objects)
     await restored.initialize()
     try:
-        restored_capture = await CapabilityGroup("skills", assets=restored).capture()
+        asset_features_2 = RuntimeFeatures("skills")
+        asset_features_2.capability(AssetCapability(restored), scope="runtime")
+        restored_capture = await asset_features_2.capture()
         restored_definition = restored_capture.contributions[0].value
         assert isinstance(restored_definition, SkillDefinition)
         assert restored_definition.spec == definition.spec
@@ -117,7 +122,9 @@ async def test_directory_skill_aliases_use_logical_declaration_paths(
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        capture = await CapabilityGroup("skills", assets=store).capture()
+        asset_features = RuntimeFeatures("skills")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
@@ -143,7 +150,9 @@ async def test_skill_aliases_preserve_ambiguous_package_rejection(second: str) -
         await store.put(AssetKey("skill", "review/SKILL.md"), _DECLARATION)
         await store.put(AssetKey("skill", second), _DECLARATION)
         with pytest.raises(AIError) as error:
-            await CapabilityGroup("skills", assets=store).capture()
+            asset_features = RuntimeFeatures("skills")
+            asset_features.capability(AssetCapability(store), scope="runtime")
+            await asset_features.capture()
         assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     finally:
         await store.close()
@@ -165,8 +174,10 @@ async def test_filename_aliases_do_not_case_fold_other_declarations_or_flat_path
             ("rule", "review.MD"),
         ):
             await store.put(AssetKey(kind, identifier), b"not a declaration")
-        capture = await CapabilityGroup("skills", assets=store).capture()
-        assert capture.contributions == ()
+        asset_features = RuntimeFeatures("skills")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
+        assert [(item.kind, item.id) for item in capture.contributions] == [("capability", "runtime.assets")]
         assert capture.instructions.documents == ()
     finally:
         await store.close()

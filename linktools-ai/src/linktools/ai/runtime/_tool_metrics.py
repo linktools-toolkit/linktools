@@ -36,7 +36,7 @@ TOOL_METRICS_MANAGED_METADATA_KEY = "linktools.tool_metrics_managed"
 
 
 @dataclass(frozen=True, slots=True)
-class _ToolMetricContext:
+class ToolMetricContext:
     recorder: MetricRecorder
     source_namespace: str
     tenant_id: str
@@ -45,7 +45,7 @@ class _ToolMetricContext:
     agent_run_id: str
     agent_id: str
 
-    def record_error(
+    async def record_error(
         self,
         *,
         call: ToolCallPart,
@@ -53,7 +53,7 @@ class _ToolMetricContext:
         error: Exception,
     ) -> None:
         """Record a model-visible failure before Pydantic handles it."""
-        self._record(
+        await self._record(
             _tool_observation_id(
                 self.source_namespace,
                 self.tenant_id,
@@ -76,6 +76,7 @@ class _ToolMetricContext:
         args: dict[str, Any],
         handler: Callable[[dict[str, Any]], Awaitable[Any]],
         suppress_cancel: Callable[[], bool],
+        capture: Callable[[Observation], None] | None = None,
     ) -> Any:
         attempt_id = _tool_observation_id(
             self.source_namespace,
@@ -89,56 +90,61 @@ class _ToolMetricContext:
             result = await handler(args)
         except asyncio.CancelledError:
             if not suppress_cancel():
-                self._record(
+                await self._record(
                     attempt_id,
                     call=call,
                     tool_def=tool_def,
                     started=started,
                     status="CANCELLED",
                     error_code=None,
+                    capture=capture,
                 )
             raise
         except SkipToolExecution:
-            self._record(
+            await self._record(
                 attempt_id,
                 call=call,
                 tool_def=tool_def,
                 started=started,
                 status="SUCCEEDED",
                 error_code=None,
+                capture=capture,
             )
             raise
         except (ApprovalRequired, CallDeferred):
-            self._record(
+            await self._record(
                 attempt_id,
                 call=call,
                 tool_def=tool_def,
                 started=started,
                 status="DEFERRED",
                 error_code=None,
+                capture=capture,
             )
             raise
         except Exception as error:
-            self._record(
+            await self._record(
                 attempt_id,
                 call=call,
                 tool_def=tool_def,
                 started=started,
                 status="FAILED",
                 error_code=_tool_error_code(error),
+                capture=capture,
             )
             raise
-        self._record(
+        await self._record(
             attempt_id,
             call=call,
             tool_def=tool_def,
             started=started,
             status="SUCCEEDED",
             error_code=None,
+            capture=capture,
         )
         return result
 
-    def _record(
+    async def _record(
         self,
         observation_id: str,
         *,
@@ -147,6 +153,7 @@ class _ToolMetricContext:
         started: int,
         status: str,
         error_code: str | None,
+        capture: Callable[[Observation], None] | None = None,
     ) -> None:
         correlation: dict[str, str | int] = {
             "execution_id": self.execution_id,
@@ -174,7 +181,16 @@ class _ToolMetricContext:
                     MetricMeasurement("latency_ns", 1, monotonic_ns() - started),
                 ),
             )
-            self.recorder.try_record(observation)
+            if capture is not None:
+                capture(observation)
+            else:
+                await self.record(observation)
+        except Exception:
+            _logger.exception("tool metric observation rejected")
+
+    async def record(self, observation: Observation) -> None:
+        try:
+            await self.recorder.try_record(observation)
         except Exception:
             _logger.exception("tool metric observation rejected")
 
@@ -184,7 +200,7 @@ class ToolMetricsCapability(
 ):
     """Observe capability tools before the outer Pydantic control boundary."""
 
-    def __init__(self, context: _ToolMetricContext) -> None:
+    def __init__(self, context: ToolMetricContext) -> None:
         self.id = "linktools.ai.tool-metrics"
         self._context = context
 
@@ -226,6 +242,7 @@ def _tool_error_code(error: Exception) -> str:
 
 
 __all__ = [
+    "ToolMetricContext",
     "ToolMetricsCapability",
     "TOOL_METRICS_MANAGED_METADATA_KEY",
 ]

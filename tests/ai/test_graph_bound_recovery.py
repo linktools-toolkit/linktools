@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.agent import AgentBindingContract
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,
@@ -97,11 +97,11 @@ async def _graph_recovery(
 ) -> AsyncIterator[tuple[Runtime, RuntimeStorage, DefaultTaskGraphService, _RecoveryBackend, _Launcher, _GraphAuthorization]]:
     authorization = _GraphAuthorization()
     storage = RuntimeStorage.in_memory()
-    capabilities = CapabilityGroup("bound-recovery")
+    capabilities = RuntimeFeatures("bound-recovery", authorization=authorization)
     capabilities.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "bound-recovery", models=ModelRegistry.openai(model="gpt-test"),
-        storage=storage, capabilities=(capabilities,), authorization=authorization,
+        storage=storage, features=capabilities,
     ) as runtime:
         task = runtime.tasks.from_agent("test.bound-agent", runtime.agents.get("default"))
         graph = TaskGraph("bound-graph", tuple(

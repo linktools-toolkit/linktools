@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Captured graphs use accepted Agent inputs and only their executable bindings."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import JsonValue, TaskStatus, WorkspaceFileInput
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
@@ -56,7 +58,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
     work.mkdir()
     attachment = work / "file.txt"
     attachment.write_text("ORIGINAL", encoding="utf-8")
-    group = CapabilityGroup("captured-projection")
+    group = workspace_features("captured-projection", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     context = ExecutionInputContext.from_messages((
         ModelRequest(parts=[UserPromptPart("Historical question")]),
@@ -68,7 +70,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
         return f"Prepared in {context.graph_id}: {context.input['question']}"
 
     async with Runtime.open("captured-projection", models=models, storage=RuntimeStorage.in_memory(),
-            context=CONTEXT, capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
+            context=CONTEXT, features=group) as runtime:
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
         engine = runtime.tasks.bind(target, scorer)
@@ -169,7 +171,7 @@ async def test_graph_capture_rejects_unavailable_projected_input(
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
 
-    group = CapabilityGroup("unavailable-projection")
+    group = RuntimeFeatures("unavailable-projection")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     models = FixtureModels()
 
@@ -180,7 +182,7 @@ async def test_graph_capture_rejects_unavailable_projected_input(
         return "should never be evaluated"
 
     async with Runtime.open("unavailable-projection", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         failure = Task("captured.failure", fail, effect_policy="none")
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         source = await runtime.tasks.bind(failure, target).start(TaskGraph("source", (
@@ -204,7 +206,7 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
 
-    group = CapabilityGroup("recaptured-fixed")
+    group = RuntimeFeatures("recaptured-fixed")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     models = FixtureModels()
     projected_graphs = []
@@ -224,7 +226,7 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
         return "ready"
 
     async with Runtime.open("recaptured-fixed", models=models, context=CONTEXT,
-            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         prepare = Task("captured.prepare", gate, effect_policy="none")
         scorer = Task("captured.score", _score_graph, effect_policy="none")
@@ -299,7 +301,7 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
     attachment = work / "file.txt"
     attachment.write_text("ORIGINAL", encoding="utf-8")
     models = FixtureModels()
-    group = CapabilityGroup("recaptured-projection")
+    group = workspace_features("recaptured-projection", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def project(context: AgentTaskInputContext) -> str:
@@ -307,7 +309,7 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
 
     async with Runtime.open("recaptured-projection", models=models, context=CONTEXT,
             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
+            features=group) as runtime:
         task = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)
@@ -344,7 +346,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
     inline = work / "inline.txt"
     inline.write_text("INLINE ORIGINAL", encoding="utf-8")
     models = FixtureModels()
-    group = CapabilityGroup("unstarted-literal")
+    group = workspace_features("unstarted-literal", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def prepare(context: TaskNodeContext[None]) -> JsonValue:
@@ -354,7 +356,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
 
     async with Runtime.open("unstarted-literal", models=models, context=CONTEXT,
             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            capabilities=(group, CapabilityGroup("work", workspace=Workspace.load(work)))) as runtime:
+            features=group) as runtime:
         producer = Task("captured.prepare", prepare, effect_policy="none")
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get())
         scorer = Task("captured.score", _score_graph, effect_policy="none")

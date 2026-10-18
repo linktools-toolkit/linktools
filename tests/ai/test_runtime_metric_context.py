@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 """Runtime-scoped bounded metric dimension regressions."""
 
+from ._runtime_test_helpers import workspace_features
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import (
@@ -18,9 +20,10 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import MetricsCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._metrics import _MetricBuffer
+from linktools.ai.runtime._metrics import RuntimeMetricRecorder
+from linktools.ai.runtime._metrics_capability import MetricsRecordingBinding
 from linktools.ai.workspace import Workspace
 
 
@@ -83,17 +86,18 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         measurements=(),
     )
 
+    features = workspace_features("workspace", workspace=workspace)
+    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open(
         "default",
         context=context,
         models=models,
         storage=RuntimeStorage.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
-        metrics=metrics,
+        features=features,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
-        assert isinstance(control, _MetricBuffer)
-        assert control.try_record(observation) is True
+        assert isinstance(control, MetricsRecordingBinding)
+        assert await control.recorder.try_record(observation) is True
         flushed = await runtime.metrics.flush()
         assert flushed.completed is True
 
@@ -146,3 +150,128 @@ async def test_custom_metric_does_not_gain_implicit_context_query_fields() -> No
             )
         )
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+async def test_runtime_recorder_reports_later_source_failure_after_enrichment_failure() -> None:
+    from linktools.ai.observe._memory import InMemoryMetricStore
+
+    class FailingStore(InMemoryMetricStore):
+        async def put_observations(
+            self, namespace: str, observations: tuple[Observation, ...],
+        ) -> None:
+            raise OSError("source unavailable")
+
+    recorder = RuntimeMetricRecorder(Metrics.from_store(FailingStore()).recorder())
+    assert not await recorder.try_record(object())  # type: ignore[arg-type]
+    assert recorder.status().last_failure_code == "ENRICHMENT_FAILED"
+    observation = Observation(
+        version=1, observation_id="later-source-error", kind="test.metric",
+        occurred_at=datetime.now(timezone.utc), source_namespace="default",
+        tenant_id="default", status="SUCCEEDED", error_code=None,
+        correlation={}, dimensions={}, measurements=(),
+    )
+    assert not await recorder.try_record(observation)
+    assert recorder.status().last_failure_code == "WRITE_FAILED"
+    assert recorder.status().rejected == 1
+    await recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> None:
+    from linktools.ai.storage import InMemoryCacheBackend
+
+    metrics = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    features = RuntimeFeatures("shared-metrics")
+    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
+    async with Runtime.open(
+        "first", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
+    ) as first:
+        async with Runtime.open(
+            "second", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
+        ) as second:
+            observation = Observation(
+                version=1, observation_id="second-pending", kind="test.metric",
+                occurred_at=datetime.now(timezone.utc), source_namespace="second",
+                tenant_id="default", status="SUCCEEDED", error_code=None,
+                correlation={}, dimensions={}, measurements=(),
+            )
+            assert await second._metric_control.recorder.try_record(observation)
+            await first.close()
+            assert second.metrics.status().accepting
+            assert second.metrics.status().pending == 1
+            assert await metrics.get_observation("second-pending") is None
+            assert (await second.metrics.flush()).completed
+    assert await metrics.get_observation("second-pending") is not None
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from linktools.ai.observe._memory import InMemoryMetricStore
+    from linktools.ai.storage import InMemoryCacheBackend
+    from linktools.ai.storage import _write_cache as write_cache
+
+    monkeypatch.setattr(write_cache, "_CLOSE_DEADLINE_SECONDS", 0.01)
+    entered = asyncio.Event()
+    cancelling = asyncio.Event()
+    release = asyncio.Event()
+    returned = asyncio.Event()
+    storage_closed = asyncio.Event()
+
+    class CancellingStore(InMemoryMetricStore):
+        async def put_observations(
+            self, namespace: str, observations: tuple[Observation, ...],
+        ) -> None:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelling.set()
+                await release.wait()
+            await super().put_observations(namespace, observations)
+            returned.set()
+
+    metrics = Metrics.from_store(CancellingStore(), cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    storage = RuntimeStorage.in_memory()
+    original_close = storage.close
+
+    async def close_storage() -> None:
+        assert returned.is_set()
+        storage_closed.set()
+        await original_close()
+
+    monkeypatch.setattr(storage, "close", close_storage)
+    features = RuntimeFeatures("close-metrics")
+    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
+    async with Runtime.open(
+        "close-owner", models=ModelRegistry(), storage=storage, features=features,
+    ) as runtime:
+        observation = Observation(
+            version=1, observation_id="close-inflight", kind="test.metric",
+            occurred_at=datetime.now(timezone.utc), source_namespace="close-owner",
+            tenant_id="default", status="SUCCEEDED", error_code=None,
+            correlation={}, dimensions={}, measurements=(),
+        )
+        assert await runtime._metric_control.recorder.try_record(observation)
+        await runtime.metrics.flush(timeout_seconds=0)
+        await asyncio.wait_for(entered.wait(), 1)
+        closing = asyncio.create_task(runtime.close())
+        try:
+            await asyncio.wait_for(cancelling.wait(), 1)
+            closing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            assert not returned.is_set()
+            assert not storage_closed.is_set()
+            assert runtime.metrics.status().pending == 1
+            assert runtime.metrics.status().queue_size == 1
+        finally:
+            release.set()
+            await asyncio.wait_for(runtime.close(), 1)
+    assert storage_closed.is_set()
+    assert runtime.metrics.status().persisted == 1
+    assert runtime.metrics.status().pending == 0

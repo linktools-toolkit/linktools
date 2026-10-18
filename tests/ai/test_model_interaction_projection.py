@@ -23,10 +23,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime._attachment import (
@@ -48,6 +47,9 @@ from linktools.ai.runtime._model_interaction import (
 )
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+
+
+from linktools.ai.runtime import ConversationCapability, TraceCapability
 
 
 class _TextModelBinding:
@@ -87,8 +89,9 @@ class _TextModels:
         return _TextModelBinding()
 
 
-def _agent_group() -> CapabilityGroup[object]:
-    group = CapabilityGroup[object]("application")
+def _agent_group() -> RuntimeFeatures[object]:
+    group = RuntimeFeatures[object]("application")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -101,9 +104,11 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     monkeypatch.setattr(_TextModelBinding, "materialize", lambda self: TestModel(custom_output_text=response))
     database = tmp_path / "state.db"
     sizes = []
+    features = _agent_group()
+    features.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open(
         "response-growth", storage=RuntimeStorage.sqlite(database),
-        models=_TextModels(), capabilities=(_agent_group(),),
+        models=_TextModels(), features=features,
     ) as runtime:
         agent = runtime.agents.get("default")
         await agent.create_session("session")
@@ -720,11 +725,11 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             )
         )
 
-        await state.run_store.materialize_recovery_checkpoint(
+        await state.run_store.checkpoint_persistence.materialize_recovery_checkpoint(
             agent_run_id="run",
             require_complete=True,
         )
-        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         interactions = await archive.list_model_interactions(agent_run_id="run")
         assert [value.model_request_seq for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)
@@ -815,8 +820,7 @@ async def test_execution_model_interactions_are_durable_and_public() -> None:
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
-        metrics=Metrics.in_memory(),
+        features=_agent_group(),
     ) as runtime:
         await _assert_public_interaction(runtime)
 
@@ -827,8 +831,7 @@ async def test_execution_model_interactions_support_volatile_memory_state() -> N
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(_agent_group(),),
-        metrics=Metrics.in_memory(),
+        features=_agent_group(),
     ) as runtime:
         await _assert_public_interaction(runtime)
 

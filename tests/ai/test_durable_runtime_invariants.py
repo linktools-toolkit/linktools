@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup
+from linktools.ai.capability import CapabilityContribution, RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,
@@ -28,13 +28,16 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
+from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime.state._durability import (
     CommitObservation,
     DurableCommitState,
     run_durable_commit,
 )
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
-from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.runtime.state._plan import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
@@ -125,8 +128,8 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
 
 @pytest.mark.asyncio
 async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -> None:
-    group = CapabilityGroup[None]("durable")
-    group.capability(_RegisteredCapability(), revision=3)
+    group = RuntimeFeatures[None]("durable")
+    group.capability(_RegisteredCapability(), revision=3, scope="agent")
     candidates = (await group.capture()).contributions
     compiler = _compiler(candidates=candidates)
     binding = compiler.bind(compiler.compile(_spec()))
@@ -140,8 +143,8 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
         _compiler().restore(binding.binding_contract)
     assert missing.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
-    changed_group = CapabilityGroup[None]("changed")
-    changed_group.capability(_RegisteredCapability(), revision=4)
+    changed_group = RuntimeFeatures[None]("changed")
+    changed_group.capability(_RegisteredCapability(), revision=4, scope="agent")
     changed_candidates = (await changed_group.capture()).contributions
     with pytest.raises(AIError) as changed:
         _compiler(candidates=changed_candidates).restore(binding.binding_contract)
@@ -241,17 +244,15 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
 
 
 def _run_store_for_preflight() -> RuntimeAgentRunStore:
-    store = object.__new__(RuntimeAgentRunStore)
-    store._projection_offsets = {}
-    store._projection_dirty = set()
-    store._observation_task = None
-    store._observation_wake = asyncio.Event()
-    store._observation_started_at = None
-    store._background_tasks = set()
-    store._durability_flights = {}
-    store._terminal_seals = {}
-    store._preflight = False
-    return store
+    return RuntimeAgentRunStore(
+        StagingAgentRunStore(),
+        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        execution_archive=None,
+        recovery_archive=None,
+        conversation_retention=RuntimeRetentionMode.VOLATILE,
+        execution_retention=RuntimeRetentionMode.VOLATILE,
+        recovery_retention=RuntimeRetentionMode.VOLATILE,
+    )
 
 
 @pytest.mark.asyncio
@@ -418,6 +419,9 @@ async def test_runtime_close_coordinator_does_not_close_lower_resources_after_pr
 @pytest.mark.asyncio
 async def test_local_execution_close_rejects_pending_command_owned_work() -> None:
     backend = object.__new__(LocalExecutionBackend)
+    backend._live_broker = LiveExecutionEventBroker()
+    backend._pending_turns = _PendingExecutionTurns()
+    backend._pending_renewals = {}
     backend._accepting = True
     backend._tasks = {}
     backend._executor = SimpleNamespace(pending_background_tasks=())

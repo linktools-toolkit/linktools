@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from time import time
 from typing import TYPE_CHECKING, TypeVar
 
 from linktools.core import environ
@@ -20,6 +21,7 @@ from ...storage import (
 )
 from ._plan import RuntimeDomain
 from ._schema import build_runtime_sql_metadata
+from ._record_cache import StateRecordCache
 from ._store import (
     FactQuery,
     FactScanCursor,
@@ -55,7 +57,7 @@ ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
-# Six CASE assignments plus key/version predicates stay below 999 SQLite binds.
+# Six CASE assignments plus key/CAS predicates stay below 999 SQLite binds.
 _RECORD_REPLACE_BATCH_SIZE = 64
 
 
@@ -157,12 +159,14 @@ class SqlStateStorageGroup:
         async with self._session() as session:
             async with session.begin():
                 await self._context.dialect.begin_consistent_read(session)
+                clock = _SqlTransactionClock(session, self._context)
                 transactions = {
                     store: _SqlTransaction(
                         session,
                         self._metadata,
                         self._context,
                         store.store_digest,
+                        clock=clock,
                     )
                     for store in members
                 }
@@ -188,13 +192,24 @@ class SqlStateStorageGroup:
         if active is not None:
             return await fn(active_state_group_transaction(self, members))
 
+        captured_at = 0.0
+        captures: dict[SqlStateStore, tuple[StoredRecord, ...]] = {}
+        capture_tokens: dict[SqlStateStore, object] = {}
+        changed: set[SqlStateStore] = set()
+        confirmed = False
+
         async def execute(session: "AsyncSession") -> ValueT:
+            nonlocal captured_at, captures, capture_tokens, changed
+            captured_at = time()
+            capture_tokens = {store: store._reads.capture_token for store in members}
+            clock = _SqlTransactionClock(session, self._context)
             transactions = {
                 store: _SqlTransaction(
                     session,
                     self._metadata,
                     self._context,
                     store.store_digest,
+                    clock=clock,
                 )
                 for store in members
             }
@@ -205,6 +220,16 @@ class SqlStateStorageGroup:
                 for transaction in transactions.values():
                     if transaction._mutation_error is not None:
                         raise transaction._mutation_error
+                captures = {
+                    store: tuple(record for key, record in transaction._record_cache.items()
+                                 if key in transaction._guarded_record_keys
+                                 and record is not None and record.kind in {"session", "execution"})
+                    for store, transaction in transactions.items()
+                }
+                changed = {
+                    store for store, transaction in transactions.items()
+                    if transaction._guarded_record_keys or transaction._deleted_records
+                }
                 return result
             finally:
                 reset_state_transaction(token)
@@ -214,10 +239,12 @@ class SqlStateStorageGroup:
             await lock.acquire()
         try:
             domains = ",".join(store.runtime_domain.value for store in members)
-            return await self._context.run_mutation(
+            result = await self._context.run_mutation(
                 execute,
                 domain=f"runtime.state.group[{domains}]",
             )
+            confirmed = True
+            return result
         except asyncio.CancelledError:
             raise
         except AIError:
@@ -275,6 +302,14 @@ class SqlStateStorageGroup:
         finally:
             if lock is not None:
                 lock.release()
+            for store in members:
+                if confirmed and store not in changed:
+                    continue
+                previous = await store._reads.invalidate()
+                # A delayed source return must not acquire a newer capture boundary.
+                if confirmed and previous is capture_tokens.get(store):
+                    for record in captures.get(store, ()):
+                        store._reads.publish_record(record, captured_at=captured_at)
 
     @asynccontextmanager
     async def _session(self):
@@ -308,6 +343,7 @@ class SqlStateStore:
         context: "SqlStorageContext | None" = None,
         runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
         group: SqlStateStorageGroup | None = None,
+        cache: object | None = None,
         store_digest: bytes | None = None,
     ) -> None:
         resolved_context = context or create_sql_storage_context(engine)
@@ -335,6 +371,7 @@ class SqlStateStore:
         self._close_lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
+        self._reads = StateRecordCache(self, cache, scope=f"sql:{self._store_digest.hex()}")
 
     @property
     def context(self) -> SqlStorageContext:
@@ -364,12 +401,28 @@ class SqlStateStore:
                 return
             self._closed = True
             try:
+                await self._reads.close()
                 if self._owns_group:
                     await self._storage_group.close()
             except BaseException:
                 self._closed = False
                 raise
             self._initialized = False
+
+    async def read_record(self, key: bytes) -> StoredRecord | None:
+        """Read ordinary committed metadata with bounded cache freshness."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_record(key)
+
+    async def read_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Read ordinary metadata; explicit transaction scopes stay source-only."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.read_records(keys)
+
+    async def refresh_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        """Refresh an ordinary batch without changing authoritative read scopes."""
+        self._storage_group._ensure_member(self)
+        return await self._reads.refresh_records(keys)
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()
@@ -529,6 +582,22 @@ class SqlStateStore:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
 
+class _SqlTransactionClock:
+    """Keep one database timestamp within one physical transaction."""
+
+    def __init__(self, session: "AsyncSession", context: SqlStorageContext) -> None:
+        self._session = session
+        self._context = context
+        self._now: datetime | None = None
+
+    async def now(self) -> datetime:
+        if self._now is None:
+            self._now = await self._context.run_statement(
+                self._context.dialect.database_now(self._session)
+            )
+        return self._now
+
+
 class _SqlTransaction:
     def __init__(
         self,
@@ -536,6 +605,8 @@ class _SqlTransaction:
         metadata: "MetaData",
         context: SqlStorageContext,
         store_digest: bytes,
+        *,
+        clock: _SqlTransactionClock | None = None,
     ) -> None:
         if not isinstance(store_digest, bytes) or len(store_digest) != 32:
             raise ValueError("store_digest must be a 32-byte digest")
@@ -545,10 +616,11 @@ class _SqlTransaction:
         self._store_digest = store_digest
         self._store_hex = store_digest.hex()
         self._guarded_record_keys: set[bytes] = set()
+        self._deleted_records = False
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
-        self._now: datetime | None = None
+        self._clock = clock if clock is not None else _SqlTransactionClock(session, context)
         self._mutation_error: BaseException | None = None
 
     def _abort_mutation(self, error: BaseException) -> None:
@@ -571,11 +643,7 @@ class _SqlTransaction:
             raise
 
     async def now(self) -> datetime:
-        if self._now is None:
-            self._now = await self._context.run_statement(
-                self._context.dialect.database_now(self._session)
-            )
-        return self._now
+        return await self._clock.now()
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
         from sqlalchemy import select
@@ -668,18 +736,18 @@ class _SqlTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
     ) -> StoredRecord | None:
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
-            raise ValueError("expected_storage_version must be a non-negative integer")
+            raise ValueError("expected_storage_revision must be a non-negative integer")
         if key in self._guarded_record_keys:
             return await self.get_record(key)
         current = await self.get_record(key)
-        if current is None or current.storage_version != expected_storage_version:
+        if current is None or current.storage_revision != expected_storage_revision:
             return None
         from sqlalchemy import update
 
@@ -689,23 +757,23 @@ class _SqlTransaction:
             .where(
                 table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
-                table.c.storage_version == expected_storage_version,
+                table.c.storage_revision == expected_storage_revision,
             )
-            .values(storage_version=expected_storage_version + 1)
+            .values(storage_revision=expected_storage_revision + 1)
         )
         if result.rowcount != 1:
             return None
-        guarded = replace(current, storage_version=expected_storage_version + 1)
+        guarded = replace(current, storage_revision=expected_storage_revision + 1)
         self._guarded_record_keys.add(key)
         self._record_cache[key] = guarded
         return guarded
 
     async def replace_record(
-        self, record: StoredRecord, *, expected_storage_version: int
+        self, record: StoredRecord, *, expected_storage_revision: int
     ) -> bool:
         try:
             await self.replace_records(
-                (RecordReplacement(record, expected_storage_version),)
+                (RecordReplacement(record, expected_storage_revision),)
             )
         except AIError as error:
             if error.code is ErrorCode.STORAGE_CONFLICT:
@@ -726,23 +794,23 @@ class _SqlTransaction:
             existing = current.get(replacement.record.key_digest)
             if (
                 existing is None
-                or existing.storage_version != replacement.expected_storage_version
+                or existing.storage_revision != replacement.expected_storage_revision
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             validate_record_identity(replacement.record)
             validate_record_replacement(existing, replacement.record)
             if (
-                replacement.record.storage_version
-                != replacement.expected_storage_version + 1
+                replacement.record.storage_revision
+                != replacement.expected_storage_revision + 1
             ):
                 raise ValueError(
-                    "replacement must increment storage_version exactly once"
+                    "replacement must increment storage_revision exactly once"
                 )
         from sqlalchemy import bindparam, case, func, literal, tuple_, update
 
         table = self._table("ai_state_records")
         prepared = tuple(_record_values(value.record) for value in ordered)
-        columns = ("state", "storage_version", "lease_owner", "lease_fence",
+        columns = ("state", "storage_revision", "lease_owner", "lease_fence",
                    "lease_expires_at", "payload_json")
         executemany = self._context.dialect.prefer_update_executemany
         statement_count = 0
@@ -754,18 +822,18 @@ class _SqlTransaction:
                 statement = update(table).where(
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest == bindparam("_replacement_key"),
-                    table.c.storage_version == bindparam("_replacement_expected_version"),
+                    table.c.storage_revision == bindparam("_replacement_expected_storage_revision"),
                 ).values(**{column: bindparam(f"_replacement_{column}") for column in columns},
                          updated_at=func.current_timestamp())
                 parameters = [
                     {"_replacement_key": row["key_digest"],
-                     "_replacement_expected_version": value.expected_storage_version,
+                     "_replacement_expected_storage_revision": value.expected_storage_revision,
                      **{f"_replacement_{column}": row[column] for column in columns}}
                     for row, value in zip(rows, batch)
                 ]
             else:
-                versions = [(row["key_digest"], value.expected_storage_version)
-                            for row, value in zip(rows, batch)]
+                cas_conditions = [(row["key_digest"], value.expected_storage_revision)
+                                  for row, value in zip(rows, batch)]
                 updates = {
                     column: rows[0][column] if len(rows) == 1 else case(
                         {row["key_digest"]: literal(row[column], type_=table.c[column].type)
@@ -778,7 +846,7 @@ class _SqlTransaction:
                 statement = update(table).where(
                     table.c.store_digest == self._store_hex,
                     table.c.key_digest.in_([row["key_digest"] for row in rows]),
-                    tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                    tuple_(table.c.key_digest, table.c.storage_revision).in_(cas_conditions),
                 ).values(**updates, updated_at=func.current_timestamp())
             try:
                 result = await self._execute(statement, parameters)
@@ -801,7 +869,7 @@ class _SqlTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
         lease_owner: str | None,
         lease_fence: int,
         lease_expires_at: datetime | None,
@@ -809,9 +877,9 @@ class _SqlTransaction:
         from sqlalchemy import func, update
 
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
             or isinstance(lease_fence, bool)
             or not isinstance(lease_fence, int)
             or lease_fence < 0
@@ -825,13 +893,13 @@ class _SqlTransaction:
             .where(
                 table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
-                table.c.storage_version == expected_storage_version,
+                table.c.storage_revision == expected_storage_revision,
             )
             .values(
                 lease_owner=lease_owner,
                 lease_fence=lease_fence,
                 lease_expires_at=lease_expires_at,
-                storage_version=expected_storage_version + 1,
+                storage_revision=expected_storage_revision + 1,
                 updated_at=func.current_timestamp(),
             )
         )
@@ -844,7 +912,7 @@ class _SqlTransaction:
                     lease_owner=lease_owner,
                     lease_fence=lease_fence,
                     lease_expires_at=lease_expires_at,
-                    storage_version=expected_storage_version + 1,
+                    storage_revision=expected_storage_revision + 1,
                 )
         return result.rowcount == 1
 
@@ -867,17 +935,17 @@ class _SqlTransaction:
                 )
                 if not current:
                     continue
-                versions = tuple(
-                    (_hex(key), record.storage_version)
+                cas_conditions = tuple(
+                    (_hex(key), record.storage_revision)
                     for key, record in sorted(current.items())
                 )
-                key_hexes = tuple(key for key, _version in versions)
-                # Deleting the version-matched owners fences concurrent alias/fact writers.
+                key_hexes = tuple(key for key, _revision in cas_conditions)
+                # Deleting the CAS-matched owners fences concurrent alias/fact writers.
                 result = await self._execute(
                     delete(table).where(
                         table.c.store_digest == self._store_hex,
                         table.c.key_digest.in_(key_hexes),
-                        tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                        tuple_(table.c.key_digest, table.c.storage_revision).in_(cas_conditions),
                     )
                 )
                 if result.rowcount != len(current):
@@ -900,6 +968,7 @@ class _SqlTransaction:
             # A caught partial deletion must still abort the owning transaction.
             self._abort_mutation(error)
             raise
+        self._deleted_records = self._deleted_records or bool(deleted_keys)
         for key in deleted_keys:
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None
@@ -909,15 +978,15 @@ class _SqlTransaction:
         self._log_batch("delete_records", len(deleted_keys), statement_count)
 
     async def delete_record(
-        self, key: bytes, *, expected_storage_version: int | None = None
+        self, key: bytes, *, expected_storage_revision: int | None = None
     ) -> bool:
-        if expected_storage_version is not None and (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+        if expected_storage_revision is not None and (
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
             raise ValueError(
-                "expected_storage_version must be a non-negative integer or None"
+                "expected_storage_revision must be a non-negative integer or None"
             )
         from sqlalchemy import delete
 
@@ -925,18 +994,18 @@ class _SqlTransaction:
         if current is None:
             return False
         expected = (
-            current.storage_version
-            if expected_storage_version is None
-            else expected_storage_version
+            current.storage_revision
+            if expected_storage_revision is None
+            else expected_storage_revision
         )
-        guarded = await self.guard_record(key, expected_storage_version=expected)
+        guarded = await self.guard_record(key, expected_storage_revision=expected)
         if guarded is None:
             return False
         table = self._table("ai_state_records")
         statement = delete(table).where(
             table.c.store_digest == self._store_hex,
             table.c.key_digest == _hex(key),
-            table.c.storage_version == guarded.storage_version,
+            table.c.storage_revision == guarded.storage_revision,
         )
         children_changed = False
         try:
@@ -961,6 +1030,7 @@ class _SqlTransaction:
         if result.rowcount != 1:
             self._abort_mutation(AIError(ErrorCode.STORAGE_CONFLICT))
         if result.rowcount == 1:
+            self._deleted_records = True
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None
             for alias, record_key in tuple(self._alias_cache.items()):
@@ -1627,7 +1697,7 @@ def _record_values(
         "kind": record.kind,
         "sort_key": record.sort_key,
         "state": record.state,
-        "storage_version": record.storage_version,
+        "storage_revision": record.storage_revision,
         "lease_owner": record.lease_owner,
         "lease_fence": record.lease_fence,
         "lease_expires_at": record.lease_expires_at,
@@ -1649,7 +1719,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
             _row_string(row["kind"]),
             _row_string(row["sort_key"]),
             _row_optional_string(row["state"]),
-            _row_nonnegative_int(row["storage_version"]),
+            _row_nonnegative_int(row["storage_revision"]),
             _row_optional_string(row["lease_owner"]),
             _row_nonnegative_int(row["lease_fence"]),
             _datetime_or_none(row["lease_expires_at"]),

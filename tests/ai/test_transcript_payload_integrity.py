@@ -76,7 +76,7 @@ def _reader(stream: _Stream) -> TranscriptRepository:
         object_store=_Store(stream),  # type: ignore[arg-type]
         namespace="history",
         tenant_id="tenant",
-        runtime_domain=RuntimeDomain.EXECUTION,
+        runtime_domain=RuntimeDomain.TRACE,
     )
 
 

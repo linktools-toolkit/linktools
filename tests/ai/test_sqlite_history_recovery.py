@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Persisted SQLite history remains usable after optional wire fields are added."""
+"""Current SQLite history survives reopening and snapshot restoration."""
 
 import base64
 import hashlib
@@ -13,17 +13,17 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeHistory, RuntimeStorage
 
 from . import _runtime_test_helpers as helpers
 
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_history_5b7dd032.json"
+_FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_history_current.json"
 
 
-async def _old_execution_evidence(
+async def _execution_evidence(
     history: RuntimeHistory, execution_id: str, principal: Principal,
 ) -> dict[str, object]:
     interactions = await history.model_interactions(
@@ -67,13 +67,13 @@ async def _old_execution_evidence(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
+async def test_sqlite_history_retains_prior_turn_when_resumed_and_reopened(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
     assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
-    assert b'pending_part_count' not in sql
+    assert b'pending_part_count' in sql
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
@@ -83,7 +83,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
         assert heads
         assert all(
             set(json.loads(row[0])["value"]["payload"]["fields"])
-            == {"owner_domain", "owner_id", "message_count", "chunk_count", "quality"}
+            == {"owner_domain", "owner_id", "message_count", "chunk_count", "quality", "pending", "pending_part_count"}
             for row in heads
         )
 
@@ -100,16 +100,17 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
         return await original_model(messages, info)
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
+    application.capability(ConversationCapability(), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as runtime:
         session = runtime.agents.get("default").session("session")
         old = await session.history()
         old_execution_id = (await session.timeline()).items[0].execution_id
-        evidence = await _old_execution_evidence(runtime.history, old_execution_id, runtime.default_principal)
+        evidence = await _execution_evidence(runtime.history, old_execution_id, runtime.default_principal)
         assert [(item.item_kind, item.content) for item in old.items if item.item_kind != "system"] == [
             ("user", "retained old question"), ("assistant", "done"),
         ]
@@ -118,7 +119,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
         assert "retained old question" in observed_prompts
         assert "new question" in observed_prompts
         appended = await session.history()
-        assert await _old_execution_evidence(runtime.history, old_execution_id, runtime.default_principal) == evidence
+        assert await _execution_evidence(runtime.history, old_execution_id, runtime.default_principal) == evidence
         assert appended.items[:len(old.items)] == old.items
         assert [(item.item_kind, item.content) for item in appended.items if item.item_kind != "system"] == [
             ("user", "retained old question"), ("assistant", "done"),
@@ -127,11 +128,11 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
 
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as reopened:
         restored = await reopened.agents.get("default").session("session").history()
         assert restored.items == appended.items
-        assert await _old_execution_evidence(reopened.history, old_execution_id, reopened.default_principal) == evidence
+        assert await _execution_evidence(reopened.history, old_execution_id, reopened.default_principal) == evidence
 
 
 @pytest.mark.asyncio
@@ -169,12 +170,13 @@ async def test_sqlite_explicit_checkpoint_boundary_excludes_later_observation(tm
 
 
 @pytest.mark.asyncio
-async def test_sqlite_old_history_survives_snapshot_restore(tmp_path: Path) -> None:
+async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     from linktools.ai.runtime.state import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
+    assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
@@ -182,7 +184,7 @@ async def test_sqlite_old_history_survives_snapshot_restore(tmp_path: Path) -> N
     async with RuntimeHistory.open("legacy-history", storage=RuntimeStorage.sqlite(path)) as history:
         timeline = await history.session_timeline("session", principal=principal)
         execution_id = timeline.items[0].execution_id
-        evidence = await _old_execution_evidence(history, execution_id, principal)
+        evidence = await _execution_evidence(history, execution_id, principal)
     state = RuntimeStorage.sqlite(path)
     await state.initialize(namespace="legacy-history", tenant_id="default", read_only=True)
     objects = InMemoryObjectStore("snapshot")
@@ -195,13 +197,14 @@ async def test_sqlite_old_history_survives_snapshot_restore(tmp_path: Path) -> N
     await RuntimeStorage.restore_snapshot(
         snapshot, object_store=objects, root=restored_root, limits=limits,
     )
-    application = CapabilityGroup("application")
+    application = RuntimeFeatures("application")
+    application.capability(ConversationCapability(), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.from_root(restored_root),
-        models=helpers.RuntimeUsageModels(), capabilities=(application,),
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as runtime:
-        assert await _old_execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
+        assert await _execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
         history = await runtime.agents.get("default").session("session").history()
         assert [(item.item_kind, item.content) for item in history.items if item.item_kind != "system"] == [
             ("user", "retained old question"), ("assistant", "done"),

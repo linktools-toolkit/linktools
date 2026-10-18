@@ -68,7 +68,7 @@ def _transcript_chunk_data() -> dict[str, object]:
         len(raw),
         RuntimePayloadRef(
             StoredPayload.inline_bytes(raw),
-            RuntimeDomain.EXECUTION,
+            RuntimeDomain.TRACE,
         ),
     )
     return encode_envelope(
@@ -102,7 +102,7 @@ async def test_transcript_decoders_preserve_future_schema_unsupported(
     await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
     try:
         history = state.run_store.read_store(
-            RuntimeDomain.EXECUTION
+            RuntimeDomain.TRACE
         ).transcript_repository
 
         head = history.empty_head("owner")

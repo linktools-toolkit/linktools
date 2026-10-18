@@ -54,7 +54,7 @@ async def _assert_caught_failure(
             await transaction._execute(update(table).where(
                 table.c.store_digest == store.store_digest.hex(),
                 table.c.key_digest == records[-1].key_digest.hex(),
-            ).values(storage_version=1))
+            ).values(storage_revision=1))
         await transaction.delete_records((*keys, keys[0], _digest("missing")))
 
     async def callback(group):

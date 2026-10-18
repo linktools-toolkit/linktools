@@ -15,8 +15,9 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import (
+    AssetCapability,
     AssetSkillSource,
-    CapabilityGroup,
+    RuntimeFeatures,
     SkillDefinition,
     SkillSourceRef,
 )
@@ -42,7 +43,9 @@ async def _captured_local_skill(
     )))
     await store.initialize()
     try:
-        capture = await CapabilityGroup("local", assets=store).capture()
+        asset_features = RuntimeFeatures("local")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
@@ -105,7 +108,9 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
     )
     await store.initialize()
     try:
-        capture = await CapabilityGroup("application", assets=store).capture()
+        asset_features = RuntimeFeatures("application")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         binding = next(
             item.value for item in capture.contributions if item.kind == "skill"
         )
@@ -306,15 +311,18 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
     )
     await store.initialize()
     try:
-        group: CapabilityGroup[object] = CapabilityGroup(
+        group: RuntimeFeatures[object] = RuntimeFeatures(
             "workspace",
-            assets=store,
+
         )
+        group_assets = AssetCapability(store)
+        group.capability(group_assets, scope="runtime")
         snapshot = await group.capture()
         assert {(item.kind, item.id) for item in snapshot.contributions} == {
             ("agent", "review"),
             ("mcp", "server"),
             ("skill", "review"),
+            ("capability", "runtime.assets"),
         }
         source = AssetSkillSource("workspace", store)
         definition = next(
@@ -406,7 +414,9 @@ async def test_captured_local_skill_keeps_resources_from_distinct_overlay_roots(
     ))
     await store.initialize()
     try:
-        capture = await CapabilityGroup("local", assets=store).capture()
+        asset_features = RuntimeFeatures("local")
+        asset_features.capability(AssetCapability(store), scope="runtime")
+        capture = await asset_features.capture()
         definition = capture.contributions[0].value
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None

@@ -38,7 +38,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
-from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
+from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
@@ -657,7 +657,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             usage,
             client_requests=client_requests,
         )
-        self._record_model(
+        observation = self._capture_model(
             ctx.deps,
             fact,
             model=model,
@@ -666,18 +666,25 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             error_code=error_code,
             measurements=measurements,
         )
-        await self._record_request_event(
-            fact,
-            phase=phase,
-            response=response if phase == "completed" else None,
-            error_code=error_code,
-        )
-        await self._publish_request_event(
-            fact,
-            phase=phase,
-            response=response if phase == "completed" else None,
-            error_code=error_code,
-        )
+
+        async def handoff() -> None:
+            await self._record_request_event(
+                fact,
+                phase=phase,
+                response=response if phase == "completed" else None,
+                error_code=error_code,
+            )
+            await self._publish_request_event(
+                fact,
+                phase=phase,
+                response=response if phase == "completed" else None,
+                error_code=error_code,
+            )
+
+        interrupted = await await_request_handoff(handoff())
+        await self._record_model(observation)
+        if interrupted:
+            raise asyncio.CancelledError
 
     async def _record_request_event(
         self,
@@ -771,7 +778,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             if status == "SUCCEEDED" and response is not None
             else ()
         )
-        self._record_model(
+        observation = self._capture_model(
             run_context,
             finished,
             model=model,
@@ -795,7 +802,9 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 error_code=error_code,
             )
 
-        return await _await_request_handoff(handoff())
+        interrupted = await await_request_handoff(handoff())
+        await self._record_model(observation)
+        return interrupted
 
     def _stage_request(
         self,
@@ -867,7 +876,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             client_requests=client_requests,
         )
 
-    def _record_model(
+    def _capture_model(
         self,
         run_context: AgentContext[object] | None,
         fact: ModelRequestFact,
@@ -877,7 +886,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         status: str,
         error_code: str | None,
         measurements: tuple[MetricMeasurement, ...],
-    ) -> None:
+    ) -> Observation | None:
         if self._recorder is None:
             return
         try:
@@ -902,7 +911,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 dimensions["response_provider_name"] = response_provider
             if response_model:
                 dimensions["response_model_name"] = response_model
-            observation = Observation(
+            return Observation(
                 version=1,
                 observation_id=fact.observation_id,
                 kind="linktools.model.request",
@@ -926,7 +935,14 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     *measurements,
                 ),
             )
-            self._recorder.try_record(observation)
+        except Exception:
+            _logger.exception("model metric observation rejected")
+
+    async def _record_model(self, observation: Observation | None) -> None:
+        if self._recorder is None or observation is None:
+            return
+        try:
+            await self._recorder.try_record(observation)
         except Exception:
             _logger.exception("model metric observation rejected")
 
@@ -995,4 +1011,4 @@ def _model_error_code(error: Exception) -> str:
     return ErrorCode.INTERNAL_ERROR.value
 
 
-__all__: list[str] = []
+__all__ = ["ModelInteractionRecorder", "ModelObservationCapability", "ModelRequestEventSink"]

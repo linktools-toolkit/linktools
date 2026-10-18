@@ -113,10 +113,10 @@ def build_runtime_sql_metadata(
             comment="Current SQL-queryable state for record kinds with persisted state-machine semantics.",
         ),
         Column(
-            "storage_version",
+            "storage_revision",
             BigInteger,
             nullable=False,
-            comment="Internal optimistic-concurrency version incremented by every physical record mutation.",
+            comment="Physical compare-and-swap revision incremented by every record mutation.",
         ),
         Column(
             "lease_owner",

@@ -8,7 +8,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import ClassVar, Literal
+from typing import Literal
 from urllib.parse import urlsplit
 
 from ..asset import AssetKey
@@ -22,6 +22,9 @@ from ..core import (
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
+
+DEFAULT_AGENT_RETRIES = 3
+
 
 _SELECTOR_SAFE_BYTES = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
@@ -195,9 +198,6 @@ class AgentUsageLimits:
 class AgentSpec:
     """Durable, runtime-independent declaration of one Agent."""
 
-    DEFAULT_TOOL_RETRIES: ClassVar[int] = 10
-    DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
-
     id: str
     model: str = "default"
     system_prompt: str = ""
@@ -209,8 +209,8 @@ class AgentSpec:
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
-    tool_retries: int = DEFAULT_TOOL_RETRIES
-    output_retries: int = DEFAULT_OUTPUT_RETRIES
+    tool_retries: int | None = None
+    output_retries: int | None = None
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
@@ -236,8 +236,10 @@ class AgentSpec:
             ("tool_retries", self.tool_retries),
             ("output_retries", self.output_retries),
         ):
+            if value is None:
+                continue
             if not isinstance(value, int) or isinstance(value, bool):
-                raise TypeError(f"agent {name} must be an integer")
+                raise TypeError(f"agent {name} must be an integer or None")
             if value < 0:
                 raise ValueError(f"agent {name} cannot be negative")
         if self.description is not None and (
@@ -461,6 +463,7 @@ def _validated_string_mapping(value: object, field_name: str) -> Mapping[str, st
 
 
 __all__ = [
+    "DEFAULT_AGENT_RETRIES",
     "AgentSpec",
     "AgentUsageLimits",
     "MCPServerSpec",

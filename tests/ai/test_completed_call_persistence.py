@@ -13,7 +13,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import AgentContext, CapabilityGroup
+from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeHistory
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
@@ -23,6 +23,7 @@ from linktools.ai.runtime._model_interaction import StagedContextInline, StagedC
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+from linktools.ai.runtime import TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_incremental_projection_boundaries import _storage
@@ -44,7 +45,7 @@ async def test_running_public_metadata_does_not_read_prepared_request_payloads(t
         def read_payload(digest: str) -> bytes:
             raise AssertionError(f"running observation read a prepared body: {digest}")
 
-        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
         values = await archive.prepare_interactions(AgentRunRecord("run"), (prepared,), read_payload)
         assert len(values) == 1
         assert values[0].request_context is None and values[0].request_envelope is None
@@ -114,7 +115,8 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
             raise ValueError("provider stopped after partial content")
         yield "; done"
 
-    group = CapabilityGroup("completed-call-persistence")
+    group = RuntimeFeatures("completed-call-persistence")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     state = _storage(backend, tmp_path)
     execution_id = None
@@ -122,7 +124,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
     try:
         async with Runtime.open(
             "completed-call-persistence", models=_Models(FunctionModel(stream_function=stream)),
-            storage=state, capabilities=(group,),
+            storage=state, features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Respond slowly")
             execution_id = execution.execution_id
@@ -213,13 +215,14 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
         await release.wait()
         raise ValueError("tool arguments interrupted")
 
-    group = CapabilityGroup("partial-tool-arguments")
+    group = RuntimeFeatures("partial-tool-arguments")
+    group.capability(TraceCapability(), scope="runtime")
     group.tool(work, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("work",))
     try:
         async with Runtime.open(
             "partial-tool-arguments", models=_Models(FunctionModel(stream_function=stream)),
-            storage=_storage(backend, tmp_path), capabilities=(group,),
+            storage=_storage(backend, tmp_path), features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Call work")
             execution_id = execution.execution_id

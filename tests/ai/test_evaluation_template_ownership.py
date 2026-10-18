@@ -448,7 +448,7 @@ async def test_graph_input_capture_has_one_owner(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_graph_case_preserves_template_options_and_checks_prompt_owner(tmp_path: Path) -> None:
-    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.runtime import AgentTaskInputContext
     from .test_evaluation_consumers import FixtureModels
 
@@ -456,10 +456,10 @@ async def test_agent_graph_case_preserves_template_options_and_checks_prompt_own
         return f"{context.prompt}:{context.input['suffix']}"
 
     models = FixtureModels()
-    group = CapabilityGroup("case-agent")
+    group = RuntimeFeatures("case-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("agent-case", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT,
-                            capabilities=(group,)) as runtime:
+                            features=group) as runtime:
         target = runtime.tasks.from_agent("case.agent", runtime.agents.get(), build_input=project)
         judge = Task("case.score", score, effect_policy="none")
         engine = runtime.tasks.bind(target, judge)

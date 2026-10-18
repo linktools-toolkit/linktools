@@ -86,7 +86,7 @@ class _SchemaTwinB(BaseModel):
 def _binding_contract() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent"),
+        agent_spec=AgentSpec("agent", tool_retries=3, output_retries=3),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -163,13 +163,13 @@ def _versioned_skill(
     layer_id: str,
     revision: int,
     size: int,
-    etag: str = "a" * 64,
+    digest: str = "a" * 64,
 ) -> SkillDefinition:
     asset = AssetVersionRef(
         AssetKey("skill", "review/guide.md"),
         layer_id,
         StorageEntryRevision(revision),
-        etag,
+        digest,
         size,
     )
     return SkillDefinition(
@@ -244,7 +244,7 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
             "id": "review/guide.md",
             "layer_id": "",
             "revision": 1,
-            "etag": "a" * 64,
+            "digest": "a" * 64,
             "size": 1,
         },
         {
@@ -253,7 +253,7 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
             "id": "review/guide.md",
             "layer_id": "source",
             "revision": "1",
-            "etag": "a" * 64,
+            "digest": "a" * 64,
             "size": 1,
         },
     ),

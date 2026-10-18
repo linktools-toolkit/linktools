@@ -162,8 +162,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         self, transaction: StateTransaction, record: StoredRecord, state: str,
     ) -> None:
         if not await transaction.replace_record(
-            replace(record, state=state, storage_version=record.storage_version + 1),
-            expected_storage_version=record.storage_version,
+            replace(record, state=state, storage_revision=record.storage_revision + 1),
+            expected_storage_revision=record.storage_revision,
         ):
             raise _SubmissionConflict()
 
@@ -317,7 +317,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 self._validate_graph_record(graph_record, submission.graph_id)
                 if await transaction.guard_record(
                     graph_record.key_digest,
-                    expected_storage_version=graph_record.storage_version,
+                    expected_storage_revision=graph_record.storage_revision,
                 ) is None:
                     raise _SubmissionConflict()
                 pending = operation
@@ -1076,7 +1076,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     graph_record,
                     replace(graph_view, status=view.status),
                 ),
-                graph_record.storage_version,
+                graph_record.storage_revision,
             )
         await _append_task_events(
             transaction,

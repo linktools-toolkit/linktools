@@ -87,12 +87,12 @@ async def test_live_reader_invalidates_mutable_and_negative_caches(
         assert await reader.read(observe) == (
             record, record.key_digest, 1, (fact,), operation, (record,),
         )
-        updated = replace(record, storage_version=1, data={"value": 1})
+        updated = replace(record, storage_revision=1, data={"value": 1})
         completed = replace(operation, state="done")
         next_fact = replace(fact, sequence=2)
 
         async def update(transaction: StateTransaction) -> None:
-            assert await transaction.replace_record(updated, expected_storage_version=0)
+            assert await transaction.replace_record(updated, expected_storage_revision=0)
             await transaction.next_sequence(sequence)
             await transaction.insert_fact(next_fact)
             assert await transaction.replace_operation(completed, expected_state="pending")
@@ -140,7 +140,7 @@ async def test_reader_waits_for_entire_multirecord_publication(
                 assert release.wait(5), "publication barrier timed out"
 
     monkeypatch.setattr(os, "replace", paused_replace)
-    changed = tuple(replace(record, storage_version=1, data={"value": 1}) for record in records)
+    changed = tuple(replace(record, storage_revision=1, data={"value": 1}) for record in records)
     commit = asyncio.create_task(writer.mutate(
         lambda transaction: transaction.replace_records(
             tuple(RecordReplacement(record, 0) for record in changed)
@@ -178,7 +178,7 @@ def _crash_during_publish(root: str, grouped: bool) -> None:
 
         os.replace = crash_replace
         await writer.mutate(lambda transaction: transaction.replace_records(tuple(
-            RecordReplacement(replace(_record(value), storage_version=1, data={"value": 1}), 0)
+            RecordReplacement(replace(_record(value), storage_revision=1, data={"value": 1}), 0)
             for value in ("first", "second")
         )))
 
@@ -250,8 +250,8 @@ async def test_live_read_open_and_refresh_never_scan_all_business_records(
     try:
         await reader.initialize()
         for index in range(8):
-            value = replace(records[index], storage_version=1, data={"value": 1})
-            await writer.mutate(lambda transaction: transaction.replace_record(value, expected_storage_version=0))
+            value = replace(records[index], storage_revision=1, data={"value": 1})
+            await writer.mutate(lambda transaction: transaction.replace_record(value, expected_storage_revision=0))
             assert await reader.read(lambda transaction: transaction.get_record(value.key_digest)) == value
     finally:
         await reader.close()

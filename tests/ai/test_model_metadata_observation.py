@@ -11,7 +11,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     HmacCursorSigner, Principal, ResourceKind, ResourceRef,
     TenantAuthorizationPolicy, agent_conversation_id,
@@ -25,6 +25,7 @@ from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.runtime import TraceCapability
 
 from .test_model_interaction_lifecycle_paging import (
     _Executions, _HistoryStore, _interaction, _reader,
@@ -217,7 +218,7 @@ async def test_model_metadata_excludes_uncommitted_staging() -> None:
     execution = _record("root")
     reader = StepExecutionHistoryReader(
         namespace="history", executions=_Executions(execution),
-        store=storage.run_store.read_store(RuntimeDomain.EXECUTION), notifications=storage.run_store,
+        store=storage.run_store.read_store(RuntimeDomain.TRACE), notifications=storage.run_store,
         cursor_signer=HmacCursorSigner("metadata", b"metadata"),
     )
     try:
@@ -293,11 +294,12 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
             return RuntimeStorage.filesystem(tmp_path / "state")
         return RuntimeStorage.sqlite(tmp_path / "state.db")
 
-    group = CapabilityGroup[None]("metadata")
+    group = RuntimeFeatures[None]("metadata")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "metadata-live", models=_Models(_UsageFunctionModel(model)),
-        storage=storage(), capabilities=(group,),
+        storage=storage(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("private prompt")
         principal = runtime.default_principal
@@ -361,7 +363,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     prepare_interactions = StateStepArchive.prepare_interactions
 
     async def block_publication(self, run, interactions, payload, **kwargs):
-        if self.runtime_domain is RuntimeDomain.EXECUTION and any(
+        if self.runtime_domain is RuntimeDomain.TRACE and any(
             item.request_context is not None for item in interactions
         ):
             publication_started.set()
@@ -376,12 +378,13 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         await release_provider.wait()
         return ModelResponse(parts=[TextPart("published answer")])
 
-    group = CapabilityGroup("scheduled-history")
+    group = RuntimeFeatures("scheduled-history")
+    group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     storage_path = tmp_path / "scheduled"
     async with Runtime.open(
         "scheduled-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.filesystem(storage_path), capabilities=(group,),
+        storage=RuntimeStorage.filesystem(storage_path), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal

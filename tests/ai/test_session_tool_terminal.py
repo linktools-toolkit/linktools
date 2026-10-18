@@ -24,6 +24,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import (
+    CheckpointCapability,
+    TraceCapability,
     Runtime,
     RuntimeStorage,
     RuntimeStoragePlan,
@@ -166,11 +168,13 @@ async def test_session_tool_turn_commits_terminal_and_history(
     calls: list[str] = []
     application = _application(calls)
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-terminal",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -324,11 +328,13 @@ async def test_rejected_session_start_cleans_only_its_admission(
         release=release_tool,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-admission-cleanup",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             try:
                 await runtime.agents.get("default").create_session("session")
@@ -466,11 +472,14 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
     calls: list[str] = []
     execution_id: str | None = None
     try:
+        application = _application(calls)
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "start-cleanup-restart",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(_application(calls),),
+            features=application,
         ) as runtime:
             original_release = state.conversation.sessions.release_execution
 
@@ -552,11 +561,14 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
     assert execution_id is not None
     reopened = _split_sqlite_storage(database)
     try:
+        application = _application(calls)
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "start-cleanup-restart",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=reopened,
-            capabilities=(_application(calls),),
+            features=application,
         ) as runtime:
             checkpoint = await reopened.recovery.checkpoints.get(
                 execution_id,
@@ -604,11 +616,13 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", pause_worker)
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-start-cancel-before-run",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -720,11 +734,14 @@ async def test_pending_start_cancel_commits_terminal_before_admission(
 
     monkeypatch.setattr(LocalExecutionBackend, "prepare_start", pause_prepare)
     try:
+        application = _application(calls)
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             f"pending-start-cancel-{storage_mode}",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(_application(calls),),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -809,11 +826,13 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
         release=release_tool,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "cancel-unknown-tool-effect",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -910,11 +929,13 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
     )
     cancel_key = "cancel-probe"
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "cancel-intent-readback",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
@@ -1004,7 +1025,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 ) -> None:
                     guarded = await transaction.guard_record(
                         candidate.key_digest,
-                        expected_storage_version=expected_version,
+                        expected_storage_revision=expected_version,
                     )
                     if guarded is None:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1210,11 +1231,13 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
         release=release_tool,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-recovery-resolution",
             models=_RecoveryToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
@@ -1263,7 +1286,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             assert checkpoint_before.agent_run_id is not None
             agent_run_id = checkpoint_before.agent_run_id
             if with_cancel:
-                recovery_archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+                recovery_archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
                 durable_interaction_count = await recovery_archive.model_interaction_count(
                     agent_run_id=agent_run_id
                 )
@@ -1278,11 +1301,13 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
             effect_policy="non_replay_safe",
             effect_log=effect_log,
         )
+        reopened_application.capability(CheckpointCapability(), scope="runtime")
+        reopened_application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-recovery-resolution",
             models=_RecoveryToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(reopened_application,),
+            features=reopened_application,
         ) as runtime:
             execution = await runtime.executions.get(execution_id)
 
@@ -1336,7 +1361,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
 
             if with_cancel:
                 interactions_after = await state.run_store.read_store(
-                    RuntimeDomain.RECOVERY
+                    RuntimeDomain.CHECKPOINT
                 ).model_interaction_count(
                     agent_run_id=agent_run_id,
                 )
@@ -1378,11 +1403,13 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
     )
     cancel_key = "cancel-while-worker-absent"
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "recovery-no-worker-cancel",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = await runtime.agents.get("default").session("session").start(
@@ -1476,11 +1503,13 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
         release=release_tool,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             f"cancel-unknown-boundary-{boundary}",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             if boundary == "unknown_write":
                 repository = state.recovery.tools
@@ -1635,11 +1664,13 @@ async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
     )
     close_failure_expected = False
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             f"unknown-write-{readback}",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             repository = state.recovery.tools
             original_get = repository.get_operation
@@ -1741,11 +1772,13 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
         fail_finalize,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-terminal-finalize",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = (
@@ -1824,11 +1857,13 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
         "commit_terminal_checkpoint",
         fail_success_once,
     )
+    application.capability(CheckpointCapability(), scope="runtime")
+    application.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "session-tool-terminal-failure",
         models=_ToolModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(application,),
+        features=application,
     ) as runtime:
         await runtime.agents.get("default").create_session("session")
         session = runtime.agents.get("default").session("session")
@@ -1978,11 +2013,13 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
         effect_log=effect_log,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             current = await state.execution.executions.get(
                 execution_id,
@@ -2043,11 +2080,13 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
         effect_log=effect_log,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             tools = await state.recovery.tools.list_by_execution(
                 execution_id,
@@ -2145,11 +2184,13 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
         effect_log=effect_log,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
@@ -2209,11 +2250,13 @@ async def test_split_storage_success_handoff_wins_cancel_race(
         pause_handoff,
     )
     try:
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "split-storage-handoff-cancel-race",
             models=_ToolModels(),  # type: ignore[arg-type]
             storage=state,
-            capabilities=(application,),
+            features=application,
         ) as runtime:
             assert (
                 state.execution.executions.state_store.storage_group
@@ -2304,7 +2347,7 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
 ) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="checkpoint-readback", tenant_id="tenant")
-    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     assert isinstance(recovery, StateStepArchive)
     original = recovery.state_store.mutate
     injected = False
@@ -2338,7 +2381,7 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
         await state.run_store.save_checkpoint(checkpoint)
         assert injected
 
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert isinstance(recovery, StateStepArchive)
         assert await recovery.transcript_message_count_for_run(run) == len(
             checkpoint.messages
@@ -2359,7 +2402,7 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="run-checkpoint-relocation", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         assert isinstance(recovery, StateStepArchive)
         run = AgentRunRecord("run", agent_conversation_id="conversation", agent_id="default")
         await recovery.register_agent_run(run)
@@ -2429,7 +2472,7 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> 
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
     try:
-        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         conversation = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         assert isinstance(recovery, StateStepArchive)
         assert isinstance(conversation, StateStepArchive)
@@ -2527,13 +2570,14 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     if phase == "effect_unconfirmed":
         await asyncio.sleep(1.1)
     calls: list[str] = []
+    application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
+    application.capability(CheckpointCapability(), scope="runtime")
+    application.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "session-tool-crash",
         models=_ToolModels(),
         storage=RuntimeStorage.sqlite(database),
-        capabilities=(
-            _application(calls, effect_policy="non_replay_safe", effect_log=effect_log),
-        ),
+        features=application,
     ) as runtime:
         session = runtime.agents.get("default").session("session")
         if phase == "effect_unconfirmed":
@@ -2577,7 +2621,7 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
         **kwargs: Any,
     ) -> None:
         nonlocal rejected
-        if self.runtime_domain is RuntimeDomain.RECOVERY:
+        if self.runtime_domain is RuntimeDomain.CHECKPOINT:
             messages = [message for chunk in checkpoint.chunks
                         for message in await self.transcript_repository._decode_chunk_messages(chunk)]
             if any(isinstance(message, ModelResponse)
@@ -2589,11 +2633,14 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
 
     monkeypatch.setattr(StateStepArchive, "materialize_checkpoint_in_transaction", reject_response)
     with pytest.raises(AIError) as raised:
+        application = _application(calls)
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "pre-effect-checkpoint",
             models=_ToolModels(),
             storage=RuntimeStorage.in_memory(),
-            capabilities=(_application(calls),),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             execution = (
@@ -2635,11 +2682,14 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
     state, engine = await _state(backend, tmp_path)
     calls: list[str] = []
     try:
+        application = _application(calls)
+        application.capability(CheckpointCapability(), scope="runtime")
+        application.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "session-atomic-terminal",
             models=_ToolModels(),
             storage=state,
-            capabilities=(_application(calls),),
+            features=application,
         ) as runtime:
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
@@ -2675,7 +2725,7 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
 ) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
-    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord(
         "run",
         agent_conversation_id="conversation",

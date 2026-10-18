@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """Harness summarization must remain visible to Runtime request observability."""
 
+import asyncio
 from collections.abc import Sequence
+from types import SimpleNamespace
 from copy import deepcopy
 
 import pytest
@@ -10,8 +12,11 @@ from linktools.ai.core import PromptLimits
 from linktools.ai.runtime._compaction import (
     CompactionCapability,
     CompactionPolicy,
+    _ObservedCompactionModel,
 )
 from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
+from linktools.ai.runtime._metric_capability import ModelObservationCapability
+from linktools.ai.observe import Observation
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -347,3 +352,75 @@ async def test_compaction_keeps_semantic_control_results() -> None:
     ]
     assert returns[0].content == "result-0"
     assert returns[1].content == "[tool result cleared]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_observer", (False, True))
+async def test_compaction_metric_is_interruptible_after_observer_handoff(
+    cancel_during_observer: bool,
+) -> None:
+    observer_entered = asyncio.Event()
+    observer_release = asyncio.Event()
+    metric_entered = asyncio.Event()
+    phases: list[str] = []
+    metric_tasks: list[asyncio.Task[object] | None] = []
+
+    class BlockingRecorder:
+        async def try_record(self, observation: Observation) -> bool:
+            assert observation.status == "SUCCEEDED"
+            assert observation.correlation["linktools.request_purpose"] == "compaction"
+            metric_tasks.append(asyncio.current_task())
+            metric_entered.set()
+            await asyncio.Event().wait()
+            return True
+
+    model = TestModel(custom_output_text="summary")
+    ctx = RunContext(
+        deps=SimpleNamespace(correlation={}), model=model, usage=RunUsage(),
+        run_id="run", run_step=1,
+    )
+    journal = ModelRequestJournal(
+        source_namespace="workspace", tenant_id="tenant",
+        execution_id="execution", agent_run_id="run",
+    )
+    metrics = ModelObservationCapability(
+        BlockingRecorder(), source_namespace="workspace", tenant_id="tenant",
+        execution_id="execution", session_id=None, agent_run_id="run", agent_id="agent",
+        journal=journal,
+    )
+
+    async def event(fact: object, *, phase: str, **kwargs: object) -> None:
+        phases.append("recorded:" + phase)
+
+    async def publish(fact: object, *, phase: str, **kwargs: object) -> None:
+        phases.append("published:" + phase)
+
+    metrics._record_request_event = event
+    metrics._publish_request_event = publish
+
+    async def observer(_ctx: object, fact: ModelRequestFact, phase: str,
+                       wrapped: object, response: object, error: object) -> None:
+        if phase == "completed":
+            observer_entered.set()
+            await observer_release.wait()
+        phases.append("observed:" + phase)
+
+    observed = _ObservedCompactionModel(
+        model, ctx=ctx, journal=journal, observer=observer,
+        recorder=metrics.record_external_model_request, source_messages=(),
+    )
+    task = asyncio.create_task(observed.request([], None, ModelRequestParameters()))
+    await asyncio.wait_for(observer_entered.wait(), timeout=1)
+    if cancel_during_observer:
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    observer_release.set()
+    await asyncio.wait_for(metric_entered.wait(), timeout=1)
+    assert phases[-3:] == ["observed:completed", "recorded:completed", "published:completed"]
+    assert metric_tasks == [task]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="missing"):
+        journal.current(1)

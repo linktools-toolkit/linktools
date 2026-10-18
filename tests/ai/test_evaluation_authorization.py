@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Runtime policies share selected datasets without transferring resource ownership."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, JsonValue, Principal, ResourceKind, ResourceRef,
     TenantAuthorizationPolicy, service_principal,
@@ -88,7 +89,7 @@ async def test_runtime_default_authorization_keeps_owner_and_local_trusted_denia
     options = {"authorization": None} if explicit_none else {}
     async with Runtime.open(
         "default-policy", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path),
-        **options,
+        features=RuntimeFeatures("default-policy", **options),
     ) as runtime:
         owner = service_principal("default", "owner")
         other = service_principal("default", "other")
@@ -118,8 +119,9 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     tmp_path: Path, backend: str, input_kind: str,
 ) -> None:
     models = FixtureModels()
-    group = CapabilityGroup[None]("shared-agent")
+    group = RuntimeFeatures[None]("shared-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    captured = await group.capture()
     ref = DatasetRef("system-data", 1)
     case_ref = CaseRef(ref.id, "one", 1)
     spec = DatasetSpec(ref, (
@@ -132,7 +134,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     ))
     async with Runtime.open(
         "shared-data", models=models, storage=storage_for(backend, tmp_path), context=CONTEXT,
-        capabilities=(group,),
+        features=captured,
     ) as runtime:
         await runtime.evaluations.publish_dataset(spec, principal=PUBLISHER, idempotency_key="system")
         await runtime.evaluations.publish_dataset(private, principal=PUBLISHER, idempotency_key="private")
@@ -145,7 +147,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     storage = storage_for(backend, tmp_path)
     async with Runtime.open(
         "shared-data", models=models, storage=storage, context=CONTEXT,
-        capabilities=(group,), authorization=authorization,
+        features=replace(captured, authorization=authorization),
     ) as runtime:
         assert (await runtime.evaluations.get_dataset(ref, principal=OPERATOR)).ref == ref
         cases = await runtime.evaluations.list_cases(ref, principal=OPERATOR)
@@ -208,7 +210,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
 
     async with Runtime.open(
         "shared-data", models=models, storage=storage_for(backend, tmp_path), context=CONTEXT,
-        capabilities=(group,),
+        features=captured,
     ) as runtime:
         with pytest.raises(AIError) as denied:
             await runtime.evaluations.get_dataset(ref, principal=OPERATOR)
@@ -227,7 +229,7 @@ async def test_shared_graph_capture_requires_its_own_permission(tmp_path: Path) 
     scorer = Task("shared.graph-score", exact, effect_policy="none")
     async with Runtime.open(
         "shared-graph", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path),
-        context=CONTEXT, authorization=authorization,
+        context=CONTEXT, features=RuntimeFeatures("authorization", authorization=authorization),
     ) as runtime:
         engine = runtime.tasks.bind(target, scorer)
         source = await engine.start(TaskGraph("source", (

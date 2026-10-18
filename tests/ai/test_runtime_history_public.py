@@ -514,6 +514,10 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
 
 class _ResultExecutions:
     def __init__(self) -> None:
+        async def read(operation):
+            return await operation(None)
+
+        self.state_store = SimpleNamespace(read=read)
         self.binding = TaskBindingContract(
             "handler",
             1,

@@ -129,7 +129,8 @@ Evaluation actions require an authorized principal and enforce tenant/owner
 boundaries. The example explicitly uses a service principal; the default Runtime
 principal is not authorized for evaluation by default. Production applications
 should pass their `AuthorizationPolicy` from `linktools.ai.core` to
-`Runtime.open(..., authorization=policy)` and use real caller identities. Omitting
+`RuntimeFeatures("evaluation", authorization=policy)` and pass the declaration as
+`Runtime.open(..., features=features)`. Use real caller identities. Omitting
 `authorization`, or passing `None`, retains `TenantAuthorizationPolicy` with the
 Runtime tenant. The supplied instance is shared by evaluation, input capture,
 TaskGraph, execution, session, artifact, and borrowed `runtime.history` services.
@@ -144,7 +145,8 @@ resources.
 
 Policies are application configuration, not persisted execution data. Inject the
 policy on every reopened Runtime and worker. For a separately opened read-only
-history reader, pass it to `RuntimeHistory.open(..., authorization=policy)` too.
+history reader, use the same policy-bearing capture with
+`RuntimeHistory.open(..., features=captured)` too.
 Recovery permission belongs to the recovery actor; resumed execution retains the
 principal originally admitted with its graph.
 
@@ -289,7 +291,10 @@ retention and deletion remain the application's separate responsibility.
 
 ## Fixed MCP tool responses
 
-`Runtime.open(..., tool_responses=ToolResponseFixture(ref, reader))` binds one
+Register `ToolResponsesCapability(ToolResponseFixture(ref, reader))` from
+`linktools.ai.capability` on the trial's `RuntimeFeatures`,
+then pass the single declaration or capture to `Runtime.open(features=...)`.
+This binds one
 case's immutable Asset to a borrowed `AssetStoreReader`. The host owns the
 reader's initialization, authorization, and closing. An Asset version proves
 byte integrity, not permission to read it. Keep fixture Assets separate from
@@ -459,7 +464,7 @@ select results. A successful null is `{"status": "succeeded", "value": None,
 
 ## Agent candidates and model judges
 
-Open the Runtime with your application's `ModelRegistry` and `CapabilityGroup`.
+Open the Runtime with your application's `ModelRegistry` and `RuntimeFeatures`.
 An existing Agent becomes a candidate or scorer through the same Task adapter:
 
 ```python

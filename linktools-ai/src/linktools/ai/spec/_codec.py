@@ -84,8 +84,8 @@ class AgentSpecCodec:
         allow_capabilities = raw.get("allow_capabilities", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
-        tool_retries = raw.get("tool_retries", AgentSpec.DEFAULT_TOOL_RETRIES)
-        output_retries = raw.get("output_retries", AgentSpec.DEFAULT_OUTPUT_RETRIES)
+        tool_retries = raw.get("tool_retries")
+        output_retries = raw.get("output_retries")
         description = raw.get("description")
         metadata = raw.get("metadata", {})
         preload_skills: object = raw.get("preload_skills", [])
@@ -118,10 +118,10 @@ class AgentSpecCodec:
             ("tool_retries", tool_retries),
             ("output_retries", output_retries),
         ):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
                 raise AIError(
                     ErrorCode.OUTPUT_CONTRACT_INVALID,
-                    f"{name} must be a non-negative integer",
+                    f"{name} must be a non-negative integer or None",
                 )
         if description is not None and (
             not isinstance(description, str) or not 1 <= len(description) <= 1024

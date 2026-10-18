@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -46,10 +46,10 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
         return ScoreBundle(dimensions={"exact_match": 1}).to_mapping()
 
     models = StructuredModels()
-    group = CapabilityGroup("structured-graph")
+    group = RuntimeFeatures("structured-graph")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("graph.score", score, effect_policy="none")
-    async with Runtime.open("structured-graph", models=models, context=CONTEXT, capabilities=(group,),
+    async with Runtime.open("structured-graph", models=models, context=CONTEXT, features=group,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         target = runtime.tasks.from_agent("graph.target", runtime.agents.get())
         source = await runtime.tasks.bind(target).start(TaskGraph("source", (
@@ -59,7 +59,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
         source_output = await source.result("answer")
         source_contract = (await source.state(include_content=True)).nodes[0].output_contract
         capture = await runtime.tasks.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "capture"))
-    async with Runtime.open("structured-graph", models=models, context=CONTEXT, capabilities=(group,),
+    async with Runtime.open("structured-graph", models=models, context=CONTEXT, features=group,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         target = runtime.tasks.from_agent("graph.target", runtime.agents.get())
         engine = runtime.tasks.bind(target, scorer)

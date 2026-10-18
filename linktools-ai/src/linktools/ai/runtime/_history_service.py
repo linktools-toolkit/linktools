@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authorized read-only execution query and history service."""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 from ..core import JsonValue
 
@@ -20,11 +20,12 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
-from ._history_projection import StepExecutionHistoryReader
+from ._history_projection import StepExecutionHistoryReader, _model_interaction_update_ranges
 from .service_api import (
     AttachmentFact,
     ExecutionHistoryItem,
     ExecutionHistoryReader,
+    ExecutionHistoryService,
     ExecutionTraceItem,
     ExecutionView,
     ListExecutionRequest,
@@ -50,11 +51,14 @@ class DefaultExecutionHistoryService:
         authorization: AuthorizationPolicy,
         reader: ExecutionHistoryReader,
         cursor_signer: "CursorSigner | None" = None,
+        *,
+        pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
     ) -> None:
         self._executions = executions
         self._authorization = authorization
         self._reader = reader
         self._cursor_signer = cursor_signer
+        self._pending_execution = pending_execution
 
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -322,6 +326,21 @@ class DefaultExecutionHistoryService:
             ),
         )
 
+    async def read_model_interaction_updates(
+        self, execution_id: str, *, principal: Principal,
+        after_cutoffs: tuple[UsageReadCutoff, ...] = (), limit: int = 200,
+    ) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+        """Authorize one bounded capture-and-suffix operation before opening its read scope."""
+        if type(self) is DefaultExecutionHistoryService and type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.read_authorized_model_interaction_updates(
+                execution_id, tenant_id=principal.tenant_id, executions=self._executions,
+                after_cutoffs=after_cutoffs, limit=limit,
+            )
+        return await _read_model_interaction_updates(
+            self, execution_id, principal=principal, after_cutoffs=after_cutoffs, limit=limit,
+        )
+
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, principal: Principal,
     ) -> ModelInteractionReadBoundary:
@@ -357,6 +376,12 @@ class DefaultExecutionHistoryService:
     async def subscribe_model_interactions(
         self, execution_id: str, *, principal: Principal,
     ) -> ModelInteractionSubscription | None:
+        if type(self._reader) is StepExecutionHistoryReader:
+            await self._authorize_header(execution_id, principal)
+            return await self._reader.subscribe_authorized_model_interactions(
+                execution_id, tenant_id=principal.tenant_id,
+                executions=self._executions,
+            )
         await self._authorize(execution_id, principal)
         return await self._reader.subscribe_model_interactions(execution_id, tenant_id=principal.tenant_id)
 
@@ -513,10 +538,13 @@ class DefaultExecutionHistoryService:
         principal: Principal,
     ) -> None:
         tenant_id = principal.tenant_id
-        header = await self._executions.get_header(
+        pending = (None if self._pending_execution is None else
+                   await self._pending_execution(execution_id, tenant_id=tenant_id))
+        header = (ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id, pending.principal_id)
+                  if pending is not None else await self._executions.get_header(
             execution_id,
             tenant_id=tenant_id,
-        )
+        ))
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
@@ -531,6 +559,10 @@ class DefaultExecutionHistoryService:
         principal: Principal,
     ) -> ExecutionRecord:
         await self._authorize_header(execution_id, principal)
+        if self._pending_execution is not None:
+            pending = await self._pending_execution(execution_id, tenant_id=principal.tenant_id)
+            if pending is not None:
+                return pending
         record = await self._executions.get(
             execution_id,
             tenant_id=principal.tenant_id,
@@ -538,6 +570,24 @@ class DefaultExecutionHistoryService:
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
+
+
+async def _read_model_interaction_updates(
+    service: ExecutionHistoryService, execution_id: str, *, principal: Principal,
+    after_cutoffs: tuple[UsageReadCutoff, ...], limit: int,
+) -> tuple[ModelInteractionReadBoundary, tuple[ModelInteractionItem, ...]]:
+    """Compose existing public operations for services without the optional read."""
+    boundary = await service.capture_model_interaction_cutoffs(execution_id, principal=principal)
+    items: list[ModelInteractionItem] = []
+    for run, after, through in _model_interaction_update_ranges(execution_id, boundary, after_cutoffs, limit):
+        rows = await service.read_model_interaction_metadata(
+            execution_id, principal=principal, agent_run_seq=run,
+            after_model_request_seq=after, through_model_request_seq=through, limit=through - after,
+        )
+        if not rows:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        items.extend(rows)
+    return boundary, tuple(items)
 
 
 def _validate_history_filters(filters: Mapping[str, JsonValue]) -> None:

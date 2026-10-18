@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -34,12 +34,12 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
             raise RuntimeError("offline model failure")
         return ModelResponse(parts=[TextPart("done")])
 
-    group = CapabilityGroup("terminal-race")
+    group = RuntimeFeatures("terminal-race")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "terminal-race", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, capabilities=(group,),
+        storage=storage, features=group,
     ) as runtime:
         agent = runtime.agents.get()
         execution = await agent.start("work", idempotency_key="same")

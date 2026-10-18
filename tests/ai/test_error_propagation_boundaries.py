@@ -151,6 +151,7 @@ async def test_task_service_finalizer_preserves_classified_ai_error() -> None:
 async def test_execution_cancel_finalizer_preserves_classified_ai_error() -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("execution finalizer"))
     service = object.__new__(DefaultExecutionService)
+    service._admission_tasks = set()
     service._detached_cancel_finalizers = set()
     service._detached_cancel_failure = None
 
@@ -289,6 +290,7 @@ async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
 @pytest.mark.asyncio
 async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     execution = SimpleNamespace(
+        restart_checkpoints=True,
         execution_id="execution",
         tenant_id="tenant",
         principal_id="principal",

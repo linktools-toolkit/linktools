@@ -55,6 +55,8 @@ class ExecutionStateCommands:
         checkpoints: Sequence[AgentRunCheckpoint] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult:
+        if not commit.execution.durable_trace and (agent_run is not None or step_events or checkpoints):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         prepared_checkpoints = ()
         if self._steps is not None and agent_run is not None and checkpoints:
             prepared_checkpoints = await self._steps.prepare_checkpoints(
@@ -72,7 +74,7 @@ class ExecutionStateCommands:
                 if isinstance(prepared_checkpoints, PreparedAgentRunCheckpointBatch)
                 else None
             ),
-        )
+        ) if commit.execution.durable_trace else None
 
         async def mutate(
             transaction: StateTransaction,
@@ -112,18 +114,16 @@ class ExecutionStateCommands:
                     execution_id=commit.execution.execution_id,
                     history_head_guard=(head, head_record),
                 )
-            await self._executions.put_history_seal_in_transaction(
-                transaction,
-                history_seal,
-            )
+            if history_seal is not None:
+                await self._executions.put_history_seal_in_transaction(transaction, history_seal)
             await self._executions.replace_history_head_in_transaction(
                 transaction,
                 head_record,
                 replace(
                     head,
-                    state=ExecutionHistoryState.SEALED,
+                    state=ExecutionHistoryState.SEALED if history_seal is not None else ExecutionHistoryState.CLOSED,
                     revision=head.revision + 1,
-                    seal_digest=history_seal.seal_digest,
+                    seal_digest=None if history_seal is None else history_seal.seal_digest,
                 ),
             )
             return await self._executions.commit_terminal_in_transaction(
@@ -145,7 +145,7 @@ class ExecutionStateCommands:
                 seal = await self._executions.get_history_seal(
                     commit.execution.execution_id,
                     tenant_id=self._executions.tenant_id,
-                )
+                ) if history_seal is not None else None
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     return CommitObservation(
@@ -156,14 +156,14 @@ class ExecutionStateCommands:
                     DurableCommitState.UNRESOLVED,
                     error=error,
                 )
-            if execution is None or head is None or seal is None:
+            if execution is None or head is None or history_seal is not None and seal is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             expected_revision = commit.expected_revision + len(audit_events) + 1
             expected_event_seq = (
                 commit.expected_event_seq + len(audit_events) + 1
             )
             if (
-                head.state is ExecutionHistoryState.SEALED
+                head.state is (ExecutionHistoryState.SEALED if history_seal is not None else ExecutionHistoryState.CLOSED)
                 and seal == history_seal
                 and execution.status is commit.execution.status
                 and execution.result == commit.result
@@ -178,7 +178,7 @@ class ExecutionStateCommands:
                         commit.result,
                     ),
                 )
-            if head.state is ExecutionHistoryState.SEALED:
+            if head.state in {ExecutionHistoryState.SEALED, ExecutionHistoryState.CLOSED}:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),

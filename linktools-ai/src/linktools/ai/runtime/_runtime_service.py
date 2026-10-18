@@ -4,6 +4,7 @@
 
 import asyncio
 import inspect
+import math
 import secrets
 from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -18,14 +19,12 @@ from ..agent import (
     AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
-    CapabilityFilter,
     CompiledAgent,
     OutputBinding,
     restore_output,
 )
-from ..capability import CapabilityGroup, CapabilityGroupCapture
+from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
-    AuthorizationPolicy,
     RunBudget,
     CorrelationData,
     ExecutionMode,
@@ -33,9 +32,7 @@ from ..core import (
     Principal,
     PrincipalKind,
     SessionStatus,
-    TaskStatus,
     ThinkingValue,
-    PromptLimits,
     Page,
     normalize_correlation,
     normalize_execution_mode,
@@ -55,7 +52,6 @@ from ..model import ModelRegistry
 if TYPE_CHECKING:
     from ._evaluation import RuntimeEvaluations
     from ._input_capture import RuntimeInputCaptures
-    from ..observe import Metrics
     from ..task import TaskResultRecord
     from ._runtime_history import RuntimeHistory
     from .state._contracts import (
@@ -78,7 +74,6 @@ from ..task import (
     TaskResultRef,
     TaskNode,
     TaskNodeInvocation,
-    TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
@@ -90,14 +85,10 @@ from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
-from ._tool_response_fixture import ToolResponseFixture
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
-from ._metrics import (
-    MetricFlushResult,
-    MetricBufferStatus,
-    _disabled_metric_status,
-)
+from ..observe import MetricRecorderStatus, MetricFlushResult
+from ._metrics import _disabled_metric_status
 from .service_api import (
     ExecutionView,
     ApprovalService,
@@ -119,7 +110,6 @@ from .service_api import (
     SessionView,
     UpdateSessionRequest,
     ExecutionTreeEvent,
-    TaskGraphRunEvent,
 )
 from .state import RuntimeStorage
 
@@ -230,7 +220,7 @@ class _TaskNodeRuntimePort(Protocol):
 
 
 class _MetricControl(Protocol):
-    def status(self) -> MetricBufferStatus: ...
+    def status(self) -> MetricRecorderStatus: ...
 
     async def flush(
         self,
@@ -391,13 +381,8 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         storage: RuntimeStorage,
         context: None = None,
-        capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupCapture[None]]" = (),
-        metrics: "Metrics | None" = None,
-        limits: "PromptLimits | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
+        features: "RuntimeFeatures[None] | RuntimeFeaturesCapture[None] | None" = None,
         auto_recover: bool = True,
-        tool_responses: ToolResponseFixture | None = None,
-        capability_filter: CapabilityFilter | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -409,13 +394,8 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         storage: RuntimeStorage,
         context: RuntimeContext[AppT],
-        capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
-        metrics: "Metrics | None" = None,
-        limits: "PromptLimits | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
+        features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
         auto_recover: bool = True,
-        tool_responses: ToolResponseFixture | None = None,
-        capability_filter: CapabilityFilter | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -426,40 +406,32 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         storage: RuntimeStorage,
         context: "RuntimeContext[object] | None" = None,
-        capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]" = (),
-        metrics: "Metrics | None" = None,
-        limits: "PromptLimits | None" = None,
-        authorization: "AuthorizationPolicy | None" = None,
+        features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None" = None,
         auto_recover: bool = True,
-        tool_responses: ToolResponseFixture | None = None,
-        capability_filter: CapabilityFilter | None = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         """Open a Runtime, optionally skipping namespace-wide startup recovery.
 
         Explicit graph and execution recovery remain available when disabled.
         Closing still drains work owned by this Runtime.
+
+        Runtime-scoped RuntimeFeatures registrations apply to every agent run,
+        independently of Agent capability selection. They use native hooks and
+        lifecycle. Persistence guarantees are fixed on each admitted execution;
+        reopening under different feature declarations does not reinterpret them.
         """
-        if tool_responses is not None and not isinstance(tool_responses, ToolResponseFixture):
-            raise TypeError("tool_responses must be ToolResponseFixture")
         if not isinstance(auto_recover, bool):
             raise TypeError("auto_recover must be bool")
         resolved_namespace = validate_persistence_namespace(namespace)
         root_context = RuntimeContext(None) if context is None else context
         if not isinstance(root_context, RuntimeContext):
             raise TypeError("context must be RuntimeContext")
-        selected_limits = PromptLimits() if limits is None else limits
         return _open_runtime(
             resolved_namespace,
             context=root_context,
             models=models,
             storage=storage,
-            capabilities=capabilities,
-            metrics=metrics,
-            limits=selected_limits,
-            authorization=authorization,
+            features=features,
             auto_recover=auto_recover,
-            tool_responses=tool_responses,
-            capability_filter=capability_filter,
         )
 
     @property
@@ -532,7 +504,7 @@ class Runtime(Generic[AppT]):
     def correlation(self) -> CorrelationData:
         return self._context.correlation
 
-    def _metric_status(self) -> MetricBufferStatus:
+    def _metric_status(self) -> MetricRecorderStatus:
         control = self._metric_control
         return _disabled_metric_status() if control is None else control.status()
 
@@ -545,6 +517,7 @@ class Runtime(Generic[AppT]):
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
             or timeout_seconds < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1468,13 +1441,8 @@ async def _open_runtime(
     context: RuntimeContext[object],
     models: ModelRegistry,
     storage: RuntimeStorage,
-    capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]",
-    metrics: "Metrics | None",
-    limits: PromptLimits,
-    authorization: "AuthorizationPolicy | None",
+    features: "RuntimeFeatures[object] | RuntimeFeaturesCapture[object] | None",
     auto_recover: bool = True,
-    tool_responses: ToolResponseFixture | None = None,
-    capability_filter: CapabilityFilter | None = None,
 ):
     from ._factory import compose_runtime_components
 
@@ -1484,13 +1452,8 @@ async def _open_runtime(
         tenant_id=context.tenant_id,
         models=models,
         storage=storage,
-        capabilities=capabilities,
-        metrics=metrics,
-        limits=limits,
-        authorization=authorization,
+        features=features,
         auto_recover=auto_recover,
-        tool_responses=tool_responses,
-        capability_filter=capability_filter,
     )
     try:
         if components.metric_control is not None:

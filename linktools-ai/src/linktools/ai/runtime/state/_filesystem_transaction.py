@@ -139,18 +139,18 @@ class _FilesystemTransaction:
             self._sync_record_index(None, record)
 
     async def guard_record(
-        self, key: bytes, *, expected_storage_version: int
+        self, key: bytes, *, expected_storage_revision: int
     ) -> StoredRecord | None:
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
-            raise ValueError("expected_storage_version must be a non-negative integer")
+            raise ValueError("expected_storage_revision must be a non-negative integer")
         current = await self.get_record(key)
         if key in self.guarded_record_keys:
             return current
-        if current is None or current.storage_version != expected_storage_version:
+        if current is None or current.storage_revision != expected_storage_revision:
             return None
         guarded = StoredRecord(
             current.key_digest,
@@ -159,7 +159,7 @@ class _FilesystemTransaction:
             current.kind,
             current.sort_key,
             current.state,
-            expected_storage_version + 1,
+            expected_storage_revision + 1,
             current.lease_owner,
             current.lease_fence,
             current.lease_expires_at,
@@ -171,11 +171,11 @@ class _FilesystemTransaction:
         return guarded
 
     async def replace_record(
-        self, record: StoredRecord, *, expected_storage_version: int
+        self, record: StoredRecord, *, expected_storage_revision: int
     ) -> bool:
         try:
             await self.replace_records(
-                (RecordReplacement(record, expected_storage_version),)
+                (RecordReplacement(record, expected_storage_revision),)
             )
         except AIError as error:
             if error.code is ErrorCode.STORAGE_CONFLICT:
@@ -196,17 +196,17 @@ class _FilesystemTransaction:
             current = current_values.get(replacement.record.key_digest)
             if (
                 current is None
-                or current.storage_version != replacement.expected_storage_version
+                or current.storage_revision != replacement.expected_storage_revision
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             validate_record_replacement(current, replacement.record)
             validate_record_identity(replacement.record)
             if (
-                replacement.record.storage_version
-                != replacement.expected_storage_version + 1
+                replacement.record.storage_revision
+                != replacement.expected_storage_revision + 1
             ):
                 raise ValueError(
-                    "replacement must increment storage_version exactly once"
+                    "replacement must increment storage_revision exactly once"
                 )
             candidates.append((current, replacement.record))
         for current, record in candidates:
@@ -219,22 +219,22 @@ class _FilesystemTransaction:
         self,
         key: bytes,
         *,
-        expected_storage_version: int,
+        expected_storage_revision: int,
         lease_owner: str | None,
         lease_fence: int,
         lease_expires_at: datetime | None,
     ) -> bool:
         if (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
             or isinstance(lease_fence, bool)
             or not isinstance(lease_fence, int)
             or lease_fence < 0
         ):
             raise ValueError("record lease integer fields are invalid")
         current = await self.get_record(key)
-        if current is None or current.storage_version != expected_storage_version:
+        if current is None or current.storage_revision != expected_storage_revision:
             return False
         if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
@@ -245,7 +245,7 @@ class _FilesystemTransaction:
             current.kind,
             current.sort_key,
             current.state,
-            expected_storage_version + 1,
+            expected_storage_revision + 1,
             lease_owner,
             lease_fence,
             lease_expires_at,
@@ -278,25 +278,25 @@ class _FilesystemTransaction:
             self._sync_record_index(record, None)
 
     async def delete_record(
-        self, key: bytes, *, expected_storage_version: int | None = None
+        self, key: bytes, *, expected_storage_revision: int | None = None
     ) -> bool:
-        if expected_storage_version is not None and (
-            isinstance(expected_storage_version, bool)
-            or not isinstance(expected_storage_version, int)
-            or expected_storage_version < 0
+        if expected_storage_revision is not None and (
+            isinstance(expected_storage_revision, bool)
+            or not isinstance(expected_storage_revision, int)
+            or expected_storage_revision < 0
         ):
             raise ValueError(
-                "expected_storage_version must be a non-negative integer or None"
+                "expected_storage_revision must be a non-negative integer or None"
             )
         current = await self.get_record(key)
         if current is None:
             return False
         expected = (
-            current.storage_version
-            if expected_storage_version is None
-            else expected_storage_version
+            current.storage_revision
+            if expected_storage_revision is None
+            else expected_storage_revision
         )
-        if await self.guard_record(key, expected_storage_version=expected) is None:
+        if await self.guard_record(key, expected_storage_revision=expected) is None:
             return False
         aliases = dict(await asyncio.to_thread(self._cache.list_aliases))
         await self.delete_fact_streams(key)

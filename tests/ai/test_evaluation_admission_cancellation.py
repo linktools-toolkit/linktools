@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, JsonValue, Principal, ResourceRef, TenantAuthorizationPolicy,
     idempotency_key_digest, service_principal,
@@ -128,7 +129,7 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
     storage = storage_for("filesystem", tmp_path)
     async with Runtime.open(
         "cancel-security", models=ModelRegistry(), storage=storage, context=CONTEXT,
-        authorization=authorization,
+        features=RuntimeFeatures("authorization", authorization=authorization),
     ) as runtime:
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancel", 1), (
             CaseSpec.task(CaseRef("cancel", "one", 1), input={"answer": "yes"}, expected="yes"),

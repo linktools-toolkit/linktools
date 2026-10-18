@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from ._runtime_test_helpers import workspace_features
+
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -9,7 +11,7 @@ from typing import cast
 
 import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin, bind_output, restore_output
-from linktools.ai.capability import CapabilityGroup, workspace_capabilities
+from linktools.ai.capability import RuntimeFeatures, workspace_capabilities
 from linktools.ai.core import (
     IdempotencyStatus,
     JsonValue,
@@ -39,7 +41,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace)._contributions
+        workspace_features("workspace", workspace=workspace)._contributions
     )
 
 
@@ -53,7 +55,7 @@ def _load_json(name: str) -> object:
 def _binding_fixture_value() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000),
+        agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000, output_retries=3),
         model_contract={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
         subagents=(),

@@ -19,7 +19,8 @@ from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime import TraceCapability
 from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._snapshot_validation import (
@@ -121,7 +122,7 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
                 for item in trace.items[1:3]
             )
 
-        archive = history.state.run_store.read_store(RuntimeDomain.EXECUTION)
+        archive = history.state.run_store.read_store(RuntimeDomain.TRACE)
         events = await archive.list_events(agent_run_id=recorder.agent_run_id)
         assert [event.error for event in events if event.error is not None] == [
             "unknown attempt 0", "unknown attempt 1",
@@ -132,11 +133,11 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
             key=lambda fact: (fact.stream_digest, fact.sequence),
         ))
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="history", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            namespace="history", tenant_id="tenant", domain=RuntimeDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
-            namespace="history", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            namespace="history", tenant_id="tenant", domain=RuntimeDomain.TRACE,
             records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
         )
 
@@ -216,15 +217,16 @@ async def test_only_typed_unknown_effect_errors_are_unfinished_attempts(error: E
     store = StagingAgentRunStore()
     recorder = AgentRunRecorder(store, execution_id=None, agent_run_id="run")
     await recorder.register_agent_run(AgentRunRecord("run"))
-    capability = _AgentRunPersistenceCapability(
+    capability = AgentRunCapture(
         recorder=recorder, agent_id="agent", agent_run_id="run",
     )
+    trace = TraceCapability().bind(capability)
     call = ToolCallPart("echo", {}, tool_call_id="call")
     definition = ToolDefinition(name="echo")
     context = SimpleNamespace(run_step=1)
-    await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
+    await trace.before_tool_execute(context, call=call, tool_def=definition, args={})
     with pytest.raises(type(error)):
-        await capability.on_tool_execute_error(
+        await trace.on_tool_execute_error(
             context, call=call, tool_def=definition, args={}, error=error,
         )
     events = await store.list_events(agent_run_id="run")

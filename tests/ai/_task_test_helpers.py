@@ -5,7 +5,7 @@
 from collections.abc import Callable, Mapping
 from typing import TypeVar
 
-from linktools.ai.capability import CapabilityGroup as _CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures as _RuntimeFeatures
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
@@ -64,7 +64,7 @@ class TaskFunction(Task[AppT]):
         )
 
 
-class CapabilityGroup(_CapabilityGroup[AppT]):
+class RuntimeFeatures(_RuntimeFeatures[AppT]):
     """Capability fixture with out-of-band task definitions for legacy tests."""
 
     def task(

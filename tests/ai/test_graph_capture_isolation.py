@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Graph captures replay accepted attachments and the requested context policy."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
 
-from linktools.ai.capability import CapabilityGroup
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import TaskStatus
 from linktools.ai.runtime import (
     AgentTaskInput, CaptureGraphRequest, CaptureInputRequest, ExecutionInputContext,
@@ -18,8 +20,8 @@ from linktools.ai.workspace import Workspace
 from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
 
 
-def _agents() -> CapabilityGroup:
-    group = CapabilityGroup("capture-isolation")
+def _agents(*, workspace: Workspace | None = None) -> RuntimeFeatures:
+    group = workspace_features("capture-isolation", workspace=workspace)
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     return group
 
@@ -34,11 +36,11 @@ async def test_graph_capture_replays_each_accepted_attachment_once(
     work.mkdir()
     attachment = work / "input.txt"
     attachment.write_text("accepted file bytes", encoding="utf-8")
-    capabilities = (_agents(), CapabilityGroup("workspace", workspace=Workspace.load(work)))
+    features = _agents(workspace=Workspace.load(work))
     models = FixtureModels()
     async with Runtime.open("capture-files", models=models, context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-                            capabilities=capabilities) as runtime:
+                            features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question", files=("input.txt",))),
@@ -52,7 +54,7 @@ async def test_graph_capture_replays_each_accepted_attachment_once(
         attachment.unlink()
     async with Runtime.open("capture-files", models=models, context=CONTEXT,
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-                            capabilities=capabilities) as runtime:
+                            features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         template = await runtime._input_captures.read_graph(capture, principal=PRINCIPAL)
         replay = await runtime.tasks.bind(task).start(TaskGraph("replay", template.nodes),
@@ -72,7 +74,7 @@ async def test_graph_capture_applies_context_policy_to_all_agent_input_forms(
         ModelResponse(parts=[TextPart("OLD HISTORICAL ANSWER")]),
     ), session_metadata={"secret": "historical value"})
     async with Runtime.open("capture-context", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_agents(),)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=_agents()) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         engine = runtime.tasks.bind(task)
         run = await engine.start(TaskGraph("source", (
@@ -134,7 +136,7 @@ async def test_capture_context_policy_remains_authoritative_when_reprojecting(
         ModelResponse(parts=[TextPart("prior answer")]),
     ), session_metadata={"secret": "prior metadata"})
     async with Runtime.open("capture-reproject", models=FixtureModels(), context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_agents(),)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=_agents()) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         scorer = Task("capture.scorer", exact, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)

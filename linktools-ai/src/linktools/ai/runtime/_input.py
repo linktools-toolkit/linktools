@@ -677,7 +677,7 @@ def captured_input_prompt(original: CanonicalUserInput, accepted: CanonicalUserI
     if independent_files < 0:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     file_parts = captured_input_files(accepted, independent_files) if independent_files else ()
-    position = len(file_parts) if _generated_file_pairs(file_parts) else 0
+    position = len(file_parts)
     file_index = 0
     for item in items:
         if not isinstance(item, Mapping):
@@ -722,17 +722,14 @@ def _validate_captured_file(parts: tuple[UserContent, ...], view: JsonValue) -> 
     path = view.get("path")
     if (not isinstance(content, BinaryContent)
         or not isinstance(path, str)
-        or not (
-            label == "Workspace file path: " + json.dumps(path)
-            or is_binary_attachment_text(label, content, path=path)
-        )
+        or not is_binary_attachment_text(label, content, path=path)
         or content.media_type != view.get("media_type") or len(content.data) != view.get("size")
         or hashlib.sha256(content.data).hexdigest() != view.get("digest")):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def captured_input_files(value: CanonicalUserInput, count: int) -> tuple[UserContent, ...]:
-    """Read accepted files, preserving current prefixes and durable legacy suffixes."""
+    """Read accepted independent files from their captured prefix."""
     if not isinstance(value, MaterializedUserContent):
         raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "accepted_file_view_not_retained"})
     views = value.view.get("files")
@@ -741,10 +738,6 @@ def captured_input_files(value: CanonicalUserInput, count: int) -> tuple[UserCon
     if count == 0:
         return ()
     files = tuple(value[:2 * count])
-    if not _generated_file_pairs(files):
-        files = tuple(value[-2 * count:])
-        if any(not isinstance(files[2 * index], str) for index in range(count)):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for index, view in enumerate(views[-count:]):
         _validate_captured_file(files[2 * index:2 * index + 2], view)
     return files
@@ -754,17 +747,9 @@ def merge_captured_input_files(
     prompt: CanonicalUserInput,
     files: Sequence[UserContent],
 ) -> CanonicalUserInput:
-    """Replay captured file placement without changing legacy capture semantics."""
+    """Replay captured independent files before the prompt."""
     items = (prompt,) if isinstance(prompt, str) else prompt
-    return (*files, *items) if _generated_file_pairs(files) else (*items, *files)
-
-
-def _generated_file_pairs(parts: Sequence[UserContent]) -> bool:
-    return bool(parts) and len(parts) % 2 == 0 and all(
-        isinstance(parts[index + 1], BinaryContent)
-        and is_binary_attachment_text(parts[index], parts[index + 1])
-        for index in range(0, len(parts), 2)
-    )
+    return (*files, *items)
 
 
 def stored_input_attachment_views(
