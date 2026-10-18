@@ -65,7 +65,9 @@ class Command(BaseCommand):
                         history = await stack.enter_async_context(RuntimeHistory.open("default", storage=_local_runtime_storage(workspace)))
                 else:
                     from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
-                    from linktools.ai.runtime import Runtime, ConversationCapability, MetricsCapability
+                    from linktools.ai.runtime import (
+                        CheckpointCapability, ConversationCapability, MetricsCapability, Runtime, TraceCapability,
+                    )
 
                     assets = _local_runtime_assets(workspace)
                     await assets.initialize()
@@ -74,6 +76,8 @@ class Command(BaseCommand):
                     features.capability(AssetCapability(assets))
                     features.capability(WorkspaceCapability(workspace))
                     features.capability(ConversationCapability())
+                    features.capability(CheckpointCapability())
+                    features.capability(TraceCapability())
                     metrics = await _local_metrics(workspace)
                     features.capability(MetricsCapability(metrics=metrics))
                     capture = await features.capture()
