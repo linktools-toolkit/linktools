@@ -16,7 +16,7 @@ from linktools.ai.core import Principal, TenantAuthorizationPolicy, canonical_js
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
 from linktools.ai.runtime._message import encode_model_messages
-from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._factory import _borrowed_runtime_history
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan, RuntimeStorageRoute
@@ -190,7 +190,7 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
         service = DefaultExecutionService(
             storage.execution, objects, TenantAuthorizationPolicy("tenant"),
             sessions=storage.conversation.sessions, catalog=None, compiler=None,
-            runtime_bridge=SimpleNamespace(port=None),
+            runtime_bridge=_ExecutionRuntimeBridge(),
             live_broker=LiveExecutionEventBroker(), history_reader=None,
             object_reader=read if use_storage_reader else None,
         )
