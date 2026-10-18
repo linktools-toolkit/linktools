@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
-from linktools.core import ConfigField, environ
+from linktools.core import ConfigField
 
 from linktools.ai.asset import (
     AssetStore,
@@ -100,23 +100,7 @@ def _local_input_config(
     workspace: Workspace,
 ) -> tuple[str, ...]:
 
-    missing = object()
-    if (
-        any(key in workspace.config for key in ("vision", "OPENAI_VISION", "LINKTOOLS_OPENAI_VISION"))
-        or "OPENAI_VISION" in os.environ
-        or "LINKTOOLS_OPENAI_VISION" in os.environ
-        or environ.config.get("OPENAI_VISION", default=missing) is not missing
-    ):
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            "Legacy vision configuration was removed; remove vision/OPENAI_VISION "
-            "and configure input_types in .linktools/config.yaml",
-            retryable=False,
-            safe_details={"reason": "legacy_vision_configuration"},
-        )
     try:
-        if any(key in workspace.config for key in ("input_capabilities", "unknown_inputs", "input_mime_types")):
-            raise ValueError("use input_types")
         values = workspace.config.get("input_types", [])
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
             raise ValueError("input_types must be a list of input type strings")

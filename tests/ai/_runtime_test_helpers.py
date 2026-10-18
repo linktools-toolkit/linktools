@@ -59,7 +59,7 @@ class _Models:
     provider = "test"
     model_identity = "test:live-history"
     model_digest = "a" * 64
-    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history", "vision": False}
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history", "input_mime_types": ["application/*", "audio/*", "text/*", "video/*"]}
 
     def __init__(self, model: FunctionModel) -> None:
         self.model = model

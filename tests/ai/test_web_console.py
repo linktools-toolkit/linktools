@@ -577,11 +577,13 @@ def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyP
     assert not (config_dir / "runtime").exists()
 
 
-def test_web_read_only_rejects_legacy_input_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_web_read_only_rejects_invalid_input_types(tmp_path: Path) -> None:
     from linktools.commands.ai.web import command
     from linktools.cli import CommandError
 
-    monkeypatch.setenv("OPENAI_VISION", "false")
+    config = tmp_path / ".linktools" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("input_types: image/png\n")
     args = command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
     with pytest.raises(CommandError, match="input_types"):
         command.run(args)

@@ -805,14 +805,9 @@ SDK encoding restrictions and existing resource limits still apply. Transport
 selection is internal; no extra status, transport, passthrough, or per-MIME
 byte-limit configuration is needed.
 
-The old `vision` API argument and `--vision` flag have been removed.
-Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and
-persisted configuration, and remove workspace `vision` settings; their presence
-is a migration error, even when false or empty. There is no implicit mapping to
-`input_types`. Recovering a historical execution requires an explicitly
-registered binding matching its persisted historical contract. Historical input
-semantics are retained only at that restore boundary; a new binding with omitted
-declarations cannot recover them or replace them with its empty allowlist contract.
+Configure attachment permissions with `input_types`. Captured model contracts
+must contain the resolved `input_mime_types` list; missing permissions do not
+implicitly allow attachments. Restored bindings must match their captured contract.
 
 Execution file input uses the same durable boundary:
 

@@ -50,10 +50,7 @@ A match permits an input but does not verify provider support; SDK encoding and
 resource limits still apply. Without a configured model, settings report that
 no model is configured.
 
-The old `--vision` flag is removed. Remove `OPENAI_VISION` and
-`LINKTOOLS_OPENAI_VISION` from environment/persisted configuration and workspace
-`vision` settings; any remaining value, even false or empty, produces a migration
-error instead of an implicit fallback. Use `input_types` explicitly.
+Configure attachment permissions explicitly with workspace `input_types`.
 
 ```bash
 ai-web --project /path/to/project --read-only
