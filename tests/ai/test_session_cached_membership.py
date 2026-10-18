@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 import linktools.ai.runtime._session as session_module
 
@@ -137,7 +137,9 @@ async def test_cached_execution_absence_does_not_reject_new_source_display(tmp_p
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
     state = RuntimeStorage.sqlite(path, cache=cache)
-    await state.initialize(namespace="display", tenant_id="tenant")
+    await state.initialize(
+            namespace="display", tenant_id="tenant", module_caches={RuntimeDomain.CONVERSATION: cache},
+        )
     other = RuntimeStorage.sqlite(path)
     try:
         assert await state.execution.executions.get_many(("active",), tenant_id="tenant") == {}
@@ -176,7 +178,9 @@ async def test_cached_canonical_page_projects_live_pending_without_freezing_prog
     if with_history:
         await _prepare(state, body=True)
     else:
-        await state.initialize(namespace="display", tenant_id="tenant")
+        await state.initialize(
+            namespace="display", tenant_id="tenant", module_caches={RuntimeDomain.CONVERSATION: cache},
+        )
         await state.conversation.sessions.create(_session())
     pending = _execution("pending", status=ExecutionStatus.STARTED, prompt="live question")
     service = _service(state, cache)

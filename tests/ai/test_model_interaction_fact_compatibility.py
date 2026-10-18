@@ -28,7 +28,7 @@ async def test_mixed_interaction_facts_and_records_preserve_paging_and_count(
             run.agent_run_id, 1, 1, "agent", None, {}, None, None, None,
             "CANCELLED", None, 1, None, now, now,
         )
-        store = state.execution.executions.state_store
+        store = archive.state_store
         stream = archive._stream(run.agent_run_id, "interaction")
         fact = StoredFact(
             stream, 1, archive._agent_run_key(run.agent_run_id),

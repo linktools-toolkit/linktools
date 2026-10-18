@@ -36,13 +36,6 @@ def _restore_fixture(tmp_path: Path) -> tuple[Path, str, str]:
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
-        rows = connection.execute("SELECT id, payload_json FROM ai_state_records WHERE kind = 'execution'").fetchall()
-        for record_id, content in rows:
-            payload = json.loads(content)
-            # These cases isolate missing shared budgets, not missing required persistence flags.
-            payload["value"]["payload"]["fields"].update(restart_checkpoints=True, durable_trace=True)
-            connection.execute("UPDATE ai_state_records SET payload_json = ? WHERE id = ?",
-                               (json.dumps(payload), record_id))
     return path, fixture["execution_id"], fixture["standalone_execution_id"]
 
 

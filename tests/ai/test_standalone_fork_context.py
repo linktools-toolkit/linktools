@@ -164,7 +164,7 @@ async def test_pending_confirmation_rejects_missing_or_corrupt_fork_context(tmp_
     async with _turn_state("sqlite", tmp_path) as state:
         turn = _standalone(state)
         await _commit(state, turn)
-        await _damage_fork_context(state.storage.recovery.checkpoints.state_store, damage)
+        await _damage_fork_context(state.storage.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
         with pytest.raises(AIError) as raised:
             await state.commands.read_pending_turn(turn.reservation, expected_session=None)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -191,7 +191,7 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         source = await runtime.agents.get().start("source")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
-        await _damage_fork_context(storage.recovery.checkpoints.state_store, damage)
+        await _damage_fork_context(storage.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
     with pytest.raises(AIError) as raised:
         async with Runtime.open("corrupt-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=models, features=group) as runtime:
             source = await runtime.executions.get(source_id)

@@ -110,7 +110,7 @@ async def test_history_and_task_results_keep_execution_object_ownership(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("domain", (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY))
+@pytest.mark.parametrize("domain", (RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT))
 async def test_composed_transcript_archives_cache_verified_compressed_bytes(
     tmp_path: Path, domain: RuntimeDomain,
 ) -> None:
@@ -121,7 +121,10 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         RuntimeStoragePlan(conversation=route, execution=route),
         object_store=objects, cache=cache,
     )
-    await storage.initialize(namespace="history", tenant_id="tenant")
+    await storage.initialize(
+        namespace="history", tenant_id="tenant",
+        module_caches={RuntimeDomain.CONVERSATION: cache, RuntimeDomain.TRACE: cache},
+    )
     try:
         archive = storage.run_store.read_store(domain)
         assert isinstance(archive, StateStepArchive)
@@ -136,6 +139,12 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
 
         assert await repository.load_messages("run") == messages
         assert await repository.load_messages("run") == messages
+        if domain is RuntimeDomain.CHECKPOINT:
+            assert objects.reads == 2
+            assert cache.writes == []
+            assert await repository.read_payload(StoredPayload.inline_bytes(b"inline body")) == b"inline body"
+            assert objects.reads == 2
+            return
         assert objects.reads == 1
         assert len(cache.writes) == 1
         key, _envelope = cache.writes[0]
@@ -289,7 +298,7 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("consumer", ("checkpoint", "verify", "relocate", "deferred"))
-@pytest.mark.parametrize("domain", (RuntimeDomain.RECOVERY, RuntimeDomain.CONVERSATION))
+@pytest.mark.parametrize("domain", (RuntimeDomain.CHECKPOINT, RuntimeDomain.CONVERSATION))
 async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
     tmp_path: Path, monkeypatch, consumer: str, domain: RuntimeDomain,
 ) -> None:
@@ -302,7 +311,10 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
     objects = _CountingObjects()
     storage = RuntimeStorage.sqlite(tmp_path / "checkpoint.db", object_store=objects,
                                     cache=InMemoryCacheBackend(max_bytes=100000))
-    await storage.initialize(namespace="checkpoint", tenant_id="tenant")
+    await storage.initialize(
+        namespace="checkpoint", tenant_id="tenant",
+        module_caches={RuntimeDomain.CONVERSATION: storage.cache},
+    )
     try:
         archive = storage.run_store.read_store(domain)
         run = AgentRunRecord("run")
@@ -318,7 +330,7 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
         now[0] = 1002.0
         # The ordinary observer still has its permitted hot bytes. The consumers
         # below must instead validate the current recovery source.
-        if domain is not RuntimeDomain.RECOVERY:
+        if domain is not RuntimeDomain.CHECKPOINT:
             assert await archive.transcript_repository.load_messages("run") == tuple(messages)
         with pytest.raises(AIError) as raised:
             if consumer == "checkpoint":
@@ -332,7 +344,7 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
                     await archive.relocate_run_checkpoint(run, checkpoint)
             else:
                 backend = object.__new__(LocalExecutionBackend)
-                backend._run_stores = {RuntimeDomain.RECOVERY: archive}
+                backend._run_stores = {RuntimeDomain.CHECKPOINT: archive}
                 await backend.load_interrupted_messages("run")
         assert raised.value.code is ErrorCode.STORAGE_NOT_FOUND
     finally:

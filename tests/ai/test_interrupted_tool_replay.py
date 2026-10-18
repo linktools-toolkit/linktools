@@ -133,11 +133,11 @@ async def test_recovered_tool_retains_interruptions_and_one_real_result(
             key=lambda fact: (fact.stream_digest, fact.sequence),
         ))
         aliases, sequences = canonical_snapshot_indexes(
-            namespace="history", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            namespace="history", tenant_id="tenant", domain=RuntimeDomain.TRACE,
             records=records, facts=facts, operations=(),
         )
         validate_snapshot_domain(
-            namespace="history", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            namespace="history", tenant_id="tenant", domain=RuntimeDomain.TRACE,
             records=records, aliases=aliases, facts=facts, operations=(), sequences=sequences,
         )
 

@@ -3,6 +3,7 @@
 """Tool response fixtures belong to accepted invocation input and durable lineage."""
 
 import base64
+import hashlib
 import json
 import sqlite3
 import zlib
@@ -34,14 +35,14 @@ def _execution_without_fixture() -> ExecutionRecord:
     path = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_4609177e.json"
     fixture = json.loads(path.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
+    assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
     with sqlite3.connect(":memory:") as connection:
         connection.executescript(sql.decode("utf-8"))
         row = connection.execute("SELECT payload_json FROM ai_state_records WHERE kind = 'execution'").fetchone()
     payload = json.loads(row[0])
     fields = payload["value"]["payload"]["fields"]
     assert "tool_response_ref" not in fields
-    # Isolate the optional fixture reference from the required persistence flags.
-    fields.update(restart_checkpoints=True, durable_trace=True)
+    assert fields["restart_checkpoints"] is True and fields["durable_trace"] is True
     return _decode_enveloped_domain(payload, ExecutionRecord)
 
 

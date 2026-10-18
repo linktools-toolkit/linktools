@@ -330,7 +330,6 @@ class RuntimeStorage:
                 _validate_cache(value)
             self._plan = self._plan.with_module_routes(routes)
             _validate_storage_configuration(self._plan, self._external_object_store)
-            selected_modules = frozenset(caches)
             for domain in module_domains:
                 caches.setdefault(domain, None)
             self._lifecycle = _RuntimeStorageLifecycle.INITIALIZING
@@ -344,7 +343,6 @@ class RuntimeStorage:
                     object_store=self._external_object_store,
                     cache=self._cache,
                     module_caches=caches,
-                    selected_modules=selected_modules,
                     read_only=read_only,
                 )
                 self._assign_materialized(

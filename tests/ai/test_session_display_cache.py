@@ -12,7 +12,7 @@ from sqlalchemy import event
 import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import ConversationCapability, RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
@@ -71,7 +71,9 @@ def _fixed_display_clock(monkeypatch):
 
 
 async def _prepare(state, *, body=False, namespace="display"):
-    await state.initialize(namespace=namespace, tenant_id="tenant")
+    await state.initialize(
+        namespace=namespace, tenant_id="tenant", module_caches={RuntimeDomain.CONVERSATION: state.cache},
+    )
     record = await state.conversation.sessions.create(replace(_session(), metadata={"nested": {"value": "old"}}))
     await _admit(state, status=ExecutionStatus.SUCCEEDED if body else ExecutionStatus.PENDING_START)
     if body:
@@ -767,6 +769,7 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     else:
         storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache)
     group = RuntimeFeatures[None]("display")
+    group.capability(ConversationCapability(cache=cache), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
         "display", storage=storage, models=_Models(TestModel()), features=group,
@@ -862,6 +865,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
     cache = _Cache()
     storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache=cache)
     group = RuntimeFeatures[None]("display")
+    group.capability(ConversationCapability(cache=cache), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)

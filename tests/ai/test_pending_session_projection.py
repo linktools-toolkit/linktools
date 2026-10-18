@@ -41,7 +41,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
     def group():
         value = RuntimeFeatures("pending-session-display")
         value.agent("default", model="default", allow_tools=())
-        value.capability(ConversationCapability(), scope="runtime")
+        value.capability(ConversationCapability(cache=cache), scope="runtime")
         return value
 
     def block_next():

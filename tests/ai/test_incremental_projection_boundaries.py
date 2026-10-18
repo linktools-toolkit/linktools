@@ -304,7 +304,8 @@ async def test_recovery_restores_context_without_assuming_public_checkpoint_ackn
         restored = state.run_store
         public = restored.read_store(RuntimeDomain.TRACE)
         old = RuntimeAgentRunStore(
-            StagingAgentRunStore(), conversation_archive=restored.read_store(RuntimeDomain.CONVERSATION),
+            StagingAgentRunStore(), execution_repository=repository, tenant_id="tenant",
+            conversation_archive=restored.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=public, recovery_archive=restored.read_store(RuntimeDomain.CHECKPOINT),
             conversation_retention=RuntimeRetentionMode.VOLATILE,
             execution_retention=RuntimeRetentionMode.VOLATILE,

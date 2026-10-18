@@ -3,7 +3,7 @@
 """Unused Runtime services perform no business IO or background execution."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TypeVar
 
@@ -12,6 +12,7 @@ import pytest
 from linktools.ai.core import TaskStatus
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorageRoute
 from linktools.ai.runtime.state._store import StateStore
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
@@ -29,9 +30,14 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
 
     async def initialize_and_guard(
         *, namespace: str, tenant_id: str, read_only: bool = False,
+        module_routes: Mapping[RuntimeDomain, RuntimeStorageRoute] | None = None,
+        module_caches: Mapping[RuntimeDomain, object | None] | None = None,
     ) -> None:
         # Shared schema provisioning is permitted; domain business IO is not.
-        await initialize(namespace=namespace, tenant_id=tenant_id, read_only=read_only)
+        await initialize(
+            namespace=namespace, tenant_id=tenant_id, read_only=read_only,
+            module_routes=module_routes, module_caches=module_caches,
+        )
         service_stores = {
             storage.task.tasks.state_store,
             storage.evaluation.records.state_store,

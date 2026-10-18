@@ -1361,7 +1361,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
 
             if with_cancel:
                 interactions_after = await state.run_store.read_store(
-                    RuntimeDomain.RECOVERY
+                    RuntimeDomain.CHECKPOINT
                 ).model_interaction_count(
                     agent_run_id=agent_run_id,
                 )
@@ -2621,7 +2621,7 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
         **kwargs: Any,
     ) -> None:
         nonlocal rejected
-        if self.runtime_domain is RuntimeDomain.RECOVERY:
+        if self.runtime_domain is RuntimeDomain.CHECKPOINT:
             messages = [message for chunk in checkpoint.chunks
                         for message in await self.transcript_repository._decode_chunk_messages(chunk)]
             if any(isinstance(message, ModelResponse)

@@ -98,8 +98,10 @@ retain their own batching; a conversation turn does not force a metrics flush.
 `TraceCapability(storage=route, cache=cache)` configure their own archives.
 Omitted storage inherits the corresponding Runtime base route; Trace and
 Checkpoint default to the execution route with separate logical partitions.
-Routes participating in atomic publication must share one StateStorageGroup;
-incompatible routes fail during opening. Shared SQL engines and object stores
+Trace and Checkpoint routes must share the execution StateStorageGroup;
+incompatible routes fail during opening. Conversation may use a separate store:
+that configuration uses durable admission and the recoverable prepared terminal
+handoff protocol, rather than deferred single-transaction turns. Shared SQL engines and object stores
 remain borrowed resources, rather than one connection or close per capability.
 
 A module's `cache=None` disables its hot/read cache; it never inherits the root

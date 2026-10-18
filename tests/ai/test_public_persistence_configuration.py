@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Public capability configuration owns module routes, caches and read-only use."""
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -153,7 +155,7 @@ async def test_module_cache_is_explicit_and_does_not_inherit_root_cache(tmp_path
                 assert (module_cache.reads, module_cache.writes) == before_module
 
 
-@pytest.mark.parametrize("feature_type", (ConversationCapability, CheckpointCapability, TraceCapability))
+@pytest.mark.parametrize("feature_type", (CheckpointCapability, TraceCapability))
 async def test_atomic_module_route_rejects_a_different_transaction_group(
     tmp_path: Path, feature_type: type,
 ) -> None:
@@ -166,3 +168,32 @@ async def test_atomic_module_route_rejects_a_different_transaction_group(
         ):
             pytest.fail("an atomic module cannot silently split its transactions")
     assert invalid.value.code in {ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, ErrorCode.STORAGE_DEPENDENCY_NOT_READY}
+
+
+async def test_split_conversation_route_uses_durable_admission_with_shared_cache(tmp_path: Path) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def model(messages, info):
+        entered.set()
+        await release.wait()
+        yield "done"
+
+    state = RuntimeStorage.sqlite(tmp_path / "execution.db", cache=InMemoryCacheBackend(max_bytes=2**20))
+    route = RuntimeStorageRoute.sqlite(tmp_path / "conversation.db")
+    features = _features(ConversationCapability(storage=route))
+    async with Runtime.open(
+        "split-conversation", storage=state,
+        models=_FeatureModels(FunctionModel(stream_function=model)), features=features,
+    ) as runtime:
+        session = await runtime.agents.get().create_session("session")
+        execution = await session.start("question", idempotency_key="turn")
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            assert record is not None
+            assert record.status is ExecutionStatus.STARTED
+        finally:
+            release.set()
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
+        replay = await session.start("question", idempotency_key="turn")
+        assert replay.execution_id == execution.execution_id

@@ -65,6 +65,9 @@ class _ObservedTrace(TraceCapability):
     events: list[tuple[str, str]] = field(default_factory=list)
     id: str | None = "runtime.trace"
 
+    def __post_init__(self) -> None:
+        super().__init__()
+
     async def before_run(self, ctx: RunContext) -> None:
         self.events.append((ctx.deps.execution_id, "trace"))
         await super().before_run(ctx)

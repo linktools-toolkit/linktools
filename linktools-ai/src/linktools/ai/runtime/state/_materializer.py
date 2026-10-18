@@ -94,7 +94,6 @@ async def materialize_runtime_storage(
     cache: object | None = None,
     module_caches: Mapping[RuntimeDomain, object | None] | None = None,
     read_only: bool = False,
-    selected_modules: frozenset[RuntimeDomain] = frozenset(),
 ) -> _MaterializedRuntimeStorage:
     module_caches = dict(module_caches or {})
     def state_cache(domain: RuntimeDomain) -> object | None:
@@ -279,7 +278,7 @@ async def materialize_runtime_storage(
                 "execution and recovery must share a StateStorageGroup",
             )
 
-        atomic_domains = {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT} | selected_modules
+        atomic_domains = {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         for domain in atomic_domains:
             if stores[domain].storage_group is not execution_store.storage_group:
                 raise AIError(
