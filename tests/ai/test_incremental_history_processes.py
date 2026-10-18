@@ -16,7 +16,7 @@ from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, Principal
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 
-from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed, _persistence_capabilities
 from .test_live_history_readback_integration import _Models
 
 
@@ -51,7 +51,7 @@ def _writer_process(root: str, pipe: Connection) -> None:
         group.agent("default", model="default", allow_tools=("quick", "slow"))
         async with Runtime.open(
             "process-history", storage=RuntimeStorage.filesystem(Path(root)),
-            models=_Models(_UsageFunctionModel(model)), capabilities=(group,),
+            models=_Models(_UsageFunctionModel(model)), capabilities=(_persistence_capabilities(trace=True), group,),
         ) as runtime:
             execution = await runtime.agents.get("default").start("process prompt")
             principal = runtime.default_principal

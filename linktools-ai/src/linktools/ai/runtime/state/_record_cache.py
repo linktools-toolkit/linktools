@@ -3,6 +3,7 @@
 
 """Bounded ordinary record reads over source-owned transaction boundaries."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
@@ -20,6 +21,10 @@ class StateRecordCache:
     def __init__(self, store: StateStore, cache: object | None, *, scope: str) -> None:
         self._store = store
         self._scope = scope
+        self._epoch = object()
+        self._publisher: asyncio.Task[None] | None = None
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self._cache = StorageReadCache(cache) if isinstance(cache, CacheBackend) else None
 
     async def read_record(self, key: bytes) -> StoredRecord | None:
@@ -40,8 +45,7 @@ class StateRecordCache:
             records = await self._store.read(lambda transaction: transaction.get_records(ordered))
             return canonical_json_bytes([encode_record(records[key]) for key in ordered if key in records])
 
-        key_digest = hashlib.sha256(canonical_json_bytes([key.hex() for key in ordered])).hexdigest()
-        cache_key = f"runtime-record:{self._scope}:{key_digest}"
+        cache_key = self._cache_key(ordered)
         content = await self._cache.get(cache_key, load)
         try:
             if content is None:
@@ -60,11 +64,68 @@ class StateRecordCache:
             await self._cache.invalidate(cache_key)
             return await self._store.read(lambda transaction: transaction.get_records(ordered))
 
-    async def invalidate(self) -> None:
+    def _cache_key(self, ordered: Sequence[bytes]) -> str:
+        key_digest = hashlib.sha256(canonical_json_bytes([key.hex() for key in ordered])).hexdigest()
+        return f"runtime-record:{self._scope}:{key_digest}"
+
+    def publish_record(self, record: StoredRecord, *, captured_at: float) -> None:
+        """Offer one complete committed record; busy publishers discard the offer."""
+        if self._closed or self._cache is None or (
+            self._publisher is not None and not self._publisher.done()
+        ):
+            return
+        epoch = self._epoch
+
+        async def publish() -> None:
+            if self._closed or self._epoch is not epoch:
+                return
+            content = canonical_json_bytes([encode_record(record)])
+            await self._cache.put(
+                self._cache_key((record.key_digest,)), content, captured_at=captured_at,
+            )
+
+        self._publisher = asyncio.create_task(publish(), name="runtime-record-cache-publish")
+        self._publisher.add_done_callback(self._consume_publisher)
+
+    def _consume_publisher(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+        if self._publisher is task:
+            self._publisher = None
+
+    @property
+    def capture_token(self) -> object:
+        """Owner invalidation boundary at source capture start."""
+        return self._epoch
+
+    async def invalidate(self) -> object:
+        previous = self._epoch
+        self._epoch = object()
         if self._cache is not None:
             await self._cache.clear()
+        return previous
 
     async def close(self) -> None:
+        self._closed = True
+        self._epoch = object()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_owned(), name="runtime-record-cache-close")
+            self._close_task.add_done_callback(self._consume_close_result)
+        await asyncio.shield(self._close_task)
+
+    def _consume_close_result(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+
+    async def _close_owned(self) -> None:
+        publisher = self._publisher
+        if publisher is not None:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
         if self._cache is not None:
             await self._cache.close()
 

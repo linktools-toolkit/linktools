@@ -749,14 +749,19 @@ class TranscriptRepository:
         chunks: Sequence[TranscriptChunk],
         projection: ContextProjection,
         quality: HistoryQuality | None = None,
+        *,
+        checkpoint_fact: tuple[bytes, StoredFact] | None = None,
     ) -> None:
         """Write one transcript checkpoint using its known metadata write set."""
+        if checkpoint_fact is not None and (type(self) is not TranscriptRepository or not chunks):
+            raise ValueError("checkpoint fact batching requires a canonical transcript append")
         if type(self) is not TranscriptRepository:
             await self.append_chunks(transaction, owner_id, chunks, quality)
             await self.store_projection(transaction, owner_id, projection)
         elif chunks:
             await self._append_chunks(
                 transaction, owner_id, chunks, quality, projection=projection,
+                checkpoint_fact=checkpoint_fact,
             )
         else:
             await self.store_projection(transaction, owner_id, projection)
@@ -778,6 +783,7 @@ class TranscriptRepository:
         quality: HistoryQuality | None,
         *,
         projection: ContextProjection | None = None,
+        checkpoint_fact: tuple[bytes, StoredFact] | None = None,
     ) -> None:
         if not chunks:
             return
@@ -842,10 +848,14 @@ class TranscriptRepository:
                     current.storage_revision,
                 ))
             await transaction.replace_records(tuple(replacements))
-        final = await transaction.reserve_sequence(
-            self._transcript_sequence(owner_id),
-            len(chunks),
-        )
+        sequence_key = self._transcript_sequence(owner_id)
+        requests = {sequence_key: len(chunks)}
+        if checkpoint_fact is not None:
+            if checkpoint_fact[0] == sequence_key:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            requests[checkpoint_fact[0]] = 1
+        high_waters = await transaction.reserve_sequences(requests)
+        final = high_waters[sequence_key]
         sequences = tuple(range(final - len(chunks) + 1, final + 1))
         await transaction.insert_facts(
             tuple(
@@ -864,7 +874,9 @@ class TranscriptRepository:
                     ),
                 )
                 for sequence, chunk in zip(sequences, chunks, strict=True)
-            )
+            ) + (() if checkpoint_fact is None else (
+                replace(checkpoint_fact[1], sequence=high_waters[checkpoint_fact[0]]),
+            ))
         )
         await self._insert_message_seek_boundaries(
             transaction,

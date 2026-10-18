@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import CapabilityGroup
@@ -14,12 +15,14 @@ from linktools.ai.runtime import CaptureInputRequest, ExecutionInputContext, Run
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state import RuntimeDomain
 
+from ._runtime_test_helpers import _persistence_capabilities
 from .test_captured_execution_context import _NoToolsModels
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata_size", [16, 80_000], ids=["inline", "object"])
-async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, metadata_size: int) -> None:
+@pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
+async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, metadata_size: int, trace: bool) -> None:
     group = CapabilityGroup("retry-context")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     context = ExecutionInputContext.from_messages(
@@ -29,22 +32,26 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         replace_history_system_prompt=True,
     )
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, capabilities=(group,)) as runtime:
+    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, capabilities=(_persistence_capabilities(trace=trace), group,)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == ("inline" if metadata_size == 16 else "object")
-        retry = await source.retry("replacement prompt")
-        assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
+        with capture_run_messages() as messages:
+            retry = await source.retry("replacement prompt")
+            assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(retry.execution_id, CaptureInputRequest(principal, "retry-context-capture"))
         captured = await runtime._input_captures.read_agent(capture, principal=principal)
         assert captured.input_context.digest == context.digest
-        interactions = await retry.model_interactions(include_content=True)
-        request = str(interactions.items[0].request)
-        assert "earlier question" in request and "earlier answer" in request
-        assert "replacement prompt" in request
-        assert "superseded prompt" not in request
+        requests = [str(messages)]
+        if trace:
+            interactions = await retry.model_interactions(include_content=True)
+            requests.append(str(interactions.items[0].request))
+        for request in requests:
+            assert "earlier question" in request and "earlier answer" in request
+            assert "replacement prompt" in request
+            assert "superseded prompt" not in request
 
 
 @pytest.mark.asyncio

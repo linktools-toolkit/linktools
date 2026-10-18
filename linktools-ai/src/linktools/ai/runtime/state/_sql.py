@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from time import time
 from typing import TYPE_CHECKING, TypeVar
 
 from linktools.core import environ
@@ -191,7 +192,16 @@ class SqlStateStorageGroup:
         if active is not None:
             return await fn(active_state_group_transaction(self, members))
 
+        captured_at = 0.0
+        captures: dict[SqlStateStore, tuple[StoredRecord, ...]] = {}
+        capture_tokens: dict[SqlStateStore, object] = {}
+        changed: set[SqlStateStore] = set()
+        confirmed = False
+
         async def execute(session: "AsyncSession") -> ValueT:
+            nonlocal captured_at, captures, capture_tokens, changed
+            captured_at = time()
+            capture_tokens = {store: store._reads.capture_token for store in members}
             clock = _SqlTransactionClock(session, self._context)
             transactions = {
                 store: _SqlTransaction(
@@ -210,6 +220,16 @@ class SqlStateStorageGroup:
                 for transaction in transactions.values():
                     if transaction._mutation_error is not None:
                         raise transaction._mutation_error
+                captures = {
+                    store: tuple(record for key, record in transaction._record_cache.items()
+                                 if key in transaction._guarded_record_keys
+                                 and record is not None and record.kind in {"session", "execution"})
+                    for store, transaction in transactions.items()
+                }
+                changed = {
+                    store for store, transaction in transactions.items()
+                    if transaction._guarded_record_keys or transaction._deleted_records
+                }
                 return result
             finally:
                 reset_state_transaction(token)
@@ -219,10 +239,12 @@ class SqlStateStorageGroup:
             await lock.acquire()
         try:
             domains = ",".join(store.runtime_domain.value for store in members)
-            return await self._context.run_mutation(
+            result = await self._context.run_mutation(
                 execute,
                 domain=f"runtime.state.group[{domains}]",
             )
+            confirmed = True
+            return result
         except asyncio.CancelledError:
             raise
         except AIError:
@@ -281,7 +303,13 @@ class SqlStateStorageGroup:
             if lock is not None:
                 lock.release()
             for store in members:
-                await store._reads.invalidate()
+                if confirmed and store not in changed:
+                    continue
+                previous = await store._reads.invalidate()
+                # A delayed source return must not acquire a newer capture boundary.
+                if confirmed and previous is capture_tokens.get(store):
+                    for record in captures.get(store, ()):
+                        store._reads.publish_record(record, captured_at=captured_at)
 
     @asynccontextmanager
     async def _session(self):
@@ -583,6 +611,7 @@ class _SqlTransaction:
         self._store_digest = store_digest
         self._store_hex = store_digest.hex()
         self._guarded_record_keys: set[bytes] = set()
+        self._deleted_records = False
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
         self._sequence_cache: dict[bytes, int] = {}
@@ -934,6 +963,7 @@ class _SqlTransaction:
             # A caught partial deletion must still abort the owning transaction.
             self._abort_mutation(error)
             raise
+        self._deleted_records = self._deleted_records or bool(deleted_keys)
         for key in deleted_keys:
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None
@@ -995,6 +1025,7 @@ class _SqlTransaction:
         if result.rowcount != 1:
             self._abort_mutation(AIError(ErrorCode.STORAGE_CONFLICT))
         if result.rowcount == 1:
+            self._deleted_records = True
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None
             for alias, record_key in tuple(self._alias_cache.items()):

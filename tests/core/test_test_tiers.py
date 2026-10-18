@@ -183,6 +183,12 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
         assert "--dist=loadfile" in options
         assert "--test-group=" + check["group"] in options
         assert "-rs" in options
+        if check["group"] == "runtime":
+            assert options[-4:] == ["-vv", "--tb=short", "-o", "faulthandler_timeout=90"]
+        else:
+            assert "-vv" not in options
+            assert not any(option.startswith("faulthandler_timeout=") for option in options)
+        assert "--showlocals" not in options
     workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
     jobs = workflow["jobs"]
     assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"

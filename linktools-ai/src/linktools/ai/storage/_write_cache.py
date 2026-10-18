@@ -601,10 +601,17 @@ class StorageReadCache:
         await self._publish(key, value, captured, generation)
         return value
 
-    async def put(self, key: str, value: bytes | None) -> None:
-        """Publish a source-confirmed value or tombstone, superseding loads."""
+    async def put(
+        self, key: str, value: bytes | None, *, captured_at: float | None = None,
+    ) -> None:
+        """Publish confirmed bytes without renewing an earlier source capture."""
+        if captured_at is not None and (
+            isinstance(captured_at, bool) or not isinstance(captured_at, (int, float))
+            or not math.isfinite(captured_at)
+        ):
+            raise ValueError("captured_at must be a finite wall-clock timestamp")
         generation = self._generation(key, replace=True)
-        await self._publish(key, value, time(), generation)
+        await self._publish(key, value, time() if captured_at is None else captured_at, generation)
 
     async def _publish(
         self, key: str, value: bytes | None, captured: float, generation: _ReadGeneration,

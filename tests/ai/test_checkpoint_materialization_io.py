@@ -20,7 +20,7 @@ from linktools.ai.runtime.state._store import FactQuery, StoredFact
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_materialization_reads_latest_fact_once_and_replays(
+async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_replay(
     tmp_path: Path,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
@@ -42,7 +42,7 @@ async def test_checkpoint_materialization_reads_latest_fact_once_and_replays(
     event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
     try:
         await archive.materialize_checkpoint(run, checkpoint)
-        assert len(statements) == 1
+        assert len(statements) == 0
         statements.clear()
         await archive.materialize_checkpoint(run, checkpoint)
         assert len(statements) == 1

@@ -80,6 +80,8 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 
 普通调用方只注入一个可选 cache 实例，不另外构造写策略、options、总管理器或全能力包装。实例按实际需要提供完整方法组：热点 get/put/delete，批写 append/read_batch/ack，流 open_stream/read_stream。contains_many 是可选热点批探测。所属消费方仅检查自身使用的方法组；该组全部缺失就沿用该场景的直接源或已有本地流路径，半组立即 TypeError，不静默换用内部队列。宿主无需继承新 Protocol，也无需给无用能力写空方法。
 
+SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 的完整 session/execution 记录写入同一 singleton 热点 key。no-op mutation 不失效也不重发已有观察。每个 store 最多持有一个受管发布任务，忙时丢弃后续填充，不新增待写队列；缓存错误不能改变源提交结果，关闭等待该任务的取消清理。未确认或结果未知的提交不发布，整批读取仍独立捕获完整快照，不拼接 singleton。期限始终从原事务 capture 起算3秒，commit、延迟发布及跨层读取都不续期；本 owner 失效阻止旧本地填充，跨 owner 晚到的旧快照在其原期限内仍可能覆盖较新的缓存，不承诺全局单调。该优化仅覆盖这两种 SQL metadata 热点，其他 backend 保持原 read-through；节省源查询可能增加 cache put 和传输字节，须分别计量。
+
 既有 CacheBackend 表达热点方法组，既有 StreamBackend 表达流方法组。InMemoryCacheBackend 同时提供热点和批写，共用 max_bytes/max_size；InMemoryStreamBackend 仅提供流。FilesystemCacheBackend 和 TieredCacheBackend 只提供热点。宿主已有客户端可在同一实例上同时实现任意完整组，框架不会自动向其加上另一种介质。TieredCacheBackend 可以嵌套复用热点，不引入层配置 DSL，也不承担 pending 的多层复制。
 
 ### 5.1 资产读写：内容缓存单入口

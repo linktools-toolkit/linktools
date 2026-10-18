@@ -242,6 +242,23 @@ repopulate them. Other owners may observe the old snapshot within three seconds.
 A custom `StateStore` can implement the two ordinary methods by delegating to
 its existing `read` callback; caching is optional, correctness is not.
 
+After a confirmed SQL mutation, complete `session` and `execution` records
+written or guarded by that transaction may fill their singleton observation keys.
+A no-op mutation neither invalidates nor republishes these observations.
+Each store owns at most one publication task; a busy publisher drops additional
+offers rather than queuing them. Publication failure cannot change the committed
+result, and close joins the owned task's cancellation cleanup. Failed or unknown
+commits do not publish. Complete batch reads keep their own source snapshot and
+are never assembled from singleton entries.
+
+These fills keep the original transaction capture deadline. Neither commit nor
+delayed publication starts another three-second window. Local invalidation
+suppresses older local fills; independent publishers may replace a newer shared
+entry with an older, still-valid capture. The bounded observation contract does
+not promise globally monotonic reads. Fills can avoid source reads at the cost of
+extra cache writes and bytes; fewer SQL queries do not imply fewer total network
+operations. Other backends keep their existing read-through behavior.
+
 Runtime `inspect` and ordinary display observations can use this bounded view.
 Explicit results, waits, next-turn admission, terminal/unknown-commit readback,
 and effect ownership use their committed owner paths. These guarantees do not

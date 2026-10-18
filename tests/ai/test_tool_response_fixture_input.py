@@ -22,14 +22,14 @@ from linktools.ai.runtime.state._codec import _decode_enveloped_domain, decode_d
 from linktools.ai.runtime.state._contracts import ExecutionRecord, ExecutionStartReservation
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
 
 def _reference(name: str = "case-a") -> AssetVersionRef:
     return AssetVersionRef(AssetKey("tool-response", name), "fixture-layer", StorageEntryRevision(1), "a" * 64, 42)
 
 
-def _historical_execution() -> ExecutionRecord:
+def _execution_without_fixture() -> ExecutionRecord:
     path = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_budget_4609177e.json"
     fixture = json.loads(path.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
@@ -37,12 +37,15 @@ def _historical_execution() -> ExecutionRecord:
         connection.executescript(sql.decode("utf-8"))
         row = connection.execute("SELECT payload_json FROM ai_state_records WHERE kind = 'execution'").fetchone()
     payload = json.loads(row[0])
-    assert "tool_response_ref" not in payload["value"]["payload"]["fields"]
+    fields = payload["value"]["payload"]["fields"]
+    assert "tool_response_ref" not in fields
+    # Isolate the optional fixture reference from the required persistence flags.
+    fields.update(restart_checkpoints=True, durable_trace=True)
     return _decode_enveloped_domain(payload, ExecutionRecord)
 
 
-def test_fixture_reference_is_optional_in_historical_execution_wire() -> None:
-    historical = _historical_execution()
+def test_fixture_reference_is_optional_with_explicit_persistence_flags() -> None:
+    historical = _execution_without_fixture()
     assert historical.tool_response_ref is None
     for reference in (None, _reference()):
         current = replace(historical, tool_response_ref=reference)
@@ -244,7 +247,7 @@ async def test_recovery_reads_fixture_only_before_actual_resume_and_preserves_or
     )
     from linktools.ai.storage import StoredPayload
 
-    historical = _historical_execution()
+    historical = _execution_without_fixture()
     status = {
         "pending_admission": ExecutionStatus.PENDING_START,
         "explicit_recovery": ExecutionStatus.RECOVERY_REQUIRED,
@@ -365,6 +368,7 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
 
     monkeypatch.setattr(assets, "read_versions", read_fixture)
     async with Runtime.open("fixture-repair", models=RuntimeUsageModels(), storage=storage,
+                            capabilities=(_persistence_capabilities(restart=True),),
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         reserve = storage.execution.executions.reserve_start
 

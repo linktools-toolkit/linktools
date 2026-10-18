@@ -23,6 +23,16 @@ from . import _runtime_test_helpers as helpers
 _FIXTURE = Path(__file__).parent / "fixtures" / "persistence" / "sqlite_session_history_5b7dd032.json"
 
 
+def _declare_fixture_persistence(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT id, payload_json FROM ai_state_records WHERE kind = 'execution'").fetchall()
+    for record_id, content in rows:
+        payload = json.loads(content)
+        # Keep the older optional history shape while declaring required execution guarantees.
+        payload["value"]["payload"]["fields"].update(restart_checkpoints=True, durable_trace=True)
+        connection.execute("UPDATE ai_state_records SET payload_json = ? WHERE id = ?",
+                           (json.dumps(payload), record_id))
+
+
 async def _old_execution_evidence(
     history: RuntimeHistory, execution_id: str, principal: Principal,
 ) -> dict[str, object]:
@@ -77,6 +87,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
+        _declare_fixture_persistence(connection)
         heads = connection.execute(
             "SELECT payload_json FROM ai_state_records WHERE kind = ?", ("transcript_head",),
         ).fetchall()
@@ -175,9 +186,11 @@ async def test_sqlite_old_history_survives_snapshot_restore(tmp_path: Path) -> N
 
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     sql = zlib.decompress(base64.b64decode(fixture["sql_zlib_base64"]))
+    assert hashlib.sha256(sql).hexdigest() == fixture["sql_sha256"]
     path = tmp_path / "history.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(sql.decode("utf-8"))
+        _declare_fixture_persistence(connection)
     principal = Principal("runtime", "default", "local_trusted")
     async with RuntimeHistory.open("legacy-history", storage=RuntimeStorage.sqlite(path)) as history:
         timeline = await history.session_timeline("session", principal=principal)

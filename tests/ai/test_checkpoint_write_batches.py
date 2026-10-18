@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Checkpoint batches preserve scalar persistence and owner override semantics."""
 
+import sqlite3
+
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import replace
@@ -10,6 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from sqlalchemy import event, update
+from sqlalchemy.exc import OperationalError
 
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
@@ -305,5 +308,64 @@ async def test_terminal_lost_member_cas_rolls_back_closed_head_and_result(
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
         assert lost == [target]
         assert await _snapshot(repository.state_store) == before
+    finally:
+        await state.close()
+
+
+@pytest.mark.parametrize("failure_stage", ("reservation", "facts", "seek"))
+@pytest.mark.parametrize("retry", (False, True))
+async def test_new_checkpoint_fact_batch_rolls_back_or_retries_without_sequence_gaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str, retry: bool,
+) -> None:
+    state = _storage("sqlite", tmp_path)
+    await state.initialize(namespace="checkpoint-batch-rollback", tenant_id="tenant")
+    archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    run = AgentRunRecord("run")
+    checkpoint = AgentRunCheckpoint(
+        "run", 1, [ModelRequest(parts=[UserPromptPart("owned")])],
+        transcript_message_count_before=0,
+    )
+    method_name = {"reservation": "reserve_sequences", "facts": "insert_facts", "seek": "insert_records"}[failure_stage]
+    original = getattr(_SqlTransaction, method_name)
+    failures = []
+
+    async def fail_once(transaction, values):
+        result = await original(transaction, values)
+        selected = (
+            len(values) == 2 if failure_stage == "reservation" else
+            {value.kind for value in values} == {"transcript_chunk", "step_checkpoint"} if failure_stage == "facts" else
+            any(value.kind == "transcript_seek" for value in values)
+        )
+        if selected and not failures:
+            failures.append(failure_stage)
+            if retry:
+                error = sqlite3.OperationalError("database is locked")
+                error.sqlite_errorcode = 5
+                error.sqlite_errorname = "SQLITE_BUSY"
+                raise OperationalError("checkpoint batch", {}, error)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return result
+
+    try:
+        before = await _snapshot(archive.state_store)
+        with monkeypatch.context() as patch:
+            patch.setattr(_SqlTransaction, method_name, fail_once)
+            if retry:
+                await archive.materialize_checkpoint(run, checkpoint)
+            else:
+                with pytest.raises(AIError) as raised:
+                    await archive.materialize_checkpoint(run, checkpoint)
+                assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+                assert await _snapshot(archive.state_store) == before
+        assert failures == [failure_stage]
+        if not retry:
+            await archive.materialize_checkpoint(run, checkpoint)
+        snapshot = await _snapshot(archive.state_store)
+        _, facts, sequences = snapshot
+        assert {fact.kind for fact in facts} == {"transcript_chunk", "step_checkpoint"}
+        assert all(fact.sequence == 1 for fact in facts)
+        assert len(sequences) == 2 and all(value == 1 for value in sequences.values())
+        await archive.materialize_checkpoint(run, checkpoint)
+        assert await _snapshot(archive.state_store) == snapshot
     finally:
         await state.close()

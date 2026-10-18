@@ -24,6 +24,8 @@ from linktools.ai.workspace import (
     ToolPermissionPolicy,
 )
 
+from ._runtime_test_helpers import _persistence_capabilities
+
 
 class _CompositionModelBinding:
     route_id = "default"
@@ -113,7 +115,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         "default",
         models=_CompositionModels(),  # type: ignore[arg-type]
         storage=state,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+        capabilities=(_persistence_capabilities(trace=True), CapabilityGroup("workspace", workspace=workspace), application),
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run(

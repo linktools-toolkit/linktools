@@ -190,6 +190,12 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
             assert (await paused.history(include_content=True)).items == paused_history.items
             held_record = await storage.execution.executions.get(held.execution_id, tenant_id=runtime.tenant_id)
             assert held_record is not None and held_record.status is ExecutionStatus.STARTED
+            checkpoint = await storage.recovery.checkpoints.get(held.execution_id, tenant_id=runtime.tenant_id)
+            head = await storage.execution.executions.get_history_head(held.execution_id, tenant_id=runtime.tenant_id)
+            assert checkpoint is not None and checkpoint.agent_run_id is not None and head is not None
+            await storage.run_store.flush_execution_projection(
+                checkpoint.agent_run_id, execution_id=held.execution_id, producer_generation=head.producer_generation,
+            )
             held_history = await held.history(include_content=True)
             assert [item.content for item in held_history.items if item.item_kind == "user"] == ["hold this run"]
             assert not any(item.item_kind == "tool_call" for item in held_history.items)

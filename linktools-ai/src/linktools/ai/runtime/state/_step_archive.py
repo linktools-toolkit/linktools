@@ -2435,7 +2435,7 @@ class StateStepArchive(AgentRunStore):
             history_head_guard,
         )
         # Pin ownership before the fact read so READ COMMITTED races fail the CAS.
-        owner_record, _created = await self._ensure_run_with_head_in_transaction(
+        owner_record, created = await self._ensure_run_with_head_in_transaction(
             transaction, run, include_projection=True,
             prefetch_keys=self._history.checkpoint_record_keys(
                 checkpoint.owner_id, checkpoint.chunks,
@@ -2444,7 +2444,8 @@ class StateStepArchive(AgentRunStore):
         stream = self._stream(run.agent_run_id, "checkpoint")
         subject = _step_subject(checkpoint.stored)
         data = _encode_step(checkpoint.stored)
-        existing = await transaction.list_facts(
+        # A newly inserted run cannot own committed checkpoint facts.
+        existing = () if created else await transaction.list_facts(
             FactQuery(stream, subject_digest=subject, latest=True)
         )
         if any(
@@ -2452,28 +2453,35 @@ class StateStepArchive(AgentRunStore):
             for fact in existing
         ):
             return
-        await self._history.append_checkpoint(
-            transaction,
-            checkpoint.owner_id,
-            checkpoint.chunks,
-            checkpoint.projection,
-            checkpoint.history_quality,
-        )
         owner = self._agent_run_key(run.agent_run_id)
+        checkpoint_fact = StoredFact(
+            stream, 0, owner, "step_checkpoint", subject,
+            checkpoint.stored.state, data,
+        )
+        batch_new_owner = created and bool(checkpoint.chunks) and type(self._history) is TranscriptRepository
+        if batch_new_owner:
+            # Inserting the run already pins its owner; existing runs retain
+            # their transcript-first then run-guard write order below.
+            await self._history.append_checkpoint(
+                transaction, checkpoint.owner_id, checkpoint.chunks,
+                checkpoint.projection, checkpoint.history_quality,
+                checkpoint_fact=(self._sequence(run.agent_run_id, "checkpoint"), checkpoint_fact),
+            )
+        else:
+            await self._history.append_checkpoint(
+                transaction, checkpoint.owner_id, checkpoint.chunks,
+                checkpoint.projection, checkpoint.history_quality,
+            )
         if await transaction.guard_record(
             owner,
             expected_storage_revision=owner_record.storage_revision,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        sequence = (await _reserve_sequences(
-            transaction, self._sequence(run.agent_run_id, "checkpoint"), 1,
-        ))[0]
-        await _insert_facts(transaction, (
-            StoredFact(
-                stream, sequence, owner, "step_checkpoint", subject,
-                checkpoint.stored.state, data,
-            ),
-        ))
+        if not batch_new_owner:
+            sequence = (await _reserve_sequences(
+                transaction, self._sequence(run.agent_run_id, "checkpoint"), 1,
+            ))[0]
+            await _insert_facts(transaction, (replace(checkpoint_fact, sequence=sequence),))
         if history_head_guard is not None and not supplied_history_head_guard:
             await self._advance_execution_history_head_in_transaction(
                 transaction,

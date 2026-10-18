@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import monotonic_ns
 from typing import Protocol, TypeVar, cast
@@ -240,6 +240,12 @@ _CheckpointT = TypeVar("_CheckpointT")
 
 
 
+
+
+@dataclass(frozen=True, slots=True)
+class _InitialAttemptCapture:
+    execution: ExecutionRecord
+    checkpoint: RecoveryCheckpoint
 
 
 class LocalExecutionBackend:
@@ -1121,14 +1127,17 @@ class LocalExecutionBackend:
                 current.execution_id,
                 current.event_seq,
             )
+        initial_attempt = None
+        if (resume is None and producer_generation is None and recovery_operation is None
+                and checkpoint.state is RecoveryCheckpointState.ADMITTED
+                and self._can_prepare_initial_attempt(current)):
+            initial_attempt = _InitialAttemptCapture(current, checkpoint)
         self._terminal_events[execution.execution_id] = asyncio.Event()
-        task = asyncio.create_task(
-            self._run(
-                request, execution, resume,
-                producer_generation=producer_generation,
-            ),
-            name=f"ai-execution-{execution.execution_id}",
-        )
+        run = (self._run(request, execution, resume, producer_generation=producer_generation)
+               if initial_attempt is None else
+               self._run(request, execution, resume, producer_generation=producer_generation,
+                         initial_attempt=initial_attempt))
+        task = asyncio.create_task(run, name=f"ai-execution-{execution.execution_id}")
         self._tasks[execution.execution_id] = task
         task.add_done_callback(
             lambda completed, execution_id=execution.execution_id: self._task_done(
@@ -2958,6 +2967,7 @@ class LocalExecutionBackend:
         resume: _DeferredResume | None = None,
         *,
         producer_generation: int | None = None,
+        initial_attempt: _InitialAttemptCapture | None = None,
     ) -> None:
         execution_id = original.execution_id
         execution_tasks = self._execution_task_set(execution_id)
@@ -2973,15 +2983,21 @@ class LocalExecutionBackend:
         admission_claim: AgentAttemptClaim | None = None
         prepared_admission: AgentAttemptClaim | None = None
         try:
-            current = await self.load_execution(
-                execution_id, tenant_id=self._tenant_id
-            )
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            checkpoint = await self._recovery.checkpoints.get(
-                execution_id,
-                tenant_id=self._tenant_id,
-            )
+            if initial_attempt is None:
+                current = await self.load_execution(
+                    execution_id, tenant_id=self._tenant_id
+                )
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                checkpoint = await self._recovery.checkpoints.get(
+                    execution_id,
+                    tenant_id=self._tenant_id,
+                )
+            else:
+                # Preparation has no producer authority. The attempt CAS checks
+                # both captured revisions before any provider can be dispatched.
+                current = initial_attempt.execution
+                checkpoint = initial_attempt.checkpoint
             if checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if checkpoint.state is RecoveryCheckpointState.ADMITTED:
