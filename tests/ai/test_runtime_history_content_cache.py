@@ -210,7 +210,7 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
             assert execution_id == "execution" and tenant_id == "tenant"
             return replace(record, result=replace(record.result, output=StoredPayload.object(foreign)))
 
-        monkeypatch.setattr(storage.execution.executions, "get", foreign_result)
+        monkeypatch.setattr(storage.execution.executions, "get_fresh", foreign_result)
         with pytest.raises(AIError) as error:
             await service.result("execution", principal=principal)
         assert error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH

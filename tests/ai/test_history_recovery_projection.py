@@ -210,7 +210,8 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             agent_run_id=run_id,
             next_model_request_seq=high_water + 1,
         )
-        await CheckpointCapability().bind(capability).before_model_request(ctx, SimpleNamespace())
+        request_context = await capability.before_model_request(ctx, SimpleNamespace())
+        await CheckpointCapability().bind(capability).before_model_request(ctx, request_context)
         received = []
         b = ModelResponse(
             parts=[

@@ -117,7 +117,8 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
         await recorder.record_tool_result_boundary(replayed, 1)
         await recorder.record_tool_result_boundary(slow, 1)
         ctx.messages.append(ModelRequest(parts=[replayed, slow]))
-        await CheckpointCapability().bind(capability).before_model_request(ctx, SimpleNamespace())
+        request_context = await capability.before_model_request(ctx, SimpleNamespace())
+        await CheckpointCapability().bind(capability).before_model_request(ctx, request_context)
         recorder.append_transcript_message(ModelResponse(parts=[TextPart("done")]))
         await recorder.commit_history_boundary()
         messages = [message async for message in archive.iter_messages(agent_run_id="run")]
