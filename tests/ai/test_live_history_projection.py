@@ -309,7 +309,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
         "partial",
         models=_Models(Model(unused)),
         storage=RuntimeStorage.in_memory(),
-        runtime_features=group,
+        features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None

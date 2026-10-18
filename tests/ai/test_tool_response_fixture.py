@@ -407,7 +407,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
         storage = RuntimeStorage.in_memory()
         async with Runtime.open(
             "fixture-native-runtime", models=_Models(_UsageFunctionModel(model)),
-            storage=storage, runtime_features=group, tool_responses=fixture,
+            storage=storage, features=group, tool_responses=fixture,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Look up the fixture")
             result = (await execution.wait(timeout_seconds=10)).result

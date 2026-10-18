@@ -46,7 +46,7 @@ async def test_system_prompt_presence_matches_provider_observation_and_history(
     group.agent("default", **options)
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("system-prompts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         agent = runtime.agents.get()
         if case == "derive-none":
             agent = agent.derive(system_prompt=None)
@@ -87,7 +87,7 @@ async def test_imported_system_history_respects_explicit_replacement(
     ), replace_history_system_prompt=replace_system)
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("imported-system", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         execution = await runtime.agents.get().start("question", input_context=imported)
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"
@@ -133,7 +133,7 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
     group.agent("default", **options)
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("http-system", models=registry, storage=RuntimeStorage.filesystem(tmp_path),
-                            runtime_features=group) as runtime:
+                            features=group) as runtime:
         execution = await runtime.agents.get().start("question")
         result = await execution.wait(timeout_seconds=10)
         assert result.result.status == "SUCCEEDED"

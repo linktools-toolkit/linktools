@@ -66,7 +66,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
         "default",
         models=_Models(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=_agent_group(),
+        features=_agent_group(),
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result

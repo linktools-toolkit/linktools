@@ -769,7 +769,7 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     group = RuntimeFeatures[None]("display")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
-        "display", storage=storage, models=_Models(TestModel()), runtime_features=group,
+        "display", storage=storage, models=_Models(TestModel()), features=group,
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
         await storage.conversation.sessions.create(_session())
@@ -874,7 +874,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
         finally:
             exited.set()
     async with Runtime.open(
-        "display", storage=storage, models=_Models(TestModel()), runtime_features=group,
+        "display", storage=storage, models=_Models(TestModel()), features=group,
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
         await storage.conversation.sessions.create(_session())

@@ -29,7 +29,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
                 allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("consumer.historical-score", exact, effect_policy="none")
     async with Runtime.open("historical-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, runtime_features=group) as runtime:
+                            context=CONTEXT, features=group) as runtime:
         source = await runtime.agents.get().start("the original question", output=ScoreBundle,
             principal=PRINCIPAL, idempotency_key="historical-source")
         source_result = (await source.wait(timeout_seconds=10)).result

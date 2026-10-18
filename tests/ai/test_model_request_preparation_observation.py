@@ -127,7 +127,7 @@ async def test_imported_request_publishes_prepared_provider_input_at_completion(
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     metrics = Metrics.from_store(metric_store, namespace="prepared-input")
     async with Runtime.open("prepared-input", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            runtime_features=group, metrics=metrics) as runtime:
+                            features=group, metrics=metrics) as runtime:
         execution = await runtime.agents.get().start("new question", input_context=imported)
         try:
             await asyncio.wait_for(entered.wait(), timeout=5)

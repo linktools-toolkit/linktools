@@ -82,7 +82,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     storage = RuntimeStorage.filesystem(state)
     context = replace(CONTEXT, app=object()) if environment in {"app", "both"} else CONTEXT
     async with Runtime.open("rescore-environment", models=FixtureModels(), storage=storage,
-                            context=context, runtime_features=features) as runtime:
+                            context=context, features=features) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
         before = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         request = RescoreRequest((rule_scorer(scorer),), "rescore")
@@ -107,7 +107,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
     body = b"Do not expose binary bodies through input evidence"
     received: list[ScoringInput] = []
     async with Runtime.open("scoring-input", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, runtime_features=capabilities()) as runtime:
+                            context=CONTEXT, features=capabilities()) as runtime:
         async def score(context: TaskNodeContext[None]) -> JsonValue:
             sample = ScoringInput.from_mapping(context.input)
             received.append(sample)
@@ -165,7 +165,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
 
     scorer = Task("semantics.projected-score", score, effect_policy="none")
     async with Runtime.open("projected-input", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, runtime_features=capabilities()) as runtime:
+                            context=CONTEXT, features=capabilities()) as runtime:
         target = runtime.tasks.from_agent("semantics.projected-target", runtime.agents.get(), build_input=project)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("projected", 1), (
             CaseSpec.task(CaseRef("projected", "one", 1), input=dict(
@@ -230,7 +230,7 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
     context = replace(CONTEXT, app=object()) if live else CONTEXT
     features = workspace_features("workspace", workspace=Workspace.load(tmp_path)) if live else None
     async with Runtime.open("early-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
-                            context=context, runtime_features=features) as runtime:
+                            context=context, features=features) as runtime:
         if stage == "before_waiting":
             original = runtime._execution_service.defer_task_input
 
@@ -503,7 +503,7 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
 
     rule = Task("semantics.initial-score", score, effect_policy="none")
     async with Runtime.open("scorer-usage", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            context=CONTEXT, runtime_features=capabilities()) as runtime:
+                            context=CONTEXT, features=capabilities()) as runtime:
         judge = runtime.tasks.from_agent("semantics.usage-judge", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule, judge)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("usage", 1), tuple(

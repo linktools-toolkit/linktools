@@ -249,7 +249,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "attachment-pagination", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        runtime_features=group,
+        features=group,
     ) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"

@@ -63,10 +63,10 @@ async def test_remote_cancel_releases_revoked_producer_staging(
     try:
         async with Runtime.open(
             "remote-cancel-release", models=_Models(FunctionModel(stream_function=model)),
-            storage=owner_storage, runtime_features=group,
+            storage=owner_storage, features=group,
         ) as owner, Runtime.open(
             "remote-cancel-release", models=_Models(FunctionModel(stream_function=model)),
-            storage=remote_storage, runtime_features=group,
+            storage=remote_storage, features=group,
         ) as remote:
             await owner.agents.get("default").create_session("session")
             session = owner.agents.get("default").session("session")
@@ -237,10 +237,10 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     async with Runtime.open(
         "individual-tool-cancel", models=_Models(_UsageFunctionModel(model)),
-        storage=owner_storage, runtime_features=group,
+        storage=owner_storage, features=group,
     ) as owner, Runtime.open(
         "individual-tool-cancel", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), runtime_features=group,
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
     ) as remote:
         execution = await owner.agents.get("default").start("run both")
         try:
@@ -328,10 +328,10 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
-        storage=owner_storage, runtime_features=group,
+        storage=owner_storage, features=group,
     ) as owner, Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), runtime_features=group,
+        storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,
     ) as remote:
         execution = await owner.agents.get("default").start("run tool")
         try:

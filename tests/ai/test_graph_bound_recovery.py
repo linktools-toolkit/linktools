@@ -101,7 +101,7 @@ async def _graph_recovery(
     capabilities.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "bound-recovery", models=ModelRegistry.openai(model="gpt-test"),
-        storage=storage, runtime_features=capabilities, authorization=authorization,
+        storage=storage, features=capabilities, authorization=authorization,
     ) as runtime:
         task = runtime.tasks.from_agent("test.bound-agent", runtime.agents.get("default"))
         graph = TaskGraph("bound-graph", tuple(

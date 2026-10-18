@@ -205,7 +205,7 @@ async def _open_local_runtime(
             storage=_local_runtime_storage(workspace),
             metrics=await _local_metrics(workspace),
             models=_local_models(workspace) if models is None else models,
-            runtime_features=features,
+            features=features,
         ) as runtime:
             yield runtime
     finally:

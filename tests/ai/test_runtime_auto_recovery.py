@@ -38,7 +38,7 @@ async def _admit_without_worker(
 ) -> ExecutionRecord:
     storage = RuntimeStorage.filesystem(path)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, runtime_features=_capabilities(),
+        _NAMESPACE, models=models, storage=storage, features=_capabilities(),
     ) as runtime:
         async def interrupted_launch(
             request: ExecutionRequest, execution: ExecutionRecord, **kwargs: object,
@@ -72,7 +72,7 @@ async def test_startup_recovery_defaults_to_enabled(
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     options = {"auto_recover": True} if explicit_default else {}
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, runtime_features=_capabilities(), **options,
+        _NAMESPACE, models=models, storage=storage, features=_capabilities(), **options,
     ) as runtime:
         result = (await runtime.executions.wait(
             before.execution_id, principal=runtime.default_principal, timeout_seconds=10,
@@ -98,7 +98,7 @@ async def test_disabled_startup_preserves_admission_until_explicit_execution_rec
     before = await _admit_without_worker(tmp_path / "state", models, monkeypatch)
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, runtime_features=_capabilities(), auto_recover=False,
+        _NAMESPACE, models=models, storage=storage, features=_capabilities(), auto_recover=False,
     ) as runtime:
         assert await storage.execution.executions.get(
             before.execution_id, tenant_id=runtime.tenant_id,
@@ -157,7 +157,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
     assert owner_storage is not other_storage
     async with Runtime.open(
         _NAMESPACE, models=_Models(FunctionModel(stream_function=owner_model)),
-        storage=owner_storage, runtime_features=_capabilities(),
+        storage=owner_storage, features=_capabilities(),
     ) as owner:
         try:
             owner_run = await owner.agents.get().start("keep running", idempotency_key="owner")
@@ -171,7 +171,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             )
             async with Runtime.open(
                 _NAMESPACE, models=_Models(FunctionModel(stream_function=owned_model)),
-                storage=other_storage, runtime_features=_capabilities(), auto_recover=False,
+                storage=other_storage, features=_capabilities(), auto_recover=False,
             ) as other:
                 assert other.namespace == owner.namespace
                 assert owned_calls == []

@@ -35,7 +35,7 @@ async def run(project: Path) -> object:
         "default",
         models=models,
         storage=RuntimeStorage.in_memory(),
-        runtime_features=application,
+        features=application,
     ) as runtime:
         result = await runtime.agents.get("writer").run("Say hello.")
         return result.result.output

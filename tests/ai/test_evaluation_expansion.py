@@ -44,7 +44,7 @@ async def test_dynamic_target_rejects_unsafe_bound_definition_before_callbacks(
     initial = Task("expansion.seed", seed, effect_policy="none")
     scorer = Task("expansion.score", exact, effect_policy="none")
     async with Runtime.open("unsafe-expansion", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         unsafe = (Task("expansion.effect", effect, effect_policy=unsafe_kind) if unsafe_kind != "model"
                   else runtime.tasks.from_agent("expansion.model", runtime.agents.get()))
         expander = TaskExpander("expansion.expand", lambda context: (TaskNode("child", task=unsafe),))

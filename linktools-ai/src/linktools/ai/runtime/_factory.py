@@ -125,7 +125,7 @@ async def compose_runtime_components(
     tenant_id: "str | None" = None,
     models: ModelRegistry,
     storage: RuntimeStorage,
-    runtime_features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
+    features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
     authorization: "AuthorizationPolicy | None" = None,
@@ -143,13 +143,13 @@ async def compose_runtime_components(
     selected_limits = PromptLimits() if limits is None else limits
     if not isinstance(selected_limits, PromptLimits):
         raise TypeError("limits must be PromptLimits")
-    sources = () if runtime_features is None else (runtime_features,)
+    sources = () if features is None else (features,)
     if any(
         not isinstance(source, (RuntimeFeatures, RuntimeFeaturesCapture))
         for source in sources
     ):
         raise TypeError(
-            "runtime_features must be RuntimeFeatures or RuntimeFeaturesCapture"
+            "features must be RuntimeFeatures or RuntimeFeaturesCapture"
         )
     captures: list[RuntimeFeaturesCapture[AppT]] = []
     for source in sources:

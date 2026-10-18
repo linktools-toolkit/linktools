@@ -90,7 +90,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         context=context,
         models=models,
         storage=RuntimeStorage.in_memory(),
-        runtime_features=workspace_features("workspace", workspace=workspace),
+        features=workspace_features("workspace", workspace=workspace),
         metrics=metrics,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]

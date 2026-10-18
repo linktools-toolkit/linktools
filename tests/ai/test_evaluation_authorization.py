@@ -132,7 +132,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     ))
     async with Runtime.open(
         "shared-data", models=models, storage=storage_for(backend, tmp_path), context=CONTEXT,
-        runtime_features=group,
+        features=group,
     ) as runtime:
         await runtime.evaluations.publish_dataset(spec, principal=PUBLISHER, idempotency_key="system")
         await runtime.evaluations.publish_dataset(private, principal=PUBLISHER, idempotency_key="private")
@@ -145,7 +145,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
     storage = storage_for(backend, tmp_path)
     async with Runtime.open(
         "shared-data", models=models, storage=storage, context=CONTEXT,
-        runtime_features=group, authorization=authorization,
+        features=group, authorization=authorization,
     ) as runtime:
         assert (await runtime.evaluations.get_dataset(ref, principal=OPERATOR)).ref == ref
         cases = await runtime.evaluations.list_cases(ref, principal=OPERATOR)
@@ -208,7 +208,7 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
 
     async with Runtime.open(
         "shared-data", models=models, storage=storage_for(backend, tmp_path), context=CONTEXT,
-        runtime_features=group,
+        features=group,
     ) as runtime:
         with pytest.raises(AIError) as denied:
             await runtime.evaluations.get_dataset(ref, principal=OPERATOR)

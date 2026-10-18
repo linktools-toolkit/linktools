@@ -68,7 +68,7 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
                 else RuntimeStorage.filesystem(tmp_path, cache=cache))
 
     state = storage()
-    async with Runtime.open("standalone-fork", storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open("standalone-fork", storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         with capture_run_messages() as actual:
             source = await runtime.agents.get().start("source", input_context=imported)
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -86,7 +86,7 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
         assert await archive.list_events(agent_run_id=run_id) == []
         assert await state.run_store.read_store(RuntimeDomain.EXECUTION).get_agent_run(agent_run_id=run_id) is None
 
-    async with Runtime.open("standalone-fork", storage=storage(), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open("standalone-fork", storage=storage(), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         original = await runtime.executions.get(source_id)
         fork = await original.fork("fork")
         assert (await fork.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -112,7 +112,7 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
     group.agent("default", model="default", allow_tools=("lookup",))
     group.capability(ConversationCapability(), scope="runtime")
     state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
-    async with Runtime.open("one-fork-boundary", storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open("one-fork-boundary", storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         transactions = set()
 
         def capture(connection, _cursor, statement, _parameters, _context, _many):
@@ -187,13 +187,13 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
     group.capability(ConversationCapability(), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)
-    async with Runtime.open("corrupt-fork", storage=storage, models=models, runtime_features=group) as runtime:
+    async with Runtime.open("corrupt-fork", storage=storage, models=models, features=group) as runtime:
         source = await runtime.agents.get().start("source")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
         await _damage_fork_context(storage.recovery.checkpoints.state_store, damage)
     with pytest.raises(AIError) as raised:
-        async with Runtime.open("corrupt-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=models, runtime_features=group) as runtime:
+        async with Runtime.open("corrupt-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=models, features=group) as runtime:
             source = await runtime.executions.get(source_id)
             fork = await source.fork("fork")
             await fork.wait(timeout_seconds=5)
@@ -218,7 +218,7 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
     group = workspace_features("file-fork", workspace=workspace)
     group.agent("default", model="default", allow_tools=("read_file",))
     group.capability(ConversationCapability(), scope="runtime")
-    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         with capture_run_messages() as messages:
             source = await runtime.agents.get().start("read")
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -247,7 +247,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
     group.capability(ConversationCapability(), scope="runtime")
     storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     with pytest.raises(AIError) as raised:
-        async with Runtime.open("incomplete-fork", storage=storage, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
+        async with Runtime.open("incomplete-fork", storage=storage, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
             source = await runtime.agents.get().start("source")
             await asyncio.wait_for(entered.wait(), 5)
             if state == "failed":

@@ -38,7 +38,7 @@ async def test_live_wait_acknowledges_callback_cleanup_without_waiting_for_model
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "wait-cleanup-ack", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get().start("hello")
         await asyncio.wait_for(model_started.wait(), 10)

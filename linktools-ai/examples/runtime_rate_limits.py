@@ -11,7 +11,7 @@ LinkTools application, register the same instance with a RuntimeFeatures:
     )
     group.capability(limits, id="host.rate-limit", scope="runtime")
 
-Pass that group in Runtime.open(..., runtime_features=group). The quota key is an
+Pass that group in Runtime.open(..., features=group). The quota key is an
 explicit host label for the project/account bucket, not a model or credential
 lookup. Share this instance to share its counters; two instances with the same
 key do not coordinate. Multiple processes need an application-owned service.

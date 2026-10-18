@@ -364,7 +364,7 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
     features = _agents()
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
-        "default", models=registry, storage=storage, runtime_features=features,
+        "default", models=registry, storage=storage, features=features,
     ) as runtime:
         with ModelClientRequestRecorder() as recorder:
             execution = await runtime.agents.get("default").start("hello")
@@ -439,7 +439,7 @@ async def test_model_client_request_capture_runtime_preserves_custom_model_lifec
     registry = ModelRegistry()
     registry.register(_ModelBinding(model))
     async with Runtime.open(
-        "default", models=registry, storage=RuntimeStorage.in_memory(), runtime_features=_agents(),
+        "default", models=registry, storage=RuntimeStorage.in_memory(), features=_agents(),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
     assert result.status is ExecutionStatus.FAILED
@@ -460,7 +460,7 @@ async def test_model_client_request_capture_runtime_leaves_borrowed_client_open(
         registry = ModelRegistry()
         registry.register(_ModelBinding(model))
         async with Runtime.open(
-            "default", models=registry, storage=RuntimeStorage.in_memory(), runtime_features=_agents(),
+            "default", models=registry, storage=RuntimeStorage.in_memory(), features=_agents(),
         ) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED

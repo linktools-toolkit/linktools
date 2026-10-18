@@ -77,7 +77,7 @@ async def test_minimal_runtime_rejects_conversation_but_runs_agent(tmp_path: Pat
         conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
         execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
     )) if split_storage else RuntimeStorage.in_memory())
-    async with Runtime.open("minimal", storage=storage, models=_FeatureModels(), runtime_features=_definitions()) as runtime:
+    async with Runtime.open("minimal", storage=storage, models=_FeatureModels(), features=_definitions()) as runtime:
         with pytest.raises(AIError) as missing:
             await runtime.agents.get().create_session("session")
         assert missing.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
@@ -105,7 +105,7 @@ async def test_conversation_pending_requires_complete_cache(tmp_path, monkeypatc
         features.capability(CheckpointCapability() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
     cache = InMemoryCacheBackend(max_bytes=2**20) if cache_kind == "full" else object() if cache_kind == "unsupported" else None
     storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
-    async with Runtime.open("pending", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), runtime_features=features) as runtime:
+    async with Runtime.open("pending", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         writes = []
         original = SqlStorageContext.run_mutation
@@ -140,7 +140,7 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
     features = workspace_features("deferred", workspace=workspace)
     features.agent("default", model="default", allow_tools=("read_file",))
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
-    async with Runtime.open("deferred", storage=storage, models=_FeatureModels(TestModel(call_tools=["read_file"])), runtime_features=features) as runtime:
+    async with Runtime.open("deferred", storage=storage, models=_FeatureModels(TestModel(call_tools=["read_file"])), features=features) as runtime:
         execution = await runtime.agents.get().start("read a file")
         async def wait_for_deferred():
             while True:
@@ -170,7 +170,7 @@ async def test_native_type_requirement_survives_binding(feature_type):
         async def before_run(self, ctx):
             observed.append(ctx.deps.execution_id)
     template = feature_type()
-    async with Runtime.open("ordering", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), runtime_features=_features(template, RequiresFeature())) as runtime:
+    async with Runtime.open("ordering", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=_features(template, RequiresFeature())) as runtime:
         execution = await runtime.agents.get().start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         assert observed == [execution.execution_id]
@@ -199,7 +199,7 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     group.capability(ConversationCapability(), scope='runtime')
-    async with Runtime.open('pending-tool', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open('pending-tool', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
         commits = []
@@ -235,7 +235,7 @@ async def test_reconstructed_test_pending_cancel_promotes_and_quiesces_before_ca
     group.agent('default', model='default', allow_tools=())
     group.capability(ConversationCapability(), scope='runtime')
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=2**20))
-    async with Runtime.open('pending-cancel', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open('pending-cancel', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
@@ -256,7 +256,7 @@ async def test_cached_lost_ack_reconciles_without_replay(tmp_path, monkeypatch):
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart("done")])
-    async with Runtime.open("lost-ack", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), runtime_features=_features(ConversationCapability())) as runtime:
+    async with Runtime.open("lost-ack", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=_features(ConversationCapability())) as runtime:
         session = await runtime.agents.get().create_session("session")
         original = SqlStorageContext.run_mutation
         writes = []
@@ -283,11 +283,11 @@ async def test_fork_uses_stored_conversation_promise_and_actual_history(tmp_path
         messages_seen.append(messages)
         return ModelResponse(parts=[TextPart("done")])
     features = _features(ConversationCapability() if source_conversation else TraceCapability())
-    async with Runtime.open("fork-promise", storage=RuntimeStorage.sqlite(database), models=_FeatureModels(_FeatureFunctionModel(model)), runtime_features=features) as runtime:
+    async with Runtime.open("fork-promise", storage=RuntimeStorage.sqlite(database), models=_FeatureModels(_FeatureFunctionModel(model)), features=features) as runtime:
         source = await runtime.agents.get().start("original input")
         await source.wait(timeout_seconds=5)
         execution_id = source.execution_id
-    async with Runtime.open("fork-promise", storage=RuntimeStorage.sqlite(database), models=_FeatureModels(_FeatureFunctionModel(model)), runtime_features=_features(ConversationCapability())) as runtime:
+    async with Runtime.open("fork-promise", storage=RuntimeStorage.sqlite(database), models=_FeatureModels(_FeatureFunctionModel(model)), features=_features(ConversationCapability())) as runtime:
         source = await runtime.executions.get(execution_id)
         if not source_conversation:
             with pytest.raises(AIError) as missing:
@@ -311,7 +311,7 @@ async def test_handoff_uses_stored_guarantee(monkeypatch, current_conversation, 
         return True
     monkeypatch.setattr(RuntimeRetentionController, "release_execution_handoff", release)
     features = _features(ConversationCapability()) if current_conversation else _definitions()
-    async with Runtime.open("handoff", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), runtime_features=features) as runtime:
+    async with Runtime.open("handoff", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=features) as runtime:
         assert await runtime._execution_service._release_terminal("terminal", tenant_id=runtime.tenant_id, terminal_commit=stored_guarantee)
         assert observed == [stored_guarantee]
 
@@ -322,7 +322,7 @@ async def test_capture_does_not_reinterpret_later_feature_registration():
     captured = await features.capture()
     features.capability(TraceCapability(), scope="runtime")
     storage = RuntimeStorage.in_memory()
-    async with Runtime.open("capture", storage=storage, models=_FeatureModels(), runtime_features=captured) as runtime:
+    async with Runtime.open("capture", storage=storage, models=_FeatureModels(), features=captured) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         await execution.wait(timeout_seconds=5)

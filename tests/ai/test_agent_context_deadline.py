@@ -55,7 +55,7 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
     contexts: list[AgentContext[None]] = []
     storage = RuntimeStorage.in_memory()
     async with Runtime.open("context-deadline", models=RuntimeUsageModels(), storage=storage,
-                            runtime_features=_group(contexts)) as runtime:
+                            features=_group(contexts)) as runtime:
         reads: list[str] = []
         read = storage.execution.budgets.read
 
@@ -111,7 +111,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     features.capability(CheckpointCapability(), scope="runtime")
     async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(),
                             storage=RuntimeStorage.filesystem(tmp_path),
-                            runtime_features=features) as runtime:
+                            features=features) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass
         with monkeypatch.context() as fault:
@@ -121,7 +121,7 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     assert not contexts
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(), storage=storage,
-                            runtime_features=features,
+                            features=features,
                             auto_recover=False) as runtime:
         reads: list[str] = []
         read = storage.execution.budgets.read

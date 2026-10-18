@@ -83,7 +83,7 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
     first.agent("disabled", tool_retries=0, output_retries=0)
     models = ModelRegistry.openai(model="gpt-test")
     async with Runtime.open(
-        "retry-binding", models=models, storage=RuntimeStorage.in_memory(), runtime_features=first,
+        "retry-binding", models=models, storage=RuntimeStorage.in_memory(), features=first,
     ) as runtime:
         compiled = runtime._catalog.root_agent("agent")
         assert (compiled.spec.tool_retries, compiled.spec.output_retries) == (6, 4)
@@ -93,7 +93,7 @@ async def test_runtime_reconfiguration_does_not_change_restored_retry_limits() -
     second = RuntimeFeatures("retries", tool_retries=9, output_retries=8)
     second.agent("agent")
     async with Runtime.open(
-        "retry-binding", models=models, storage=RuntimeStorage.in_memory(), runtime_features=second,
+        "retry-binding", models=models, storage=RuntimeStorage.in_memory(), features=second,
     ) as runtime:
         fresh = runtime._catalog.root_agent("agent")
         assert (fresh.spec.tool_retries, fresh.spec.output_retries) == (9, 8)

@@ -49,7 +49,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
     group = RuntimeFeatures("structured-graph")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     scorer = Task("graph.score", score, effect_policy="none")
-    async with Runtime.open("structured-graph", models=models, context=CONTEXT, runtime_features=group,
+    async with Runtime.open("structured-graph", models=models, context=CONTEXT, features=group,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         target = runtime.tasks.from_agent("graph.target", runtime.agents.get())
         source = await runtime.tasks.bind(target).start(TaskGraph("source", (
@@ -59,7 +59,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
         source_output = await source.result("answer")
         source_contract = (await source.state(include_content=True)).nodes[0].output_contract
         capture = await runtime.tasks.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "capture"))
-    async with Runtime.open("structured-graph", models=models, context=CONTEXT, runtime_features=group,
+    async with Runtime.open("structured-graph", models=models, context=CONTEXT, features=group,
                             storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         target = runtime.tasks.from_agent("graph.target", runtime.agents.get())
         engine = runtime.tasks.bind(target, scorer)

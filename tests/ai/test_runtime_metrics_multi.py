@@ -95,7 +95,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 "default",
                 models=_Models(),  # type: ignore[arg-type]
                 storage=state,
-                runtime_features=_agent_group(),
+                features=_agent_group(),
                 metrics=metrics,
             ) as runtime:
                 result = (await runtime.agents.get("default").run(

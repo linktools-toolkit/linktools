@@ -81,7 +81,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         "default",
         models=_ToolModels(),  # type: ignore[arg-type]
         storage=state,
-        runtime_features=application,
+        features=application,
     ) as runtime:
         execution = await runtime.agents.get("default").start("read a file")
         record = None

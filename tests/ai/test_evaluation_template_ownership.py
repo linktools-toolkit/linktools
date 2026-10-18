@@ -459,7 +459,7 @@ async def test_agent_graph_case_preserves_template_options_and_checks_prompt_own
     group = RuntimeFeatures("case-agent")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("agent-case", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT,
-                            runtime_features=group) as runtime:
+                            features=group) as runtime:
         target = runtime.tasks.from_agent("case.agent", runtime.agents.get(), build_input=project)
         judge = Task("case.score", score, effect_policy="none")
         engine = runtime.tasks.bind(target, judge)

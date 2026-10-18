@@ -69,7 +69,7 @@ def _runtime_process(
         state = _storage(Path(database), phase)
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, runtime_features=_capabilities(conversation=mode == "session"),
+            storage=state, features=_capabilities(conversation=mode == "session"),
         ) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None

@@ -118,7 +118,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         "default",
         models=_CompositionModels(),  # type: ignore[arg-type]
         storage=state,
-        runtime_features=application,
+        features=application,
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run(

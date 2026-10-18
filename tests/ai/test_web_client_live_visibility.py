@@ -76,7 +76,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "web-client-live", models=models, storage=storage,
-        runtime_features=group,
+        features=group,
     ) as runtime:
         commit = storage.run_store.commit_captured_execution_projection
 

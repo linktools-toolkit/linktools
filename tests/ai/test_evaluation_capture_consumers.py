@@ -73,7 +73,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions.write_text("Historical child repository context", encoding="utf-8")
     state = tmp_path / "state"
     async with Runtime.open("child-capture-consumer", models=models, storage=RuntimeStorage.filesystem(state),
-            context=CONTEXT, runtime_features=child_capabilities(1, "Historical child behavior", workspace=Workspace.load(work))) as runtime:
+            context=CONTEXT, features=child_capabilities(1, "Historical child behavior", workspace=Workspace.load(work))) as runtime:
         parent = await runtime.agents.get().start("delegate this work", principal=PRINCIPAL,
                                                 idempotency_key="create-real-child")
         assert (await parent.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
@@ -96,7 +96,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
     instructions.write_text("Changed live repository context", encoding="utf-8")
     scorer = Task("consumer.captured-child-score", exact, effect_policy="none")
     async with Runtime.open("child-capture-consumer", models=models, storage=RuntimeStorage.filesystem(state),
-            context=CONTEXT, runtime_features=child_capabilities(2, "Changed current child behavior", workspace=Workspace.load(work))) as runtime:
+            context=CONTEXT, features=child_capabilities(2, "Changed current child behavior", workspace=Workspace.load(work))) as runtime:
         historical = await runtime.tasks.from_agent_capture("consumer.tool-child", capture, principal=PRINCIPAL)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("tool-child", 1), cases=(
             CaseSpec.from_capture(CaseRef("tool-child", "original", 1), capture=capture, expected=source_result.output),

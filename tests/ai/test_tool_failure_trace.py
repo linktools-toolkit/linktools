@@ -41,7 +41,7 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
     group.agent("default", model="default", allow_tools=("broken",))
     async with Runtime.open(
         "tool-failure-trace", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("Call the tool")
         if failure == "fatal":
@@ -94,7 +94,7 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "observation-terminal-drain", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, runtime_features=group,
+        storage=storage, features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("finish")
         try:
@@ -171,7 +171,7 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "parallel-handoff", models=_Models(_UsageFunctionModel(model)), storage=storage,
-        runtime_features=group,
+        features=group,
     ) as runtime:
         held = await runtime.agents.get("default").start("hold this run")
         try:

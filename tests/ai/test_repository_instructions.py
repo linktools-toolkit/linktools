@@ -340,7 +340,7 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
             "rule-assets",
             models=runtime_test_helpers.RuntimeUsageModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            runtime_features=workspace_features("rules", assets=store, workspace=Workspace.load(tmp_path)),
+            features=workspace_features("rules", assets=store, workspace=Workspace.load(tmp_path)),
         ) as runtime:
             result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

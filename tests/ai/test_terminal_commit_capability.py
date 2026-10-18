@@ -60,7 +60,7 @@ async def test_conversation_rejects_agent_scope(combined: bool) -> None:
     with pytest.raises(AIError) as invalid:
         async with Runtime.open(
             "conversation-feature", models=RuntimeUsageModels(),
-            storage=RuntimeStorage.in_memory(), runtime_features=group,
+            storage=RuntimeStorage.in_memory(), features=group,
         ):
             raise AssertionError("Agent-scoped Conversation was accepted")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -77,7 +77,7 @@ async def test_conversation_rejects_duplicate_native_id_across_contributions() -
     with pytest.raises(AIError) as invalid:
         async with Runtime.open(
             "conversation-feature", models=RuntimeUsageModels(),
-            storage=RuntimeStorage.in_memory(), runtime_features=group,
+            storage=RuntimeStorage.in_memory(), features=group,
         ):
             raise AssertionError("Duplicate Conversation capabilities were accepted")
     assert invalid.value.code is ErrorCode.CAPABILITY_CONFLICT
@@ -158,7 +158,7 @@ async def test_admitted_policy_preserves_stronger_durability(
             group.capability(capability, scope="runtime")
     storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     async with Runtime.open(
-        "conversation-feature", models=RuntimeUsageModels(), storage=storage, runtime_features=group,
+        "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
     ) as runtime:
         execution = await runtime.agents.get().start("answer", idempotency_key="answer")
         assert (await execution.wait(timeout_seconds=10)).result.output == {"text": "done"}
@@ -179,7 +179,7 @@ async def test_task_admission_keeps_conversation_disabled() -> None:
     group.capability(ConversationCapability(), scope="runtime")
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
-        "conversation-feature", models=RuntimeUsageModels(), storage=storage, runtime_features=group,
+        "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
     ) as runtime:
         graph = await runtime.tasks.bind(task).start(
             TaskGraph("task-policy", (TaskNode("answer", task=task),)), idempotency_key="task-policy",
@@ -206,7 +206,7 @@ async def test_reopening_cannot_reinterpret_admitted_conversation(
             group.capability(ConversationCapability(), scope="runtime")
         storage = RuntimeStorage.sqlite(database)
         async with Runtime.open(
-            "conversation-feature", models=RuntimeUsageModels(), storage=storage, runtime_features=group,
+            "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
         ) as runtime:
             execution = await runtime.agents.get().start("answer", idempotency_key="answer")
             assert (await execution.wait(timeout_seconds=10)).result.output == {"text": "done"}
@@ -245,7 +245,7 @@ async def test_earlier_execution_record_remains_recoverable(
         del request, execution, kwargs
 
     async with Runtime.open(
-        "conversation-feature", models=RuntimeUsageModels(), storage=storage, runtime_features=group,
+        "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
     ) as runtime:
         with monkeypatch.context() as fault:
             fault.setattr(_repository_common, "_encode_persisted_domain", encode_earlier_record)
@@ -258,7 +258,7 @@ async def test_earlier_execution_record_remains_recoverable(
 
     reopened = RuntimeStorage.filesystem(storage_path)
     async with Runtime.open(
-        "conversation-feature", models=RuntimeUsageModels(), storage=reopened, runtime_features=group,
+        "conversation-feature", models=RuntimeUsageModels(), storage=reopened, features=group,
     ) as runtime:
         recovered = await runtime.executions.get(execution.execution_id)
         assert (await recovered.wait(timeout_seconds=10)).result.output == {"text": "done"}

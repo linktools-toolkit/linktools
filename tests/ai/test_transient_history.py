@@ -48,7 +48,7 @@ async def test_transient_execution_reads_live_owner_and_releases_after_handoff(o
     storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
     async with Runtime.open(
         "transient-history", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, runtime_features=capabilities,
+        storage=storage, features=capabilities,
     ) as runtime:
         execution = await runtime.agents.get("default").start("question")
         principal = runtime.default_principal

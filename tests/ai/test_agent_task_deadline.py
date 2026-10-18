@@ -84,7 +84,7 @@ async def test_agent_node_deadline_cancels_work_and_preserves_unknown_effects(
     group.agent("child", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "deadline", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(
@@ -156,7 +156,7 @@ async def test_agent_node_deadline_uses_tighter_limit_without_replacing_shared_b
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "deadline-budget", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
         budget = RunBudget(model_requests=4, deadline_at=(
@@ -225,7 +225,7 @@ def _start_interrupted_graph(
         group = _recovery_group(subagent)
         async with Runtime.open(
             "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), runtime_features=group,
+            storage=(RuntimeStorage.sqlite(Path(path)) if backend == "sqlite" else RuntimeStorage.filesystem(Path(path))), features=group,
         ) as runtime:
             task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
             run = await runtime.tasks.bind(task).start(
@@ -306,7 +306,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
     group = _recovery_group(subagent, change)
     runtime_context = Runtime.open(
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), runtime_features=group,
+        storage=(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)), features=group,
     )
     runtime = await runtime_context.__aenter__()
     try:
@@ -375,7 +375,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
     storage = RuntimeStorage.sqlite(path) if subagent else RuntimeStorage.filesystem(path)
     async with Runtime.open(
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, runtime_features=group,
+        storage=storage, features=group,
     ) as runtime:
         original_binding = (await storage.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,

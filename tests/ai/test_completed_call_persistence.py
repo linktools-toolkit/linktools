@@ -124,7 +124,7 @@ async def test_partial_response_is_published_only_at_request_or_shutdown_complet
     try:
         async with Runtime.open(
             "completed-call-persistence", models=_Models(FunctionModel(stream_function=stream)),
-            storage=state, runtime_features=group,
+            storage=state, features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Respond slowly")
             execution_id = execution.execution_id
@@ -222,7 +222,7 @@ async def test_interrupted_tool_arguments_remain_raw_without_tool_execution(
     try:
         async with Runtime.open(
             "partial-tool-arguments", models=_Models(FunctionModel(stream_function=stream)),
-            storage=_storage(backend, tmp_path), runtime_features=group,
+            storage=_storage(backend, tmp_path), features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("Call work")
             execution_id = execution.execution_id

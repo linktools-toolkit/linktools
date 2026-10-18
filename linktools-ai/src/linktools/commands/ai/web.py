@@ -81,7 +81,7 @@ class Command(BaseCommand):
                     metrics = await _local_metrics(workspace)
                     runtime = await stack.enter_async_context(Runtime.open(
                         "default", storage=_local_runtime_storage(workspace), metrics=metrics,
-                        models=models, runtime_features=capture,
+                        models=models, features=capture,
                     ))
                 status = {
                     "namespace": "default", "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),

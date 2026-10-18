@@ -149,7 +149,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         models=FixtureModels(),
         storage=state,
         context=CONTEXT,
-        runtime_features=group,
+        features=group,
     ) as runtime:
         agent = runtime.agents.get()
         if split_session:

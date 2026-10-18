@@ -40,7 +40,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("captured-session", models=_NoToolsModels(), storage=storage, runtime_features=group) as runtime:
+    async with Runtime.open("captured-session", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         session = await agent.create_session("source-session", principal=principal, metadata={"note": "accepted metadata"})
@@ -76,7 +76,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
     group = RuntimeFeatures("context-memory")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("captured-memory", models=_NoToolsModels(), storage=storage, runtime_features=group) as runtime:
+    async with Runtime.open("captured-memory", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
                                     namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
@@ -107,7 +107,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
     group.capability(ConversationCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
-    async with Runtime.open("captured-graph-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+    async with Runtime.open("captured-graph-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         agent = runtime.agents.get()
         session = await agent.create_session("graph-session", principal=principal)
         previous = await session.start("remember the earlier turn")
@@ -122,7 +122,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
         assert template.nodes[0].input["capture_context"]["history"]
         latest = await session.start("this later turn must not leak")
         await latest.wait()
-    async with Runtime.open("captured-graph-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+    async with Runtime.open("captured-graph-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         task = runtime.tasks.from_agent("context.agent", runtime.agents.get())
         template = await runtime._input_captures.read_graph(graph_capture, principal=principal)
         rerun = await runtime.tasks.bind(task).start(TaskGraph("context-replay", template.nodes), principal=principal, idempotency_key="context-graph-replay")
@@ -147,7 +147,7 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path / "state")
-    async with Runtime.open("captured-instructions", models=_NoToolsModels(), storage=storage, runtime_features=group) as runtime:
+    async with Runtime.open("captured-instructions", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("question", principal=principal)
         await source.wait()
@@ -176,7 +176,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
     })
     source_root = tmp_path / "source"
     storage = RuntimeStorage.filesystem(source_root)
-    async with Runtime.open("portable-context", models=_NoToolsModels(), storage=storage, runtime_features=group) as runtime:
+    async with Runtime.open("portable-context", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         execution = await runtime.agents.get().start("question", input_context=baseline, principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
@@ -191,7 +191,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         await storage.close()
     restored_root = tmp_path / "restored"
     await RuntimeStorage.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
-    async with Runtime.open("portable-context", models=_NoToolsModels(), storage=RuntimeStorage.from_root(restored_root), runtime_features=group) as runtime:
+    async with Runtime.open("portable-context", models=_NoToolsModels(), storage=RuntimeStorage.from_root(restored_root), features=group) as runtime:
         capture = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "restored-context"))
         imported = await runtime._input_captures.read_agent(capture, principal=principal)
         assert imported.input_context.digest == baseline.digest
@@ -214,7 +214,7 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
     async def replacement_builder(context: AgentTaskInputContext) -> str:
         return "replacement projected question"
 
-    async with Runtime.open("reproject-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+    async with Runtime.open("reproject-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         session = await runtime.agents.get().create_session("context-session", principal=principal)
         first = await session.start("immutable earlier history")
@@ -246,7 +246,7 @@ async def test_custom_memory_without_consistent_read_view_reports_precise_unavai
 
     group = RuntimeFeatures("unsupported-context")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
-    async with Runtime.open("unsupported-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+    async with Runtime.open("unsupported-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         backend = runtime._execution_service.runtime_backend()
         backend._memory_store_factory = lambda *_args: InMemoryStore()
@@ -277,7 +277,7 @@ async def test_reprojected_files_use_accepted_bytes_after_workspace_file_changes
     async def builder(context: AgentTaskInputContext) -> str:
         return "projected prompt"
 
-    async with Runtime.open("file-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path / "state"), runtime_features=group) as runtime:
+    async with Runtime.open("file-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path / "state"), features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         task = runtime.tasks.from_agent("files.projected", runtime.agents.get(), build_input=builder)
         engine = runtime.tasks.bind(task)
@@ -327,7 +327,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
     group = RuntimeFeatures("model-memory-context")
     group.agent("default", model="default", allow_tools=("*",), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("model-memory-context", models=Models(), storage=storage, runtime_features=group) as runtime:
+    async with Runtime.open("model-memory-context", models=Models(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")

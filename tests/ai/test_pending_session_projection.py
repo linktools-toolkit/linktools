@@ -54,7 +54,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
         for _ in range(2 if shared and cache is not None else 1):
             storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
             runtime = await stack.enter_async_context(Runtime.open(
-                "pending-session-display", storage=storage, models=models, runtime_features=group(),
+                "pending-session-display", storage=storage, models=models, features=group(),
             ))
             values.append((runtime, storage))
         try:

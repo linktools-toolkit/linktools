@@ -62,7 +62,7 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "provider-stream-failure", models=_Models(ExitModel(stream_function=stream)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("respond")
         result = (await execution.wait(timeout_seconds=10)).result

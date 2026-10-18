@@ -30,7 +30,7 @@ async def test_session_execution_fork_preserves_committed_cursor_and_rejects_cha
     group.capability(ConversationCapability(), scope="runtime")
     if mode == "trace":
         group.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("session-execution-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == "pending" else None), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
+    async with Runtime.open("session-execution-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if mode == "pending" else None), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session("session")
         first = await session.start("first")
         await first.wait(timeout_seconds=5)

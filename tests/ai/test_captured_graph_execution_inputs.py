@@ -70,7 +70,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
         return f"Prepared in {context.graph_id}: {context.input['question']}"
 
     async with Runtime.open("captured-projection", models=models, storage=RuntimeStorage.in_memory(),
-            context=CONTEXT, runtime_features=group) as runtime:
+            context=CONTEXT, features=group) as runtime:
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
         engine = runtime.tasks.bind(target, scorer)
@@ -182,7 +182,7 @@ async def test_graph_capture_rejects_unavailable_projected_input(
         return "should never be evaluated"
 
     async with Runtime.open("unavailable-projection", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         failure = Task("captured.failure", fail, effect_policy="none")
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         source = await runtime.tasks.bind(failure, target).start(TaskGraph("source", (
@@ -226,7 +226,7 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
         return "ready"
 
     async with Runtime.open("recaptured-fixed", models=models, context=CONTEXT,
-            storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         prepare = Task("captured.prepare", gate, effect_policy="none")
         scorer = Task("captured.score", _score_graph, effect_policy="none")
@@ -309,7 +309,7 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
 
     async with Runtime.open("recaptured-projection", models=models, context=CONTEXT,
             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            runtime_features=group) as runtime:
+            features=group) as runtime:
         task = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
         scorer = Task("captured.score", _score_graph, effect_policy="none")
         engine = runtime.tasks.bind(task, scorer)
@@ -356,7 +356,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
 
     async with Runtime.open("unstarted-literal", models=models, context=CONTEXT,
             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-            runtime_features=group) as runtime:
+            features=group) as runtime:
         producer = Task("captured.prepare", prepare, effect_policy="none")
         target = runtime.tasks.from_agent("captured.agent", runtime.agents.get())
         scorer = Task("captured.score", _score_graph, effect_policy="none")

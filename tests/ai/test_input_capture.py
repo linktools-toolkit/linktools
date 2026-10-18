@@ -86,7 +86,7 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
         calls.append(context.input["name"])
         return "Hello " + context.input["name"]
 
-    async with Runtime.open("agent-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+    async with Runtime.open("agent-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=build)
         engine = runtime.tasks.bind(task)
@@ -188,7 +188,7 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) ->
     group = RuntimeFeatures("capture-child")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("child", model="default", system_prompt="Captured child instructions", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("subagent-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+    async with Runtime.open("subagent-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = Principal("capture", runtime.tenant_id)
         parent = await runtime.agents.get().start("parent input", principal=principal)
         await parent.wait()

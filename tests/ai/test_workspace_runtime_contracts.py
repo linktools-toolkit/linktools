@@ -220,7 +220,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         "default",
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
@@ -238,7 +238,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
@@ -248,7 +248,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         "default",
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         loaded = await runtime.sessions.get(
             created.session_id,

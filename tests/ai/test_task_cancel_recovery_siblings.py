@@ -59,7 +59,7 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
             "cancel-unknown-sibling",
             models=_TaskTestModels(),
             storage=storage,
-            runtime_features=group,
+            features=group,
         ) as runtime:
             unknown_task = runtime.tasks.from_agent(
                 "review.unknown", runtime.agents.get("unknown")

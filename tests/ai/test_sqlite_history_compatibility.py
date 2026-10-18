@@ -116,7 +116,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), runtime_features=application,
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as runtime:
         session = runtime.agents.get("default").session("session")
         old = await session.history()
@@ -139,7 +139,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
 
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), runtime_features=application,
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as reopened:
         restored = await reopened.agents.get("default").session("session").history()
         assert restored.items == appended.items
@@ -213,7 +213,7 @@ async def test_sqlite_old_history_survives_snapshot_restore(tmp_path: Path) -> N
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.from_root(restored_root),
-        models=helpers.RuntimeUsageModels(), runtime_features=application,
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as runtime:
         assert await _old_execution_evidence(runtime.history, execution_id, runtime.default_principal) == evidence
         history = await runtime.agents.get("default").session("session").history()

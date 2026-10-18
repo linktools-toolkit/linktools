@@ -598,7 +598,7 @@ async def test_remote_only_runtime_uses_host_network_without_opening_sandbox(
             "remote-only",
             models=_RemoteModels(),
             storage=RuntimeStorage.in_memory(),
-            runtime_features=_group(_spec(remote), sandbox=sandbox),
+            features=_group(_spec(remote), sandbox=sandbox),
         ) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
@@ -616,7 +616,7 @@ async def test_unselected_offline_remote_does_not_connect() -> None:
             "remote-selection",
             models=_RemoteModels(),
             storage=RuntimeStorage.in_memory(),
-            runtime_features=_group(_spec(remote), offline),
+            features=_group(_spec(remote), offline),
         ) as runtime:
             result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
@@ -637,7 +637,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
             "remote-recovery",
             models=_RemoteModels(),
             storage=storage,
-            runtime_features=features,
+            features=features,
         ) as runtime:
             execution = await runtime.agents.get("default").start("echo")
             with pytest.raises(AIError) as raised:
@@ -661,7 +661,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
                 "remote-recovery",
                 models=_RemoteModels(),
                 storage=restored,
-                runtime_features=restored_features,
+                features=restored_features,
             ) as runtime:
                 execution = await runtime.executions.get(execution_id)
                 resolution = await execution.resolve_tool_effect(
@@ -759,7 +759,7 @@ async def test_parallel_runtimes_do_not_share_service_credentials() -> None:
                 f"remote-{label}",
                 models=_RemoteModels(),
                 storage=RuntimeStorage.in_memory(),
-                runtime_features=_group(_spec(remote, headers={"Authorization": f"Bearer {label}"})),
+                features=_group(_spec(remote, headers={"Authorization": f"Bearer {label}"})),
             ) as runtime:
                 result = (await runtime.agents.get("default").run(
                     "echo", timeout_seconds=10
@@ -896,7 +896,7 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
             "mixed-mcp",
             models=_MixedModels(),
             storage=RuntimeStorage.in_memory(),
-            runtime_features=group,
+            features=group,
         ) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=15
@@ -987,7 +987,7 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
             "remote-cleanup",
             models=_RemoteModels(),
             storage=storage,
-            runtime_features=_group(_spec(remote)),
+            features=_group(_spec(remote)),
         ) as runtime:
             execution = await runtime.agents.get("default").start(
                 "echo",
@@ -1081,7 +1081,7 @@ async def test_mixed_runtime_does_not_bypass_failed_local_sandbox() -> None:
             "mixed-unavailable",
             models=_MixedModels(),
             storage=RuntimeStorage.in_memory(),
-            runtime_features=group,
+            features=group,
         ) as runtime:
             result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=10

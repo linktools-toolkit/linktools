@@ -255,7 +255,7 @@ async def test_terminal_stream_allows_immediate_runtime_close(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=state,
-            runtime_features=_agent_group(),
+            features=_agent_group(),
         ) as runtime:
             execution = await runtime.agents.get("default").start("hello")
             terminal_events = []
@@ -304,7 +304,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=state,
-            runtime_features=features,
+            features=features,
         ) as runtime:
             task = asyncio.create_task(
                 _emit_result(
@@ -333,7 +333,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=reopened,
-            runtime_features=features,
+            features=features,
         ):
             pass
     finally:
@@ -360,7 +360,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=state,
-            runtime_features=features,
+            features=features,
         ) as runtime:
             created = await runtime.agents.get("default").create_session("session")
             loaded = await runtime.sessions.get(

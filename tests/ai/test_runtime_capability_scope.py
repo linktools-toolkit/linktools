@@ -139,7 +139,7 @@ async def test_runtime_capability_shares_backend_across_agents_and_agent_tasks_w
     policies = _policies(_group(), _GlobalPolicy(backend))
     async with Runtime.open(
         "runtime_capability", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), runtime_features=replace(
+        storage=RuntimeStorage.in_memory(), features=replace(
             await policies.capture(), filter=lambda _agent, item: item.kind != "capability",
         ),
     ) as runtime:
@@ -186,7 +186,7 @@ async def test_stream_permit_spans_consumption_and_releases_on_every_exit(outcom
 
     async with Runtime.open(
         "runtime_capability-stream", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), _GlobalPolicy(backend)),
+        storage=RuntimeStorage.in_memory(), features=_policies(_group(), _GlobalPolicy(backend)),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         await asyncio.wait_for(streamed.wait(), 3)
@@ -216,7 +216,7 @@ async def test_queued_cancellation_does_not_release_another_executions_permit() 
 
     async with Runtime.open(
         "runtime_capability-queue", models=_Models(FunctionModel(stream_function=chunks)),
-        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), _GlobalPolicy(backend)),
+        storage=RuntimeStorage.in_memory(), features=_policies(_group(), _GlobalPolicy(backend)),
     ) as runtime:
         first = await runtime.agents.get().start("first")
         await backend.requested(1)
@@ -241,10 +241,10 @@ async def test_shared_host_backend_spans_runtime_instances() -> None:
 
     async with Runtime.open(
         "first", models=_Models(_UsageFunctionModel(blocked)), storage=RuntimeStorage.in_memory(),
-        runtime_features=_policies(_group(), runtime_capability),
+        features=_policies(_group(), runtime_capability),
     ) as first_runtime, Runtime.open(
         "second", models=_Models(_UsageFunctionModel(_immediate)), storage=RuntimeStorage.in_memory(),
-        runtime_features=_policies(_group(), runtime_capability),
+        features=_policies(_group(), runtime_capability),
     ) as second_runtime:
         first = await first_runtime.agents.get().start("first")
         await backend.requested(1)
@@ -272,7 +272,7 @@ async def test_runtime_capability_sees_logical_model_call_not_each_transport_ret
     model = _RetryingModel(_UsageFunctionModel(transient), max_retries=2, retry_delay=0)
     async with Runtime.open(
         "runtime_capability-retry", models=_Models(model), storage=RuntimeStorage.in_memory(),
-        runtime_features=_policies(_group(), _GlobalPolicy(backend)),
+        features=_policies(_group(), _GlobalPolicy(backend)),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -299,7 +299,7 @@ async def test_runtime_capability_covers_delegated_agents_and_tool_hooks() -> No
     group.agent("child", model="default", allow_tools=("ping",), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "runtime_capability-delegation", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=_policies(group, _GlobalPolicy(backend)),
+        storage=RuntimeStorage.in_memory(), features=_policies(group, _GlobalPolicy(backend)),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -326,7 +326,7 @@ async def test_runtime_capability_rejects_invalid_or_not_always_on_entries(kind:
     with pytest.raises((TypeError, AIError)):
         async with Runtime.open(
             "runtime-policy-invalid", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), *entries),
+            storage=RuntimeStorage.in_memory(), features=_policies(_group(), *entries),
         ):
             raise AssertionError("invalid runtime capability was accepted")
 
@@ -340,7 +340,7 @@ async def test_selected_capability_cannot_silently_replace_runtime_capability_wi
     with pytest.raises(AIError) as raised:
         async with Runtime.open(
             "runtime-policy-collision", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), runtime_features=_policies(group, _GlobalPolicy(backend)),
+            storage=RuntimeStorage.in_memory(), features=_policies(group, _GlobalPolicy(backend)),
         ):
             raise AssertionError("conflicting runtime capability was accepted")
     assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT
@@ -353,7 +353,7 @@ async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime
     first.id = second.id = None
     async with Runtime.open(
         "runtime_capability-anonymous", models=_Models(_UsageFunctionModel(_immediate)),
-        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), CombinedCapability([first, second])),
+        storage=RuntimeStorage.in_memory(), features=_policies(_group(), CombinedCapability([first, second])),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -366,7 +366,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     first_features = _policies(_group(), _GlobalPolicy(first_backend), ConversationCapability())
     async with Runtime.open(
         "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        runtime_features=first_features,
+        features=first_features,
     ) as runtime:
         first = await runtime.agents.get().start("standalone")
         assert (await first.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
@@ -376,7 +376,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     current.id = "host.replacement"
     async with Runtime.open(
         "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        runtime_features=_policies(_group(), current, ConversationCapability()),
+        features=_policies(_group(), current, ConversationCapability()),
     ) as runtime:
         historical = await runtime.executions.get(first.execution_id)
         retry = await historical.retry("retry")
@@ -405,7 +405,7 @@ async def test_runtime_capability_acquisition_failure_does_not_call_provider() -
 
     async with Runtime.open(
         "runtime_capability-unavailable", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=_policies(_group(), Unavailable()),
+        storage=RuntimeStorage.in_memory(), features=_policies(_group(), Unavailable()),
     ) as runtime:
         execution = await runtime.agents.get().start("go")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.FAILED
@@ -421,7 +421,7 @@ async def test_nested_native_id_conflict_cannot_replace_selected_capability() ->
     policies = _policies(group, CombinedCapability([_GlobalPolicy(backend)]))
     async with Runtime.open(
         "runtime-policy-nested-collision", models=_Models(_UsageFunctionModel(_immediate)),
-        storage=RuntimeStorage.in_memory(), runtime_features=policies,
+        storage=RuntimeStorage.in_memory(), features=policies,
     ) as runtime:
         execution = await runtime.agents.get("selected").start("go")
         result = (await execution.wait(timeout_seconds=5)).result
@@ -439,7 +439,7 @@ async def test_runtime_native_ids_are_unique_across_named_combined_registrations
     with pytest.raises(AIError) as raised:
         async with Runtime.open(
             "runtime-policy-native-duplicates", models=_Models(_UsageFunctionModel(_immediate)),
-            storage=RuntimeStorage.in_memory(), runtime_features=policies,
+            storage=RuntimeStorage.in_memory(), features=policies,
         ):
             raise AssertionError("duplicate native runtime IDs were accepted")
     assert raised.value.code is ErrorCode.CAPABILITY_CONFLICT

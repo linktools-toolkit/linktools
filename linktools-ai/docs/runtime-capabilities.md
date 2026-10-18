@@ -2,7 +2,7 @@
 
 `RuntimeFeatures.capability(capability, scope="runtime")` registers a native
 Pydantic AI `AbstractCapability[AgentContext[AppT]]` as host policy. The same
-`runtime_features=group` argument to `Runtime.open` supplies both Agent-selected
+`features=group` argument to `Runtime.open` supplies both Agent-selected
 behavior and Runtime-wide policy; there is no separate registration system.
 
 ```python
@@ -19,7 +19,7 @@ group.agent("default", allow_capabilities=())
 
 capture = await group.capture()
 async with Runtime.open(
-    "application", models=models, storage=storage, runtime_features=capture,
+    "application", models=models, storage=storage, features=capture,
 ) as runtime:
     ...
 ```
@@ -36,7 +36,7 @@ pass through these hooks.
 Conversation, interrupted-execution recovery, detailed trace and automatic Agent
 metrics are separate, explicit Runtime-scoped capabilities. Passing durable
 storage alone does not enable them. Supply one `RuntimeFeatures` declaration or
-its `RuntimeFeaturesCapture` through `runtime_features`; complete registrations
+its `RuntimeFeaturesCapture` through `features`; complete registrations
 before capture or opening the Runtime.
 
 ```python
@@ -46,13 +46,13 @@ from linktools.ai.runtime import ConversationCapability, CheckpointCapability, T
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
 chat.capability(ConversationCapability(), scope="runtime")
-# Runtime.open(..., runtime_features=chat) supports Sessions and conversation forks.
+# Runtime.open(..., features=chat) supports Sessions and conversation forks.
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
 persistent_work.capability(CheckpointCapability(), scope="runtime")
 persistent_work.capability(TraceCapability(), scope="runtime")
-# Runtime.open(..., runtime_features=persistent_work) supports recovery and audit.
+# Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
 `ConversationCapability()` retains committed conversation context and Session
@@ -83,7 +83,7 @@ from linktools.ai.runtime import MetricsCapability
 
 group.capability(MetricsCapability(), scope="runtime")
 # metrics is an application-owned Metrics instance.
-# Runtime.open(..., runtime_features=group, metrics=metrics)
+# Runtime.open(..., features=group, metrics=metrics)
 ```
 
 `MetricsCapability()` requires `metrics=` and selects automatic Agent model,

@@ -31,7 +31,7 @@ async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open("scope-authorization", models=RuntimeUsageModels(),
-                            storage=storage, runtime_features=group) as runtime:
+                            storage=storage, features=group) as runtime:
         root = await runtime.agents.get().start("root", budget=RunBudget(model_requests=20))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(root.execution_id, tenant_id="default")

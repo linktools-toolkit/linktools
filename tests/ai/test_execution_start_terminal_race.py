@@ -39,7 +39,7 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "terminal-race", models=_Models(_UsageFunctionModel(model)),
-        storage=storage, runtime_features=group,
+        storage=storage, features=group,
     ) as runtime:
         agent = runtime.agents.get()
         execution = await agent.start("work", idempotency_key="same")

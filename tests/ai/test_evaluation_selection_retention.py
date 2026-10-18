@@ -65,7 +65,7 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
     target = Task("selection.target", echo, effect_policy="none")
     rule = Task("selection.rule", score, effect_policy="none")
     async with Runtime.open("selected-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, runtime_features=capabilities()) as runtime:
+                            context=CONTEXT, features=capabilities()) as runtime:
         judge = runtime.tasks.from_agent("selection.judge", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule, judge)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("usage", 1), (
@@ -110,7 +110,7 @@ async def test_selected_rescore_cannot_hide_unknown_target_usage() -> None:
     models = FailedTarget()
     rule = Task("selection.failed-target-score", score, effect_policy="none")
     async with Runtime.open("target-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, runtime_features=capabilities()) as runtime:
+                            context=CONTEXT, features=capabilities()) as runtime:
         target = runtime.tasks.from_agent("selection.failed-target", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule)
         scorer = replace(rule_scorer(rule), accepts_target_failure=True)
@@ -150,7 +150,7 @@ async def test_usage_gate_excludes_an_unselected_candidate() -> None:
     models = SelectiveJudge()
     target, unrelated = Task("selection.good", good, effect_policy="none"), Task("selection.bad", echo, effect_policy="none")
     async with Runtime.open("candidate-usage", models=models, storage=RuntimeStorage.in_memory(),
-                            context=CONTEXT, runtime_features=capabilities()) as runtime:
+                            context=CONTEXT, features=capabilities()) as runtime:
         judge = runtime.tasks.from_agent("selection.selective-judge", runtime.agents.get())
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("candidate-usage", 1), (
             CaseSpec.task(CaseRef("candidate-usage", "one", 1), input={"answer": "bad"}),

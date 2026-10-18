@@ -190,7 +190,7 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
         "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=RuntimeStorage.in_memory(),
-        runtime_features=group,
+        features=group,
     )
 
     await components.close_callback()
@@ -225,7 +225,7 @@ async def test_runtime_rejects_source_change_during_assembly(
                 "workspace",
                 models=RuntimeUsageModels(),  # type: ignore[arg-type]
                 storage=RuntimeStorage.in_memory(),
-                runtime_features=RuntimeFeatures("workspace", assets=store),
+                features=RuntimeFeatures("workspace", assets=store),
             )
 
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
@@ -309,7 +309,7 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=application,
+        features=application,
     ) as runtime:
         result = (await runtime.agents.get("default").run(
             "hello",

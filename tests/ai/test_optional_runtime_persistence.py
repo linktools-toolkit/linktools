@@ -128,7 +128,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
     storage_factory = _split_sqlite_storage if split_storage else RuntimeStorage.sqlite
     storage = storage_factory(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=storage, runtime_features=group,
+        _NAMESPACE, models=models, storage=storage, features=group,
     ) as runtime:
         await runtime.agents.get().create_session("session")
         session = runtime.agents.get().session("session")
@@ -198,7 +198,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
 
     reopened = storage_factory(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=reopened, runtime_features=group,
+        _NAMESPACE, models=models, storage=reopened, features=group,
     ) as runtime:
         restored = await runtime.executions.get(execution.execution_id)
         assert (await restored.wait(timeout_seconds=10)).result.output == first_output
@@ -295,7 +295,7 @@ async def test_persistence_capabilities_reject_agent_scope(
     with pytest.raises(AIError) as invalid:
         async with Runtime.open(
             _NAMESPACE, models=_Models(_UsageFunctionModel(model)),
-            storage=RuntimeStorage.in_memory(), runtime_features=group,
+            storage=RuntimeStorage.in_memory(), features=group,
         ):
             raise AssertionError("Agent-scoped persistence capability was accepted")
     assert invalid.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -328,7 +328,7 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
     database = tmp_path / "recovery.db"
     original = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         execution = await owner.agents.get().start("hold the original request", idempotency_key="original")
         try:
@@ -340,7 +340,7 @@ async def test_recovery_cannot_enable_restart_after_execution_admission(
             if reopen_with_restart:
                 group.capability(CheckpointCapability(), scope="runtime")
             async with Runtime.open(
-                _NAMESPACE, models=models, storage=RuntimeStorage.sqlite(database), runtime_features=group,
+                _NAMESPACE, models=models, storage=RuntimeStorage.sqlite(database), features=group,
             ) as reopened:
                 remote = await reopened.executions.get(execution.execution_id)
                 replayed = await reopened.agents.get().start(
@@ -411,7 +411,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
     original = RuntimeStorage.sqlite(database)
     remote_state = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         await owner.agents.get().create_session("session")
         execution = await owner.agents.get().session("session").start("hold the provider", idempotency_key="first")
@@ -421,7 +421,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
             # producer exits; retain its task to verify the later write boundary.
             worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
             async with Runtime.open(
-                _NAMESPACE, models=models, storage=remote_state, runtime_features=group,
+                _NAMESPACE, models=models, storage=remote_state, features=group,
             ) as observer:
                 remote = await observer.executions.get(execution.execution_id)
                 normal = await remote.cancel(idempotency_key="normal-cancel")
@@ -517,7 +517,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
     original = RuntimeStorage.sqlite(database)
     remote_state = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         await owner.agents.get().create_session("session")
         execution = await owner.agents.get().session("session").start("perform effect")
@@ -525,7 +525,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
             await asyncio.wait_for(reached.wait(), 10)
             worker = owner._execution_service.runtime_backend()._tasks[execution.execution_id]
             async with Runtime.open(
-                _NAMESPACE, models=models, storage=remote_state, runtime_features=group,
+                _NAMESPACE, models=models, storage=remote_state, features=group,
             ) as observer:
                 remote = await observer.executions.get(execution.execution_id)
                 operations = await remote_state.recovery.tools.list_by_execution(
@@ -590,7 +590,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
     original = RuntimeStorage.sqlite(database)
     remote_state = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         await owner.agents.get().create_session("session")
         execution = await owner.agents.get().session("session").start("perform uncertain effect")
@@ -598,7 +598,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
             await execution.wait(timeout_seconds=10)
         assert unknown.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
         async with Runtime.open(
-            _NAMESPACE, models=models, storage=remote_state, runtime_features=group,
+            _NAMESPACE, models=models, storage=remote_state, features=group,
         ) as observer:
             remote = await observer.executions.get(execution.execution_id)
             assert not (await remote.cancel(idempotency_key="force-unknown", force=True)).cancelled
@@ -740,7 +740,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
     original = RuntimeStorage.sqlite(database)
     remote_state = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         await owner.agents.get().create_session("session")
         root = await owner.agents.get().session("session").start("root", idempotency_key="root")
@@ -753,7 +753,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
             execution_ids = (root.execution_id, child_id, grandchild_id)
             workers = tuple(owner._execution_service.runtime_backend()._tasks[key] for key in execution_ids)
             async with Runtime.open(
-                _NAMESPACE, models=models, storage=remote_state, runtime_features=group,
+                _NAMESPACE, models=models, storage=remote_state, features=group,
             ) as observer:
                 assert [item.execution_id for item in await observer.executions.list_children(
                     root.execution_id, principal=observer.default_principal,
@@ -829,7 +829,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
     original = RuntimeStorage.sqlite(database)
     remote_state = RuntimeStorage.sqlite(database)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         await owner.agents.get().create_session("session")
         root = await owner.agents.get().session("session").start("root", idempotency_key="root")
@@ -842,7 +842,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
                 await child.wait(timeout_seconds=10)
             assert unknown.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
             async with Runtime.open(
-                _NAMESPACE, models=models, storage=remote_state, runtime_features=group,
+                _NAMESPACE, models=models, storage=remote_state, features=group,
             ) as observer:
                 remote = await observer.executions.get(root.execution_id)
                 with pytest.raises(AIError) as unresolved:
@@ -934,7 +934,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
     original = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
     remote_state = RuntimeStorage.sqlite(database, cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cache_enabled else None)
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=original, runtime_features=group,
+        _NAMESPACE, models=models, storage=original, features=group,
     ) as owner:
         if task_owned:
             task = owner.tasks.from_agent("delegation.agent", owner.agents.get())
@@ -960,7 +960,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
             assert child_record.root_execution_id == root_id
             workers = tuple(owner._execution_service.runtime_backend()._tasks[key] for key in (root_id, child_id))
             async with Runtime.open(
-                _NAMESPACE, models=models, storage=remote_state, runtime_features=group,
+                _NAMESPACE, models=models, storage=remote_state, features=group,
             ) as observer:
                 remote = await observer.executions.get(root_id)
                 remote_child = await observer.executions.get(child_id)
@@ -1042,7 +1042,7 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
     storage_factory = _split_sqlite_storage if split_storage else RuntimeStorage.sqlite
     storage = storage_factory(tmp_path / "terminal.db")
     async with Runtime.open(
-        _NAMESPACE, models=_Models(_UsageFunctionModel(model)), storage=storage, runtime_features=group,
+        _NAMESPACE, models=_Models(_UsageFunctionModel(model)), storage=storage, features=group,
         metrics=Metrics.from_store(MetricStore(), namespace=_NAMESPACE),
     ) as runtime:
         await runtime.agents.get().create_session("session")
@@ -1107,7 +1107,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
     models = _Models(_UsageFunctionModel(model))
     initial = storage()
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=initial, runtime_features=group,
+        _NAMESPACE, models=models, storage=initial, features=group,
     ) as runtime:
         await runtime.agents.get().create_session("session")
 
@@ -1133,7 +1133,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         group.capability(CheckpointCapability(), scope="runtime")
     reopened = storage()
     async with Runtime.open(
-        _NAMESPACE, models=models, storage=reopened, runtime_features=group,
+        _NAMESPACE, models=models, storage=reopened, features=group,
     ) as runtime:
         assert await reopened.execution.executions.get(
             execution.execution_id, tenant_id=runtime.tenant_id,

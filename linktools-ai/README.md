@@ -49,7 +49,7 @@ def available(agent, contribution):
 
 group = RuntimeFeatures("application", filter=available)
 async with Runtime.open(
-    "application", models=models, storage=storage, runtime_features=group,
+    "application", models=models, storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -63,7 +63,7 @@ Workspace tools. Keep the unfiltered capture for global asset administration.
 A capture retains the current in-process filter policy without serializing it into
 assets or execution bindings. If the policy depends on captured metadata, use
 `dataclasses.replace(capture, filter=build_filter(capture))` and pass that capture
-to `Runtime.open(runtime_features=...)`. This keeps the same source revision and
+to `Runtime.open(features=...)`. This keeps the same source revision and
 reader without loading the assets again. `Runtime.open` has no separate filter
 parameter.
 
@@ -100,7 +100,7 @@ independently of `allow_capabilities` and `RuntimeFeatures.filter`:
 ```python
 group.capability(global_rate_limit, id="host.rate-limit", scope="runtime")
 async with Runtime.open(
-    "application", models=models, storage=storage, runtime_features=group,
+    "application", models=models, storage=storage, features=group,
 ) as runtime:
     ...
 ```
@@ -174,7 +174,7 @@ async with Runtime.open(
     "default",
     models=models,
     storage=storage,
-    runtime_features=features,
+    features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
         "review this change",
@@ -234,7 +234,7 @@ async with Runtime.open(
     "default",
     models=models,
     storage=storage,
-    runtime_features=application,
+    features=application,
 ) as runtime:
     result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
@@ -473,7 +473,7 @@ server = group.mcp(MCPServerSpec(
 ))
 assert server.id == "security"
 group.agent("reviewer", allow_tools=(mcp_server_selector("security"),))
-# Pass runtime_features=group to Runtime.open(...).
+# Pass features=group to Runtime.open(...).
 ```
 
 Import a shared configuration explicitly, then register its declarations:
@@ -699,7 +699,7 @@ on the same declaration before opening the Runtime:
 from linktools.ai.runtime import ConversationCapability
 
 application.capability(ConversationCapability(), scope="runtime")
-# Open with Runtime.open(..., runtime_features=application) after registration.
+# Open with Runtime.open(..., features=application) after registration.
 ```
 
 ```python

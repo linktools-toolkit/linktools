@@ -58,10 +58,10 @@ async def _runtimes(tmp_path, cache):
     group.agent("default", model="default", allow_tools=())
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
-    async with Runtime.open("stream-lifecycle", models=models, runtime_features=group,
+    async with Runtime.open("stream-lifecycle", models=models, features=group,
                             storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
         storage = RuntimeStorage.sqlite(path, cache=cache)
-        async with Runtime.open("stream-lifecycle", models=models, runtime_features=group, storage=storage) as reader:
+        async with Runtime.open("stream-lifecycle", models=models, features=group, storage=storage) as reader:
             execution = await owner.agents.get().start("question")
             try:
                 await asyncio.wait_for(entered.wait(), 5)
@@ -245,10 +245,10 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
     group.agent("default", model="default", allow_tools=())
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
-    async with Runtime.open("early-preview", models=models, runtime_features=group,
+    async with Runtime.open("early-preview", models=models, features=group,
                             storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
         reader_storage = RuntimeStorage.sqlite(path, cache=cache)
-        async with Runtime.open("early-preview", models=models, runtime_features=group,
+        async with Runtime.open("early-preview", models=models, features=group,
                                 storage=reader_storage) as reader:
             execution = await owner.agents.get().start("question")
             repository = reader_storage.execution.executions

@@ -213,7 +213,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=_agent_group(),
+        features=_agent_group(),
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
@@ -261,7 +261,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=_agent_group(),
+        features=_agent_group(),
         metrics=metrics,
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
@@ -851,7 +851,7 @@ async def test_terminal_metric_cancellation_preserves_published_success_and_hist
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "terminal-order", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        runtime_features=features, metrics=metrics,
+        features=features, metrics=metrics,
     ) as runtime:
         execution = await runtime.agents.get("default").start("hello")
         try:
@@ -926,7 +926,7 @@ async def test_pending_cancel_delivers_terminal_metric_in_caller_after_admission
     store = Store()
     async with Runtime.open(
         "pending-cancel-metric", models=_TextModels(), storage=RuntimeStorage.in_memory(),
-        runtime_features=_agent_group(), metrics=Metrics.from_store(store),
+        features=_agent_group(), metrics=Metrics.from_store(store),
     ) as runtime:
         starter = asyncio.create_task(runtime.agents.get("default").start("hello"))
         cancellation: asyncio.Task[object] | None = None

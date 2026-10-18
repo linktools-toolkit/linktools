@@ -103,7 +103,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     features = RuntimeFeatures("fixture-conversation")
     features.capability(ConversationCapability(), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, runtime_features=features,
+    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features,
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -134,7 +134,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     assert await assets.read_versions((first,))
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, runtime_features=features,
+    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features,
                             tool_responses=ToolResponseFixture(second, assets)) as runtime:
         original = await runtime.executions.get(execution.execution_id, principal=principal)
         for derived in (await original.retry("retry"), await original.fork("fork")):
@@ -167,7 +167,7 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
     features = RuntimeFeatures("fixture-conversation")
     features.capability(ConversationCapability(), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage, runtime_features=features,
+    async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage, features=features,
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question", session_id="session")
@@ -373,7 +373,7 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
 
     monkeypatch.setattr(assets, "read_versions", read_fixture)
     async with Runtime.open("fixture-repair", models=RuntimeUsageModels(), storage=storage,
-                            runtime_features=_persistence_capabilities(restart=True),
+                            features=_persistence_capabilities(restart=True),
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         reserve = storage.execution.executions.reserve_start
 

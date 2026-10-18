@@ -58,7 +58,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
 
     async with Runtime.open("clean-input", models=_NoToolsModels(),
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
-                            runtime_features=group) as runtime:
+                            features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent_task = runtime.tasks.from_agent("clean.agent", runtime.agents.get(),
             build_input=project if task_mode == "projected" else None)

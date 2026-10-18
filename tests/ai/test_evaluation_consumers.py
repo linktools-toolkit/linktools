@@ -203,7 +203,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
         return "Grade the data: " + json.dumps({"answer": sample.target_output, "expected": sample.expected, "rubric": sample.rubric})
 
     target = Task("consumer.judge-target", echo, effect_policy="none")
-    async with Runtime.open("judge-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, runtime_features=group) as runtime:
+    async with Runtime.open("judge-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=group) as runtime:
         judge = runtime.tasks.from_agent("consumer.judge", runtime.agents.get(), build_input=build_input if projected else None)
         scorer = replace(rule_scorer(judge), rubric={"criterion": "semantic equality"})
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("judge", 1), cases=(
@@ -558,7 +558,7 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
     body = b"A fixed original attachment\x00with bytes."
     group = RuntimeFeatures[None]("attachment-consumer")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("attachment-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, runtime_features=group) as runtime:
+    async with Runtime.open("attachment-consumers", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT, features=group) as runtime:
         target = runtime.tasks.from_agent("consumer.attachment-target", runtime.agents.get())
         received: list[bytes] = []
 

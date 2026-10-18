@@ -41,7 +41,7 @@ async def _runtime(tmp_path: Path, *, backend: str = "filesystem", models=None) 
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open(
         "metadata-projection", models=FixtureModels() if models is None else models,
-        storage=storage, runtime_features=group,
+        storage=storage, features=group,
     ) as runtime:
         yield runtime
 

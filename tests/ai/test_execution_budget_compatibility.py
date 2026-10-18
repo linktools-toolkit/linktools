@@ -93,7 +93,7 @@ async def test_sqlite_retry_preserves_historical_agent_usage_limit(
     application.agent("default", revision=2, model="default", allow_tools=())
     async with Runtime.open(
         "older-history", storage=RuntimeStorage.sqlite(path),
-        models=helpers.RuntimeUsageModels(), runtime_features=application,
+        models=helpers.RuntimeUsageModels(), features=application,
     ) as runtime:
         original = await runtime.executions.get(execution_id)
         assert await original.budget_usage() is None

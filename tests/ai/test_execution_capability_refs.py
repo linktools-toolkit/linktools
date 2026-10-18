@@ -201,7 +201,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
 
     application_task = Task("bound-ref-prepare", prepare, effect_policy="none")
     async with Runtime.open("bound-refs", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.sqlite(path), runtime_features=capture) as runtime:
+                            storage=RuntimeStorage.sqlite(path), features=capture) as runtime:
         derived = runtime.agents.get("root").derive(allow_tools=())
         task = runtime.tasks.from_agent("bound-ref-agent", derived)
         run = await runtime.tasks.bind(application_task, task).start(
@@ -224,7 +224,7 @@ async def test_graph_agent_refs_preserve_derived_binding_after_catalog_change_an
     changed = RuntimeFeatures("bound-ref-test")
     changed.agent("root", revision=2, allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("bound-refs", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.sqlite(path), runtime_features=changed) as current:
+                            storage=RuntimeStorage.sqlite(path), features=changed) as current:
         assert current.agents.get("root").derive(model="default").compiled.skill_definitions == ()
         assert (await current.history.inspect_execution(execution_id, principal=principal)).capability_refs == info.capability_refs
     async with RuntimeHistory.open("bound-refs", storage=RuntimeStorage.sqlite(path)) as history:

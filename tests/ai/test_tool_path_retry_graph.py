@@ -78,7 +78,7 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
     async with Runtime.open(
         "path-correction", models=_Models(_UsageFunctionModel(model)),
         storage=RuntimeStorage.in_memory(),
-        runtime_features=group,
+        features=group,
     ) as runtime:
         task = runtime.tasks.from_agent("path.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("path-graph", (

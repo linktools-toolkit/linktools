@@ -246,7 +246,7 @@ def _crash_session_process(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            runtime_features=application,
+            features=application,
         ) as runtime:
             if phase != "recovered_before_terminal":
                 await runtime.agents.get("default").create_session("session")
@@ -309,7 +309,7 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
             "session-tool-crash",
             models=_ToolModels(),
             storage=state,
-            runtime_features=application,
+            features=application,
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             before_replay = await state.execution.executions.get(

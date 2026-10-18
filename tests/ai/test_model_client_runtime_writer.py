@@ -115,7 +115,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
     storage = RuntimeStorage.in_memory()
     features = _agents()
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("default", models=models, storage=storage, runtime_features=features) as runtime:
+    async with Runtime.open("default", models=models, storage=storage, features=features) as runtime:
         execution = await runtime.agents.get("default").start(
             "continue", input_context=ExecutionInputContext.from_messages(history),
             budget=RunBudget(model_requests=2) if budgeted else None,
@@ -170,7 +170,7 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "state.db")
     features = _agents()
     features.capability(TraceCapability(), scope="runtime")
-    async with Runtime.open("default", models=models, storage=storage, runtime_features=features) as runtime:
+    async with Runtime.open("default", models=models, storage=storage, features=features) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
             await asyncio.wait_for(stream.blocked.wait(), 5)
@@ -244,7 +244,7 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     principal = Principal("owner", "default")
-    async with Runtime.open("default", models=models, storage=storage, runtime_features=group) as runtime:
+    async with Runtime.open("default", models=models, storage=storage, features=group) as runtime:
         parents = await asyncio.gather(*(runtime.agents.get("default").start(f"root-{i}", principal=principal) for i in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=15) for execution in parents))
         assert all(value.result.status == "SUCCEEDED" for value in results)

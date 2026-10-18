@@ -52,7 +52,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         assert runtime.namespace == "web-chat"
         session = await runtime.agents.get("default").create_session("chat")
@@ -71,7 +71,7 @@ async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         with pytest.raises(AIError) as files_error:
             await runtime.agents.get("default").run(
@@ -111,7 +111,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
         "workspace-sandbox",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=group,
+        features=group,
     ) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
@@ -134,7 +134,7 @@ async def test_sandbox_group_can_be_composed_without_workspace() -> None:
         "sandbox-only",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=group,
+        features=group,
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
     assert result.status is ExecutionStatus.SUCCEEDED
@@ -171,7 +171,7 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
             "sandbox-skill",
             models=RuntimeUsageModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.in_memory(),
-            runtime_features=RuntimeFeatures("assets", assets=store, sandbox=sandbox),
+            features=RuntimeFeatures("assets", assets=store, sandbox=sandbox),
         ) as runtime:
             result = (await runtime.agents.get("default").run(
                 "review",
@@ -197,7 +197,7 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
         "separate-sandbox",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=workspace_features("workspace", workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()),
+        features=workspace_features("workspace", workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()),
     ) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
@@ -210,10 +210,10 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
 @pytest.mark.asyncio
 async def test_runtime_features_rejects_multiple_sources() -> None:
     # A single RuntimeFeatures owns sandbox selection; arrays are no longer an API.
-    with pytest.raises(TypeError, match="runtime_features"):
+    with pytest.raises(TypeError, match="features"):
         async with Runtime.open(
             "sandbox-conflict", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
-            runtime_features=(RuntimeFeatures("first", sandbox=DisabledSandbox()),
+            features=(RuntimeFeatures("first", sandbox=DisabledSandbox()),
                               RuntimeFeatures("second", sandbox=DisabledSandbox())),
         ):
             pytest.fail("multiple feature sources were accepted")
@@ -234,7 +234,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.from_root(storage_root),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         await runtime.agents.get("default").create_session(
             "cwd-session",
@@ -247,7 +247,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.from_root(storage_root),
-        runtime_features=features,
+        features=features,
     ) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(

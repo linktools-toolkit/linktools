@@ -299,7 +299,7 @@ async def test_model_metadata_live_and_archived_backend_contract(backend: str, t
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "metadata-live", models=_Models(_UsageFunctionModel(model)),
-        storage=storage(), runtime_features=group,
+        storage=storage(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("private prompt")
         principal = runtime.default_principal
@@ -384,7 +384,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     storage_path = tmp_path / "scheduled"
     async with Runtime.open(
         "scheduled-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.filesystem(storage_path), runtime_features=group,
+        storage=RuntimeStorage.filesystem(storage_path), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal

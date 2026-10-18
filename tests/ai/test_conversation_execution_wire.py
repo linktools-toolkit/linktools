@@ -29,7 +29,7 @@ async def test_execution_writer_fixes_conversation_with_safe_earlier_writer_defa
     storage = RuntimeStorage.in_memory()
     features = _features(*(ConversationCapability(),) if conversation else ())
     async with Runtime.open(
-        "conversation-wire", storage=storage, models=_FeatureModels(), runtime_features=features,
+        "conversation-wire", storage=storage, models=_FeatureModels(), features=features,
     ) as runtime:
         execution = await runtime.agents.get().start("answer")
         await execution.wait(timeout_seconds=5)

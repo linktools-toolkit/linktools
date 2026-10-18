@@ -183,7 +183,7 @@ async def test_runtime_token_estimator_reads_native_metadata_and_observes_respon
     app = {"quota": "project-a"}
     async with Runtime.open(
         "quota-metadata", models=_Models(model), context=RuntimeContext(app),
-        storage=RuntimeStorage.in_memory(), runtime_features=await group.capture(),
+        storage=RuntimeStorage.in_memory(), features=await group.capture(),
     ) as runtime:
         execution = await runtime.agents.get().start("question", correlation={"request": "one"})
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED

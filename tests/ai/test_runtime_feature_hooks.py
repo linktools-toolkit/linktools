@@ -43,7 +43,7 @@ async def test_wrapped_features_keep_native_order_and_isolate_concurrent_runs(ne
     features = _features(tree)
     state = RuntimeStorage.in_memory()
     async with Runtime.open("wrapped-features", models=_FeatureModels(), storage=state,
-                            runtime_features=features) as runtime:
+                            features=features) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(f"input {index}") for index in range(3)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
         assert all(result.result.status is ExecutionStatus.SUCCEEDED for result in results)
@@ -91,7 +91,7 @@ async def test_bound_features_preserve_public_types_and_subclass_hooks_for_nativ
     conversation = ConversationCapability()
     features = _features(trace, checkpoint, conversation, _RequiresFeatureTypes(events=events))
     async with Runtime.open("type-ordering", models=_FeatureModels(), storage=RuntimeStorage.in_memory(),
-                            runtime_features=features) as runtime:
+                            features=features) as runtime:
         executions = await asyncio.gather(*(runtime.agents.get().start(str(index)) for index in range(2)))
         results = await asyncio.gather(*(execution.wait(timeout_seconds=5) for execution in executions))
         assert all(result.result.status is ExecutionStatus.SUCCEEDED for result in results)

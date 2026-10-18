@@ -149,7 +149,7 @@ async def test_runtime_wires_filter_into_roots_and_derived_agents(tmp_path):
     capture = replace(capture, contributions=(*capture.contributions, CapabilityContribution.from_declaration(SkillDefinition(SkillSpec("guide", "Instructions")))))
     async with Runtime.open(
         "capability-filter-test", models=ModelRegistry.openai(model="test"),
-        storage=RuntimeStorage.from_root(tmp_path), runtime_features=capture,
+        storage=RuntimeStorage.from_root(tmp_path), features=capture,
     ) as runtime:
         root = runtime.agents.get("root")
         assert root.derive(allow_skills=("*",)).compiled.skill_definitions == ()
@@ -292,3 +292,9 @@ async def test_filter_configuration_rejects_invalid_values_and_old_runtime_param
     with pytest.raises(TypeError, match="capability_filter"):
         Runtime.open("old", models=ModelRegistry.openai(model="test"),
                      storage=RuntimeStorage.in_memory(), capability_filter=lambda *_: True)
+
+
+def test_runtime_rejects_removed_runtime_features_keyword():
+    with pytest.raises(TypeError, match="runtime_features"):
+        Runtime.open("old", models=ModelRegistry.openai(model="test"),
+                     storage=RuntimeStorage.in_memory(), runtime_features=RuntimeFeatures("old"))

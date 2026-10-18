@@ -102,7 +102,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "live-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("run both tools")
         principal = runtime.default_principal
@@ -272,7 +272,7 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "child-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.in_memory(), runtime_features=group,
+        storage=RuntimeStorage.in_memory(), features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("delegate")
         principal = runtime.default_principal
@@ -332,7 +332,7 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
                 instructions=("Coordinate instructions",))
     group.capability(TraceCapability(), scope="runtime")
     async with Runtime.open("raw-parts", models=_Models(_UsageFunctionModel(model)),
-                            storage=RuntimeStorage.filesystem(tmp_path), runtime_features=group) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = runtime.default_principal
         execution = await runtime.agents.get("default").start("run both tools")
         try:

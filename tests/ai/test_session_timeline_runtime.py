@@ -26,7 +26,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=application,
+        features=application,
     ) as runtime:
         session = await runtime.agents.get("default").create_session("session")
         first = (await session.run("hello", timeout_seconds=10)).result
@@ -86,7 +86,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=storage,
-        runtime_features=application,
+        features=application,
     ) as runtime:
         principal = runtime.default_principal
         parent = await runtime.agents.get("default").create_session("parent")

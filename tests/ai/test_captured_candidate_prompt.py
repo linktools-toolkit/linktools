@@ -43,7 +43,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
         group.agent(name, model="default", system_prompt=prompt,
                     allow_tools=(), allow_skills=(), allow_subagents=())
     async with Runtime.open("fork-candidate", models=models, context=CONTEXT,
-                            storage=RuntimeStorage.in_memory(), runtime_features=group) as runtime:
+                            storage=RuntimeStorage.in_memory(), features=group) as runtime:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
             assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED

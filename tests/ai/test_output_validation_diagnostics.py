@@ -183,7 +183,7 @@ async def test_failed_runtime_persists_safe_diagnostic_and_logs_no_output_values
     models = _InvalidOutputModels()
     group = RuntimeFeatures("output-diagnostics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("output-diagnostics", models=models, runtime_features=group, storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("output-diagnostics", models=models, features=group, storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         result = (await runtime.agents.get().run("count", output=Output, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.MODEL_RESPONSE_INVALID.value
@@ -194,7 +194,7 @@ async def test_failed_runtime_persists_safe_diagnostic_and_logs_no_output_values
         execution_id = result.execution_id
     assert "expected integer" in caplog.text
     assert _SECRET not in caplog.text
-    async with Runtime.open("output-diagnostics", models=models, runtime_features=group, storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
+    async with Runtime.open("output-diagnostics", models=models, features=group, storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         restored = await runtime.history.result(execution_id, principal=runtime.default_principal)
         assert restored.safe_error_details == result.safe_error_details
         assert restored.error_diagnostics == result.error_diagnostics

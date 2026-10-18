@@ -248,7 +248,7 @@ class ACPApplication:
             "default",
             models=self.models,
             storage=self.storage,
-            runtime_features=features,
+            features=features,
         ) as runtime:
             await serve_stdio(
                 ACPAgent(

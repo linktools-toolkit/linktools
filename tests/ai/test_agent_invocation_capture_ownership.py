@@ -68,7 +68,7 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
     models = _ControlledModels()
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-ownership", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    async with Runtime.open("capture-ownership", models=models, storage=storage, features=_agents()) as runtime:
         objects = storage.object_store(RuntimeDomain.TASK)
         original_put = objects.put
 
@@ -104,7 +104,7 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
         finally:
             models.release.set()
     async with Runtime.open("capture-ownership", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            runtime_features=_agents()) as runtime:
+                            features=_agents()) as runtime:
         with pytest.raises(AIError) as missing:
             await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "failed-input"))
         assert missing.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
@@ -117,7 +117,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
     models = _ControlledModels()
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-recovery", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    async with Runtime.open("capture-recovery", models=models, storage=storage, features=_agents()) as runtime:
         objects = storage.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel
@@ -171,7 +171,7 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
     models = _ControlledModels()
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-cancel", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    async with Runtime.open("capture-cancel", models=models, storage=storage, features=_agents()) as runtime:
         objects = storage.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         capture_started = asyncio.Event()
@@ -214,7 +214,7 @@ async def test_terminal_agent_task_keeps_its_invocation_capture(
     models.release.set()
     principal = service_principal("default", "owner")
     async with Runtime.open("capture-terminal", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            runtime_features=_agents()) as runtime:
+                            features=_agents()) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         run = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
@@ -234,7 +234,7 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
     models = _ControlledModels()
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-cleanup", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    async with Runtime.open("capture-cleanup", models=models, storage=storage, features=_agents()) as runtime:
         objects = storage.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel
@@ -299,7 +299,7 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
     models.release.set()
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
-    async with Runtime.open("capture-hold", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    async with Runtime.open("capture-hold", models=models, storage=storage, features=_agents()) as runtime:
         objects = storage.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         capture_started = asyncio.Event()
@@ -360,7 +360,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
     features = _agents()
     if session_id is not None:
         features.capability(ConversationCapability(), scope="runtime")
-    async with Runtime.open("capture-ready", models=models, storage=storage, runtime_features=features) as runtime:
+    async with Runtime.open("capture-ready", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime.tasks.bind(producer, task)
         objects = storage.object_store(RuntimeDomain.TASK)
@@ -421,7 +421,7 @@ async def test_standalone_agent_capture_accepts_unrelated_execution_holds(tmp_pa
     models = _ControlledModels()
     principal = service_principal("default", "owner")
     async with Runtime.open("standalone-capture", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-                            runtime_features=_agents()) as runtime:
+                            features=_agents()) as runtime:
         execution = await runtime.agents.get().start("standalone input", principal=principal)
         await asyncio.wait_for(models.entered.wait(), 30)
         holds = ("task-ref:dependency", "input-capture:reader")
@@ -461,7 +461,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
     execution_id = None
     for reopened in (False, True):
         storage = RuntimeStorage.filesystem(tmp_path)
-        async with Runtime.open("capture-contract", models=models, storage=storage, runtime_features=_agents()) as runtime:
+        async with Runtime.open("capture-contract", models=models, storage=storage, features=_agents()) as runtime:
             agent = runtime.agents.get()
             binding = runtime._compiler.bind(runtime._compiled_agent(agent.id, agent.revision, agent.compiled))
             request = ExecutionRequest("source", principal, "source", None, "run", False, False)
@@ -520,7 +520,7 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     storage = RuntimeStorage.filesystem(tmp_path)
     features = _agents()
     features.capability(ConversationCapability(), scope="runtime")
-    async with Runtime.open("capture-lineage", models=models, storage=storage, runtime_features=features) as runtime:
+    async with Runtime.open("capture-lineage", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         source = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("source input")),

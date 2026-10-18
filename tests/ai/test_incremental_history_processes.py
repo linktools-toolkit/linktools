@@ -53,7 +53,7 @@ def _writer_process(root: str, pipe: Connection) -> None:
         group.capability(TraceCapability(), scope="runtime")
         async with Runtime.open(
             "process-history", storage=RuntimeStorage.filesystem(Path(root)),
-            models=_Models(_UsageFunctionModel(model)), runtime_features=group,
+            models=_Models(_UsageFunctionModel(model)), features=group,
         ) as runtime:
             execution = await runtime.agents.get("default").start("process prompt")
             principal = runtime.default_principal
