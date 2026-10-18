@@ -569,12 +569,10 @@ async def test_live_stream_missing_base_sequence_is_authoritative(
 @pytest.mark.asyncio
 async def test_live_close_authoritative_error_overrides_optional_broker_error():
     cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    class Live:
-        shared = None
-        def is_local_producer(self, execution_id):
-            return True
-        def base_event_seq(self, execution_id):
-            return 0
+    class Live(LiveExecutionEventBroker):
+        def __init__(self):
+            super().__init__()
+            self.register_local_producer("execution", 0)
         def subscribe(self, execution_id):
             return self
         def __aiter__(self):
@@ -594,15 +592,13 @@ async def test_live_close_authoritative_error_overrides_optional_broker_error():
 async def test_event_stream_close_awaits_owned_live_subscription():
     from linktools.ai.core import ExecutionDeltaType
     from linktools.ai.runtime._event import ExecutionDelta
-    class Live:
-        shared = None
-        closed = False
+    class Live(LiveExecutionEventBroker):
+        def __init__(self):
+            super().__init__()
+            self.register_local_producer("execution", 0)
+            self.closed = False
         def claim_local_producer(self, execution_id):
             return self
-        def is_local_producer(self, execution_id):
-            return True
-        def base_event_seq(self, execution_id):
-            return 0
         def __aiter__(self):
             return self
         async def __anext__(self):
