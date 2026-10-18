@@ -278,12 +278,24 @@ require a new per-call cache option or a different Runtime profile.
 ## Runtime observation publication
 
 Metrics uses the cache's pending-write group with its configurable scheduler
-(defaults: 60 seconds or 128 entries). Runtime retains its existing archive-owned publication scheduler,
-coalescing public observations for up to three seconds or 128 boundaries.
-Recovery checkpoints and final conversation/result commits keep their own
-reliable transaction boundaries; terminal completion and close drain publication.
-The Runtime scheduler remains local whether or not a cache is supplied. It does
-not enqueue empty markers or claim that its payloads live in a shared cache queue.
+(defaults: 60 seconds or 128 entries). Trace uses the same owner-scoped buffering
+primitive when its explicitly supplied cache implements `append`, `read_batch`
+and `ack` (defaults: three seconds or 128 observation boundaries). Without that
+write-buffer capability, including `cache=None` and a hot-content-only cache, each
+observation boundary awaits the existing guarded projection commit.
+
+A Trace queue entry is a flush request, not the sole copy of trace evidence.
+The run's existing staging owner retains facts until atomic publication and
+readback confirm them. Queue acknowledgement is not a durability receipt and
+this owner-local queue does not provide cross-process recovery of pending trace.
+Capacity rejection or cache failure settles owned callbacks before direct
+publication; a source integrity error or unresolved commit remains authoritative.
+
+Required flushes, checkpoints, effect fences and terminal publication retain
+their existing boundaries. Before terminal capture or revoked-producer discard,
+queued requests are quiesced without independently committing the dirty tail.
+Already-running publication settles first. Closing a run drains its owned work
+without closing the borrowed cache.
 
 ## Runtime content
 

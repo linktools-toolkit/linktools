@@ -12,6 +12,7 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ConversationCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -57,7 +58,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
     group = RuntimeFeatures("remote-cancel-release")
     group.capability(ConversationCapability(), scope="runtime")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
@@ -110,8 +111,11 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
                 run_stores = (owner_storage.run_store, remote_storage.run_store)
-                observation_tasks = {store.trace_persistence.scheduler_task for store in run_stores
-                                     if store.trace_persistence.scheduler_task is not None}
+                observation_tasks = {
+                    buffer.scope._writer
+                    for store in run_stores for buffer in store.trace_persistence._buffers.values()
+                    if buffer.scope is not None and buffer.scope._writer is not None
+                }
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
                     asyncio.gather(asyncio.shield(worker), return_exceptions=True), 10,
@@ -147,8 +151,10 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         tasks = observation_tasks | backend._checkpoint_tasks
                         for store in run_stores:
                             tasks.update(store._background_tasks)
-                            if store.trace_persistence.scheduler_task is not None:
-                                tasks.add(store.trace_persistence.scheduler_task)
+                            tasks.update(
+                                buffer.scope._writer for buffer in store.trace_persistence._buffers.values()
+                                if buffer.scope is not None and buffer.scope._writer is not None
+                            )
                         tasks.difference_update(joined)
                         if not tasks:
                             return
@@ -290,7 +296,6 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     from linktools.ai.capability import AgentContext
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.runtime.state._sql import _SqlTransaction
-    from linktools.ai.runtime.state._trace_persistence import TracePersistence
 
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -309,7 +314,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
     group = RuntimeFeatures("projection-cancel-conflict")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
@@ -324,8 +329,6 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             transaction, record, expected_storage_revision=expected_storage_revision,
         )
 
-    # Keep the batch pending until the cancel CAS, rather than race a timer.
-    monkeypatch.setattr(TracePersistence, "schedule", lambda self: None)
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),

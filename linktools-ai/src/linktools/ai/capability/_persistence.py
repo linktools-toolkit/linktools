@@ -144,8 +144,9 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
 class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     """Retain model, transcript and tool evidence without enabling recovery.
 
-    Native hooks collect this run's observations. Existing history boundaries
-    retain their batching behavior; Runtime seals the final execution tail."""
+    A write-capable cache owns optional observation batching. Without one,
+    observation boundaries await publication. Runtime seals the final tail.
+    """
 
     id = "runtime.trace"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
@@ -160,6 +161,9 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
         if (isinstance(flush_interval, bool) or not isinstance(flush_interval, (int, float))
                 or not math.isfinite(flush_interval) or flush_interval <= 0):
             raise ValueError("flush_interval must be finite and positive")
+        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
+        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
+            raise TypeError("cache must implement append, read_batch and ack together")
         self._batch_size = batch_size
         self._flush_interval = float(flush_interval)
         self._storage = storage

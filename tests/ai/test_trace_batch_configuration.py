@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from linktools.ai.capability import TraceCapability
+from linktools.ai.storage import InMemoryCacheBackend
 from .test_observation_coalescing import _add_run, _observe, _setup
 from linktools.ai.runtime.state import RuntimeDomain
 
@@ -24,10 +25,9 @@ def test_trace_batch_configuration_rejects_invalid_values(options):
 def test_trace_batch_configuration_keeps_defaults():
     feature = TraceCapability()
     from linktools.ai.core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
-    from linktools.ai.runtime.state import _trace_persistence
 
-    assert feature.batch_size == DEFAULT_TRACE_BATCH_SIZE == _trace_persistence._OBSERVATION_FLUSH_BOUNDARIES == 128
-    assert feature.flush_interval == DEFAULT_TRACE_FLUSH_INTERVAL == _trace_persistence._OBSERVATION_FLUSH_SECONDS == 3.0
+    assert feature.batch_size == DEFAULT_TRACE_BATCH_SIZE == 128
+    assert feature.flush_interval == DEFAULT_TRACE_FLUSH_INTERVAL == 3.0
 
 
 @pytest.mark.asyncio
@@ -35,11 +35,15 @@ async def test_trace_custom_pressure_and_required_flush_are_independent(tmp_path
     state = await _setup(tmp_path, "memory")
     try:
         store = state.run_store
-        store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
+        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
         archive = store.read_store(RuntimeDomain.TRACE)
         await _observe(store, 1)
         assert await archive.list_events(agent_run_id="run") == []
         await _observe(store, 2)
+        async def wait_pressure():
+            while len(await archive.list_events(agent_run_id="run")) < 2:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_pressure(), 2)
         assert len(await archive.list_events(agent_run_id="run")) == 2
         await _observe(store, 3)
         assert len(await archive.list_events(agent_run_id="run")) == 2
@@ -55,8 +59,8 @@ async def test_trace_scheduler_respects_each_runs_deadline(tmp_path):
     try:
         await _add_run(state, "slow", "slow-execution")
         store = state.run_store
-        store.trace_persistence.configure("run", batch_size=100, flush_interval=0.01)
-        store.trace_persistence.configure("slow", batch_size=100, flush_interval=60.0)
+        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=100, flush_interval=0.01)
+        store.trace_persistence.configure("slow", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=100, flush_interval=60.0)
         archive = store.read_store(RuntimeDomain.TRACE)
         await _observe(store, 1, run_id="slow", execution_id="slow-execution")
         await _observe(store, 1)
@@ -117,7 +121,7 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
     await restored.initialize(namespace="observation-batches", tenant_id="tenant")
     try:
         store = restored.run_store
-        store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
+        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(run, execution_id="execution")
         offset = store.trace_persistence.offsets["run"]
@@ -128,6 +132,10 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
         archive = store.read_store(RuntimeDomain.TRACE)
         assert len(await archive.list_events(agent_run_id="run")) == 1
         await _observe(store, 3)
+        async def wait_pressure():
+            while len(await archive.list_events(agent_run_id="run")) < 3:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(wait_pressure(), 2)
         assert len(await archive.list_events(agent_run_id="run")) == 3
     finally:
         await restored.close()

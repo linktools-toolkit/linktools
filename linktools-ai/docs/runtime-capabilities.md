@@ -338,8 +338,11 @@ by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 
 `TraceCapability(batch_size=128, flush_interval=3.0)` controls observation-only
 flush pressure (counted in observation boundaries) and maximum scheduled delay
-in seconds. Each run retains its own limits and deadline. A lower threshold or
-interval can make partial trace visible sooner at the cost of more writes.
+in seconds when `cache` supplies `append`, `read_batch` and `ack`. Each run owns
+an independent cache-backed recording scope. `cache=None` or a hot-content-only cache
+awaits publication at each observation boundary; timing options do not create a
+hidden Runtime queue. A lower threshold or interval can make partial trace
+visible sooner at the cost of more writes.
 Explicit flush, tool-effect, checkpoint and terminal safety boundaries can
 publish earlier and cannot be delayed by these options. Cache configuration does
 not weaken those boundaries.

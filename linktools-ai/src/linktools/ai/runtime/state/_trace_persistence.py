@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Trace-owned observation buffering, batch pressure and timer lifetime."""
+"""Trace projection scheduling over an explicitly borrowed write cache."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from time import monotonic
+from collections.abc import Awaitable, Callable, Hashable
+from dataclasses import dataclass
 from typing import Protocol
 
 from linktools.core import environ
 
-from ...core import (
-    DEFAULT_TRACE_BATCH_SIZE as _OBSERVATION_FLUSH_BOUNDARIES,
-    DEFAULT_TRACE_FLUSH_INTERVAL as _OBSERVATION_FLUSH_SECONDS,
-)
+from ...core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
+from ...storage import BatchWriteScope
 from ...errors import AIError, ErrorCode
+from ._durability import _await_owned_task
 from ._step_archive import _AgentRunHistoryLock, _ProjectionOffset
 from ._step_contracts import AgentRunStore
+
 
 _logger = environ.get_logger("ai.runtime.state.trace")
 
@@ -23,12 +23,24 @@ _logger = environ.get_logger("ai.runtime.state.trace")
 class _FlushProjection(Protocol):
     async def __call__(
         self, agent_run_id: str, *, execution_id: str,
-        producer_generation: int | None = None, deferred: bool = False,
+        producer_generation: int | None = None,
     ) -> None: ...
 
 
+@dataclass
+class _ObservationBuffer:
+    scope: BatchWriteScope | None = None
+    paused: bool = False
+    error: BaseException | None = None
+
+
 class TracePersistence:
-    """Own trace buffering; delegate atomic publication to Runtime's narrow port."""
+    """Keep semantic facts in staging and optional flush requests in the cache.
+
+    Queue acknowledgements settle scheduling requests, never durable facts.
+    Only Runtime's guarded projection commit may advance offsets or clear dirty
+    staging. Each run owns its consumer; the cache itself is borrowed.
+    """
 
     def __init__(
         self, archive: AgentRunStore | None, *, history_lock: _AgentRunHistoryLock,
@@ -49,27 +61,43 @@ class TracePersistence:
         self._flush = flush
         self._flush_boundary = flush_boundary
         self._background_tasks = background_tasks
-        self.scheduler_task: asyncio.Task[None] | None = None
-        self.wake = asyncio.Event()
+        self._caches: dict[str, object | None] = {}
+        self._buffers: dict[str, _ObservationBuffer] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
-    def configure(self, agent_run_id: str, *, batch_size: int, flush_interval: float) -> None:
-        """Bind this run's observation policy before its first boundary."""
-        offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
-        if offset.observation_boundaries or offset.observation_task is not None:
+    def configure(
+        self, agent_run_id: str, *, cache: object | None = None,
+        batch_size: int = DEFAULT_TRACE_BATCH_SIZE,
+        flush_interval: float = DEFAULT_TRACE_FLUSH_INTERVAL,
+    ) -> None:
+        """Bind this run's cache and observation policy before admission."""
+        if agent_run_id in self._buffers:
             raise RuntimeError("observation batching cannot change during an active run")
+        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
+        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
+            raise TypeError("cache must implement append, read_batch and ack together")
+        self._caches[agent_run_id] = cache if all(callable(method) for method in methods) else None
+        offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
         offset.observation_batch_size = batch_size
         offset.observation_flush_interval = flush_interval
 
     def reset(self) -> None:
         self.offsets.clear()
         self.dirty.clear()
-        self.scheduler_task = None
-        self.wake.clear()
+        self._caches.clear()
+        self._buffers.clear()
+        self._locks.clear()
 
-    async def settle_scheduler(self) -> None:
-        self.wake.set()
-        if self.scheduler_task is not None:
-            await asyncio.shield(self.scheduler_task)
+    async def settle_buffers(self) -> None:
+        for agent_run_id in tuple(self._buffers):
+            await self.stop(agent_run_id)
+
+    def release(self, agent_run_id: str) -> None:
+        """Forget a quiescent run after its semantic owner released staging."""
+        if agent_run_id in self._buffers:
+            raise RuntimeError("observation buffer is not quiescent")
+        self._caches.pop(agent_run_id, None)
+        self._locks.pop(agent_run_id, None)
 
     async def defer(
         self, agent_run_id: str, *, execution_id: str,
@@ -78,159 +106,108 @@ class TracePersistence:
         await self._ensure_ready()
         async with self._history_lock.hold(agent_run_id):
             self._require_mutable(agent_run_id)
-            offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
-            task = offset.observation_task
-            if task is not None and task.done():
-                if not self._has_flight(agent_run_id):
-                    offset.observation_task = None
-                    offset.observation_boundaries = 0
-                task.result()
             if agent_run_id not in self.dirty:
                 return
-            schedule = offset.observation_boundaries == 0
-            offset.observation_boundaries += 1
+            offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
             offset.observation_execution_id = execution_id
             offset.observation_producer_generation = producer_generation
-            if schedule:
-                interval = offset.observation_flush_interval or _OBSERVATION_FLUSH_SECONDS
-                offset.observation_deadline = monotonic() + interval
-            pressure = offset.observation_boundaries >= (
-                offset.observation_batch_size or _OBSERVATION_FLUSH_BOUNDARIES
-            )
-        if pressure:
+        accepted = False
+        async with self._locks.setdefault(agent_run_id, asyncio.Lock()):
+            cache = self._caches.get(agent_run_id)
+            if cache is not None:
+                buffer = self._buffers.get(agent_run_id)
+                if buffer is None:
+                    buffer = _ObservationBuffer()
+                    async def write_batch(batch: tuple[tuple[str, Hashable, bytes | None], ...]) -> None:
+                        if buffer.paused:
+                            return
+                        offset.observation_task = asyncio.current_task()
+                        try:
+                            if buffer.error is not None:
+                                raise buffer.error
+                            if any(key != (agent_run_id, execution_id, producer_generation) or content is not None
+                                   for _, key, content in batch):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            # One run/producer owns this scope. A marker requests
+                            # capture of its latest staged facts, not a replay of
+                            # a previously committed payload.
+                            # A cache callback timeout must not cancel durable
+                            # publication. Wait for its actual outcome; caller
+                            # cancellation remains owned by the outer boundary.
+                            _, error, _ = await _await_owned_task(
+                                asyncio.create_task(self._flush(
+                                    agent_run_id, execution_id=execution_id,
+                                    producer_generation=producer_generation,
+                                )), self._background_tasks,
+                            )
+                            if error is not None:
+                                raise error
+                        except BaseException as error:
+                            buffer.error = error
+                            raise
+                        finally:
+                            offset.observation_task = None
+                    buffer.scope = BatchWriteScope(
+                        cache, write_batch,
+                        batch_size=offset.observation_batch_size or DEFAULT_TRACE_BATCH_SIZE,
+                        flush_interval=offset.observation_flush_interval or DEFAULT_TRACE_FLUSH_INTERVAL,
+                    )
+                    self._buffers[agent_run_id] = buffer
+                if buffer.error is None:
+                    assert buffer.scope is not None
+                    try:
+                        accepted = await buffer.scope.try_submit(
+                            (agent_run_id, execution_id, producer_generation), None,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # An uncertain append may already own a callback. The
+                        # required path quiesces it before attempting source I/O.
+                        self._caches[agent_run_id] = None
+        if not accepted:
             await self._flush_boundary(
                 agent_run_id, execution_id=execution_id,
                 producer_generation=producer_generation,
             )
-        elif schedule:
-            self.schedule()
-
-
-    def schedule(self) -> None:
-        # Tasks inherit ContextVars; callers leave their run lock before this.
-        self.wake.set()
-        task = self.scheduler_task
-        if task is not None:
-            if not task.done():
-                return
-            task.result()
-        self.scheduler_task = asyncio.create_task(
-            self._run_observation_scheduler(), name="history-observation-scheduler",
-        )
-        self._track_observation_task(self.scheduler_task)
-
-
-    def _track_observation_task(self, task: asyncio.Task[None]) -> None:
-        self._background_tasks.add(task)
-
-        def completed(value: asyncio.Task[None]) -> None:
-            self._background_tasks.discard(value)
-            self.wake.set()
-            if not value.cancelled():
-                value.exception()
-
-        task.add_done_callback(completed)
-
-
-    async def _run_observation_scheduler(self) -> None:
-        while True:
-            self.wake.clear()
-            queued = tuple(
-                agent_run_id for agent_run_id in self.dirty
-                if (offset := self.offsets.get(agent_run_id)) is not None
-                and offset.observation_boundaries
-                and (offset.observation_task is None or not offset.observation_task.done())
-            )
-            if not queued:
-                return
-            waiting = tuple(
-                run_id for run_id in queued if self.offsets[run_id].observation_task is None
-            )
-            if not waiting:
-                await self.wake.wait()
-                continue
-            deadline = min(
-                self.offsets[run_id].observation_deadline or monotonic() for run_id in waiting
-            )
-            try:
-                await asyncio.wait_for(self.wake.wait(), max(0.0, deadline - monotonic()))
-            except asyncio.TimeoutError:
-                pass
-            if self.wake.is_set():
-                continue
-            for agent_run_id in waiting:
-                async with self._history_lock.hold(agent_run_id):
-                    offset = self.offsets.get(agent_run_id)
-                    if (offset is None or not offset.observation_boundaries
-                            or offset.observation_task is not None
-                            or agent_run_id not in self.dirty
-                            or offset.observation_deadline is not None
-                            and offset.observation_deadline > monotonic()):
-                        continue
-                    execution_id = offset.observation_execution_id
-                    if execution_id is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    offset.observation_boundaries = 0
-                    offset.observation_deadline = None
-                    generation = offset.observation_producer_generation
-                task = asyncio.create_task(
-                    self._run_scheduled_projection(
-                        agent_run_id, offset, execution_id=execution_id,
-                        producer_generation=generation,
-                    ),
-                    name=f"history-observation-commit-{agent_run_id}",
-                )
-                offset.observation_task = task
-                self._track_observation_task(task)
-
-
-    async def _run_scheduled_projection(
-        self, agent_run_id: str, offset: _ProjectionOffset, *,
-        execution_id: str, producer_generation: int | None,
-    ) -> None:
-        await self._flush(
-            agent_run_id, execution_id=execution_id,
-            producer_generation=producer_generation,
-        )
-        async with self._history_lock.hold(agent_run_id):
-            if offset.observation_task is not asyncio.current_task():
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            offset.observation_task = None
-            dirty = agent_run_id in self.dirty
-            if dirty:
-                offset.observation_boundaries = max(1, offset.observation_boundaries)
-                if offset.observation_deadline is None:
-                    interval = offset.observation_flush_interval or _OBSERVATION_FLUSH_SECONDS
-                    offset.observation_deadline = monotonic() + interval
-            else:
-                offset.observation_boundaries = 0
-                offset.observation_execution_id = None
-                offset.observation_producer_generation = None
-        if dirty:
-            self.schedule()
-
 
     async def stop(self, agent_run_id: str) -> None:
-        """Remove this run from the timer and settle only its captured commit."""
-        async with self._history_lock.hold(agent_run_id):
-            offset = self.offsets.get(agent_run_id)
-            task = None if offset is None else offset.observation_task
-            if offset is None or task is asyncio.current_task():
+        """Quiesce scheduling without publishing the caller's dirty tail.
+
+        Terminal seal and revoked-producer discard choose their own atomic
+        action. Undispatched markers can be acknowledged once paused because
+        their facts remain in staging; an entered callback must settle first.
+        """
+        _, error, cancelled = await _await_owned_task(
+            asyncio.create_task(self._stop(agent_run_id)), self._background_tasks,
+        )
+        if error is not None:
+            raise error
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _stop(self, agent_run_id: str) -> None:
+        async with self._locks.setdefault(agent_run_id, asyncio.Lock()):
+            buffer = self._buffers.get(agent_run_id)
+            if buffer is None:
                 return
-            offset.observation_boundaries = 0
-            offset.observation_deadline = None
-            self.wake.set()
-            if task is None:
-                return
-        try:
-            await asyncio.shield(task)
-        except Exception:
-            async with self._history_lock.hold(agent_run_id):
-                if self._has_flight(agent_run_id):
-                    raise
-                offset.observation_task = None
-                offset.observation_boundaries = 0
-            _logger.warning(
-                "observation batch failed before commit; required barrier will retry: agent_run=%s",
-                agent_run_id,
-            )
+            buffer.paused = True
+            assert buffer.scope is not None
+            try:
+                await buffer.scope.close()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Cache transport failure cannot erase a source failure or make
+                # a durable receipt. Disable optional buffering; caller's direct
+                # guarded publication still decides whether staging is durable.
+                self._caches[agent_run_id] = None
+            self._buffers.pop(agent_run_id, None)
+            if buffer.error is not None:
+                if (not isinstance(buffer.error, Exception) or isinstance(buffer.error, AIError)
+                        or self._has_flight(agent_run_id)):
+                    raise buffer.error
+                _logger.warning(
+                    "observation publication failed before commit; required boundary will retry: agent_run=%s",
+                    agent_run_id,
+                )

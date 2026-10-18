@@ -12,6 +12,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
 from linktools.ai.runtime.state._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.runtime.state._conversation_persistence import ConversationPersistence
@@ -123,11 +124,9 @@ async def test_checkpoint_owner_requires_complete_recovery_before_materializing(
         await archive.close()
 
 
-async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(_trace_persistence, "_OBSERVATION_FLUSH_SECONDS", 60.0)
+async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners() -> None:
     writes: list[tuple[str, str]] = []
+    published = asyncio.Event()
     owners: dict[str, TracePersistence] = {}
     tasks: set[asyncio.Task[object]] = set()
 
@@ -141,7 +140,7 @@ async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners(
         ) -> None:
             writes.append((name, execution_id))
             owners[name].dirty.discard(agent_run_id)
-            owners[name].offsets[agent_run_id].observation_boundaries = 0
+            published.set()
 
         return TracePersistence(
             None, history_lock=_AgentRunHistoryLock(), ensure_ready=ready,
@@ -152,20 +151,22 @@ async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners(
     owners.update((name, make_owner(name)) for name in ("first", "second"))
     try:
         for name, owner in owners.items():
+            owner.configure("same-run", cache=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
             owner.dirty.add("same-run")
             await owner.defer("same-run", execution_id=name, producer_generation=1)
-        for _ in range(_trace_persistence._OBSERVATION_FLUSH_BOUNDARIES - 1):
+        for _ in range(_trace_persistence.DEFAULT_TRACE_BATCH_SIZE - 1):
             await owners["first"].defer("same-run", execution_id="first", producer_generation=1)
+        await asyncio.wait_for(published.wait(), 2)
         assert writes == [("first", "first")]
         assert owners["second"].dirty == {"same-run"}
-        assert owners["second"].offsets["same-run"].observation_boundaries == 1
-        await asyncio.wait_for(owners["first"].settle_scheduler(), 1)
-        assert owners["second"].scheduler_task is not None
-        assert not owners["second"].scheduler_task.done()
+        assert owners["second"]._buffers["same-run"].scope.status().pending == 1
+        await asyncio.wait_for(owners["first"].settle_buffers(), 1)
+        assert owners["second"]._buffers["same-run"].scope.status().accepting
+        assert writes == [("first", "first")]
     finally:
         for owner in owners.values():
             owner.dirty.clear()
-            await asyncio.wait_for(owner.settle_scheduler(), 1)
+            await asyncio.wait_for(owner.settle_buffers(), 1)
         await asyncio.sleep(0)
         assert not tasks
 

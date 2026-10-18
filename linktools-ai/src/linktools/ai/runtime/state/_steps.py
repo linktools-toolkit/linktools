@@ -147,7 +147,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             ensure_ready=self._ensure_business,
             require_mutable=self._ensure_run_mutable,
             has_flight=lambda run_id: run_id in self._durability_flights,
-            flush=self._flush_execution_projection,
+            flush=self._commit_execution_projection,
             flush_boundary=self.flush_execution_projection,
             background_tasks=self._background_tasks,
         )
@@ -1856,6 +1856,16 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             return
         await self.trace_persistence.stop(agent_run_id)
+        await self._commit_execution_projection(
+            agent_run_id, execution_id=execution_id,
+            producer_generation=producer_generation,
+        )
+
+    async def _commit_execution_projection(
+        self, agent_run_id: str, *, execution_id: str,
+        producer_generation: int | None = None,
+    ) -> None:
+        """Publish a captured projection after scheduling ownership is settled."""
         captured = await self.capture_execution_projection(
             agent_run_id,
         )
@@ -1989,6 +1999,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         self._execution_producers.pop(agent_run_id, None)
                         self._execution_persistence.pop(agent_run_id, None)
                         self.trace_persistence.offsets.pop(agent_run_id, None)
+                        self.trace_persistence.release(agent_run_id)
                         self.trace_persistence.dirty.discard(agent_run_id)
                         for archive in self._archives.values():
                             if isinstance(archive, StateStepArchive):
@@ -2043,6 +2054,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     if runtime_domain is RuntimeDomain.TRACE:
                         self._ensure_run_mutable(agent_run_id)
                     self.trace_persistence.offsets.pop(agent_run_id, None)
+                    self.trace_persistence.release(agent_run_id)
                     self.trace_persistence.dirty.discard(agent_run_id)
                     flight = self._install_durability_flight_locked(
                         agent_run_id,
@@ -2205,7 +2217,7 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def _preflight_close(self) -> None:
         for agent_run_id in tuple(self.trace_persistence.offsets):
             await self.trace_persistence.stop(agent_run_id)
-        await self.trace_persistence.settle_scheduler()
+        await self.trace_persistence.settle_buffers()
         for agent_run_id in tuple(self.trace_persistence.dirty):
             offset = self.trace_persistence.offsets.get(agent_run_id)
             if offset is not None and offset.observation_execution_id is not None:

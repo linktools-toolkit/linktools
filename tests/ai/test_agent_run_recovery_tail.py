@@ -12,6 +12,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._persistence_services import CheckpointService
@@ -322,6 +323,7 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
             recovery_retention=RuntimeRetentionMode.VOLATILE,
         )
         await old_producer.initialize()
+        old_producer.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536))
         old_producer.bind_execution_producer("run", execution_id="execution", producer_generation=1)
 
         async def delayed_boundary():
@@ -400,6 +402,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
         store = state.run_store
+        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536))
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(AgentRunRecord("run", agent_id="agent"), execution_id="execution")
         first = ModelRequest(parts=[UserPromptPart("start")])
