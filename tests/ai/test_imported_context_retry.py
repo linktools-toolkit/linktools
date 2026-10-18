@@ -55,10 +55,11 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
 
 
 @pytest.mark.asyncio
-async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path) -> None:
+@pytest.mark.parametrize("trace", (False, True), ids=("ordinary", "durable-trace"))
+async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path, trace: bool) -> None:
     group = CapabilityGroup("retry-parity")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
-    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+    async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_persistence_capabilities(trace=trace), group,)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()
         first = await agent.start("historical question", principal=principal)
@@ -70,13 +71,17 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
         imported = await agent.start(captured.prompt, principal=principal, input_context=captured.input_context)
         await imported.wait()
         for source in (fork, imported):
-            retry = await source.retry("replacement question")
-            assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
-            interactions = await retry.model_interactions(include_content=True)
-            request = str(interactions.items[0].request)
-            assert "historical question" in request
-            assert "replacement question" in request
-            assert "superseded question" not in request
+            with capture_run_messages() as messages:
+                retry = await source.retry("replacement question")
+                assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
+            requests = [str(messages)]
+            if trace:
+                interactions = await retry.model_interactions(include_content=True)
+                requests.append(str(interactions.items[0].request))
+            for request in requests:
+                assert "historical question" in request
+                assert "replacement question" in request
+                assert "superseded question" not in request
 
 
 @pytest.mark.asyncio

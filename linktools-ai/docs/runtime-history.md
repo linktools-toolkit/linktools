@@ -440,6 +440,20 @@ namespace-wide database lock. `TerminalCommitCapability` instead uses the
 optional cache turn-coordination lease while a turn has no database record;
 see [terminal-only commit](runtime-capabilities.md#terminal-only-commit-for-ordinary-agent-runs).
 
+With non-transient execution storage, successful standalone executions retain
+their actual final model context for
+`execution.fork`, including imported history and tool calls and returns, even
+without durable trace. This single canonical terminal checkpoint follows the
+execution storage route and remains available after reopening durable storage;
+it does not retain the full intermediate trace or enable restart checkpoints.
+Older no-trace executions without this context cannot reconstruct it from their
+prompt and result: fork reports `EXECUTION_HISTORY_UNAVAILABLE`.
+
+For eligible terminal-only source turns, this context joins the existing final
+owner batch in one database write transaction. Object bodies still have their
+own I/O. Fork and retry executions retain their existing durable-path admission
+and do not inherit that one-write-transaction guarantee.
+
 After an executor crashes, confirm it has stopped, then call the existing
 `runtime.executions.recover(execution_id, principal=...)`. Recovery competes for
 the revision authorized by that invocation, preserves producer and tool-effect

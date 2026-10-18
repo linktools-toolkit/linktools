@@ -1742,6 +1742,8 @@ class RuntimeStateCommands:
         stores = [self._execution.state_store, self._recovery.state_store]
         if expected_session is not None:
             stores.append(self._conversation.state_store)
+        elif self._recovery_run_store is not None:
+            stores.append(self._recovery_run_store.state_store)
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -1770,6 +1772,22 @@ class RuntimeStateCommands:
                 or recovery.agent_run_id != agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
                                                        execution_id=execution.execution_id, agent_run_seq=1)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if expected_session is None:
+            if self._recovery_run_store is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            run = await self._recovery_run_store.get_agent_run(agent_run_id=recovery.agent_run_id)
+            checkpoint = await self._recovery_run_store.latest_checkpoint(agent_run_id=recovery.agent_run_id)
+            if (run is None or checkpoint is None or checkpoint.pending_request_index is not None
+                    or checkpoint.agent_run_id != run.agent_run_id
+                    or run.parent_agent_run_id is not None
+                    or run.agent_id != execution.agent_id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (await self._recovery_run_store.checkpoint_count(agent_run_id=run.agent_run_id) != 1
+                    or not await self._recovery_run_store.verify_checkpoint_projection(
+                        agent_run_id=run.agent_run_id, checkpoint=checkpoint,
+                    )
+                    or await self._recovery_run_store.transcript_message_count_for_run(run) != len(checkpoint.messages)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if expected_session is not None:
             transaction = group.transaction(self._conversation.state_store)
             session = await self._conversation.get_in_transaction(
@@ -1970,6 +1988,8 @@ class RuntimeStateCommands:
         expected_session: SessionRecord | None = None, next_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
+        recovery_run: AgentRunRecord | None = None,
+        recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
         audit_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult:
         """Materialize one effect-free local turn at its final atomic boundary."""
@@ -2003,7 +2023,24 @@ class RuntimeStateCommands:
                         or candidate.lineage_kind is not ExecutionLineageKind.RUN
                         or candidate.root_execution_id != candidate.execution_id):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (recovery_run is None or recovery_agent_run_checkpoint is None
+                    or recovery_agent_run_checkpoint.state != "complete"
+                    or recovery_agent_run_checkpoint.pending_request_index is not None
+                    or recovery_run.parent_agent_run_id is not None
+                    or recovery_run.agent_id != execution.agent_id
+                    or recovery_run.agent_run_id != agent_run_id(
+                        namespace=self._namespace, tenant_id=self._tenant_id,
+                        execution_id=execution.execution_id, agent_run_seq=1,
+                    )
+                    or any(getattr(recovery_run, name) != getattr(recovery_agent_run_checkpoint, name)
+                           for name in ("agent_run_id", "agent_conversation_id", "agent_id", "parent_agent_run_id"))):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._recovery_run_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stores.append(self._recovery_run_store.state_store)
         else:
+            if recovery_run is not None or recovery_agent_run_checkpoint is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if (next_cursor is None or conversation_agent_run is None or conversation_checkpoint is None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if (type(self._conversation) is not SessionRepositoryImpl
@@ -2031,6 +2068,7 @@ class RuntimeStateCommands:
         if existing is not None:
             return existing
         prepared = None
+        prepared_recovery = None
         history = None
         final_cursor = None
         start = end = 0
@@ -2047,6 +2085,12 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             start, end = _timeline_turn_message_range(history, prepared, expected_session.continuation)
             final_cursor = replace(next_cursor, message_count=end)
+        else:
+            assert self._recovery_run_store is not None and recovery_run is not None
+            assert recovery_agent_run_checkpoint is not None
+            _checkpoint, prepared_recovery = await self._recovery_run_store.prepare_run_checkpoint(
+                recovery_run, recovery_agent_run_checkpoint,
+            )
         recovered = RecoveryCheckpoint(
             execution.execution_id, agent_run_id(namespace=self._namespace, tenant_id=self._tenant_id,
                                                 execution_id=execution.execution_id, agent_run_seq=1),
@@ -2084,6 +2128,12 @@ class RuntimeStateCommands:
                 await self._conversation.commit_pending_turn_in_transaction(
                     conversation_transaction, expected=expected_session, execution_id=execution.execution_id,
                     next_cursor=final_cursor, start_message_index=start, end_message_index=end,
+                )
+            else:
+                assert self._recovery_run_store is not None and recovery_run is not None
+                assert prepared_recovery is not None
+                await self._recovery_run_store.materialize_checkpoint_in_transaction(
+                    group.transaction(self._recovery_run_store.state_store), recovery_run, prepared_recovery[0],
                 )
             await self._recovery.admit_in_transaction(group.transaction(self._recovery.state_store), recovered)
             return final

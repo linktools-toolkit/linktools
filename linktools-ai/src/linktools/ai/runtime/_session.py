@@ -252,10 +252,8 @@ class DefaultSessionService:
             record = await self._authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
-            return await self._view(
-                record,
-                principal,
-                active=record.active_execution_id,
+            return await self._observed_view(
+                record, principal, active=record.active_execution_id,
             )
 
     async def history(
@@ -310,6 +308,9 @@ class DefaultSessionService:
                 principal=principal,
                 cursor=cursor,
                 limit=limit,
+                pending_session_execution=(
+                    self._pending_display_execution if self._pending_session_execution is not None else None
+                ),
             )
 
     async def refresh(
@@ -344,7 +345,8 @@ class DefaultSessionService:
             await self._authorization.authorize(
                 principal, AuthorizationAction.SESSION_READ, header,
             )
-            cacheable_request = max_age > 0 and active_state_scope() is None and self._display_cache_supported()
+            pending = await self._pending_display_execution(header)
+            cacheable_request = pending is None and max_age > 0 and active_state_scope() is None and self._display_cache_supported()
             if cacheable_request:
                 try:
                     validate_page_limit(limit)
@@ -372,6 +374,8 @@ class DefaultSessionService:
                 reconcile=self._reconcile_terminal_admission,
                 transcript_store=self._transcript_store,
                 validate_active=self._validate_active_admitted_execution,
+                pending_execution=pending,
+                authorized_header=header if self._pending_session_execution is not None else None,
             )
             record = state.root
             if cache_key is not None:
@@ -381,6 +385,8 @@ class DefaultSessionService:
                 None if record.active_execution_id is None
                 else state.executions.get(record.active_execution_id),
             )
+            if state.pending_execution is not None:
+                active = state.pending_execution.execution_id
             session = await self._view(record, principal, active=active)
             if self._transcript_store is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -569,7 +575,7 @@ class DefaultSessionService:
         self, key: str, state: SessionTimelineCapture, detail: SessionDetail,
         started: float, max_age: float,
     ) -> None:
-        if state.root.history_id is None or time.time() >= started + max_age:
+        if state.pending_execution is not None or state.root.history_id is None or time.time() >= started + max_age:
             return
         try:
             entry = {
@@ -625,7 +631,7 @@ class DefaultSessionService:
         views = tuple(
             await asyncio.gather(
                 *(
-                    self._view(
+                    self._observed_view(
                         record,
                         request.principal,
                         active=self._active_execution_id(
@@ -1335,6 +1341,51 @@ class DefaultSessionService:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         self._check_display_authority(record, header)
         return record
+
+    async def _pending_display_execution(self, header: ResourceRef) -> ExecutionRecord | None:
+        if self._pending_session_execution is None:
+            return None
+        pending = await self._pending_session_execution(header.id, tenant_id=header.tenant_id)
+        if (pending is None or pending.session_id != header.id
+                or pending.principal_id != header.owner_principal_id
+                or pending.parent_execution_id is not None
+                or pending.result is not None
+                or pending.status not in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED, ExecutionStatus.CANCELLING}):
+            return None
+        return pending
+
+    async def _observed_view(
+        self, record: SessionRecord, principal: Principal, *, active: str | None,
+    ) -> SessionView:
+        if record.active_execution_id is not None or record.status is not SessionStatus.OPEN:
+            return await self._view(record, principal, active=active)
+        header = ResourceRef(ResourceKind.SESSION, record.session_id, principal.tenant_id, record.owner_principal_id)
+        pending = await self._pending_display_execution(header)
+        if pending is None:
+            return await self._view(record, principal, active=active)
+
+        async def read() -> SessionView:
+            # Observation may settle a turn. Re-read the source before using
+            # it, while leaving control/admission reads entirely unchanged.
+            current = await self._conversation.sessions.get(record.session_id, tenant_id=principal.tenant_id)
+            if current is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            self._check_display_authority(current, header)
+            admitted = await self._active_admitted_execution(current)
+            observed = None if admitted is None else admitted.execution_id
+            if (current.status is SessionStatus.OPEN and current.active_execution_id is None
+                    and pending.created_at >= current.created_at
+                    and await self._executions.get(pending.execution_id, tenant_id=principal.tenant_id) is None):
+                observed = pending.execution_id
+            return await self._view(current, principal, active=observed)
+
+        sessions, executions = self._conversation.sessions, self._executions
+        if (type(sessions) is SessionRepositoryImpl and type(executions) is ExecutionRepositoryImpl
+                and sessions.state_store.storage_group is executions.state_store.storage_group):
+            return await sessions.state_store.storage_group.read_many(
+                (sessions.state_store, executions.state_store), lambda _group: read(),
+            )
+        return await read()
 
     async def _view(
         self,

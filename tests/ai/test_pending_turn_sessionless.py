@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Initial standalone turns retain only their execution outcome and recovery facts."""
+"""Initial standalone turns commit their outcome and canonical fork context together."""
 
 import asyncio
 from dataclasses import replace
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.core import ExecutionStatus
+from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._contracts import ExecutionTerminalCommitResult, RecoveryCheckpointState, RuntimeDomain, RuntimePayloadRef
 from linktools.ai.storage import StoredPayload
@@ -20,8 +20,14 @@ pytestmark = pytest.mark.asyncio
 
 def _standalone(state, **kwargs):
     turn = _pending_turn(state, **kwargs)
+    run_id = agent_run_id(
+        namespace=_NAMESPACE, tenant_id="tenant",
+        execution_id=turn.reservation.execution.execution_id, agent_run_seq=1,
+    )
     return replace(
         turn,
+        run=replace(turn.run, agent_run_id=run_id, agent_conversation_id=None, metadata={}),
+        checkpoint=replace(turn.checkpoint, agent_run_id=run_id, agent_conversation_id=None),
         reservation=replace(turn.reservation, execution=replace(
             turn.reservation.execution, session_id=None, conversation_agent_run_id=None,
         )),
@@ -33,7 +39,8 @@ def _standalone(state, **kwargs):
 
 async def _commit(state, turn, **kwargs):
     return await state.commands.commit_pending_turn(
-        turn.reservation, turn.commit, audit_events=turn.audit_events, **kwargs,
+        turn.reservation, turn.commit, audit_events=turn.audit_events,
+        recovery_run=turn.run, recovery_agent_run_checkpoint=turn.checkpoint, **kwargs,
     )
 
 

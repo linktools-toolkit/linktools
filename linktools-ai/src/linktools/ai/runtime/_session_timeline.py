@@ -16,6 +16,9 @@ from ..core import (
     ExecutionStatus,
     Page,
     Principal,
+    ResourceKind,
+    ResourceRef,
+    SessionStatus,
     canonical_sha256,
     validate_page_limit,
 )
@@ -152,6 +155,7 @@ async def _timeline_blocks(
     *,
     coordinate: "tuple[str, int] | None",
     limit: int,
+    pending_execution: ExecutionRecord | None = None,
 ) -> tuple[
     tuple[tuple[SessionRecord, tuple[SessionTurnRef, ...]], ...],
     "tuple[str, int] | None",
@@ -174,8 +178,10 @@ async def _timeline_blocks(
             if current.owner_principal_id != root.owner_principal_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = await conversation.sessions.timeline_head(source_id, tenant_id=tenant_id)
-        before = head + 1 if source_before is None else source_before
-        if before < 1 or before > head + 1:
+        pending = pending_execution if coordinate is None and source_id == root.session_id else None
+        display_head = head + (pending is not None)
+        before = display_head + 1 if source_before is None else source_before
+        if before < 1 or before > display_head + 1:
             raise AIError(ErrorCode.CURSOR_INVALID)
         available = before - 1
         if available:
@@ -184,9 +190,16 @@ async def _timeline_blocks(
             values = await conversation.sessions.list_timeline_turns(
                 source_id,
                 tenant_id=tenant_id,
-                start_turn_seq=start,
-                end_turn_seq=before,
+                start_turn_seq=min(start, head) if pending is not None and head else start,
+                end_turn_seq=min(before, head + 1),
             )
+            if pending is not None:
+                # An observation cannot replace a missing canonical execution
+                # behind an existing turn, including a pending-only page.
+                if any(value.execution_id == pending.execution_id for value in values):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values = tuple(value for value in values if value.turn_seq >= start)
+                values += (SessionTurnRef(source_id, head + 1, pending.execution_id),)
             newest_first.append((current, values))
             remaining -= len(values)
             before = start
@@ -225,6 +238,7 @@ class SessionTimelineCapture:
     next_coordinate: tuple[str, int] | None
     executions: Mapping[str, ExecutionRecord]
     commits: dict[tuple[str, int], SessionTurnCommitRef]
+    pending_execution: ExecutionRecord | None = None
 
 
 class _ActiveSessionAdmission(Exception):
@@ -241,6 +255,8 @@ async def _capture_timeline_state(
     cursor: str | None,
     cursor_signer: CursorSigner,
     limit: int,
+    pending_execution: ExecutionRecord | None = None,
+    authorized_header: ResourceRef | None = None,
     refresh_phase: Literal["initial", "final"] | None = None,
     transcript_store: SessionTimelineTranscriptStore | None = None,
     validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None] | None = None,
@@ -253,8 +269,15 @@ async def _capture_timeline_state(
     )
 
     async def read_blocks() -> tuple[SessionRecord, _TimelineBlocks, tuple[str, int] | None]:
+        nonlocal pending_execution
         root = await conversation.sessions.get(session_id, tenant_id=tenant_id)
         if root is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if authorized_header is not None and (
+                authorized_header.kind is not ResourceKind.SESSION
+                or authorized_header.tenant_id != tenant_id
+                or root.session_id != authorized_header.id
+                or root.owner_principal_id != authorized_header.owner_principal_id):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if refresh_phase == "initial" and root.active_execution_id is not None:
             if not shared_native_scope or validate_active is None:
@@ -266,12 +289,23 @@ async def _capture_timeline_state(
                 raise _ActiveSessionAdmission(root)
         if refresh_phase is not None and transcript_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if pending_execution is not None:
+            # The observation is never admission: canonical state in this same
+            # snapshot wins if the owner committed or promoted during capture.
+            if (root.status is not SessionStatus.OPEN
+                    or root.active_execution_id is not None
+                    or pending_execution.session_id != root.session_id
+                    or pending_execution.principal_id != root.owner_principal_id
+                    or pending_execution.created_at < root.created_at
+                    or await executions.get(pending_execution.execution_id, tenant_id=tenant_id) is not None):
+                pending_execution = None
         page_limit = validate_page_limit(limit)
         coordinate = _decode_timeline_cursor(
             cursor, tenant_id=tenant_id, session_id=session_id, signer=cursor_signer,
         )
         blocks, next_coordinate = await _timeline_blocks(
             conversation, root, coordinate=coordinate, limit=page_limit,
+            pending_execution=pending_execution,
         )
         return root, blocks, next_coordinate
 
@@ -282,12 +316,14 @@ async def _capture_timeline_state(
         if refresh_phase is not None and root.active_execution_id is not None:
             ids += (root.active_execution_id,)
         ids = tuple(dict.fromkeys(ids))
-        if not ids:
-            return {}
-        records = await executions.get_many(ids, tenant_id=tenant_id)
+        # Only the synthetic newest turn may omit canonical membership.
+        # A continuation consists entirely of persisted references.
+        pending = {} if pending_execution is None or cursor is not None else {pending_execution.execution_id: pending_execution}
+        ids = tuple(value for value in ids if value not in pending)
+        records = await executions.get_many(ids, tenant_id=tenant_id) if ids else {}
         if len(records) != len(ids):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return records
+        return {**pending, **records}
 
     async def commit_records(
         blocks: _TimelineBlocks,
@@ -311,7 +347,7 @@ async def _capture_timeline_state(
         root, blocks, next_coordinate = await read_blocks()
         records = await execution_records(root, blocks)
         commits = await commit_records(blocks)
-        return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+        return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
 
     session_store = conversation.sessions.state_store
     execution_store = executions.state_store
@@ -320,7 +356,7 @@ async def _capture_timeline_state(
             root, blocks, next_coordinate = await read_blocks()
             records = await execution_records(root, blocks)
             commits = await commit_records(blocks)
-            return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+            return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
 
         return await session_store.storage_group.read_many(
             (session_store, execution_store), read,
@@ -330,7 +366,7 @@ async def _capture_timeline_state(
     root, blocks, next_coordinate = await session_store.read(lambda _transaction: read_blocks())
     records = await execution_records(root, blocks)
     commits = await session_store.read(lambda _transaction: commit_records(blocks))
-    return SessionTimelineCapture(root, blocks, next_coordinate, records, commits)
+    return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
 
 
 async def capture_session_refresh(
@@ -345,12 +381,15 @@ async def capture_session_refresh(
     reconcile: Callable[[SessionRecord], Awaitable[SessionRecord]],
     transcript_store: SessionTimelineTranscriptStore | None,
     validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None],
+    pending_execution: ExecutionRecord | None = None,
+    authorized_header: ResourceRef | None = None,
 ) -> SessionTimelineCapture:
     """Capture authorized metadata, reconciling terminal admission outside read scopes."""
     try:
         return await _capture_timeline_state(
             conversation, executions, session_id, tenant_id=tenant_id,
             cursor=cursor, cursor_signer=cursor_signer, limit=limit,
+            pending_execution=pending_execution, authorized_header=authorized_header,
             refresh_phase="initial", transcript_store=transcript_store,
             validate_active=validate_active,
         )
@@ -359,6 +398,7 @@ async def capture_session_refresh(
     return await _capture_timeline_state(
         conversation, executions, session_id, tenant_id=tenant_id,
         cursor=cursor, cursor_signer=cursor_signer, limit=limit,
+        pending_execution=pending_execution, authorized_header=authorized_header,
         refresh_phase="final", transcript_store=transcript_store,
     )
 
@@ -374,6 +414,7 @@ async def project_session_timeline(
     principal: Principal,
     cursor: "str | None" = None,
     limit: int = 100,
+    pending_session_execution: Callable[[ResourceRef], Awaitable[ExecutionRecord | None]] | None = None,
 ) -> Page[SessionTurn]:
     limit = validate_page_limit(limit)
     header = await conversation.sessions.get_header(
@@ -383,10 +424,12 @@ async def project_session_timeline(
     if header is None:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+    pending = None if pending_session_execution is None else await pending_session_execution(header)
     state = await _capture_timeline_state(
         conversation, executions, session_id,
         tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
-        limit=limit,
+        limit=limit, pending_execution=pending,
+        authorized_header=header if pending_session_execution is not None else None,
     )
     return await project_captured_session_timeline(
         state, transcript_store, cursor_signer, session_id=session_id,
