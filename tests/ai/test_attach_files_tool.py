@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Workspace attach_files tool contracts."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,7 @@ from linktools.ai.workspace import Workspace
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        RuntimeFeatures("workspace", workspace=workspace)._contributions
+        workspace_features("workspace", workspace=workspace)._contributions
     )
 
 

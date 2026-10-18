@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Scoring evidence, human decisions and usage gates through native execution."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 import json
 from collections.abc import AsyncIterator
@@ -76,7 +78,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     if environment in {"workspace", "both"}:
         work = tmp_path / "workspace"
         work.mkdir()
-        features = RuntimeFeatures("workspace", workspace=Workspace.load(work))
+        features = workspace_features("workspace", workspace=Workspace.load(work))
     storage = RuntimeStorage.filesystem(state)
     context = replace(CONTEXT, app=object()) if environment in {"app", "both"} else CONTEXT
     async with Runtime.open("rescore-environment", models=FixtureModels(), storage=storage,
@@ -226,7 +228,7 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
     entered, release = asyncio.Event(), asyncio.Event()
     context = replace(CONTEXT, app=object()) if live else CONTEXT
-    features = RuntimeFeatures("workspace", workspace=Workspace.load(tmp_path)) if live else None
+    features = workspace_features("workspace", workspace=Workspace.load(tmp_path)) if live else None
     async with Runtime.open("early-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
                             context=context, runtime_features=features) as runtime:
         if stage == "before_waiting":

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Unified model-facing file operations and publication boundaries."""
 
+from ._runtime_test_helpers import workspace_features
+
 import base64
 import hashlib
 import json
@@ -186,7 +188,7 @@ async def test_unified_file_selection_keeps_scenarios_minimal(tmp_path: Path) ->
 
 
 def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: Path) -> None:
-    contributions = RuntimeFeatures("workspace", workspace=Workspace.load(tmp_path))._contributions
+    contributions = workspace_features("workspace", workspace=Workspace.load(tmp_path))._contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
         "read_file": 3, "write_file": 2, "search_files": 2,

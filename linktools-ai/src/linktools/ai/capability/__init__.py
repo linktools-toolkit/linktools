@@ -45,6 +45,7 @@ from ._tool_metadata import (
     validate_tool_metadata,
 )
 from ._workspace import (
+    WorkspaceCapability,
     WorkspaceToolDeclaration,
     workspace_capabilities,
     workspace_tool_declarations,
@@ -52,6 +53,7 @@ from ._workspace import (
 from ..spec import mcp_server_selector, mcp_tool_selector
 
 __all__ = [
+    "WorkspaceCapability",
     "ToolClass",
     "ToolEffectPolicy",
     "is_tool_class",

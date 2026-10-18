@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Historical child and graph captures run through the public evaluation API."""
 
+from ._runtime_test_helpers import workspace_features
+
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -52,7 +54,7 @@ class DelegatingModels(FixtureModels):
 
 
 def child_capabilities(revision: int, instruction: str, *, workspace: Workspace) -> RuntimeFeatures[None]:
-    group = RuntimeFeatures[None]("captured-child-consumer", workspace=workspace)
+    group = workspace_features("captured-child-consumer", workspace=workspace)
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="Parent behavior", allow_tools=(),
                 allow_skills=(), allow_subagents=("child",))

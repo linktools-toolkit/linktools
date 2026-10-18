@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Graph captures replay accepted attachments and the requested context policy."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
 
 
 def _agents(*, workspace: Workspace | None = None) -> RuntimeFeatures:
-    group = RuntimeFeatures("capture-isolation", workspace=workspace)
+    group = workspace_features("capture-isolation", workspace=workspace)
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     return group
 

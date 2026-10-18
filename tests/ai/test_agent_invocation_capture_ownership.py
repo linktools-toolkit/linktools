@@ -13,7 +13,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import TaskGraph, TaskNode
 from ._runtime_test_helpers import _RuntimeUsageModelBinding, _UsageFunctionModel
@@ -357,7 +357,10 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
         return greeting + " " + context.input["name"]
 
     producer = Task("capture.greeting", produce, effect_policy="none")
-    async with Runtime.open("capture-ready", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    features = _agents()
+    if session_id is not None:
+        features.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("capture-ready", models=models, storage=storage, runtime_features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime.tasks.bind(producer, task)
         objects = storage.object_store(RuntimeDomain.TASK)
@@ -515,7 +518,9 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     models.release.set()
     principal = service_principal("default", "owner")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("capture-lineage", models=models, storage=storage, runtime_features=_agents()) as runtime:
+    features = _agents()
+    features.capability(ConversationCapability(), scope="runtime")
+    async with Runtime.open("capture-lineage", models=models, storage=storage, runtime_features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         source = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("source input")),

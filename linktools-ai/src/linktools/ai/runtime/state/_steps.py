@@ -191,6 +191,17 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return producer[1]
 
+    async def require_active_producer(self, agent_run_id: str) -> None:
+        """Fence model admission against the run's current execution authority."""
+        producer = self._execution_producers.get(agent_run_id)
+        if producer is None:
+            return
+        await self._require_active_execution_producer(
+            agent_run_id=agent_run_id, execution_id=producer[0],
+            producer_generation=producer[1], allow_cancelling=False,
+            authoritative=True,
+        )
+
     async def initialize(self) -> None:
         await self._staging.initialize()
         for archive in self._archives.values():
@@ -509,7 +520,7 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def _require_active_execution_producer(
         self, *, agent_run_id: str, execution_id: str, producer_generation: int,
-        allow_cancelling: bool = True,
+        allow_cancelling: bool = True, authoritative: bool = False,
     ) -> None:
         """Check control authority before advancing a run without a durable checkpoint."""
         if (self._pending_producer_guard is not None
@@ -527,7 +538,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             return execution, head
 
         _conversation, restart, _trace = self.execution_persistence(agent_run_id)
-        if not restart and type(repository) is ExecutionRepositoryImpl:
+        if not authoritative and not restart and type(repository) is ExecutionRepositoryImpl:
             execution, head = await repository.observe_execution_control(execution_id, tenant_id=self._tenant_id)
         else:
             execution, head = await repository.state_store.read(read)

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Pending turns keep one local owner until their canonical terminal commit."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from pathlib import Path
 
@@ -209,7 +211,7 @@ async def test_pending_approval_promotes_before_persisting_frontier(tmp_path: Pa
     from linktools.ai.workspace import Workspace, WorkspacePolicy, ToolPermissionPolicy
     from .test_runtime_approval_composition import _ToolModels
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default='ask')))
-    group = RuntimeFeatures('approval-pending', workspace=workspace)
+    group = workspace_features('approval-pending', workspace=workspace)
     group.agent('default', model='default', allow_tools=('read_file',))
     group.capability(ConversationCapability(), scope='runtime')
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))

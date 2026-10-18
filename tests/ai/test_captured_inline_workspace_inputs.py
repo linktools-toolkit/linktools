@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Captured input reprojection retains inline workspace attachment occurrences."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
     if file_change == "deleted":
         suffix.write_text("SUFFIX ORIGINAL", encoding="utf-8")
     models = FixtureModels()
-    group = RuntimeFeatures("inline-capture", workspace=Workspace.load(work))
+    group = workspace_features("inline-capture", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def project(context: AgentTaskInputContext) -> tuple[UserContent | WorkspaceFileInput, ...]:
@@ -121,7 +123,7 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
     attachment = work / "unused.txt"
     attachment.write_text("NOT ACCEPTED", encoding="utf-8")
     models = FixtureModels()
-    group = RuntimeFeatures("irreversible-capture", workspace=Workspace.load(work))
+    group = workspace_features("irreversible-capture", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def discard(context: AgentTaskInputContext) -> str:

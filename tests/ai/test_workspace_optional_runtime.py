@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Workspace-optional Runtime behavior and file-source boundaries."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -99,7 +101,7 @@ async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
 async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     (tmp_path / "evidence.txt").write_text("evidence", encoding="utf-8")
-    group = RuntimeFeatures(
+    group = workspace_features(
         "workspace",
         workspace=workspace,
         sandbox=DisabledSandbox(),
@@ -195,7 +197,7 @@ async def test_explicit_sandbox_controls_workspace_input_reads(
         "separate-sandbox",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        runtime_features=RuntimeFeatures("workspace", workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()),
+        runtime_features=workspace_features("workspace", workspace=Workspace.load(tmp_path), sandbox=DisabledSandbox()),
     ) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agents.get("default").run(
@@ -226,7 +228,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
     workspace = Workspace.load(project)
     storage_root = tmp_path / "runtime"
 
-    features = RuntimeFeatures("workspace", workspace=workspace)
+    features = workspace_features("workspace", workspace=workspace)
     features.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open(
         "workspace",

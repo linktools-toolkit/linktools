@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Regression tests for workspace RuntimeStorage composition."""
 
+from ._runtime_test_helpers import workspace_features
+
 import pytest
 from linktools.ai.asset import (
     AssetStore,
@@ -210,11 +212,15 @@ def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
+    from linktools.ai.runtime import ConversationCapability
+
+    features = workspace_features("workspace", workspace=workspace)
+    features.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open(
         "default",
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        runtime_features=RuntimeFeatures("workspace", workspace=workspace),
+        runtime_features=features,
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
@@ -232,7 +238,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        runtime_features=RuntimeFeatures("workspace", workspace=workspace),
+        runtime_features=features,
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
@@ -242,7 +248,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         "default",
         models=models,
         storage=_workspace_runtime_storage(workspace),
-        runtime_features=RuntimeFeatures("workspace", workspace=workspace),
+        runtime_features=features,
     ) as runtime:
         loaded = await runtime.sessions.get(
             created.session_id,

@@ -153,18 +153,21 @@ security, read-only operation and explicit recovery of stopped executors.
 
 ```python
 from linktools.ai import RuntimeFeatures, Runtime, Workspace
+from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeStorage
 
 workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
 storage = RuntimeStorage.in_memory()
+features = RuntimeFeatures("workspace")
+features.capability(WorkspaceCapability(workspace), scope="runtime")
 
 async with Runtime.open(
     "default",
     models=models,
     storage=storage,
-    runtime_features=RuntimeFeatures("workspace", workspace=workspace),
+    runtime_features=features,
 ) as runtime:
     result = (await runtime.agents.get("default").run(
         "review this change",
@@ -202,8 +205,10 @@ Use `RuntimeFeatures` for direct application registrations:
 
 ```python
 from linktools.ai import AgentContext, RuntimeFeatures, Runtime
+from linktools.ai.capability import WorkspaceCapability
 
-application = RuntimeFeatures[None]("application", workspace=workspace)
+application = RuntimeFeatures[None]("application")
+application.capability(WorkspaceCapability(workspace), scope="runtime")
 
 @application.tool
 def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
@@ -242,7 +247,7 @@ these declarations instead of inferring behavior from Tool names.
 
 ## 3. Workspace and declaration assets
 
-`RuntimeFeatures("workspace", workspace=workspace)` contributes the stable
+Registering `WorkspaceCapability(workspace)` at Runtime scope contributes the stable
 Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
 MCP declarations from Workspace paths.
 
@@ -547,7 +552,7 @@ publishing, and arbitrary third-party configuration import are out of scope.
 
 ### Execution sandbox
 
-Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `RuntimeFeatures(..., sandbox=...)`; configure Workspace and Sandbox on that same RuntimeFeatures object. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
+Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `RuntimeFeatures(..., sandbox=...)`; register `WorkspaceCapability(workspace)` and configure Sandbox on that same RuntimeFeatures object. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
 
 When no Sandbox is configured, LinkTools uses its built-in `LocalSandbox`
 adapter for supervised host processes, including stdio MCP without a Workspace.
@@ -595,6 +600,7 @@ denies reads, and resource rules are keyed by `SandboxResource.id`:
 
 ```python
 from linktools.ai import RuntimeFeatures, Workspace
+from linktools.ai.capability import WorkspaceCapability
 from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy
 
 readonly = ReadOnlySandboxPolicy(
@@ -604,9 +610,9 @@ readonly = ReadOnlySandboxPolicy(
 workspace = Workspace.load("/workspace/project")
 group = RuntimeFeatures(
     "workspace",
-    workspace=workspace,
     sandbox=LocalSandbox(read_policy=readonly),
 )
+group.capability(WorkspaceCapability(workspace), scope="runtime")
 ```
 
 With a read-only policy, Bubblewrap mounts the Workspace read-only and never creates hidden-path mount points there. Provision its hidden directories (including `.linktools`) before opening the sandbox; a missing or unsafe mount point causes startup to fail with `SANDBOX_UNAVAILABLE`.

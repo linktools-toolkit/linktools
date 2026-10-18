@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Shared SQL startup observes live producers; explicit recovery owns takeover."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -119,10 +121,10 @@ async def test_sql_runtime_session_admission_remains_independent(
     try:
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=first_state, runtime_features=_capabilities(),
+            storage=first_state, runtime_features=_capabilities(conversation=True),
         ) as first_runtime, Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=second_state, runtime_features=_capabilities(),
+            storage=second_state, runtime_features=_capabilities(conversation=True),
         ) as second_runtime:
             await first_runtime.agents.get("default").create_session("first")
             if not same_session:
@@ -418,7 +420,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
     workspace = Workspace.load(
         tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")),
     )
-    application = RuntimeFeatures("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace)
     application.agent("default", model="default", allow_tools=("read_file",))
     original_state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     async with Runtime.open(

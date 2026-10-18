@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Tool execution errors remain observable without inventing SDK returns."""
 
+from ._runtime_test_helpers import workspace_features
+
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
@@ -162,7 +164,7 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(
         (ToolPermissionRule("ask", tool_name="read_file"),), default="allow",
     )))
-    group = RuntimeFeatures("parallel-handoff", workspace=workspace)
+    group = workspace_features("parallel-handoff", workspace=workspace)
     group.capability(TraceCapability(), scope="runtime")
     group.tool(broken, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "broken"))

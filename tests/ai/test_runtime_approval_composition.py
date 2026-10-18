@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Composed Runtime approval-wait regression."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
@@ -68,7 +70,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         if backend == "memory"
         else RuntimeStorage.filesystem(tmp_path / "runtime-state")
     )
-    application = RuntimeFeatures("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace)
     application.agent(
         "default",
         model="default",

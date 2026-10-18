@@ -11,7 +11,7 @@ from typing import ClassVar, Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
 from pydantic_ai import Tool
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..asset import AssetStore, AssetStoreReader
@@ -47,7 +47,7 @@ from ._tool_metadata import (
     tool_metadata,
     validate_tool_metadata,
 )
-from ._workspace import _workspace_tool_definitions, workspace_tool_declarations
+from ._workspace import WorkspaceCapability, workspace_tool_declarations
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.capability.group")
@@ -117,7 +117,6 @@ class RuntimeFeatures(Generic[AppT]):
         group_id: str,
         *,
         assets: "AssetStore | None" = None,
-        workspace: "Workspace | None" = None,
         sandbox: "Sandbox | None" = None,
         tool_retries: int = RuntimeFeaturesCapture.DEFAULT_TOOL_RETRIES,
         output_retries: int = RuntimeFeaturesCapture.DEFAULT_OUTPUT_RETRIES,
@@ -126,25 +125,15 @@ class RuntimeFeatures(Generic[AppT]):
             raise ValueError("capability group id must be a non-empty string")
         if assets is not None and not isinstance(assets, AssetStore):
             raise TypeError("assets must be AssetStore")
-        if workspace is not None and not isinstance(workspace, Workspace):
-            raise TypeError("workspace must be Workspace")
         _validate_retry_defaults(tool_retries, output_retries)
         self._tool_retries = tool_retries
         self._output_retries = output_retries
         self._id = group_id
         self._store = assets
-        self._workspace = workspace
+        self._workspace: Workspace | None = None
         self._sandbox = sandbox
         self._loaders: dict[str, CapabilityLoader[AppT]] = {}
         self._contributions: list[CapabilityContribution[AppT]] = []
-        if workspace is not None:
-            declarations = {item.name: item for item in workspace_tool_declarations()}
-            self._contributions.extend(
-                CapabilityContribution.from_opaque(
-                    "tool", tool.name, tool, revision=declarations[tool.name].revision,
-                )
-                for tool in _workspace_tool_definitions(workspace)
-            )
         if assets is not None:
             for kind in ("agent", "skill", "mcp", "rule"):
                 self._loaders[kind] = BuiltinDeclarationLoader(kind)
@@ -216,16 +205,42 @@ class RuntimeFeatures(Generic[AppT]):
         _validate_revision(revision)
         capability_id = _capability_registration_id(capability, id)
         _validate_external_capability_id(capability_id)
-        self._contributions.append(
-            CapabilityContribution.from_opaque(
-                "capability",
-                capability_id,
-                capability,
-                revision=revision,
-                config=config,
-                scope=scope,
-            )
+        contribution = CapabilityContribution.from_opaque(
+            "capability", capability_id, capability, revision=revision,
+            config=config, scope=scope,
         )
+        workspace_capabilities: list[WorkspaceCapability] = []
+
+        def collect(value: AbstractCapability[object]) -> None:
+            if isinstance(value, WrapperCapability):
+                collect(value.wrapped)
+            elif isinstance(value, CombinedCapability):
+                for child in value.capabilities:
+                    collect(child)
+            elif isinstance(value, WorkspaceCapability):
+                workspace_capabilities.append(value)
+            else:
+                value.apply(lambda leaf: workspace_capabilities.append(leaf)
+                            if isinstance(leaf, WorkspaceCapability) else None)
+
+        collect(capability)
+        if workspace_capabilities:
+            if scope != "runtime":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                              "WorkspaceCapability requires Runtime scope")
+            if self._workspace is not None or len(workspace_capabilities) != 1:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            workspace_capability = workspace_capabilities[0]
+            declarations = {item.name: item for item in workspace_tool_declarations()}
+            tools = tuple(
+                CapabilityContribution.from_opaque(
+                    "tool", tool.name, tool, revision=declarations[tool.name].revision,
+                )
+                for tool in workspace_capability.tool_definitions()
+            )
+            self._workspace = workspace_capability.workspace
+            self._contributions.extend(tools)
+        self._contributions.append(contribution)
         return capability
 
     def agent(

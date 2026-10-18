@@ -11,7 +11,7 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import MetricsCapability, Runtime, RuntimeStorage
 from pydantic_ai.models.test import TestModel
 
 
@@ -51,6 +51,7 @@ class _Models:
 
 def _agent_group() -> RuntimeFeatures[object]:
     group = RuntimeFeatures[object]("application")
+    group.capability(MetricsCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 

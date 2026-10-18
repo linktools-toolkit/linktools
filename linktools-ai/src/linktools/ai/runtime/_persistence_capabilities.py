@@ -51,7 +51,6 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
         self, ctx: PydanticRunContext[AgentContext[AppT]], request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         capture = self._bound_capture()
-        await capture.before_model_request(ctx, request_context)
         await capture.save_checkpoint(ctx, messages=ctx.messages, state="complete")
         return request_context
 

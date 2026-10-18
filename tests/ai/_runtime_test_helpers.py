@@ -20,7 +20,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage, RunUsage
 
-from linktools.ai.capability import RuntimeFeatures, tool_metadata
+from linktools.ai.capability import RuntimeFeatures, WorkspaceCapability, tool_metadata
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import TraceCapability, CheckpointCapability
@@ -39,6 +39,16 @@ def _persistence_capabilities(*, restart: bool = False, trace: bool = False) -> 
     if trace:
         group.capability(TraceCapability(), scope="runtime")
     return group
+
+
+def workspace_features(
+    group_id: str, *, workspace: Any,
+    features_type: type[RuntimeFeatures] = RuntimeFeatures, **kwargs: Any,
+) -> RuntimeFeatures:
+    features = features_type(group_id, **kwargs)
+    if workspace is not None:
+        features.capability(WorkspaceCapability(workspace), scope="runtime")
+    return features
 
 
 class _Models:

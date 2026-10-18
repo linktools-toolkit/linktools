@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Captured graphs use accepted Agent inputs and only their executable bindings."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -56,7 +58,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
     work.mkdir()
     attachment = work / "file.txt"
     attachment.write_text("ORIGINAL", encoding="utf-8")
-    group = RuntimeFeatures("captured-projection", workspace=Workspace.load(work))
+    group = workspace_features("captured-projection", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     context = ExecutionInputContext.from_messages((
         ModelRequest(parts=[UserPromptPart("Historical question")]),
@@ -299,7 +301,7 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
     attachment = work / "file.txt"
     attachment.write_text("ORIGINAL", encoding="utf-8")
     models = FixtureModels()
-    group = RuntimeFeatures("recaptured-projection", workspace=Workspace.load(work))
+    group = workspace_features("recaptured-projection", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def project(context: AgentTaskInputContext) -> str:
@@ -344,7 +346,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
     inline = work / "inline.txt"
     inline.write_text("INLINE ORIGINAL", encoding="utf-8")
     models = FixtureModels()
-    group = RuntimeFeatures("unstarted-literal", workspace=Workspace.load(work))
+    group = workspace_features("unstarted-literal", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def prepare(context: TaskNodeContext[None]) -> JsonValue:

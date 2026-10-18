@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Optional transport joins real execution owners without changing durable truth."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 
@@ -10,7 +12,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeStorage, MetricsCapability
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models
 
@@ -61,6 +63,7 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
         yield "world"
 
     group = RuntimeFeatures[None]("shared-preview")
+    group.capability(MetricsCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     from linktools.ai.runtime import RuntimeDomain
     from .test_runtime_content_cache_integration import CountingObjects, _put
@@ -487,7 +490,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(
         tool_permissions=ToolPermissionPolicy(default="ask"),
     ))
-    application = RuntimeFeatures("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace)
     application.agent("default", model="default", allow_tools=("read_file",))
     backend = _CountingStreamBackend()
     path = tmp_path / "resume.db"

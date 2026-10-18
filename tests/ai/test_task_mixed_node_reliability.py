@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 import faulthandler
 import hashlib
@@ -31,6 +33,7 @@ from ._task_test_helpers import (
     task_result,
 )
 from linktools.ai.agent import restore_output
+from linktools.ai.runtime import ConversationCapability
 from linktools.ai.core import (
     JsonValue,
     OperationKind,
@@ -175,7 +178,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     source = tmp_path / "input.txt"
     source.write_text("accepted content", encoding="utf-8")
     workspace = Workspace.load(tmp_path)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.hold", 1, hold)
     application.task(handler, effect_policy="none")
     attachment = (
@@ -3304,7 +3307,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     workspace = Workspace.load(workspace_root)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect_policy="none")
     application.agent(
@@ -3739,7 +3742,7 @@ async def test_projected_workers_issue_distinct_requests_and_persist_history(
     attachment = b"PROJECTED_ATTACHMENT_PAYLOAD"
     (workspace_root / "brief.txt").write_bytes(attachment)
     workspace = Workspace.load(workspace_root)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     application.agent(
         "default",
         model="default",
@@ -3884,7 +3887,7 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
     storage_root = tmp_path / "projected-file-state"
     monkeypatch.setattr(task_local, "_LEASE_SECONDS", 1)
     monkeypatch.setattr(task_local, "_HEARTBEAT_SECONDS", 0.1)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     application.agent(
         "default",
         model="default",
@@ -4021,7 +4024,8 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     workspace_root.mkdir()
     (workspace_root / "context.txt").write_text("context", encoding="utf-8")
     workspace = Workspace.load(workspace_root)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
+    application.capability(ConversationCapability(), scope="runtime")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect_policy="none")
     application.task_expander(_ApplicationGraphExpander(handler))
@@ -4402,7 +4406,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
     async def copy_input(context: TaskNodeContext[None]) -> JsonValue:
         return await context.read_dependency("input")
 
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.typed-node", 1, copy_input)
     application.task(handler, effect_policy="none")
     application.agent(
@@ -4562,7 +4566,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     workspace = Workspace.load(workspace_root)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.effect-applied", 1, _invalid_effect_output)
     application.task(
         handler,
@@ -4632,7 +4636,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     workspace = Workspace.load(workspace_root)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.effect-invalid", 1, _invalid_effect_output)
     application.task(
         handler,
@@ -4702,7 +4706,7 @@ async def test_not_applied_retries_same_execution_once(
             raise RuntimeError("effect outcome is unknown")
         return {"ok": True}
 
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.effect-retry", 1, flaky_effect)
     application.task(handler, effect_policy="non_replay_safe")
     application.agent(
@@ -4870,7 +4874,7 @@ async def test_not_applied_after_attempt_budget_exhaustion_fails_execution_and_n
         calls += 1
         raise RuntimeError("effect outcome is unknown")
 
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None](
         "example.effect-attempt-budget",
         1,
@@ -4946,7 +4950,7 @@ async def test_not_applied_after_deadline_expires_fails_execution_and_node(
         await asyncio.Event().wait()
         raise AssertionError("timed out effect unexpectedly completed")
 
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None](
         "example.effect-deadline-budget",
         1,
@@ -5025,7 +5029,7 @@ async def test_retry_beyond_task_deadline_fails_execution_instead_of_leaving_sta
         calls += 1
         raise AIError(ErrorCode.MODEL_TIMEOUT)
 
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None](
         "example.retry-after-deadline",
         1,
@@ -5102,7 +5106,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     workspace = Workspace.load(workspace_root)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     application.agent(
         "default",
         model="default",
@@ -5652,7 +5656,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
             cancelled.set()
             raise
 
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
     handler = TaskFunction[None]("example.block", 1, blocking_task)
     application.task(handler, effect_policy="none")
     application.agent(

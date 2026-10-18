@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
+from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage, ToolResponseFixture
+from linktools.ai.runtime import ConversationCapability, CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage, ToolResponseFixture
 from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.runtime._input import input_intent
 from linktools.ai.runtime.state._codec import _decode_enveloped_domain, decode_domain, encode_domain
@@ -99,8 +100,10 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
 ) -> None:
     assets, first, second = await _fixtures()
     principal = service_principal("default", "fixture-owner")
+    features = RuntimeFeatures("fixture-conversation")
+    features.capability(ConversationCapability(), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage,
+    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, runtime_features=features,
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -131,7 +134,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     assert await assets.read_versions((first,))
 
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage,
+    async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, runtime_features=features,
                             tool_responses=ToolResponseFixture(second, assets)) as runtime:
         original = await runtime.executions.get(execution.execution_id, principal=principal)
         for derived in (await original.retry("retry"), await original.fork("fork")):
@@ -161,8 +164,10 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
 @pytest.mark.asyncio
 async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path) -> None:
     assets, first, _second = await _fixtures()
+    features = RuntimeFeatures("fixture-conversation")
+    features.capability(ConversationCapability(), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
-    async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage,
+    async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage, runtime_features=features,
                             tool_responses=ToolResponseFixture(first, assets)) as runtime:
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question", session_id="session")

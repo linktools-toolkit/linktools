@@ -11,7 +11,7 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, StartEvaluationRequest,
 )
-from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, TraceCapability, ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, AgentTaskInput, CaptureInputRequest, TraceCapability, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode
 
 from .test_evaluation_consumers import (
@@ -35,6 +35,8 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
     models = FixtureModels()
     group = RuntimeFeatures("fork-candidate")
     group.capability(TraceCapability(), scope="runtime")
+    if source_kind == "fork":
+        group.capability(ConversationCapability(), scope="runtime")
     original_prompt = "Original Agent behavior."
     candidate_prompt = "Selected candidate behavior."
     for name, prompt in (("default", original_prompt), ("candidate", candidate_prompt)):

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from ._runtime_test_helpers import workspace_features
+
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -39,7 +41,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        RuntimeFeatures("workspace", workspace=workspace)._contributions
+        workspace_features("workspace", workspace=workspace)._contributions
     )
 
 

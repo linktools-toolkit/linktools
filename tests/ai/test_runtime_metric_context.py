@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Runtime-scoped bounded metric dimension regressions."""
 
+from ._runtime_test_helpers import workspace_features
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -88,7 +90,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         context=context,
         models=models,
         storage=RuntimeStorage.in_memory(),
-        runtime_features=RuntimeFeatures("workspace", workspace=workspace),
+        runtime_features=workspace_features("workspace", workspace=workspace),
         metrics=metrics,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
 from linktools.ai.storage._database import SqlStorageContext
 from pydantic_ai.messages import ModelResponse, TextPart
 
@@ -26,6 +26,7 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
         await release.wait()
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     async with Runtime.open('startup-boundaries', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
@@ -73,6 +74,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-ack')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = (RuntimeStorage.in_memory() if backend == 'memory' else
              RuntimeStorage.filesystem(tmp_path / 'state') if backend == 'filesystem' else
@@ -121,6 +123,7 @@ async def test_two_runtimes_share_one_first_attempt_after_parallel_preparation(
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-race')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
@@ -163,6 +166,7 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
         await release.wait()
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-busy')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
@@ -200,6 +204,7 @@ async def test_cancel_during_context_preparation_never_calls_provider(
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-cancel')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     async with Runtime.open('startup-cancel', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
@@ -233,6 +238,7 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-preparation-failure')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     async with Runtime.open('startup-preparation-failure', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:
@@ -276,6 +282,7 @@ async def test_remote_cancel_during_preparation_settles_without_provider(
         calls.append(messages)
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('startup-remote-cancel')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / 'state.db')
@@ -387,6 +394,7 @@ async def test_deadline_expires_during_preparation_without_dispatch(
         calls.append(messages)
         return ModelResponse(parts=[TextPart('not expected')])
     group = RuntimeFeatures('startup-budget-review')
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     original = LocalExecutionBackend._prepare_input_context
@@ -428,6 +436,7 @@ async def test_admission_readback_rejects_real_session_partial(
         calls.append(messages)
         return ModelResponse(parts=[TextPart('not expected')])
     capabilities = RuntimeFeatures('partial-review')
+    capabilities.capability(ConversationCapability(), scope="runtime")
     capabilities.agent('default', model='default', allow_tools=())
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     async with Runtime.open('partial-review', storage=state, models=_Models(_UsageFunctionModel(model)), runtime_features=capabilities) as runtime:

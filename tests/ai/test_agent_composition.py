@@ -229,6 +229,7 @@ class _CaptureSessionExecution:
 @pytest.mark.asyncio
 async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     service = object.__new__(DefaultSessionService)
+    service._conversation_enabled = True
     capture = _CaptureSessionExecution()
     service._authorization = _AllowAuthorization()
     service._execution = capture

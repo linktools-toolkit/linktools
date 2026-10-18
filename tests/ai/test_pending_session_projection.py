@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Live TerminalCommit turns share Session display paging without durable writes."""
+"""Live cached Conversation turns share Session display paging without durable writes."""
 
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.asyncio
 
 
 @asynccontextmanager
-async def _runtimes(tmp_path, *, cache, terminal=True):
+async def _runtimes(tmp_path, *, cache, shared=True):
     entered, finish = asyncio.Event(), asyncio.Event()
     pause = False
 
@@ -41,8 +41,7 @@ async def _runtimes(tmp_path, *, cache, terminal=True):
     def group():
         value = RuntimeFeatures("pending-session-display")
         value.agent("default", model="default", allow_tools=())
-        if terminal:
-            value.capability(ConversationCapability(), scope="runtime")
+        value.capability(ConversationCapability(), scope="runtime")
         return value
 
     def block_next():
@@ -52,7 +51,7 @@ async def _runtimes(tmp_path, *, cache, terminal=True):
     models = _Models(_UsageFunctionModel(model))
     async with AsyncExitStack() as stack:
         values = []
-        for _ in range(1 if cache is None else 2):
+        for _ in range(2 if shared and cache is not None else 1):
             storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
             runtime = await stack.enter_async_context(Runtime.open(
                 "pending-session-display", storage=storage, models=models, runtime_features=group(),
@@ -71,8 +70,8 @@ async def test_pending_session_projection_paging_and_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     history_count: int, max_age: float, shared: bool,
 ) -> None:
-    cache = InMemoryCacheBackend(max_bytes=2**24) if shared else None
-    async with _runtimes(tmp_path, cache=cache) as (runtimes, entered, finish, block):
+    cache = InMemoryCacheBackend(max_bytes=2**24)
+    async with _runtimes(tmp_path, cache=cache, shared=shared) as (runtimes, entered, finish, block):
         owner, storage = runtimes[0]
         session = await owner.agents.get().create_session("session")
         completed = []
@@ -276,8 +275,8 @@ async def test_pending_session_projection_remote_requires_live_coordination(tmp_
         await execution.wait(timeout_seconds=5)
 
 
-async def test_pending_session_projection_default_runtime_keeps_source_admission(tmp_path: Path) -> None:
-    async with _runtimes(tmp_path, cache=None, terminal=False) as (runtimes, entered, finish, block):
+async def test_pending_session_projection_no_cache_keeps_source_admission(tmp_path: Path) -> None:
+    async with _runtimes(tmp_path, cache=None) as (runtimes, entered, finish, block):
         runtime, storage = runtimes[0]
         session = await runtime.agents.get().create_session("session")
         block()

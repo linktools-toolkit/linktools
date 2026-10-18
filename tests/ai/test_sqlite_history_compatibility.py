@@ -15,7 +15,7 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
-from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeHistory, RuntimeStorage
 
 from . import _runtime_test_helpers as helpers
 
@@ -112,6 +112,7 @@ async def test_sqlite_history_retains_old_turn_when_resumed_and_reopened(
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     application = RuntimeFeatures("application")
+    application.capability(ConversationCapability(), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "legacy-history", storage=RuntimeStorage.sqlite(path),

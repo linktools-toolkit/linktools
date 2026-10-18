@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from copy import copy
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -25,7 +26,7 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
-    Capability,
+    WrapperCapability,
     CapabilityOrdering,
     PrepareTools,
     ProcessEventStream,
@@ -81,7 +82,7 @@ from ..capability import (
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_metadata,
-    workspace_capabilities,
+    WorkspaceCapability,
 )
 from ..core import (
     ExecutionDeltaType,
@@ -956,26 +957,6 @@ async def _materialize_agent(
 
     if workspace_names and scope.workspace is None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    workspace_capability_values = (
-        ()
-        if scope.workspace is None
-        else workspace_capabilities(
-            scope.workspace,
-            workspace_names,
-            limits=scope.limits,
-            session=scope.sandbox_session,
-            model_binding=compiled_agent.model,
-        )
-    )
-    if workspace_capability_values:
-        workspace_guidance = workspace_capability_values[0].get_instructions()
-        if workspace_guidance is not None:
-            capabilities.append(
-                Capability(
-                    id="linktools.ai.workspace-guidance",
-                    instructions=workspace_guidance,
-                )
-            )
     if repository_boundary is not None or scope.repository_instructions is not None:
         capabilities.append(
             _RepositoryInstructionCapability(
@@ -1063,29 +1044,38 @@ async def _materialize_agent(
         capabilities.append(RunBudgetCapability(scope.budget))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
-    workspace_toolset_values = tuple(
-        toolset
-        for capability in workspace_capability_values
-        if (toolset := capability.get_toolset()) is not None
-    )
-    if workspace_toolset_values:
-        raw_toolsets.append(
-            BoundaryToolset(
-                workspace_toolset_values,
-                workspace_descriptors,
-                id="linktools.workspace",
-                permission_policy=(
-                    None
-                    if scope.workspace is None
-                    else scope.workspace.policy.tool_permissions
-                ),
-                sandbox_session=scope.sandbox_session,
-                tool_operations=scope.tool_operations,
-                tool_metrics=tool_metrics,
-                budget=scope.budget,
-                repository_boundary=repository_boundary,
-            )
+    def wrap_workspace_toolset(
+        toolset: AbstractToolset[AgentContext[object]],
+    ) -> AbstractToolset[AgentContext[object]]:
+        return BoundaryToolset(
+            (toolset,), workspace_descriptors, id="linktools.workspace",
+            permission_policy=None if scope.workspace is None else scope.workspace.policy.tool_permissions,
+            sandbox_session=scope.sandbox_session,
+            tool_operations=scope.tool_operations, tool_metrics=tool_metrics,
+            budget=scope.budget, repository_boundary=repository_boundary,
         )
+
+    def bind_workspace(
+        capability: AbstractCapability[AgentContext[object]],
+    ) -> AbstractCapability[AgentContext[object]]:
+        if isinstance(capability, WrapperCapability):
+            wrapped = capability.wrapped.visit_and_replace(bind_workspace)
+            if wrapped is capability.wrapped:
+                return capability
+            rebound = copy(capability)
+            rebound.wrapped = wrapped
+            return rebound
+        if isinstance(capability, WorkspaceCapability):
+            return capability.bind(
+                workspace_names, session=scope.sandbox_session, limits=scope.limits,
+                model_binding=compiled_agent.model, wrap_toolset=wrap_workspace_toolset,
+            )
+        return capability
+
+    bound_runtime_capabilities = tuple(
+        bound for template in runtime_capabilities
+        if (bound := template.visit_and_replace(bind_workspace)) is not None
+    )
     if compiled_agent.mcp_servers:
         from ._mcp import materialize_mcp_capabilities
 
@@ -1143,7 +1133,8 @@ async def _materialize_agent(
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
-        runtime_capabilities=runtime_capabilities,        agent_id=compiled_agent.spec.id,
+        runtime_capabilities=bound_runtime_capabilities,
+        agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
         agent_run_seq=scope.agent_run_seq,

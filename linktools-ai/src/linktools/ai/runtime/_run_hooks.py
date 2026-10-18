@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import monotonic_ns
@@ -39,6 +39,9 @@ class AgentRunCapture(AbstractCapability[None]):
         init=False,
         repr=False,
         compare=False,
+    )
+    producer_guard: Callable[[], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False,
     )
     deferred_pause_sink: Callable[[int], None] | None = field(
         default=None,
@@ -125,6 +128,8 @@ class AgentRunCapture(AbstractCapability[None]):
         ctx: PydanticRunContext[None],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
+        if self.producer_guard is not None:
+            await self.producer_guard()
         await self.before_run(ctx)
         self._live_messages = ctx.messages
         if (ctx.messages and isinstance(ctx.messages[-1], ModelRequest)

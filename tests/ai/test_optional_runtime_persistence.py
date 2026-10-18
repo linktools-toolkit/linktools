@@ -21,6 +21,8 @@ from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
+    ConversationCapability,
+    MetricsCapability,
     TraceCapability,
     CheckpointCapability,
     Runtime,
@@ -114,6 +116,7 @@ async def test_persistence_capabilities_preserve_sessions_and_results_independen
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, output)])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.tool(lookup, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("lookup",), allow_capabilities=())
     if restart:
@@ -398,6 +401,7 @@ async def test_remote_force_cancel_releases_session_and_fences_late_provider(
         return ModelResponse(parts=[TextPart("next turn finished")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.tool(late_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("late_effect",))
     if trace:
@@ -505,6 +509,7 @@ async def test_remote_force_cancel_orders_with_tool_admission(
         return ModelResponse(parts=[ToolCallPart("effect", {}, tool_call_id="effect-call")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.tool(effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("effect",))
     models = _Models(_UsageFunctionModel(model))
@@ -577,6 +582,7 @@ async def test_remote_force_cancel_requires_explicit_tool_effect_resolution(
         return ModelResponse(parts=[ToolCallPart("uncertain_effect", {}, tool_call_id="uncertain-call")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.tool(uncertain_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("uncertain_effect",))
     models = _Models(_UsageFunctionModel(model))
@@ -727,6 +733,7 @@ async def test_remote_force_cancel_recursively_fences_ordinary_delegated_tree(tm
         return ModelResponse(parts=[TextPart(f"late {prompt}")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     database = tmp_path / "delegated-cancel.db"
@@ -814,6 +821,7 @@ async def test_unknown_delegated_tool_effect_prevents_parent_cancel_and_session_
         return ModelResponse(parts=[TextPart("late parent answer")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.tool(uncertain_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("uncertain_effect",))
     models = _Models(_UsageFunctionModel(model))
@@ -916,6 +924,7 @@ async def test_remote_force_cancel_of_model_delegation_respects_root_owner(
         return ModelResponse(parts=[TextPart("late child answer")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     if restart:
@@ -1025,6 +1034,8 @@ async def test_no_trace_terminal_readback_preserves_session_and_single_metric(
         return ModelResponse(parts=[TextPart("durable answer")])
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(MetricsCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     if restart:
         group.capability(CheckpointCapability(), scope="runtime")
@@ -1091,6 +1102,7 @@ async def test_default_admission_without_worker_never_restarts_on_reopen(
         return RuntimeStorage.sqlite(tmp_path / "runtime.db")
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     initial = storage()

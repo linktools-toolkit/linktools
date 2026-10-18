@@ -64,13 +64,14 @@ class Command(BaseCommand):
                     if (root / "runtime.db").exists():
                         history = await stack.enter_async_context(RuntimeHistory.open("default", storage=_local_runtime_storage(workspace)))
                 else:
-                    from linktools.ai.capability import RuntimeFeatures
+                    from linktools.ai.capability import RuntimeFeatures, WorkspaceCapability
                     from linktools.ai.runtime import Runtime, ConversationCapability, MetricsCapability
 
                     assets = _local_runtime_assets(workspace)
                     await assets.initialize()
                     stack.push_async_callback(assets.close)
-                    features = RuntimeFeatures("workspace", workspace=workspace, assets=assets)
+                    features = RuntimeFeatures("workspace", assets=assets)
+                    features.capability(WorkspaceCapability(workspace), scope="runtime")
                     features.capability(ConversationCapability(), scope="runtime")
                     features.capability(MetricsCapability(), scope="runtime")
                     capture = await features.capture()

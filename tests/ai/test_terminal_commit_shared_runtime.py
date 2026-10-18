@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability, CheckpointCapability
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
@@ -21,8 +21,10 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 def _group(terminal: bool = True):
     group = RuntimeFeatures('shared-pending')
     group.agent('default', model='default', allow_tools=())
-    if terminal:
-        group.capability(ConversationCapability(), scope='runtime')
+    group.capability(ConversationCapability(), scope='runtime')
+    if not terminal:
+        # Checkpoint guarantees force source admission even with shared cache.
+        group.capability(CheckpointCapability(), scope='runtime')
     return group
 
 

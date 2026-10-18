@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """A terminal standalone run retains exact model context without a durable trace."""
 
+from ._runtime_test_helpers import workspace_features
+
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
@@ -213,7 +215,7 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
         return ModelResponse(parts=[TextPart("file read")])
 
     workspace = Workspace.load(tmp_path)
-    group = RuntimeFeatures("file-fork", workspace=workspace)
+    group = workspace_features("file-fork", workspace=workspace)
     group.agent("default", model="default", allow_tools=("read_file",))
     group.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=_Models(_UsageFunctionModel(model)), runtime_features=group) as runtime:

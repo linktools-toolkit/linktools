@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._execution_context import ExecutionInputContext
 from linktools.ai.runtime._local import LocalExecutionBackend
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -29,6 +29,7 @@ async def test_changes_after_launch_are_observed_before_provider(
         return ModelResponse(parts=[TextPart("answer")])
 
     group = RuntimeFeatures("launch-change")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / "state.db")
@@ -89,6 +90,7 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return ModelResponse(parts=[TextPart("answer")])
 
     group = RuntimeFeatures("launch-winner")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / "state.db")

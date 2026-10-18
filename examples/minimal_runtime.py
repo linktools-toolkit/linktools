@@ -5,7 +5,7 @@
 import os
 from pathlib import Path
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import RuntimeFeatures, WorkspaceCapability
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import Workspace
@@ -21,7 +21,8 @@ async def run(project: Path) -> object:
         api_key=os.environ.get("OPENAI_API_KEY") or None,
     )
     workspace = Workspace.load(project)
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = RuntimeFeatures[None]("application")
+    application.capability(WorkspaceCapability(workspace), scope="runtime")
     application.agent(
         "writer",
         revision=2,

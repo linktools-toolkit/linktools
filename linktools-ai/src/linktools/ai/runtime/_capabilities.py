@@ -81,6 +81,10 @@ async def compose_platform_capabilities(
     guarantees = (True, True, True)
     if isinstance(run_store, RuntimeAgentRunStore):
         guarantees = run_store.execution_persistence(agent_run_id)
+    async def require_active_producer() -> None:
+        if isinstance(run_store, RuntimeAgentRunStore):
+            await run_store.require_active_producer(agent_run_id)
+
     persistence = AgentRunCapture(
         recorder=run_recorder,
         agent_id=agent_id,
@@ -96,6 +100,7 @@ async def compose_platform_capabilities(
             ),
         },
         deferred_pause_sink=deferred_pause_sink,
+        producer_guard=require_active_producer,
     )
     capabilities.append(persistence)
     bound_types: set[type[object]] = set()

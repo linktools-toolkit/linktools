@@ -23,7 +23,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -35,7 +35,6 @@ from linktools.ai.runtime.state._codec import (
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     ExecutionStartReservation,
-    ExecutionTerminalCommit,
     IdempotencyRecord,
     ResultRecord,
 )
@@ -298,12 +297,14 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
+    features = _agent_group()
+    features.capability(ConversationCapability(), scope="runtime")
     try:
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=state,
-            runtime_features=_agent_group(),
+            runtime_features=features,
         ) as runtime:
             task = asyncio.create_task(
                 _emit_result(
@@ -316,7 +317,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
                     False,
                 )
             )
-            await execution_started.wait()
+            await asyncio.wait_for(execution_started.wait(), 5)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -332,7 +333,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=reopened,
-            runtime_features=_agent_group(),
+            runtime_features=features,
         ):
             pass
     finally:
@@ -352,12 +353,14 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
 
+    features = _agent_group()
+    features.capability(ConversationCapability(), scope="runtime")
     try:
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=state,
-            runtime_features=_agent_group(),
+            runtime_features=features,
         ) as runtime:
             created = await runtime.agents.get("default").create_session("session")
             loaded = await runtime.sessions.get(

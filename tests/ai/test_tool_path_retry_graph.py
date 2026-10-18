@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Workspace argument correction stays inside the agent's bounded tool loop."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -68,7 +70,7 @@ async def test_workspace_path_correction_respects_graph_and_effect_boundaries(
             )])
         return ModelResponse(parts=[TextPart("files read")])
 
-    group = RuntimeFeatures("path-correction", workspace=Workspace.load(tmp_path))
+    group = workspace_features("path-correction", workspace=Workspace.load(tmp_path))
     group.capability(TraceCapability(), scope="runtime")
     group.tool(record_effect, effect_policy="non_replay_safe")
     group.agent("default", model="default", allow_tools=("read_file", "record_effect"),

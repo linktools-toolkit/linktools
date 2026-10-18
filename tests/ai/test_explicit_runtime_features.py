@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Explicit optional features and core durability regression tests."""
+
+from ._runtime_test_helpers import workspace_features
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -135,17 +137,19 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
     from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
     from linktools.ai.workspace import Workspace, WorkspacePolicy, ToolPermissionPolicy
     workspace = Workspace.load(tmp_path, policy=WorkspacePolicy(tool_permissions=ToolPermissionPolicy(default="ask")))
-    features = RuntimeFeatures("deferred", workspace=workspace)
+    features = workspace_features("deferred", workspace=workspace)
     features.agent("default", model="default", allow_tools=("read_file",))
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
     async with Runtime.open("deferred", storage=storage, models=_FeatureModels(TestModel(call_tools=["read_file"])), runtime_features=features) as runtime:
         execution = await runtime.agents.get().start("read a file")
-        async with asyncio.timeout(5):
+        async def wait_for_deferred():
             while True:
                 record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                 if record and record.status is ExecutionStatus.WAITING_DEFERRED:
-                    break
+                    return record
                 await asyncio.sleep(.01)
+
+        record = await asyncio.wait_for(wait_for_deferred(), timeout=5)
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
         checkpoint = await storage.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert checkpoint is not None and checkpoint.state is RecoveryCheckpointState.WAITING

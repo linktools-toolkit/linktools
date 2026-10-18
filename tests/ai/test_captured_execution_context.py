@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Historical reexecution imports the accepted framework context, not live state."""
 
+from ._runtime_test_helpers import workspace_features
+
 from collections.abc import Mapping
 from pathlib import Path
 from linktools.ai.runtime import ConversationCapability
@@ -141,7 +143,7 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
     work.mkdir()
     instructions = work / "AGENTS.md"
     instructions.write_text("Historical repository instruction", encoding="utf-8")
-    group = RuntimeFeatures("context-instructions", workspace=Workspace.load(work))
+    group = workspace_features("context-instructions", workspace=Workspace.load(work))
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.filesystem(tmp_path / "state")
@@ -269,7 +271,7 @@ async def test_reprojected_files_use_accepted_bytes_after_workspace_file_changes
     work.mkdir()
     path = work / "input.txt"
     path.write_text("accepted file bytes", encoding="utf-8")
-    group = RuntimeFeatures("file-context", workspace=Workspace.load(work))
+    group = workspace_features("file-context", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def builder(context: AgentTaskInputContext) -> str:

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """End-to-end model-facing tool signal composition regressions."""
 
+from ._runtime_test_helpers import workspace_features
+
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -92,7 +94,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
             tool_permissions=ToolPermissionPolicy(default="deny")
         ),
     )
-    application = RuntimeFeatures[None]("application", workspace=workspace)
+    application = workspace_features("application", workspace=workspace)
     application.capability(TraceCapability(), scope="runtime")
     application.capability(MetricsCapability(), scope="runtime")
     application.tool(_business_tool, name="business", effect_policy="replay_safe")

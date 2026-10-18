@@ -47,10 +47,11 @@ async def _writers():
     await state.initialize(namespace="mixed-admission", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     services = []
-    for mode in (True, False):
+    # Both writers support sessions; only the pending writer binds pending_start.
+    for _ in range(2):
         coordinator = _Coordinator(cache)
         service = _service(state, backend=_Launcher(state.execution.executions))
-        service._terminal_commit = mode
+        service._conversation = True
         service._runtime_bridge.pending_turns = _RemotePendingTurns(coordinator)
         services.append(service)
     try:

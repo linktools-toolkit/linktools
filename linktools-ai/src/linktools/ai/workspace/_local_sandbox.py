@@ -645,9 +645,11 @@ class _LocalSandboxSession:
                     walk_state.failed = True
                     break
                 kind = "directory" if stat.S_ISDIR(info.st_mode) else "file"
-                media_type = "-" if kind == "directory" else (mimetypes.guess_type(relative)[0] or "unknown")
-                source = "extension" if media_type not in {"-", "unknown"} else "unknown"
-                entries.append((logical, f"{logical}  {kind}  {info.st_size}  {media_type}  {source}"))
+                media_type = None if kind == "directory" else mimetypes.guess_type(relative)[0]
+                row = f"{logical}  {kind}  {info.st_size}"
+                if media_type is not None:
+                    row += f"  {media_type}  extension"
+                entries.append((logical, row))
             result = "\n".join(row for _logical, row in sorted(entries)) or "(empty directory)"
             if walk_state.failed:
                 return _bound_output_with_marker(result, "\n[truncated: narrow path or include_glob]")

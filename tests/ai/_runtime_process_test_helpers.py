@@ -11,7 +11,7 @@ import traceback
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.runtime import CheckpointCapability, TraceCapability
+from linktools.ai.runtime import CheckpointCapability, ConversationCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -22,8 +22,10 @@ from ._runtime_test_helpers import _Models
 _NAMESPACE = "recovery-ownership"
 
 
-def _capabilities() -> RuntimeFeatures:
+def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
     group = RuntimeFeatures(_NAMESPACE)
+    if conversation:
+        group.capability(ConversationCapability(), scope="runtime")
     group.capability(CheckpointCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())
@@ -67,7 +69,7 @@ def _runtime_process(
         state = _storage(Path(database), phase)
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
-            storage=state, runtime_features=_capabilities(),
+            storage=state, runtime_features=_capabilities(conversation=mode == "session"),
         ) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None

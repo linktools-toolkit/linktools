@@ -17,7 +17,7 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import InstructionPart, ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
-from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
+from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
 
 from ..capability import (
     AgentContext,
@@ -212,7 +212,12 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         descriptor = self._descriptors.get(name)
-        if descriptor is None or tool.toolset is not self:
+        owner = tool.toolset
+        seen: set[int] = set()
+        while isinstance(owner, WrapperToolset) and id(owner) not in seen:
+            seen.add(id(owner))
+            owner = owner.wrapped
+        if descriptor is None or owner is not self:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         path_fields = descriptor.workspace_path_fields
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)

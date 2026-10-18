@@ -306,7 +306,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             state.execution,
             state.object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
-            sessions=state.conversation.sessions,
+            conversation=True, sessions=state.conversation.sessions,
             catalog=_BindingCatalog(),
             compiler=object(),
             runtime_bridge=runtime_bridge,
@@ -418,7 +418,7 @@ async def test_rejected_start_preserves_admission_truth_and_cleanup_before_metri
     bridge.bind(backend)
     service = DefaultExecutionService(
         state.execution, state.object_store(RuntimeDomain.EXECUTION), TenantAuthorizationPolicy(),
-        sessions=state.conversation.sessions, catalog=_BindingCatalog(), compiler=object(),
+        conversation=True, sessions=state.conversation.sessions, catalog=_BindingCatalog(), compiler=object(),
         runtime_bridge=bridge, live_broker=LiveExecutionEventBroker(), history_reader=_History(),
     )
     caller: asyncio.Task[object] | None = None

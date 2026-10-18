@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Clean graph replay strips historical context from unstarted captured inputs."""
 
+from ._runtime_test_helpers import workspace_features
+
 from pathlib import Path
 
 import pytest
@@ -35,7 +37,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
     work.mkdir()
     attachment = work / "input.txt"
     attachment.write_text("accepted attachment", encoding="utf-8")
-    group = RuntimeFeatures("clean-input", workspace=Workspace.load(work))
+    group = workspace_features("clean-input", workspace=Workspace.load(work))
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     context = ExecutionInputContext.from_messages(
         (ModelRequest(parts=[UserPromptPart("historical secret")]),
