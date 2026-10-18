@@ -161,9 +161,6 @@ def consumed_terminal_query(method: "Callable[..., object]") -> "Callable[..., o
                 result = await method(
                     self, execution_id, *args, principal=principal, **kwargs
                 )
-            # Successful consumers have already read and validated the terminal result.
-            # Retention still checks current dependency holds before releasing anything.
-            await self.request_terminal_handoff(execution_id, tenant_id=principal.tenant_id)
             return result
 
     return wrapped
@@ -2880,7 +2877,21 @@ class DefaultExecutionService:
         execution = await self._load_authorized(
             execution_id, principal, AuthorizationAction.EXECUTION_READ
         )
-        return await self._result_from_execution(execution, tenant_id=principal.tenant_id)
+        return await self._consume_result_from_execution(execution, tenant_id=principal.tenant_id)
+
+    async def _consume_result_from_execution(
+        self, execution: ExecutionRecord, *, tenant_id: str
+    ) -> ExecutionResult:
+        result = await self._result_from_execution(execution, tenant_id=tenant_id)
+        stored = execution.result
+        if type(self._state.executions) is not ExecutionRepositoryImpl or (
+            stored is not None and stored.output is not None and stored.output.kind != "inline"
+        ):
+            # Body and custom-owner reads may yield after the terminal snapshot.
+            await self._request_handoff_if_terminal(execution.execution_id, tenant_id=tenant_id)
+        else:
+            await self.request_terminal_handoff(execution.execution_id, tenant_id=tenant_id)
+        return result
 
     async def _result_from_execution(
         self, execution: ExecutionRecord, *, tenant_id: str
@@ -2974,6 +2985,10 @@ class DefaultExecutionService:
                   await repository.get_result(execution_id, tenant_id=principal.tenant_id))
         if result is None or result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if type(repository) is ExecutionRepositoryImpl:
+            await self.request_terminal_handoff(execution_id, tenant_id=principal.tenant_id)
+        else:
+            await self._request_handoff_if_terminal(execution_id, tenant_id=principal.tenant_id)
         return result.output.size
 
     @consumed_terminal_query
@@ -3032,7 +3047,7 @@ class DefaultExecutionService:
                         )
                         if failure is not None:
                             raise failure
-                    return await self._result_from_execution(
+                    return await self._consume_result_from_execution(
                         execution, tenant_id=principal.tenant_id,
                     )
                 if self._backend is not None:

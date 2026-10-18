@@ -3,9 +3,11 @@
 """Regression coverage for durable deferred-result replay."""
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 from linktools.ai.core import (
@@ -54,8 +56,17 @@ class _AllowAuthorization:
         del principal, action, resource
 
 
+_ValueT = TypeVar("_ValueT")
+
+
+class _ReadStateStore:
+    async def read(self, callback: Callable[[object], Awaitable[_ValueT]]) -> _ValueT:
+        return await callback(None)
+
+
 class _Executions:
     def __init__(self) -> None:
+        self.state_store = _ReadStateStore()
         self.execution = SimpleNamespace(status=type("Status", (), {"value": "WAITING_DEFERRED"})())
 
     async def get_header(

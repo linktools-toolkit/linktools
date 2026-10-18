@@ -156,6 +156,7 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
     )
     record = SimpleNamespace(
         execution_id=execution_id,
+        durable_trace=True,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
         agent_run_seq=1,
@@ -246,6 +247,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
     )
     record = SimpleNamespace(
         execution_id=execution_id,
+        durable_trace=True,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
         agent_run_seq=1,

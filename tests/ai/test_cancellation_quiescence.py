@@ -24,6 +24,10 @@ from linktools.ai.task._local import LocalTaskGraphLauncher
 class _ExecutionRecords:
     def __init__(self, current: object) -> None:
         self.current = current
+        self.state_store = self
+
+    async def read(self, operation: Callable[[object], Awaitable[object]]) -> object:
+        return await operation(self)
 
     async def get(self, execution_id: str, *, tenant_id: str) -> object:
         del execution_id, tenant_id

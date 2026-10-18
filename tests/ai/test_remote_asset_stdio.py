@@ -43,7 +43,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo
 
-from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel
+from ._runtime_test_helpers import RuntimeUsageModels, _UsageFunctionModel, _persistence_capabilities
 from .test_bubblewrap_integration import _sandbox_configuration
 
 _SERVER = textwrap.dedent(
@@ -336,7 +336,7 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
         await _put_package(store, _package(log=log))
         async with Runtime.open(
             "asset-stdio", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
-            capabilities=(_group(store, sandbox),),
+            capabilities=(_group(store, sandbox), _persistence_capabilities(trace=True)),
         ) as runtime:
             await store.put(AssetKey("mcp", "probe/data/value.txt"), b"new-head-data")
             await store.put(AssetKey("mcp", "probe/sibling.py"), b'IMPORTED = "new-head-module"\n')

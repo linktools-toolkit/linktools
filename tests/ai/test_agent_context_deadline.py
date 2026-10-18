@@ -15,7 +15,7 @@ from linktools.ai.core import ExecutionStatus, Principal, RunBudget, TaskStatus
 from linktools.ai.runtime import AgentTaskInput, ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
-from ._runtime_test_helpers import RuntimeUsageModels
+from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
 
 _DEADLINE = datetime(2099, 1, 1, tzinfo=timezone.utc)
@@ -106,7 +106,8 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
 async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, monkeypatch) -> None:
     contexts: list[AgentContext[None]] = []
     async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(),
-                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_group(contexts),)) as runtime:
+                            storage=RuntimeStorage.filesystem(tmp_path),
+                            capabilities=(_group(contexts), _persistence_capabilities(restart=True))) as runtime:
         async def interrupted_launch(*args, **kwargs):
             pass
         with monkeypatch.context() as fault:
@@ -116,7 +117,8 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
     assert not contexts
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("deadline-recovery", models=RuntimeUsageModels(), storage=storage,
-                            capabilities=(_group(contexts),), auto_recover=False) as runtime:
+                            capabilities=(_group(contexts), _persistence_capabilities(restart=True)),
+                            auto_recover=False) as runtime:
         reads: list[str] = []
         read = storage.execution.budgets.read
 

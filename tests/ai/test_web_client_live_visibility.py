@@ -22,6 +22,7 @@ from linktools.ai.runtime.state._step_archive import (
 )
 from linktools.ai.web import create_app
 
+from ._runtime_test_helpers import _persistence_capabilities
 from .test_model_client_request_capture import _registry, _response
 from .test_model_client_response_capture import _DONE, _Stream
 from .test_web_console_viewers import _client
@@ -73,7 +74,8 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
     async with Runtime.open(
-        "web-client-live", models=models, storage=storage, capabilities=(group,),
+        "web-client-live", models=models, storage=storage,
+        capabilities=(group, _persistence_capabilities(trace=True)),
     ) as runtime:
         commit = storage.run_store.commit_captured_execution_projection
 
@@ -148,7 +150,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
             try:
                 await asyncio.wait_for(tool_entered.wait(), 10)
                 await asyncio.wait_for(commit_entered.wait(), 10)
-                # Leave the default approximately one-second batch window intact.
+                # Leave the default approximately three-second batch window intact.
                 # A generous lower bound distinguishes batching from eager flushes.
                 assert commit_started_at - response_started_at >= 0.5
                 if hold_commit:

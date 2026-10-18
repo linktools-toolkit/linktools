@@ -289,6 +289,7 @@ async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
 @pytest.mark.asyncio
 async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     execution = SimpleNamespace(
+        restart_checkpoints=True,
         execution_id="execution",
         tenant_id="tenant",
         principal_id="principal",

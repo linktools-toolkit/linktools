@@ -32,7 +32,7 @@ from linktools.ai.runtime._attachment import bind_tool_return_attachments
 from linktools.ai.runtime._history_projection import _attachment_fact_cursor
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 
-from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed, _persistence_capabilities
 from .test_history_request_association import _history
 from .test_live_history_readback_integration import _Models
 
@@ -247,7 +247,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
     started_items = ()
     async with Runtime.open(
         "attachment-pagination", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        capabilities=(group,),
+        capabilities=(group, _persistence_capabilities(trace=True)),
     ) as runtime:
         principal = runtime.default_principal
         prompt = ["summarize", BinaryContent(b"initial", media_type="image/png")] if initial_attachment else "summarize"

@@ -209,6 +209,57 @@ async def test_result_body_wait_preserves_fresh_handoff_and_consumer_cleanup(
         await state.close()
 
 
+@pytest.mark.parametrize("method", ("result", "wait", "result_payload_size"))
+@pytest.mark.parametrize("change", ("missing", "nonterminal", "cancel"))
+async def test_custom_result_wait_preserves_fresh_handoff_and_consumer_cleanup(
+    monkeypatch: pytest.MonkeyPatch, change: str, method: str,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="result-read", tenant_id="tenant")
+    entered, release = asyncio.Event(), asyncio.Event()
+    callbacks = []
+    try:
+        record = await _seed(state)
+        repository = state.execution.executions
+
+        class CustomResult(ExecutionRepositoryImpl):
+            async def get_result(self, execution_id, *, tenant_id):
+                entered.set()
+                await release.wait()
+                return record.result
+
+        selected = CustomResult(repository.state_store, namespace="result-read", tenant_id="tenant")
+
+        async def terminal(execution_id, *, tenant_id):
+            callbacks.append((execution_id, tenant_id))
+            return True
+
+        service = _service(state, repository=selected, release=terminal)
+        query = asyncio.create_task(getattr(service, method)("execution", principal=_PRINCIPAL))
+        await asyncio.wait_for(entered.wait(), 2)
+        if change == "cancel":
+            query.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await query
+        else:
+            async def current(*args, **kwargs):
+                return None if change == "missing" else replace(record, status=ExecutionStatus.STARTED, result=None)
+
+            monkeypatch.setattr(selected, "get", current)
+            release.set()
+            value = await query
+            if method == "result_payload_size":
+                assert value == record.result.output.size
+            else:
+                assert value.output == {"text": "result"}
+        assert callbacks == []
+        await service.request_terminal_handoff("execution", tenant_id="tenant")
+        assert callbacks == [("execution", "tenant")]
+    finally:
+        release.set()
+        await state.close()
+
+
 @pytest.mark.parametrize("history,method", ((False, "result"), (False, "wait"), (True, "result")))
 async def test_denied_result_read_does_not_resolve_payload(history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
