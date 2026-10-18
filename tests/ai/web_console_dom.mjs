@@ -155,6 +155,43 @@ assert.match(node('conversation').textContent,/a answer/);
 assert.doesNotMatch(node('conversation').textContent,/Original request timeline/);
 assert.equal(node('request-context')?.hidden ?? true,true);
 assert.equal(node('native-mode').className.includes('active'),false);
+if(process.argv[3]==='resume') {
+  for(const transport of ['local','shared']) {
+    const id=`${transport}-preview`;
+    sessions.get('a').active_execution_id=id;
+    executions.set(id,{...info(id,'a'),status:'STARTED'});
+    streamBlocks.set(id,{});
+    await select('#session=a');
+    const stream=streamBlocks.get(id);
+    await until(`${transport} stream opened`,()=>Boolean(stream.controller));
+    const emit=(event_type,text,cursor,depth=0)=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':id,depth,event:{event_type,payload:{text}}},cursor})+'\n\n'));
+    emit('ASSISTANT_TEXT_DELTA','prefix ','checkpoint');
+    emit('ASSISTANT_TEXT_DELTA','kept','checkpoint');
+    emit('ASSISTANT_THINKING_DELTA','thought prefix','checkpoint');
+    await until(`${transport} initial preview`,()=>node('live').textContent.includes('prefix kept') && node('live').textContent.includes('thought prefix'));
+    const disconnected=stream.controller;
+    disconnected.close();
+    await until(`${transport} reconnect`,()=>stream.controller!==disconnected);
+    assert.equal(calls.filter(call=>call.key===`/api/executions/${id}/events`).at(-1).query.cursor,'checkpoint');
+    assert.match(node('live').textContent,/prefix kept/,'Disconnect cannot discard the prefix acknowledged by the resumed cursor');
+    assert.match(node('live').textContent,/thought prefix/);
+    emit('ASSISTANT_TEXT_DELTA',' + suffix','next');
+    emit('ASSISTANT_THINKING_DELTA',' + thought suffix','next');
+    await until(`${transport} exact resume`,()=>node('live').textContent.includes('prefix kept + suffix') && node('live').textContent.includes('thought prefix + thought suffix'));
+    emit('STREAM_RESET','', 'child-reset',1);
+    emit('ASSISTANT_TEXT_DELTA',' + after child','after-child');
+    await until(`${transport} child reset isolation`,()=>node('live').textContent.includes('prefix kept + suffix + after child'));
+    assert.match(node('live').textContent,/thought prefix \+ thought suffix/);
+    emit('STREAM_RESET','', 'root-reset');
+    emit('ASSISTANT_TEXT_DELTA','rebuilt answer','rebuilt');
+    emit('ASSISTANT_THINKING_DELTA','rebuilt thought','rebuilt');
+    await until(`${transport} reset preview rebuilt`,()=>node('live').textContent.includes('rebuilt answer') && node('live').textContent.includes('rebuilt thought'));
+    assert.doesNotMatch(node('live').textContent,/prefix kept|thought prefix|after child/);
+    await select('#session=b');
+  }
+  console.log('Preview resume contracts passed: local/shared prefixes, repeated checkpoints, scoped resets and rebuilt text/thinking');
+  process.exit(0);
+}
 if(process.argv[3]==='minimal') {
   const descendants=node=>[node,...node.children.flatMap(descendants)];
   assert.ok(!descendants(node('conversation')).some(item=>item.tagName==='BUTTON' && ['Details','Model requests'].includes(item.textContent)),'Default turns have no duplicate diagnostic navigation');
@@ -669,7 +706,7 @@ if(process.argv[3]==='workspace'){
   failedRead.reject(new Error('Runtime temporarily unavailable'));await until('failed canonical reconnect read',()=>node('connection').textContent.includes('read unavailable'));
   streamBlocks.set('a-live',{});await until('reattached interrupted stream',()=>Boolean(streamBlocks.get('a-live').controller));
   controller=streamBlocks.get('a-live').controller;assert.ok(controller);assert.equal(observations().at(-1).query.cursor,'cursor-one');
-  delta('Reattached **response**');await until('reattached live response',()=>node('live').textContent.includes('Reattached response'));assert.match(node('live').textContent,/Reattached response/);assert.doesNotMatch(node('live').textContent,/Live response/);
+  delta('Reattached **response**');await until('reattached live response',()=>node('live').textContent.includes('Reattached response'));assert.match(node('live').textContent,/Reattached response/);assert.match(node('live').textContent,/Live response/);
   assert.equal(calls.filter(item=>item.method==='POST' && item.key.endsWith('/recover')).length,0);
   // Owner actions stay on the current turn while the inspector shows an old one.
   const stop=deferred('POST /api/executions/a-live/cancel'),stopping=node('cancel').click();node('cancel').click();await stop.requested;
@@ -877,7 +914,7 @@ await until('reconnected live stream',()=>stream.controller!==disconnected);
 assert.equal(calls.filter(call=>call.key==='/api/executions/a-new/events').at(-1).query.cursor,'resume-cursor');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'Reconnected execution text'}}},cursor:'next-cursor'})+'\n\n'));
 await until('reconnected assistant text',()=>node('live').textContent.includes('Reconnected execution text'));
-assert.doesNotMatch(node('live').textContent,/New execution text/);
+assert.match(node('live').textContent,/New execution text/);
 stream.controller.close();streamBlocks.delete('a-new');timelineOverrides.delete('a');sessions.get('a').active_execution_id=null;
 executions.set('a-new',{...info('a-new'),status:'SUCCEEDED'});
 await until('closed stream canonical readback',()=>node('connection').textContent==='Observation: SUCCEEDED');

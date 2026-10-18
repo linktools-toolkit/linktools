@@ -299,3 +299,33 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
                 await asyncio.gather(first, return_exceptions=True)
                 await stream.aclose()
                 assert (await execution.wait(timeout_seconds=5)).result.output == {"text": "first last"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote", (False, True))
+async def test_preview_resume_keeps_received_prefix_until_terminal(tmp_path: Path, remote: bool) -> None:
+    cache = _Streams()
+    async with _runtimes(tmp_path, cache) as (_, reader, _, execution, release):
+        observed = await reader.executions.get(execution.execution_id) if remote else execution
+        first_watch = observed.watch(include_content=True)
+        try:
+            first = await asyncio.wait_for(_first_text(first_watch), 5)
+            assert first.event.payload["text"] == "first "
+        finally:
+            await first_watch.aclose()
+        resumed = observed.watch(include_content=True, cursor=first.cursor)
+        received = asyncio.create_task(_first_text(resumed))
+        try:
+            await asyncio.sleep(0)
+            assert not received.done()
+            release.set()
+            suffix = await asyncio.wait_for(received, 5)
+            assert suffix.event.payload["text"] == "last"
+            remaining = [item async for item in resumed]
+            assert all(item.event.event_type != "STREAM_RESET" for item in remaining)
+            assert any(item.event.event_type == "EXECUTION_SUCCEEDED" for item in remaining)
+            assert first.event.payload["text"] + suffix.event.payload["text"] == "first last"
+        finally:
+            received.cancel()
+            await asyncio.gather(received, return_exceptions=True)
+            await resumed.aclose()
