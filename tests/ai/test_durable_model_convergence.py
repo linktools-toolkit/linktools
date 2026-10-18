@@ -60,7 +60,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
         "artifact_id",
         "execution_id",
         "producer",
-        "media_type",
+        "mime_type",
         "object_ref",
         "created_at",
     }

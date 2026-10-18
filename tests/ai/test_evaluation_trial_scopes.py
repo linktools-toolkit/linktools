@@ -89,7 +89,7 @@ _UNSCOPED_MANIFEST_WIRE = """
     "input_projection":{"$mapping":[["kind","task"],["version",1]]},"output_contract":{"$mapping":[]},
     "required":true,"rubric":null,"slot_id":"score",
     "task":{"$dataclass":"task_ref","fields":{"id":"score","revision":1}},"task_contract":{"$mapping":[]}}}]},
-  "source_experiment_id":null,"source_trials":{"$tuple":[]},
+  "source_experiment_id":null,"source_trials":{"$tuple":[]},"trial_scope_required":false,
   "trials":{"$tuple":[{"$dataclass":"evaluation_trial_plan","fields":{
     "candidate_slot_id":"target","case_ref":{"$dataclass":"evaluation_case_ref","fields":{
       "case_id":"case","dataset_id":"dataset","revision":1}},"repetition":1,"trial_id":"trial"}}]}
@@ -97,13 +97,15 @@ _UNSCOPED_MANIFEST_WIRE = """
 """
 
 
-def test_unscoped_manifest_wire_preserves_identity_and_scoped_mode_changes_it() -> None:
+def test_current_manifest_wire_requires_scope_flag_and_scoped_mode_changes_identity() -> None:
     wire = json.loads(_UNSCOPED_MANIFEST_WIRE)
     unscoped = decode_domain(wire, EvaluationManifest)
     assert not unscoped.trial_scope_required
+    assert encode_domain(unscoped) == wire
     assert unscoped.digest == "bba3e1f0b12a4ed3432f9aed120b7faceb73b331817113d0826b0a9bb0b65eec"
     start = unscoped.to_mapping()
     start.pop("experiment_id")
+    assert "trial_scope_required" not in start
     assert canonical_sha256(start) == "0580399011dde8221ae4856d8187620674736393c9d1ea34270792ca2901923b"
 
     scoped = replace(unscoped, trial_scope_required=True)
@@ -114,8 +116,11 @@ def test_unscoped_manifest_wire_preserves_identity_and_scoped_mode_changes_it() 
     assert decode_domain(encode_domain(scoped), EvaluationManifest) == scoped
     assert decode_domain(encode_domain(unscoped), EvaluationManifest) == unscoped
 
-    wire["fields"]["trial_scope_required"] = False
-    assert decode_domain(wire, EvaluationManifest) == unscoped
+    del wire["fields"]["trial_scope_required"]
+    with pytest.raises(AIError) as missing:
+        decode_domain(wire, EvaluationManifest)
+    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert missing.value.safe_details["missing_fields"] == ["trial_scope_required"]
     wire["fields"]["trial_scope_required"] = "false"
     with pytest.raises(AIError) as malformed:
         decode_domain(wire, EvaluationManifest)

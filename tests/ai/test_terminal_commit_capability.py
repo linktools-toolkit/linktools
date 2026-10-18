@@ -98,18 +98,20 @@ def test_conversation_wire_roundtrip_is_explicit(persisted: bool, conversation: 
 
 
 @pytest.mark.parametrize("persisted", (False, True), ids=("domain", "persisted"))
-def test_earlier_execution_record_keeps_conversation_guarantee(persisted: bool) -> None:
+def test_execution_wire_requires_conversation_guarantee(persisted: bool) -> None:
     record = _execution()
     assert record.conversation is True
     payload = (_encode_persisted_domain if persisted else encode_domain)(record)
     payload["fields"].pop("conversation")
-    restored = (
-        _decode_enveloped_domain(
-            encode_envelope({"type": "execution_record", "payload": payload}), ExecutionRecord,
-        ) if persisted else decode_domain(payload, ExecutionRecord)
-    )
-    assert restored == record
-    assert restored.conversation is True
+    with pytest.raises(AIError) as missing:
+        if persisted:
+            _decode_enveloped_domain(
+                encode_envelope({"type": "execution_record", "payload": payload}), ExecutionRecord,
+            )
+        else:
+            decode_domain(payload, ExecutionRecord)
+    assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert missing.value.safe_details["missing_fields"] == ["conversation"]
 
 
 @pytest.mark.parametrize("invalid", (1, "true", None))
@@ -219,7 +221,7 @@ async def test_reopening_cannot_reinterpret_admitted_conversation(
 
 
 @pytest.mark.asyncio
-async def test_earlier_execution_record_remains_recoverable(
+async def test_current_execution_record_retains_conversation_through_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from linktools.ai.runtime.service_api import ExecutionRequest
@@ -227,15 +229,16 @@ async def test_earlier_execution_record_remains_recoverable(
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(CheckpointCapability(), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
     storage_path = tmp_path / "runtime"
     storage = RuntimeStorage.filesystem(storage_path)
     encode = _repository_common._encode_persisted_domain
     written: list[JsonValue] = []
 
-    def encode_earlier_record(value: object) -> JsonValue:
+    def capture_current_record(value: object) -> JsonValue:
         payload = encode(value)
         if isinstance(value, ExecutionRecord):
-            payload["fields"].pop("conversation")
+            assert payload["fields"]["conversation"] is True
             written.append(payload)
         return payload
 
@@ -248,7 +251,7 @@ async def test_earlier_execution_record_remains_recoverable(
         "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
     ) as runtime:
         with monkeypatch.context() as fault:
-            fault.setattr(_repository_common, "_encode_persisted_domain", encode_earlier_record)
+            fault.setattr(_repository_common, "_encode_persisted_domain", capture_current_record)
             fault.setattr(runtime._execution_service.runtime_backend(), "launch", interrupted_launch)
             execution = await runtime.agents.get().start("answer", idempotency_key="answer")
         assert written
