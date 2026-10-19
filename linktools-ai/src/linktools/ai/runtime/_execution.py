@@ -2914,6 +2914,11 @@ class DefaultExecutionService:
             )
             if self._terminal_committer is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            admitted_session_id = None
+            if current.session_id is not None and self._sessions is not None:
+                admitted_session = await self._sessions.get(current.session_id, tenant_id=self._state.executions.tenant_id)
+                if admitted_session is not None and admitted_session.active_execution_id == current.execution_id:
+                    admitted_session_id = current.session_id
             try:
                 await self._terminal_committer.commit_terminal_checkpoint(
                     ExecutionTerminalCommit(
@@ -2942,7 +2947,7 @@ class DefaultExecutionService:
                             error.code.value,
                         ),
                     ),
-                    session_id=None,
+                    session_id=admitted_session_id,
                     expected_execution=current,
                     capture_metric=capture_terminal_metric,
                 )
@@ -3195,6 +3200,7 @@ class DefaultExecutionService:
         self, execution: ExecutionRecord, *, tenant_id: str
     ) -> ExecutionResult:
         result = await self._result_from_execution(execution, tenant_id=tenant_id)
+        await self._require_retained_turn(execution)
         stored = execution.result
         if type(self._state.executions) is not ExecutionRepositoryImpl or (
             stored is not None and stored.output is not None and stored.output.kind != "inline"
@@ -3206,6 +3212,16 @@ class DefaultExecutionService:
                 execution.execution_id, tenant_id=tenant_id, terminal_commit=execution.conversation,
             )
         return result
+
+    async def _require_retained_turn(self, execution: ExecutionRecord) -> None:
+        if execution.conversation and execution.session_id is not None and self._sessions is not None:
+            await self._sessions.state_store.read(
+                lambda transaction: self._sessions.pending_turn_commit_in_transaction(
+                    transaction, session_id=execution.session_id,
+                    execution_id=execution.execution_id,
+                    allow_unadmitted=execution.started_at is None,
+                )
+            )
 
     async def _result_from_execution(self, execution: ExecutionRecord, *, tenant_id: str) -> ExecutionResult:
         return await self._management.result_from_execution(execution, tenant_id=tenant_id)
@@ -3228,6 +3244,7 @@ class DefaultExecutionService:
                   await repository.get_result(execution_id, tenant_id=principal.tenant_id))
         if result is None or result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._require_retained_turn(execution)
         if type(repository) is ExecutionRepositoryImpl:
             await self.request_terminal_handoff(
                 execution_id, tenant_id=principal.tenant_id, terminal_commit=execution.conversation,

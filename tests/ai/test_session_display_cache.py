@@ -22,7 +22,7 @@ from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_refresh import _admit
-from .test_session_timeline import _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
 from .test_runtime_content_cache_integration import WriteOnlyCache
 
 pytestmark = pytest.mark.asyncio
@@ -81,11 +81,13 @@ async def _prepare(state, *, body=False, namespace="display"):
     if body:
         run_id, count = await _materialize_conversation(state, record.history_id)
         sessions = state.conversation.sessions
+        execution = await state.execution.executions.get("active", tenant_id="tenant")
 
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="active",
                 start_message_index=0, end_message_index=count,
+                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="active", expected=None,
@@ -105,11 +107,11 @@ async def _change_metadata(state, value):
     )
 
 
-async def _change_execution_display(state, value):
+async def _change_execution_display(state, value, execution_id="active"):
     executions = state.execution.executions
-    record = await executions.get("active", tenant_id="tenant")
+    record = await executions.get(execution_id, tenant_id="tenant")
     return await executions.compare_and_swap(
-        "active", tenant_id="tenant", expected_revision=record.revision,
+        execution_id, tenant_id="tenant", expected_revision=record.revision,
         next_record=replace(record, revision=record.revision + 1, safe_error_details={"value": value}),
     )
 
@@ -159,7 +161,7 @@ async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp
         cold_count = len(statements)
         statements.clear()
         assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == cold
-        assert len(statements) == 4
+        assert len(statements) == (4 if body else 3)
         assert cold_count > len(statements)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -256,10 +258,12 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
     clock = _clock(monkeypatch)
     state, cache = RuntimeStorage.in_memory(), _Cache()
     await _prepare(state, body=True)
+    session = await state.conversation.sessions.get("session", tenant_id="tenant")
+    await _admit(state, "second", ExecutionStatus.PENDING_START, expected=session.continuation)
     try:
         service = _service(state, cache)
         await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-        await _change_execution_display(state, "new")
+        await _change_execution_display(state, "new", "second")
         if phase in {"get", "dependency"}:
             owner = cache if phase == "get" else state.execution.executions
             name = "get" if phase == "get" else "get_many"
@@ -270,7 +274,7 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
                 clock.now += 3
                 return value
             monkeypatch.setattr(owner, name, slow)
-            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[0].safe_error_details == {"value": "new"}
+            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[-1].safe_error_details == {"value": "new"}
         else:
             clock.now += 3
             if phase == "body":
@@ -289,8 +293,8 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
                     await put(*args)
                 monkeypatch.setattr(cache, "put", slow_put)
             await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-            await _change_execution_display(state, "latest")
-            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[0].safe_error_details == {"value": "latest"}
+            await _change_execution_display(state, "latest", "second")
+            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[-1].safe_error_details == {"value": "latest"}
     finally:
         await state.close()
 
@@ -440,31 +444,39 @@ async def test_display_cache_terminal_active_refreshes_complete_page(status, rel
         record = await executions.get("active", tenant_id="tenant")
         await executions.compare_and_swap(
             "active", tenant_id="tenant", expected_revision=record.revision,
-            next_record=replace(record, revision=record.revision + 1, status=status, safe_error_details={"finished": True}),
+            next_record=replace(record, revision=record.revision + 1, status=status,
+                result=_execution("active", status=status, prompt="active").result,
+                safe_error_details={"finished": True}),
         )
         if status is ExecutionStatus.SUCCEEDED:
             run_id, count = await _materialize_conversation(state, session.history_id)
             sessions = state.conversation.sessions
+            execution = await executions.get("active", tenant_id="tenant")
 
             async def commit(transaction):
                 await sessions.commit_timeline_turn_in_transaction(
                     transaction, "session", tenant_id="tenant", execution_id="active",
                     start_message_index=0, end_message_index=count,
+                    **_commit_fields(execution),
                 )
                 await sessions.advance_continuation_in_transaction(
                     transaction, "session", tenant_id="tenant", execution_id="active", expected=None,
                     next_cursor=ConversationCursor(run_id, history_id=session.history_id, message_count=count),
                 )
             await sessions.state_store.mutate(commit)
+        else:
+            await _commit_empty_turn(state, await executions.get("active", tenant_id="tenant"))
         if released:
             await state.conversation.sessions.release_execution("session", tenant_id="tenant", execution_id="active")
         fresh = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         assert fresh.session.active_execution_id is None
         assert fresh.timeline.items[0].status is status
         assert fresh.timeline.items[0].safe_error_details == {"finished": True}
+        assert fresh.timeline.items[0].conversation_committed
         if status is ExecutionStatus.SUCCEEDED:
-            assert fresh.timeline.items[0].conversation_committed
             assert fresh.timeline.items[0].items
+        else:
+            assert fresh.timeline.items[0].items == ()
         assert (await state.conversation.sessions.get("session", tenant_id="tenant")).active_execution_id is None
         assert fresh == await service.refresh("session", principal=_PRINCIPAL)
         assert cache.writes == 2
@@ -509,11 +521,13 @@ async def test_display_cache_idle_completion_observes_continuation_revision():
         assert first.session.active_execution_id is None
         await _admit(state, "second", ExecutionStatus.SUCCEEDED)
         run_id, count = await _materialize_conversation(state, session.history_id)
+        execution = await state.execution.executions.get("second", tenant_id="tenant")
 
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="second",
                 start_message_index=0, end_message_index=count,
+                **_commit_fields(execution),
             )
             return await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="second", expected=None,
@@ -535,22 +549,26 @@ async def test_display_cache_idle_completion_observes_continuation_revision():
         await state.close()
 
 
-@pytest.mark.parametrize("kind,code", (("execution", ErrorCode.STORAGE_INTEGRITY_ERROR), ("conversation_history", ErrorCode.SESSION_HISTORY_UNAVAILABLE)))
+@pytest.mark.parametrize("kind,code", (("execution", None), ("conversation_history", ErrorCode.SESSION_HISTORY_UNAVAILABLE)))
 async def test_display_cache_rechecks_dependency_existence(kind, code):
     state, cache = RuntimeStorage.in_memory(), _Cache()
     await _prepare(state, body=True)
     try:
         service = _service(state, cache)
-        await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+        before = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         store = state.execution.executions.state_store if kind == "execution" else state.conversation.sessions.state_store
 
         async def remove(transaction):
             records = await transaction.scan_records()
             await transaction.delete_records(tuple(record.key_digest for record in records if record.kind == kind))
         await store.mutate(remove)
-        with pytest.raises(AIError) as error:
-            await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-        assert error.value.code is code
+        if kind == "execution":
+            assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == before
+            assert await service.refresh("session", principal=_PRINCIPAL) == before
+        else:
+            with pytest.raises(AIError) as error:
+                await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+            assert error.value.code is code
     finally:
         await state.close()
 

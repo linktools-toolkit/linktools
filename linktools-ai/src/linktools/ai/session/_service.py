@@ -63,6 +63,7 @@ class SessionExecutionState(Protocol):
     parent_execution_id: str | None
     status: ExecutionStatus
     invalidates_session_history: bool
+    conversation: bool
 
 
 class SessionExecutionReader(Protocol):
@@ -1039,6 +1040,7 @@ class SessionManager(Generic[HandleT]):
             history_unavailable=(
                 execution is not None and execution.invalidates_session_history
             ),
+            require_turn_commit=execution is not None and execution.conversation,
         )
         updated = await self._conversation.sessions.get(
             record.session_id,

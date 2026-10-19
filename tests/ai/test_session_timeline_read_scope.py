@@ -16,7 +16,7 @@ from linktools.ai.runtime._session_timeline import project_session_timeline
 from linktools.ai.runtime.state._store import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
-from .test_session_timeline import _execution, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -35,6 +35,16 @@ async def _seed(state: RuntimeStorage) -> None:
     ), result=None))
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id="failed", expected=None,
+    )
+    await _commit_empty_turn(state, await state.execution.executions.get("failed", tenant_id="tenant"))
+    await state.conversation.sessions.release_execution(
+        "session", tenant_id="tenant", execution_id="failed",
+    )
+    await state.execution.executions.create(
+        _execution("active", status=ExecutionStatus.PENDING_START, prompt="pending prompt"),
+    )
+    await state.conversation.sessions.admit_execution(
+        "session", tenant_id="tenant", execution_id="active", expected=None,
     )
 
 
@@ -55,10 +65,13 @@ async def test_timeline_read_scope_preserves_turns_and_authority(
     try:
         await _seed(state)
         result = await _timeline(state)
-        assert len(result.items) == 1
+        assert len(result.items) == 2
         assert result.items[0].execution_id == "failed"
         assert result.items[0].user_input["prompt"]["text"] == "original prompt"
-        assert result.items[0].conversation_committed is False
+        assert result.items[0].conversation_committed is True
+        assert result.items[0].items == ()
+        assert result.items[1].execution_id == "active"
+        assert result.items[1].conversation_committed is False
         assert result.next_cursor is None
         assert active_state_scope() is None
         with pytest.raises(AIError) as error:
@@ -84,7 +97,7 @@ async def test_timeline_read_scope_uses_one_post_authorization_sql_snapshot(tmp_
             result = await _timeline(state)
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
-        assert len(result.items) == 1
+        assert len(result.items) == 2
         # A separate authority read, then one snapshot for both routed stores.
         assert statements.count("BEGIN") <= 2
         assert sum(value.lstrip().upper().startswith("SELECT") for value in statements) <= 6
@@ -103,7 +116,7 @@ async def test_timeline_read_scope_keeps_separate_database_routes(tmp_path: Path
         assert (state.conversation.sessions.state_store.storage_group is not
                 state.execution.executions.state_store.storage_group)
         result = await _timeline(state)
-        assert [turn.execution_id for turn in result.items] == ["failed"]
+        assert [turn.execution_id for turn in result.items] == ["failed", "active"]
         assert active_state_scope() is None
     finally:
         await state.close()

@@ -14,6 +14,8 @@ from ..core import (
     AuthorizationPolicy,
     CursorSigner,
     ExecutionStatus,
+    JsonValue,
+    normalize_json_value,
     Page,
     Principal,
     ResourceKind,
@@ -23,6 +25,7 @@ from ..core import (
     validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import StoredPayload
 from ..core import decode_cursor as decode_runtime_cursor
 from ..core import encode_cursor as encode_runtime_cursor
 from ._input import stored_user_input_view
@@ -32,7 +35,7 @@ from .state._contracts import (
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
-    SessionTurnCommitRef,
+    SessionTurnCommit,
     SessionTurnRef,
 )
 from .state._conversation_repositories import SessionRepositoryImpl
@@ -45,6 +48,8 @@ _TIMELINE_CURSOR_KIND = "SESSION_TIMELINE"
 
 
 class SessionTimelineTranscriptStore(Protocol):
+    async def read_conversation_payload(self, payload: StoredPayload) -> bytes: ...
+
     def iter_conversation_message_range(
         self,
         *,
@@ -237,7 +242,7 @@ class SessionTimelineCapture:
     blocks: _TimelineBlocks
     next_coordinate: tuple[str, int] | None
     executions: Mapping[str, ExecutionRecord]
-    commits: dict[tuple[str, int], SessionTurnCommitRef]
+    commits: dict[tuple[str, int], SessionTurnCommit]
     pending_execution: ExecutionRecord | None = None
 
 
@@ -311,8 +316,12 @@ async def _capture_timeline_state(
 
     async def execution_records(
         root: SessionRecord, blocks: _TimelineBlocks,
+        commits: Mapping[tuple[str, int], SessionTurnCommit],
     ) -> Mapping[str, ExecutionRecord]:
-        ids = tuple(ref.execution_id for _record, refs in blocks for ref in refs)
+        ids = tuple(
+            ref.execution_id for _record, refs in blocks for ref in refs
+            if (ref.session_id, ref.turn_seq) not in commits
+        )
         if refresh_phase is not None and root.active_execution_id is not None:
             ids += (root.active_execution_id,)
         ids = tuple(dict.fromkeys(ids))
@@ -327,8 +336,8 @@ async def _capture_timeline_state(
 
     async def commit_records(
         blocks: _TimelineBlocks,
-    ) -> dict[tuple[str, int], SessionTurnCommitRef]:
-        commits: dict[tuple[str, int], SessionTurnCommitRef] = {}
+    ) -> dict[tuple[str, int], SessionTurnCommit]:
+        commits: dict[tuple[str, int], SessionTurnCommit] = {}
         for record, refs in blocks:
             if not refs:
                 continue
@@ -337,16 +346,22 @@ async def _capture_timeline_state(
                 start_turn_seq=refs[0].turn_seq,
                 end_turn_seq=refs[-1].turn_seq + 1,
             )
+            admitted = {ref.turn_seq: ref.execution_id for ref in refs}
             for value in values:
-                commits[(record.session_id, value.turn_seq)] = value
+                key = record.session_id, value.turn_seq
+                if (value.session_id != record.session_id
+                        or admitted.get(value.turn_seq) != value.execution_id
+                        or key in commits):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                commits[key] = value
         return commits
 
     # Custom owners may schedule child tasks or perform their own I/O boundaries.
     if (type(conversation.sessions) is not SessionRepositoryImpl
             or type(executions) is not ExecutionRepositoryImpl):
         root, blocks, next_coordinate = await read_blocks()
-        records = await execution_records(root, blocks)
         commits = await commit_records(blocks)
+        records = await execution_records(root, blocks, commits)
         return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
 
     session_store = conversation.sessions.state_store
@@ -354,8 +369,8 @@ async def _capture_timeline_state(
     if session_store.storage_group is execution_store.storage_group:
         async def read(_group: StateGroupTransaction) -> SessionTimelineCapture:
             root, blocks, next_coordinate = await read_blocks()
-            records = await execution_records(root, blocks)
             commits = await commit_records(blocks)
+            records = await execution_records(root, blocks, commits)
             return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
 
         return await session_store.storage_group.read_many(
@@ -363,9 +378,13 @@ async def _capture_timeline_state(
         )
 
     # Separate routes keep their own snapshots; no cross-database scope is implied.
-    root, blocks, next_coordinate = await session_store.read(lambda _transaction: read_blocks())
-    records = await execution_records(root, blocks)
-    commits = await session_store.read(lambda _transaction: commit_records(blocks))
+    async def read_conversation(_transaction: object):
+        root, blocks, next_coordinate = await read_blocks()
+        commits = await commit_records(blocks)
+        return root, blocks, next_coordinate, commits
+
+    root, blocks, next_coordinate, commits = await session_store.read(read_conversation)
+    records = await execution_records(root, blocks, commits)
     return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
 
 
@@ -429,7 +448,7 @@ async def project_session_timeline(
         conversation, executions, session_id,
         tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
         limit=limit, pending_execution=pending,
-        authorized_header=header if pending_session_execution is not None else None,
+        authorized_header=header,
     )
     return await project_captured_session_timeline(
         state, transcript_store, cursor_signer, session_id=session_id,
@@ -461,7 +480,7 @@ async def project_captured_session_timeline(
             continue
         committed = tuple(
             value for (source_id, _sequence), value in commits.items()
-            if source_id == record.session_id
+            if source_id == record.session_id and value.end_message_index > value.start_message_index
         )
         if not committed:
             continue
@@ -491,37 +510,56 @@ async def project_captured_session_timeline(
 
     turns: list[SessionTurn] = []
     for ref in refs:
-        execution = execution_records[ref.execution_id]
-        if (
-            execution.session_id != ref.session_id
-            or execution.parent_execution_id is not None
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         commit = commits.get((ref.session_id, ref.turn_seq))
         items: tuple[SessionTurnItem, ...] = ()
+        output: JsonValue = None
         if commit is not None:
-            if commit.execution_id != ref.execution_id:
+            if commit.execution_id != ref.execution_id or commit.session_id != ref.session_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            base = message_bases[ref.session_id]
-            source = messages[ref.session_id]
-            start = commit.start_message_index - base
-            end = commit.end_message_index - base
-            if start < 0 or end > len(source) or end <= start:
+            if commit.end_message_index > commit.start_message_index:
+                base = message_bases[ref.session_id]
+                source = messages[ref.session_id]
+                start = commit.start_message_index - base
+                end = commit.end_message_index - base
+                if start < 0 or end > len(source) or end <= start:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                items = _timeline_items(source[start:end])
+            if commit.status is ExecutionStatus.SUCCEEDED:
+                if commit.output is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                output = await _committed_output(commit.output, transcript_store)
+            elif commit.output is not None or commit.status not in {
+                ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            items = _timeline_items(source[start:end])
-        elif execution.status is ExecutionStatus.SUCCEEDED:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            status, created_at, updated_at = commit.status, commit.created_at, commit.updated_at
+            user_input = commit.stored_user_input
+            error_code, safe_error_details = commit.error_code, commit.safe_error_details
+        else:
+            execution = execution_records[ref.execution_id]
+            if execution.session_id != ref.session_id or execution.parent_execution_id is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution.conversation and execution.status in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            if execution.status is ExecutionStatus.SUCCEEDED:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            status, created_at, updated_at = execution.status, execution.created_at, execution.updated_at
+            user_input = execution.stored_user_input
+            error_code, safe_error_details = execution.error_code, execution.safe_error_details
         turns.append(
             SessionTurn(
-                execution.execution_id,
-                execution.status,
-                execution.created_at,
-                execution.updated_at,
-                stored_user_input_view(execution.stored_user_input),
+                ref.execution_id,
+                status,
+                created_at,
+                updated_at,
+                stored_user_input_view(user_input),
                 commit is not None,
                 items,
-                execution.error_code,
-                execution.safe_error_details,
+                error_code,
+                safe_error_details,
+                output=output,
             )
         )
     next_cursor = (
@@ -536,6 +574,22 @@ async def project_captured_session_timeline(
         )
     )
     return Page(tuple(turns), next_cursor)
+
+
+async def _committed_output(
+    payload: StoredPayload, transcript_store: SessionTimelineTranscriptStore,
+) -> JsonValue:
+    try:
+        if payload.kind == "inline":
+            value = payload.decode()
+        else:
+            raw = await transcript_store.read_conversation_payload(payload)
+            value = raw.decode("utf-8") if payload.encoding == "utf-8" else json.loads(raw.decode("utf-8"))
+        return normalize_json_value(value)
+    except AIError:
+        raise
+    except (UnicodeDecodeError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 __all__ = [

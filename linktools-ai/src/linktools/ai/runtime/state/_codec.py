@@ -189,6 +189,7 @@ from ._contracts import (
     ResultRecord,
     RuntimePayloadRef,
     SessionRecord,
+    SessionTurnCommit,
     StoredAgentRunCheckpoint,
     StoredUserInput,
     TaskPreparedInputRecord,
@@ -330,6 +331,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("resource_ref", ResourceRef),
     ("result_record", ResultRecord),
     ("session_record", SessionRecord),
+    ("session_turn_commit", SessionTurnCommit),
     ("stored_agent_run_checkpoint", StoredAgentRunCheckpoint),
     ("object_ref", ObjectRef),
     ("stored_payload", StoredPayload),
@@ -1590,6 +1592,25 @@ def decode_domain(value: JsonValue, target: type[DomainT]) -> DomainT:
     return _decode_domain(value, target, _CURRENT_CODEC)  # type: ignore[return-value]
 
 
+def encode_session_turn_commit(value: SessionTurnCommit) -> Mapping[str, JsonValue]:
+    """Encode the current flat conversation commit row."""
+    encoded = cast(Mapping[str, JsonValue], encode_domain(value))
+    return {"version": 1, **cast(Mapping[str, JsonValue], encoded["fields"])}
+
+
+def decode_session_turn_commit(value: object) -> SessionTurnCommit:
+    """Decode terminal turn metadata with the same contract as domain values."""
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return decode_domain({
+        "$dataclass": "session_turn_commit",
+        "fields": {key: item for key, item in value.items() if key != "version"},
+    }, SessionTurnCommit)
+
+
 def _decode_enveloped_domain(
     value: Mapping[str, JsonValue],
     target: type[DomainT],
@@ -2468,6 +2489,7 @@ __all__ = [
     "encode_record",
     "iter_runtime_object_dependencies",
     "iter_runtime_object_refs",
+    "encode_session_turn_commit", "decode_session_turn_commit",
     "parse_envelope",
     "wire_type_id",
 ]

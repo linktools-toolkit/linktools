@@ -21,7 +21,7 @@ from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
-from .test_session_timeline import _execution, _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
 
 pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
@@ -36,13 +36,17 @@ def _service(state: RuntimeStorage, authorization=None) -> RuntimeSessionService
     )
 
 
-async def _admit(state, execution_id="active", status=ExecutionStatus.FAILED):
-    await state.execution.executions.create(replace(
-        _execution(execution_id, status=status, prompt=execution_id), result=None,
-    ))
-    return await state.conversation.sessions.admit_execution(
-        "session", tenant_id="tenant", execution_id=execution_id, expected=None,
+async def _admit(state, execution_id="active", status=ExecutionStatus.FAILED, *, expected=None):
+    await state.execution.executions.create(
+        _execution(execution_id, status=status, prompt=execution_id),
     )
+    admitted = await state.conversation.sessions.admit_execution(
+        "session", tenant_id="tenant", execution_id=execution_id, expected=expected,
+    )
+    if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        execution = await state.execution.executions.get(execution_id, tenant_id="tenant")
+        await _commit_empty_turn(state, execution)
+    return admitted
 
 
 async def _release(state, execution_id):
@@ -256,7 +260,7 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
             detail = await service.refresh("session", principal=_PRINCIPAL, limit=1, cursor=page.next_cursor)
             assert [turn.execution_id for turn in detail.timeline.items] == ["older"]
             assert detail.session.active_execution_id == "active"
-        assert seen == [("older", "active")]
+        assert seen == [("active",)]
     finally:
         await state.close()
 
@@ -303,7 +307,7 @@ async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp
             event.remove(engine.sync_engine, "begin", begin)
         assert detail.timeline.items[0].execution_id == "active"
         assert len(begins) == 2
-        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 6
+        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 5
     finally:
         await state.close()
 
@@ -320,10 +324,12 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
         await _admit(state, "success", ExecutionStatus.SUCCEEDED)
         run_id, count = await _materialize_conversation(state, created.history_id)
         sessions = state.conversation.sessions
+        execution = await state.execution.executions.get("success", tenant_id="tenant")
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
                 start_message_index=0, end_message_index=count,
+                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",

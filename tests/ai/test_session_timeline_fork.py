@@ -26,6 +26,8 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.storage import StoredPayload
 
+from .test_session_timeline import _commit_empty_turn
+
 
 def _binding() -> AgentBindingContract:
     return AgentBindingContract(
@@ -153,6 +155,7 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
             },
             state.execution.executions.state_store,
         )
+        await _commit_empty_turn(state, executions.values["stable"])
         service = RuntimeSessionService(
             state.conversation,
             executions,  # type: ignore[arg-type]

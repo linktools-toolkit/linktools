@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.core import SessionStatus
+from linktools.ai.core import ExecutionStatus, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._runtime_commands import _timeline_turn_message_range
@@ -17,6 +17,8 @@ from linktools.ai.runtime.state._contracts import (
     SessionRecord,
 )
 from linktools.ai.runtime.state._store import StoredFact
+
+from .test_session_timeline import _commit_fields, _execution
 
 
 def _session() -> SessionRecord:
@@ -71,6 +73,7 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
                 execution_id="success",
                 start_message_index=0,
                 end_message_index=2,
+                **_commit_fields(_execution("success", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         await state.conversation.sessions.state_store.mutate(commit)
@@ -170,6 +173,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
                 execution_id="duplicate",
                 start_message_index=0,
                 end_message_index=2,
+                **_commit_fields(_execution("duplicate", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         with pytest.raises(AIError) as captured:

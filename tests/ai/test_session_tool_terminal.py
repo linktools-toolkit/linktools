@@ -473,29 +473,22 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
             storage=state,
             features=application,
         ) as runtime:
-            original_release = state.conversation.sessions.release_execution
+            original_mutate = state.conversation.sessions.state_store.mutate
 
             async def conflict_after_session_reservation(
                 _claim: Any,
             ) -> Any:
                 raise AIError(ErrorCode.SESSION_CONFLICT)
 
-            async def fail_session_release(
-                session_id: str,
-                *,
-                tenant_id: str,
-                execution_id: str,
-                history_unavailable: bool = False,
-            ) -> Any:
-                assert not history_unavailable
+            async def fail_session_release(callback, *args, **kwargs) -> Any:
+                if callback.__name__ != "release_conversation":
+                    return await original_mutate(callback, *args, **kwargs)
                 if release_committed:
-                    await original_release(
-                        session_id,
-                        tenant_id=tenant_id,
-                        execution_id=execution_id,
-                        history_unavailable=history_unavailable,
-                    )
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    await original_mutate(callback, *args, **kwargs)
+                raise AIError(
+                    ErrorCode.STORAGE_COMMIT_UNKNOWN if release_committed
+                    else ErrorCode.STORAGE_RECOVERY_REQUIRED
+                )
 
             with monkeypatch.context() as scoped:
                 scoped.setattr(
@@ -504,8 +497,8 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
                     conflict_after_session_reservation,
                 )
                 scoped.setattr(
-                    state.conversation.sessions,
-                    "release_execution",
+                    state.conversation.sessions.state_store,
+                    "mutate",
                     fail_session_release,
                 )
                 await runtime.agents.get("default").create_session("session")
@@ -515,7 +508,9 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
                         "inspect",
                         idempotency_key="turn-cleanup-restart",
                     )
-                assert rejected.value.code is ErrorCode.SESSION_CONFLICT
+                assert rejected.value.code is (
+                    ErrorCode.SESSION_CONFLICT if release_committed else ErrorCode.STORAGE_RECOVERY_REQUIRED
+                )
 
                 executions = await state.execution.executions.list_by_session(
                     "session",
@@ -534,13 +529,13 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
                     tenant_id=runtime.default_principal.tenant_id,
                 )
                 assert checkpoint is not None
-                assert checkpoint.state.value == "admitted"
+                assert checkpoint.state.value == ("completed" if release_committed else "admitted")
                 recoverable = await state.recovery.checkpoints.list_recoverable_page(
                     tenant_id=runtime.default_principal.tenant_id,
                     cursor=None,
                     limit=10,
                 )
-                assert any(item.execution_id == execution_id for item in recoverable.items)
+                assert any(item.execution_id == execution_id for item in recoverable.items) is not release_committed
                 session_record = await state.conversation.sessions.get(
                     "session",
                     tenant_id=runtime.default_principal.tenant_id,

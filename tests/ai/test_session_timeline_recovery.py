@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """Session timeline recovery handoff regressions."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -26,8 +28,13 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     SessionRecord,
 )
-from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    AgentRunCheckpoint,
+    AgentRunRecord,
+)
 from linktools.ai.storage import StoredPayload
+from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from tests.ai.test_session_timeline import _execution
 
 
 def _session() -> SessionRecord:
@@ -92,7 +99,8 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
                     "target": RuntimeDomain.CONVERSATION,
                     "agent_run_id": "run",
                 }
-                await archive.materialize_checkpoint(run, agent_run_checkpoint)
+                if await archive.latest_checkpoint(agent_run_id="run") is None:
+                    await archive.materialize_checkpoint(run, agent_run_checkpoint)
 
         backend = object.__new__(LocalExecutionBackend)
         backend._tenant_id = "tenant"
@@ -105,6 +113,32 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         }
         backend._run_store = state.run_store
         backend._agent_run_lifecycle = Lifecycle()
+        terminal = replace(
+            _execution("execution", status=ExecutionStatus.SUCCEEDED, prompt="prompt"),
+            conversation=True,
+        )
+        observed = replace(terminal, status=ExecutionStatus.FINALIZING, result=None)
+
+        async def load_execution(execution_id: str, *, tenant_id: str):
+            assert execution_id == "execution" and tenant_id == "tenant"
+            return observed
+
+        async def get_result(execution_id: str, *, tenant_id: str):
+            assert execution_id == "execution" and tenant_id == "tenant"
+            return observed.result
+
+        backend.load_execution = load_execution
+        backend._execution = SimpleNamespace(
+            executions=SimpleNamespace(get_result=get_result)
+        )
+        backend._runtime_commands = RuntimeStateCommands(
+            state.execution.executions,
+            namespace="session-timeline-recovery",
+            events=state.execution.events,
+            conversation=state.conversation.sessions,
+            conversation_run_store=archive,
+            background_tasks=set(),
+        )
 
         intent = RecoveryConversationIntent(
             "session",
@@ -147,6 +181,17 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             history_id=session.history_id,
             message_count=2,
         )
+        commits = await state.conversation.sessions.list_timeline_commits(
+            "session",
+            tenant_id="tenant",
+            start_turn_seq=1,
+            end_turn_seq=2,
+        )
+        assert commits == ()
+        assert resolved.active_execution_id == "execution"
+
+        observed = terminal
+        await backend._resolve_handoff_conversation(recovery_checkpoint, handoff)
         commits = await state.conversation.sessions.list_timeline_commits(
             "session",
             tenant_id="tenant",

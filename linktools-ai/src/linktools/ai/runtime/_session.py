@@ -56,6 +56,7 @@ from .state._contracts import (
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
+    SessionTurnCommit,
 )
 from .state._codec import decode_domain, encode_domain
 from .state._conversation_repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
@@ -349,6 +350,10 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
 
 
     @staticmethod
+    def _display_commit_identity(record: SessionTurnCommit) -> tuple[int, str, str, datetime]:
+        return record.turn_seq, record.session_id, record.execution_id, record.created_at
+
+    @staticmethod
     def _decode_display(value: object) -> SessionDetail:
         # These public view dataclasses intentionally do not enforce wire types.
         # Validate the disposable representation without registering durable types.
@@ -389,6 +394,7 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             turns.append(SessionTurn(**{
                 **turn, "status": ExecutionStatus(turn["status"]), "items": tuple(items),
                 "user_input": normalize_json_value(turn["user_input"]),
+                "output": normalize_json_value(turn["output"]),
                 "safe_error_details": normalize_json_value(turn["safe_error_details"]),
             }))
         return SessionDetail(view, Page(tuple(turns), timeline["next_cursor"]))
@@ -423,10 +429,24 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 if token is not None:
                     self._cursor_signer.decode(token)
             identities = entry["executions"]
-            if not isinstance(identities, dict) or not all(isinstance(key, str) for key in identities):
+            commits = entry["commits"]
+            if (not isinstance(identities, dict) or not all(isinstance(key, str) for key in identities)
+                    or not isinstance(commits, dict) or not all(isinstance(key, str) for key in commits)
+                    or set(identities) & set(commits)):
+                return None
+            for execution_id, identity in commits.items():
+                sequence, source_session_id, committed_execution_id, created_at = identity
+                if (type(sequence) is not int or sequence < 1
+                        or source_session_id != header.id or committed_execution_id != execution_id
+                        or not isinstance(created_at, datetime)):
+                    return None
+            if len({identity[0] for identity in commits.values()}) != len(commits):
                 return None
             if (detail.session.active_execution_id is not None and detail.session.active_execution_id not in identities
-                    or not all(turn.execution_id in identities for turn in detail.timeline.items)
+                    or not all(
+                        turn.execution_id in (commits if turn.conversation_committed else identities)
+                        for turn in detail.timeline.items
+                    )
                     or detail.session.session_id != entry["root"][0]
                     or detail.session.agent_id != entry["root"][2]):
                 return None
@@ -474,6 +494,17 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
             if any(self._display_execution_identity(records[key]) != identity
                    for key, identity in identities.items()):
                 return False
+            if commits:
+                sequences = tuple(identity[0] for identity in commits.values())
+                current_commits = await sessions.list_timeline_commits(
+                    record.session_id, tenant_id=principal.tenant_id,
+                    start_turn_seq=min(sequences), end_turn_seq=max(sequences) + 1,
+                )
+                retained = {value.execution_id: self._display_commit_identity(value) for value in current_commits}
+                if any(retained.get(key) != identity for key, identity in commits.items()):
+                    return False
+            if required_end == 0:
+                return True
             if record.history_id is None:
                 return False
             value = await histories.get_with_head(
@@ -533,6 +564,8 @@ class RuntimeSessionService(SessionManager[ExecutionHandle]):
                 "executions": {key: self._display_execution_identity(value)
                                for key, value in state.executions.items()
                                if pending is None or key != pending.execution_id},
+                "commits": {value.execution_id: self._display_commit_identity(value)
+                            for value in state.commits.values()},
                 "pending": None if pending is None else self._display_execution_identity(pending),
                 "message_end": max((value.end_message_index for value in state.commits.values()), default=0),
                 "detail": asdict(detail),

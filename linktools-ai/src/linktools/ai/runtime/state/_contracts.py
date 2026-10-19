@@ -13,7 +13,7 @@ from ...execution import (RuntimePayloadRef, StoredUserInput, ExecutionRecord, E
 import binascii
 import json
 from ...session import SessionRepository as SessionRepositoryContract
-from ...session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommitRef)
+from ...session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1253,6 +1253,11 @@ class RuntimeRepository(Protocol):
 
 
 class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
+    async def pending_turn_commit_in_transaction(
+        self, transaction: StateTransaction, *, session_id: str, execution_id: str,
+        allow_unadmitted: bool = False,
+    ) -> SessionTurnCommit | None: ...
+
     async def commit_timeline_turn_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1262,7 +1267,15 @@ class SessionRepository(SessionRepositoryContract, RuntimeRepository, Protocol):
         execution_id: str,
         start_message_index: int,
         end_message_index: int,
-    ) -> SessionTurnCommitRef: ...
+        stored_user_input: StoredUserInput,
+        output: StoredPayload | None,
+        status: ExecutionStatus,
+        created_at: datetime,
+        updated_at: datetime,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        allow_unadmitted: bool = False,
+    ) -> SessionTurnCommit | None: ...
 
     async def get_in_transaction(
         self,

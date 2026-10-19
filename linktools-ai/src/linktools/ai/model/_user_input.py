@@ -3,6 +3,7 @@
 """Pure validation for user input accepted by runtime request contracts."""
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TypeAlias
 
 from pydantic_ai.messages import (
@@ -17,8 +18,9 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from ..core import JsonValue, WorkspaceFileInput, normalize_json_value, validate_user_prompt
+from ..core import canonical_sha256, JsonValue, WorkspaceFileInput, normalize_json_value, validate_user_prompt
 from ..errors import AIError, ErrorCode
+from ..storage import StoredPayload
 
 UserPromptInput: TypeAlias = str | Sequence[UserContent | WorkspaceFileInput]
 CanonicalUserInput: TypeAlias = str | tuple[UserContent | WorkspaceFileInput, ...]
@@ -149,3 +151,34 @@ __all__ = [
     "validate_user_input",
     "normalize_input_files",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredUserInput:
+    codec: str
+    payload: StoredPayload
+    view: Mapping[str, JsonValue] | None = None
+
+    def __post_init__(self) -> None:
+        if self.codec not in {"text", "user-content-v1", "task-input-v1"}:
+            raise ValueError("stored user input codec is invalid")
+        if not isinstance(self.payload, StoredPayload):
+            raise TypeError("stored user input payload is invalid")
+        if self.view is not None:
+            if not isinstance(self.view, Mapping) or self.view.get("version") != 1:
+                raise ValueError("stored user input view is invalid")
+            try:
+                canonical_sha256(self.view)
+            except (TypeError, ValueError) as error:
+                raise ValueError("stored user input view is invalid") from error
+            object.__setattr__(self, "view", dict(self.view))
+
+    @property
+    def digest(self) -> str:
+        return canonical_sha256(
+            {
+                "codec": self.codec,
+                "payload_digest": self.payload.digest,
+                "payload_size": self.payload.size,
+            }
+        )

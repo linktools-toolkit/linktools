@@ -57,6 +57,15 @@ class RuntimeRetentionController:
         self, execution_id: str, *, tenant_id: str, terminal_commit: bool = False,
     ) -> bool:
         repository = self._execution.executions
+        retained = await repository.get(execution_id, tenant_id=tenant_id)
+        if retained is not None and retained.session_id is not None and retained.conversation:
+            sessions = self._conversation.sessions
+            await sessions.state_store.read(
+                lambda transaction: sessions.pending_turn_commit_in_transaction(
+                    transaction, session_id=retained.session_id, execution_id=execution_id,
+                    allow_unadmitted=retained.started_at is None,
+                )
+            )
 
         async def close_and_read(
             _transaction: "StateTransaction | None" = None,
@@ -98,6 +107,7 @@ class RuntimeRetentionController:
                     tenant_id=tenant_id,
                     execution_id=execution_id,
                     history_unavailable=execution.invalidates_session_history,
+                    require_turn_commit=execution.conversation,
                 )
         if execution is not None:
             agent_run_ids = tuple(

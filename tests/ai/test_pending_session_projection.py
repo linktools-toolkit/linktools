@@ -24,7 +24,7 @@ from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from .test_session_refresh import _service
-from .test_session_timeline import _execution, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -194,7 +194,10 @@ async def test_pending_session_projection_source_wins_observation_race(
         canonical = await reader_storage.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
         assert canonical is not None and detail.timeline.items[0].status is canonical.status
         assert detail.session.active_execution_id == (execution.execution_id if transition == "promote" else None)
-        assert detail.timeline.items[0].conversation_committed is (transition == "complete")
+        assert detail.timeline.items[0].conversation_committed is (transition in {"complete", "cancel"})
+        if transition == "cancel":
+            assert detail.timeline.items[0].status is ExecutionStatus.CANCELLED
+            assert detail.timeline.items[0].output is None and detail.timeline.items[0].items == ()
         if transition == "promote":
             await owner.executions._service.release_dependency_hold(execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold")
         finish.set()
@@ -331,6 +334,10 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
                     _execution(execution_id, status=ExecutionStatus.FAILED, prompt="canonical"), result=None,
                 ))
             await sessions.admit_execution("session", tenant_id="tenant", execution_id=execution_id, expected=None)
+            if execution_id == "newer":
+                await _commit_empty_turn(
+                    storage, await storage.execution.executions.get(execution_id, tenant_id="tenant"),
+                )
             await sessions.release_execution("session", tenant_id="tenant", execution_id=execution_id)
         service = _service(storage)
         principal = Principal("owner", "tenant")

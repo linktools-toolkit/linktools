@@ -14,6 +14,7 @@ from ..core import (RuntimeDomain, RunBudget, ExecutionEventType, ExecutionLinea
     normalize_correlation, normalize_execution_mode, normalize_thinking)
 from ..errors import ErrorDiagnostics
 from ..storage import StoredPayload
+from ..model import StoredUserInput
 from ..task import TaskBindingContract
 
 
@@ -26,37 +27,6 @@ def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonV
 class RuntimePayloadRef:
     payload: StoredPayload
     source_domain: RuntimeDomain | None
-
-
-@dataclass(frozen=True, slots=True)
-class StoredUserInput:
-    codec: str
-    payload: StoredPayload
-    view: Mapping[str, JsonValue] | None = None
-
-    def __post_init__(self) -> None:
-        if self.codec not in {"text", "user-content-v1", "task-input-v1"}:
-            raise ValueError("stored user input codec is invalid")
-        if not isinstance(self.payload, StoredPayload):
-            raise TypeError("stored user input payload is invalid")
-        if self.view is not None:
-            if not isinstance(self.view, Mapping) or self.view.get("version") != 1:
-                raise ValueError("stored user input view is invalid")
-            try:
-                canonical_sha256(self.view)
-            except (TypeError, ValueError) as error:
-                raise ValueError("stored user input view is invalid") from error
-            object.__setattr__(self, "view", dict(self.view))
-
-    @property
-    def digest(self) -> str:
-        return canonical_sha256(
-            {
-                "codec": self.codec,
-                "payload_digest": self.payload.digest,
-                "payload_size": self.payload.size,
-            }
-        )
 
 
 @dataclass(frozen=True, slots=True)

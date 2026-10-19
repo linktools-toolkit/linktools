@@ -319,6 +319,14 @@ class RuntimeHistory:
                   await executions.get_result(execution_id, tenant_id=principal.tenant_id))
         if stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record.conversation and record.session_id is not None:
+            sessions, _ = self._require_session_reader()
+            await sessions.state_store.read(
+                lambda transaction: sessions.pending_turn_commit_in_transaction(
+                    transaction, session_id=record.session_id, execution_id=record.execution_id,
+                    allow_unadmitted=record.started_at is None,
+                )
+            )
 
         if record.status is not ExecutionStatus.SUCCEEDED:
             if stored.output is not None:

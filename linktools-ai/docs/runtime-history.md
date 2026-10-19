@@ -234,6 +234,33 @@ form; reconcile by exact logical identity and lifecycle state. A non-null event
 coordinate certifies that event's persistence, not a newer transcript or model
 interaction read boundary. None of these coordinates are interchangeable.
 
+With `ConversationCapability`, each admitted completed session turn retains its canonical
+user input and public final output alongside the transcript range. `SessionTurn.output`
+is the committed execution output, including structured JSON or JSON null; it is
+not reconstructed from model text parts. Check `status` to distinguish successful
+null output from failed or cancelled turns, whose output is absent. Turns with no
+model messages still retain their input, status and safe error details.
+
+Completed timeline entries are owned by Conversation and remain readable after
+Execution records are removed. Object-backed input and output bytes are retained
+in the Conversation object store before publishing the turn. Runtime close and
+session close do not delete durable conversation history; existing offline object
+cleanup uses the retained turn references as roots. Forks retain the selected
+parent turn prefix. Model context compaction does not rewrite the canonical input
+or final output. Without `ConversationCapability`, standalone execution results
+retain their existing execution-scoped lifetime.
+
+A same-group terminal commit publishes execution and conversation together. With
+separate transaction groups, transcript preparation can precede execution commit,
+but the completed turn envelope is published only after terminal truth is durable,
+with session release. An active timeline never infers successful output from a
+prepared transcript. If execution terminal state is durable but the retained turn
+receipt is still unconfirmed, result and retained timeline reads report a typed
+storage recovery error. Admission and execution retention remain held until the
+existing prepared handoff is reconciled; execution business status is not rewritten.
+Malformed retained data remains an integrity error. Failed or cancelled turn
+input can appear in the timeline without being added to the next model context.
+
 Session timeline references use one-based `turn_seq` within their owning
 session; `timeline_parent_turn_seq` fixes the parent-session turn cutoff for
 a fork. These do not replace `SessionTurnItem.ordinal`. Generic storage fact

@@ -157,6 +157,16 @@ async def test_cached_execution_absence_does_not_reject_new_source_display(tmp_p
 
         await other.execution.executions.state_store.mutate(remove)
         clock.now += 3.001
+        assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == detail
+
+        async def remove_retained_turn(transaction):
+            records = await transaction.scan_records()
+            await transaction.delete_records(tuple(
+                record.key_digest for record in records if record.kind == "session_turn_commit"
+            ))
+
+        await other.conversation.sessions.state_store.mutate(remove_retained_turn)
+        clock.now += 3.001
         with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
             await service.refresh("session", principal=_PRINCIPAL, max_age=3)
     finally:

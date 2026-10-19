@@ -21,13 +21,13 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionRepository,
     SessionRecord,
     SessionRepository,
-    SessionTurnCommitRef,
+    SessionTurnCommit,
 )
 from linktools.ai.runtime.state._conversation_repositories import SessionRepositoryImpl
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
 from sqlalchemy import event
 
-from .test_session_timeline import _execution, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -77,7 +77,7 @@ class ParallelSessions:
 
     async def list_timeline_commits(
         self, session_id: str, *, tenant_id: str, start_turn_seq: int, end_turn_seq: int,
-    ) -> tuple[SessionTurnCommitRef, ...]:
+    ) -> tuple[SessionTurnCommit, ...]:
         read = self.repository.list_timeline_commits(
             session_id, tenant_id=tenant_id, start_turn_seq=start_turn_seq, end_turn_seq=end_turn_seq,
         )
@@ -93,7 +93,7 @@ class ParallelSessionSubclass(SessionRepositoryImpl):
 
     async def list_timeline_commits(
         self, session_id: str, *, tenant_id: str, start_turn_seq: int, end_turn_seq: int,
-    ) -> tuple[SessionTurnCommitRef, ...]:
+    ) -> tuple[SessionTurnCommit, ...]:
         read = super().list_timeline_commits(
             session_id, tenant_id=tenant_id, start_turn_seq=start_turn_seq, end_turn_seq=end_turn_seq,
         )
@@ -122,6 +122,16 @@ async def _populate(state: RuntimeStorage) -> None:
     ))
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id="failed", expected=None,
+    )
+    await _commit_empty_turn(state, await state.execution.executions.get("failed", tenant_id="tenant"))
+    await state.conversation.sessions.release_execution(
+        "session", tenant_id="tenant", execution_id="failed",
+    )
+    await state.execution.executions.create(
+        _execution("active", status=ExecutionStatus.PENDING_START, prompt="pending prompt"),
+    )
+    await state.conversation.sessions.admit_execution(
+        "session", tenant_id="tenant", execution_id="active", expected=None,
     )
 
 
@@ -154,7 +164,8 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
             injected["sessions"] = adapter
         actual = await _history(state, **injected).session_timeline("session", principal=principal)
         assert actual == expected
-        assert [turn.execution_id for turn in actual.items] == ["failed"]
+        assert [turn.execution_id for turn in actual.items] == ["failed", "active"]
+        assert [turn.conversation_committed for turn in actual.items] == [True, False]
     finally:
         await state.close()
 
@@ -179,7 +190,7 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: 
         finally:
             event.remove(engine, "before_cursor_execute", statement)
             event.remove(engine, "begin", begin)
-        assert [turn.execution_id for turn in result.items] == ["failed"]
+        assert [turn.execution_id for turn in result.items] == ["failed", "active"]
         assert len(begins) == 2  # Fresh authorization header, then one metadata snapshot.
         assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) == 6
     finally:

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ...errors import AIError, ErrorCode
+from ...storage import StoredPayload
 from ._contracts import LoadedContextMessage, LoadedModelContext
 from ._step_archive import InMemoryStepArchive, StateStepArchive
 from ._step_contracts import AgentRunStore
@@ -17,6 +18,12 @@ class ConversationPersistence:
 
     def __init__(self, archive: AgentRunStore) -> None:
         self.archive = archive
+
+    async def read_conversation_payload(self, payload: StoredPayload) -> bytes:
+        archive = self.archive
+        if not isinstance(archive, StateStepArchive):
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        return await archive.transcript_repository.read_payload(payload)
 
     async def iter_session_messages(
         self,
