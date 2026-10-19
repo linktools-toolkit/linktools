@@ -14,8 +14,9 @@ from linktools.ai.core import (
     ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute, SessionDetail
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, SessionDetail
+from linktools.ai.storage import StorageRoute
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
 
@@ -26,8 +27,8 @@ pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
 
 
-def _service(state: RuntimeStorage, authorization=None) -> DefaultSessionService:
-    return DefaultSessionService(
+def _service(state: RuntimeStorage, authorization=None) -> RuntimeSessionService:
+    return RuntimeSessionService(
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("refresh", b"session-refresh-key"),
@@ -262,8 +263,8 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
 
 async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: Path) -> None:
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:

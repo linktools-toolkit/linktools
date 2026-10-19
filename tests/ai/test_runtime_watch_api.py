@@ -18,7 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
-from linktools.ai.runtime import _cursor
+from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
 from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor, encode_graph_watch_cursor

@@ -16,7 +16,7 @@ from linktools.ai.core import (
     ResourceRef,
     SessionStatus,
 )
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import ListSessionRequest
 from linktools.ai.runtime.state._contracts import SessionRecord
 
@@ -164,7 +164,7 @@ def _session_record(
 async def test_session_load_reuses_reconciled_active_execution() -> None:
     record = _session_record("session", active_execution_id="execution")
     executions = _Executions()
-    service = DefaultSessionService(
+    service = RuntimeSessionService(
         SimpleNamespace(sessions=_Sessions(record)),  # type: ignore[arg-type]
         executions,  # type: ignore[arg-type]
         _Authorization(),  # type: ignore[arg-type]
@@ -196,7 +196,7 @@ async def test_session_list_batches_active_execution_reads() -> None:
         _session_record("session-idle", active_execution_id=None),
     )
     executions = _BatchExecutions()
-    service = DefaultSessionService(
+    service = RuntimeSessionService(
         SimpleNamespace(sessions=_ListSessions(records)),  # type: ignore[arg-type]
         executions,  # type: ignore[arg-type]
         _Authorization(),  # type: ignore[arg-type]

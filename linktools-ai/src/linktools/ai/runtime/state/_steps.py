@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Runtime AgentRunStore orchestration over durable archives."""
 
+from ...storage import CacheCapabilities, StorageRetentionMode
+
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
@@ -38,7 +40,7 @@ from ._contracts import (
 )
 from ._execution_repositories import ExecutionRepositoryImpl
 from ._durability import CommitObservation, DurableCommitState, _await_owned_task, run_durable_commit
-from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._plan import RuntimeDomain
 from ._step_archive import (
     CapturedExecutionProjection,
     ExecutionProjectionBatch,
@@ -115,11 +117,12 @@ class RuntimeAgentRunStore(AgentRunStore):
         conversation_archive: AgentRunStore,
         execution_archive: AgentRunStore | None,
         recovery_archive: AgentRunStore | None,
-        conversation_retention: RuntimeRetentionMode,
-        execution_retention: RuntimeRetentionMode,
-        recovery_retention: RuntimeRetentionMode,
+        conversation_retention: StorageRetentionMode,
+        execution_retention: StorageRetentionMode,
+        recovery_retention: StorageRetentionMode,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
+        trace_cache: CacheCapabilities | None = None,
     ) -> None:
         del conversation_retention, execution_retention, recovery_retention
         self._staging = staging
@@ -143,7 +146,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
         self._history_lock = _AgentRunHistoryLock()
         self.trace_persistence = TracePersistence(
-            execution_archive, history_lock=self._history_lock,
+            execution_archive, history_lock=self._history_lock, cache=trace_cache,
             ensure_ready=self._ensure_business,
             require_mutable=self._ensure_run_mutable,
             has_flight=lambda run_id: run_id in self._durability_flights,

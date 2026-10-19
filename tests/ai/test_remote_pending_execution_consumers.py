@@ -52,11 +52,11 @@ class _RemotePendingTurns(_PendingExecutionTurns):
 
 
 @asynccontextmanager
-async def _consumer():
+async def _consumer(*, authorization=None):
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="remote-pending", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
-    coordination = _PendingTurnCoordination(cache, namespace="remote-pending", tenant_id="tenant")
+    coordination = _PendingTurnCoordination(cache, cache, namespace="remote-pending", tenant_id="tenant")
     owned = await coordination.claim(
         session_key="session", request_key="request", request_digest="digest",
         execution_id="execution", owner_id="owner", lease_seconds=30,
@@ -68,7 +68,7 @@ async def _consumer():
     bridge.pending_turns = pending
     service = DefaultExecutionService(
         state.execution, state.object_store(RuntimeDomain.EXECUTION),
-        TenantAuthorizationPolicy("tenant"), sessions=state.conversation.sessions,
+        authorization or TenantAuthorizationPolicy("tenant"), sessions=state.conversation.sessions,
         catalog=None, compiler=None, runtime_bridge=bridge,
         live_broker=LiveExecutionEventBroker(), history_reader=None,
     )
@@ -232,23 +232,22 @@ async def test_terminal_cache_payload_never_supplies_a_successful_result() -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ("inspect", "result", "wait", "cancel", "list_children"))
 async def test_remote_authorization_cannot_bypass_canonical_source_policy(method) -> None:
-    async with _consumer() as (state, service, pending, record, coordination, owned, _cache):
+    seeded = False
+    policy = TenantAuthorizationPolicy("tenant")
+
+    class Authorization:
+        async def authorize(self, principal, action, resource):
+            nonlocal seeded
+            await policy.authorize(principal, action, resource)
+            if resource.owner_principal_id is None and principal.principal_id != record.principal_id:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            if not seeded:
+                seeded = True
+                await state.execution.executions.create_with_history_head(_terminal(record))
+
+    async with _consumer(authorization=Authorization()) as (state, service, pending, record, coordination, owned, _cache):
         other = Principal("other", "tenant", "service")
         await coordination.publish(replace(record, principal_id="other"), owned)
-        seeded = False
-        policy = TenantAuthorizationPolicy("tenant")
-
-        class Authorization:
-            async def authorize(self, principal, action, resource):
-                nonlocal seeded
-                await policy.authorize(principal, action, resource)
-                if resource.owner_principal_id is None and principal.principal_id != record.principal_id:
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                if not seeded:
-                    seeded = True
-                    await state.execution.executions.create_with_history_head(_terminal(record))
-
-        service._authorization = Authorization()
         with pytest.raises(AIError) as raised:
             if method == "cancel":
                 await service.cancel("execution", CancelExecutionRequest(other, "conflicting-owner"))
@@ -260,16 +259,17 @@ async def test_remote_authorization_cannot_bypass_canonical_source_policy(method
 
 @pytest.mark.asyncio
 async def test_strong_result_refreshes_source_when_owner_commits_during_remote_read(monkeypatch) -> None:
-    async with _consumer() as (state, service, pending, record, coordination, owned, _cache):
-        authorized = False
-        policy = TenantAuthorizationPolicy("tenant")
-        read_remote = pending.read_remote_execution
+    authorized = False
+    policy = TenantAuthorizationPolicy("tenant")
 
-        class Authorization:
-            async def authorize(self, principal, action, resource):
-                nonlocal authorized
-                await policy.authorize(principal, action, resource)
-                authorized = True
+    class Authorization:
+        async def authorize(self, principal, action, resource):
+            nonlocal authorized
+            await policy.authorize(principal, action, resource)
+            authorized = True
+
+    async with _consumer(authorization=Authorization()) as (state, service, pending, record, coordination, owned, _cache):
+        read_remote = pending.read_remote_execution
 
         async def commit_during_read(execution_id, *, tenant_id):
             if authorized:
@@ -277,7 +277,6 @@ async def test_strong_result_refreshes_source_when_owner_commits_during_remote_r
                 await coordination.release(owned.lease)
             return await read_remote(execution_id, tenant_id=tenant_id)
 
-        service._authorization = Authorization()
         monkeypatch.setattr(pending, "read_remote_execution", commit_during_read)
         result = await service.result("execution", principal=_PRINCIPAL)
         assert result.status is ExecutionStatus.SUCCEEDED

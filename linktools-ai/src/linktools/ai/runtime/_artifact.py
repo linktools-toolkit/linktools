@@ -29,8 +29,8 @@ from ..core import (
     validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from .service_api import ArtifactDownload, ArtifactView
 from .state._contracts import ArtifactRepositories
 

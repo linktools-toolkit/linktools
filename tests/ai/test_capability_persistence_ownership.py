@@ -13,7 +13,8 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.runtime.state._conversation_persistence import ConversationPersistence
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
@@ -146,12 +147,13 @@ async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners() 
             None, history_lock=_AgentRunHistoryLock(), ensure_ready=ready,
             require_mutable=lambda _run: None, has_flight=lambda _run: False,
             flush=flush, flush_boundary=flush, background_tasks=tasks,
+            cache=InMemoryCacheBackend(max_bytes=65536),
         )
 
     owners.update((name, make_owner(name)) for name in ("first", "second"))
     try:
         for name, owner in owners.items():
-            owner.configure("same-run", cache=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
+            owner.configure("same-run", flush_interval=60.0)
             owner.dirty.add("same-run")
             await owner.defer("same-run", execution_id=name, producer_generation=1)
         for _ in range(_trace_persistence.DEFAULT_TRACE_BATCH_SIZE - 1):
@@ -277,9 +279,9 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
             StagingAgentRunStore(),
             conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
             execution_archive=None, recovery_archive=recovery if checkpoint_enabled else None,
-            conversation_retention=RuntimeRetentionMode.VOLATILE,
-            execution_retention=RuntimeRetentionMode.VOLATILE,
-            recovery_retention=RuntimeRetentionMode.VOLATILE,
+            conversation_retention=StorageRetentionMode.VOLATILE,
+            execution_retention=StorageRetentionMode.VOLATILE,
+            recovery_retention=StorageRetentionMode.VOLATILE,
             execution_repository=repository, tenant_id="tenant",
         )
         await store.initialize()

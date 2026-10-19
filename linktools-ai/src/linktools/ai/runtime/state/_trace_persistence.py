@@ -3,14 +3,14 @@
 """Trace projection scheduling over an explicitly borrowed write cache."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 from linktools.core import environ
 
 from ...core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
-from ...storage import BatchWriteScope
+from ...storage import BatchWriteScope, CacheCapabilities, WriteBufferBackend, WriteBufferEntry
 from ...errors import AIError, ErrorCode
 from ._durability import _await_owned_task
 from ._step_archive import _AgentRunHistoryLock, _ProjectionOffset
@@ -50,7 +50,12 @@ class TracePersistence:
         flush: _FlushProjection,
         flush_boundary: _FlushProjection,
         background_tasks: set[asyncio.Task[object]],
+        cache: CacheCapabilities | None = None,
     ) -> None:
+        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
+        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
+            raise TypeError("cache must implement append, read_batch and ack together")
+        self._cache = cache if isinstance(cache, WriteBufferBackend) and all(callable(method) for method in methods) else None
         self.archive = archive
         self.offsets: dict[str, _ProjectionOffset] = {}
         self.dirty: set[str] = set()
@@ -61,22 +66,21 @@ class TracePersistence:
         self._flush = flush
         self._flush_boundary = flush_boundary
         self._background_tasks = background_tasks
-        self._caches: dict[str, object | None] = {}
+        self._caches: dict[str, WriteBufferBackend | None] = {}
         self._buffers: dict[str, _ObservationBuffer] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     def configure(
-        self, agent_run_id: str, *, cache: object | None = None,
+        self, agent_run_id: str, *, batching: bool = True,
         batch_size: int = DEFAULT_TRACE_BATCH_SIZE,
         flush_interval: float = DEFAULT_TRACE_FLUSH_INTERVAL,
     ) -> None:
-        """Bind this run's cache and observation policy before admission."""
+        """Bind this run's observation policy before admission."""
         if agent_run_id in self._buffers:
             raise RuntimeError("observation batching cannot change during an active run")
-        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
-        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
-            raise TypeError("cache must implement append, read_batch and ack together")
-        self._caches[agent_run_id] = cache if all(callable(method) for method in methods) else None
+        if not isinstance(batching, bool):
+            raise TypeError("batching must be bool")
+        self._caches[agent_run_id] = self._cache if batching else None
         offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
         offset.observation_batch_size = batch_size
         offset.observation_flush_interval = flush_interval
@@ -118,7 +122,7 @@ class TracePersistence:
                 buffer = self._buffers.get(agent_run_id)
                 if buffer is None:
                     buffer = _ObservationBuffer()
-                    async def write_batch(batch: tuple[tuple[str, Hashable, bytes | None], ...]) -> None:
+                    async def write_batch(batch: tuple[WriteBufferEntry, ...]) -> None:
                         if buffer.paused:
                             return
                         offset.observation_task = asyncio.current_task()

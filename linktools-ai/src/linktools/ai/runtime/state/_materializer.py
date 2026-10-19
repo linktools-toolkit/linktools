@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Materialize Runtime repositories and their owned StateStore resources."""
 
+from ...storage import CacheBackend, StorageRoute
+
 import asyncio
 import hashlib
 import os
@@ -36,12 +38,7 @@ from ._contracts import (
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from ._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
-from ._plan import (
-    RuntimeDomain,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-    runtime_domain_uses_object_store,
-)
+from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 from ._recovery_repositories import build_recovery_repository_bundle
 from ._repositories import OperationLedgerRepositoryImpl, build_repository_bundle
 from ._retention import RuntimeRetentionController
@@ -91,22 +88,20 @@ async def materialize_runtime_storage(
     namespace: str,
     tenant_id: str,
     object_store: ObjectStore | None,
-    cache: object | None = None,
-    module_caches: Mapping[RuntimeDomain, object | None] | None = None,
     read_only: bool = False,
 ) -> _MaterializedRuntimeStorage:
-    module_caches = dict(module_caches or {})
-    def state_cache(domain: RuntimeDomain) -> object | None:
-        return module_caches.get(domain) if domain in {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT} else cache
+    def state_cache(domain: RuntimeDomain) -> CacheBackend | None:
+        selected = plan.route(domain).cache
+        return selected if isinstance(selected, CacheBackend) else None
 
     stores: dict[RuntimeDomain, StateStore] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
     try:
         sql_groups: dict[tuple[str, object], list[RuntimeDomain]] = {}
-        sql_routes: dict[tuple[str, object], RuntimeStorageRoute] = {}
+        sql_routes: dict[tuple[str, object], StorageRoute] = {}
         filesystem_domains: dict[Path, list[RuntimeDomain]] = {}
-        filesystem_routes: dict[Path, RuntimeStorageRoute] = {}
+        filesystem_routes: dict[Path, StorageRoute] = {}
         filesystem_member_roots: dict[RuntimeDomain, Path] = {}
         memory_group = InMemoryStateStorageGroup(read_only=read_only)
         for domain in RuntimeDomain:
@@ -329,7 +324,7 @@ async def materialize_runtime_storage(
         repositories = _repositories(bundles)
         objects = build_runtime_object_router(
             plan, object_store, stores, sql_contexts,
-            cache=cache, domain_caches=module_caches, namespace=namespace, tenant_id=tenant_id,
+            namespace=namespace, tenant_id=tenant_id,
         )
         run_store = build_runtime_agent_run_store(
             plan,
@@ -559,7 +554,7 @@ def _validate_filesystem_member_roots(
         for right_domain, right in ordered[index + 1 :]:
             if left == right or left in right.parents or right in left.parents:
                 raise ValueError(
-                    "filesystem RuntimeStorageRoute member paths overlap: "
+                    "filesystem StorageRoute member paths overlap: "
                     f"{left_domain.value}={left} {right_domain.value}={right}"
                 )
     reserved_roots = tuple(
@@ -574,7 +569,7 @@ def _validate_filesystem_member_roots(
                 or reserved in member.parents
             ):
                 raise ValueError(
-                    "filesystem RuntimeStorageRoute member path overlaps "
+                    "filesystem StorageRoute member path overlaps "
                     f"coordination storage: {domain.value}={member}"
                 )
 

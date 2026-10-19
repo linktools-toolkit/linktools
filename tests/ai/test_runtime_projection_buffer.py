@@ -31,7 +31,7 @@ async def _setup(tmp_path: Path, backend: str, cache: object | None):
     await repository.state_store.mutate(
         lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
     )
-    state.run_store.trace_persistence.configure("run", cache=cache, flush_interval=60.0)
+    state.run_store.trace_persistence.configure("run", flush_interval=60.0)
     state.run_store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
     await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
     return state
@@ -158,7 +158,7 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
     cache = _WriteOnlyCache()
     state = await _setup(tmp_path, backend, cache)
     store = state.run_store
-    store.trace_persistence.configure("run", cache=cache, batch_size=2, flush_interval=60.0)
+    store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
     archive = store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     source_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)

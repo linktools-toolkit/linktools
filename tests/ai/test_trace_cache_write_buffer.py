@@ -8,9 +8,11 @@ import pytest
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import StorageRoute, InMemoryCacheBackend
 from .test_observation_coalescing import _observe, _setup
+from .test_explicit_runtime_features import _FeatureModels, _definitions
 
 
 class ContentCache:
@@ -34,10 +36,10 @@ async def _wait_until(predicate):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cache', [None, ContentCache()])
 async def test_trace_without_write_cache_commits_each_boundary(tmp_path, cache):
-    state = await _setup(tmp_path, 'sqlite')
+    state = await _setup(tmp_path, 'sqlite', cache=cache)
     try:
         store = state.run_store
-        store.trace_persistence.configure('run', cache=cache, batch_size=128, flush_interval=60)
+        store.trace_persistence.configure('run', batch_size=128, flush_interval=60)
         archive = store.read_store(RuntimeDomain.TRACE)
         for index in range(1, 4):
             await _observe(store, index)
@@ -47,12 +49,17 @@ async def test_trace_without_write_cache_commits_each_boundary(tmp_path, cache):
         await state.close()
 
 
-def test_trace_rejects_partial_write_buffer():
+@pytest.mark.asyncio
+async def test_trace_rejects_partial_write_buffer():
     class Partial:
         async def append(self, *args, **kwargs):
             return True
-    with pytest.raises(TypeError, match='together'):
-        TraceCapability(cache=Partial())
+    features = _definitions()
+    features.capability(TraceCapability(storage=StorageRoute.memory(cache=Partial())), scope='runtime')
+    with pytest.raises(TypeError, match='append.*read_batch.*ack'):
+        async with Runtime.open('partial-trace-cache', storage=RuntimeStorage.in_memory(),
+                                models=_FeatureModels(), features=features):
+            pytest.fail('partial write buffers must be rejected before runtime admission')
 
 
 @pytest.mark.asyncio
@@ -65,10 +72,10 @@ async def test_trace_failed_cache_admission_uses_guarded_direct_commit(tmp_path,
                 raise RuntimeError('lost cache acknowledgement')
             return result
     cache = Cache(max_bytes=0 if failure == 'capacity' else 65536)
-    state = await _setup(tmp_path, 'sqlite')
+    state = await _setup(tmp_path, 'sqlite', cache=cache)
     try:
         store = state.run_store
-        store.trace_persistence.configure('run', cache=cache, flush_interval=60)
+        store.trace_persistence.configure('run', flush_interval=60)
         await _observe(store, 1)
         assert len(await store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id='run')) == 1
         assert 'run' not in store.trace_persistence.dirty
@@ -90,7 +97,7 @@ async def test_trace_callback_failure_surfaces_original_source_error(tmp_path, c
     async def fail(*args, **kwargs):
         attempted.set()
         raise error
-    owner.configure('run', cache=InMemoryCacheBackend(max_bytes=65536), batch_size=1)
+    owner.configure('run', batch_size=1)
     owner._flush = fail
     try:
         await _observe(store, 1)
@@ -113,11 +120,11 @@ async def test_trace_ack_failure_does_not_replay_committed_projection(tmp_path, 
     class Cache(InMemoryCacheBackend):
         async def ack(self, scope, ids):
             raise RuntimeError('cache ack unavailable')
-    state = await _setup(tmp_path, 'sqlite')
+    state = await _setup(tmp_path, 'sqlite', cache=Cache(max_bytes=65536))
     try:
         store = state.run_store
         owner = store.trace_persistence
-        owner.configure('run', cache=Cache(max_bytes=65536), batch_size=1)
+        owner.configure('run', batch_size=1)
         await _observe(store, 1)
         await _wait_until(lambda: 'run' not in owner.dirty)
         before = await state.execution.executions.get_history_head('execution', tenant_id='tenant')
@@ -148,7 +155,7 @@ async def test_trace_cache_timeout_settles_source_before_barrier_cancellation(tm
         await release.wait()
         await original(*args, **kwargs)
     owner._flush = gated
-    owner.configure('run', cache=InMemoryCacheBackend(max_bytes=65536), batch_size=1)
+    owner.configure('run', batch_size=1)
     try:
         await _observe(store, 1)
         await asyncio.wait_for(entered.wait(), 2)
@@ -181,12 +188,12 @@ async def test_trace_cache_timeout_settles_source_before_barrier_cancellation(tm
 
 @pytest.mark.asyncio
 async def test_trace_stop_before_dispatch_keeps_tail_for_atomic_owner(tmp_path):
-    state = await _setup(tmp_path, 'sqlite')
+    cache = InMemoryCacheBackend(max_bytes=65536)
+    state = await _setup(tmp_path, 'sqlite', cache=cache)
     try:
         store = state.run_store
         owner = store.trace_persistence
-        cache = InMemoryCacheBackend(max_bytes=65536)
-        owner.configure('run', cache=cache, batch_size=128, flush_interval=60)
+        owner.configure('run', batch_size=128, flush_interval=60)
         await _observe(store, 1)
         assert cache._pending_count == 1
         await owner.stop('run')
@@ -226,7 +233,7 @@ async def test_trace_timed_out_unknown_commit_keeps_authoritative_flight(tmp_pat
     monkeypatch.setattr(archive, 'sync_prepared_projection', write_failed)
     monkeypatch.setattr(archive, 'execution_history_head_record', readback_failed)
     owner._flush = gated
-    owner.configure('run', cache=InMemoryCacheBackend(max_bytes=65536), batch_size=1)
+    owner.configure('run', batch_size=1)
     await _observe(store, 1)
     await asyncio.wait_for(entered.wait(), 2)
     buffer = owner._buffers['run']

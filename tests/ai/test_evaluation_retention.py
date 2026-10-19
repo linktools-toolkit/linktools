@@ -12,7 +12,8 @@ import pytest
 from linktools.ai.core import AuthorizationAction, JsonValue, Principal, ResourceRef, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.runtime.state import input_capture_key, ArtifactRecord, RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import input_capture_key, ArtifactRecord, RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._codec import encode_domain
 from linktools.ai.runtime.state._object_cleanup import purge_unreferenced_objects
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
@@ -66,10 +67,10 @@ def storage_for(kind: str, path: Path, objects: InMemoryObjectStore) -> RuntimeS
     if kind == "sqlite":
         return RuntimeStorage.sqlite(path / "state.sqlite", object_store=objects)
     return RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(path / "execution.sqlite"),
-        task=RuntimeStorageRoute.filesystem(path / "task"),
-        evaluation=RuntimeStorageRoute.sqlite(path / "evaluation.sqlite"),
-        artifact=RuntimeStorageRoute.filesystem(path / "artifact"),
+        execution=StorageRoute.sqlite(path / "execution.sqlite"),
+        task=StorageRoute.filesystem(path / "task"),
+        evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
+        artifact=StorageRoute.filesystem(path / "artifact"),
     ), object_store=objects)
 
 

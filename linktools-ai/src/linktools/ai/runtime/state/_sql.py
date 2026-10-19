@@ -15,6 +15,7 @@ from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
 from ...storage import (
+    CacheBackend,
     IntegrityViolationKind,
     SqlStorageContext,
     create_sql_storage_context,
@@ -343,7 +344,7 @@ class SqlStateStore:
         context: "SqlStorageContext | None" = None,
         runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
         group: SqlStateStorageGroup | None = None,
-        cache: object | None = None,
+        cache: CacheBackend | None = None,
         store_digest: bytes | None = None,
     ) -> None:
         resolved_context = context or create_sql_storage_context(engine)

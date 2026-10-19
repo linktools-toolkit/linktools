@@ -13,7 +13,8 @@ import pytest
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
-from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._model_interaction import StagedModelInteraction
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state._codec import (
@@ -239,7 +240,7 @@ async def test_volatile_archive_and_staging_keep_original_attempt_views() -> Non
     finally:
         await archive.close()
 
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
+    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         staged = _staged(requests)

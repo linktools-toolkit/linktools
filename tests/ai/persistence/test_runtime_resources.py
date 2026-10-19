@@ -6,12 +6,8 @@ import asyncio
 
 import pytest
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime.state import (
-    RuntimeDomain,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -36,7 +32,7 @@ async def test_sqlite_runtime_storage_owns_and_reopens_database(tmp_path) -> Non
 async def test_transient_runtime_storage_closes_repository_and_object_domains() -> None:
     plan = RuntimeStoragePlan(
         **{
-            domain.value: RuntimeStorageRoute.transient()
+            domain.value: StorageRoute.transient()
             for domain in RuntimeDomain
             if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         }
@@ -97,9 +93,9 @@ async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_c
 
 def test_mixed_runtime_plan_has_explicit_routes(tmp_path) -> None:
     plan = RuntimeStoragePlan(
-        conversation=RuntimeStorageRoute.filesystem(tmp_path / "conversation"),
-        execution=RuntimeStorageRoute.transient(),
-        memory=RuntimeStorageRoute.memory(),
+        conversation=StorageRoute.filesystem(tmp_path / "conversation"),
+        execution=StorageRoute.transient(),
+        memory=StorageRoute.memory(),
     )
     assert plan.route(RuntimeDomain.CONVERSATION).retention.value == "durable"
     assert plan.route(RuntimeDomain.EXECUTION).retention.value == "transient"

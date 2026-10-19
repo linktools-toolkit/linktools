@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -19,13 +19,11 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.tools import ToolDefinition
 
-from ..core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
+from ..core import CommitPolicy, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
-from ..storage import CommitPolicy
+from ..storage import StorageRoute
 from ._context import AgentContext
 
-if TYPE_CHECKING:
-    from ..runtime import RuntimeStorageRoute
 
 AppT = TypeVar("AppT")
 
@@ -39,22 +37,6 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
 
     id = "runtime.conversation"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
-
-    def __init__(
-        self, *, cache: object | None = None, commit: CommitPolicy = CommitPolicy.sync(),
-    ) -> None:
-        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
-            raise ValueError("Conversation requires sync or terminal commit")
-        self._commit = commit
-        self._cache = cache
-
-    @property
-    def commit(self) -> CommitPolicy:
-        return self._commit
-
-    @property
-    def cache(self) -> object | None:
-        return self._cache
 
     def bind(
         self, service: AbstractCapability[AgentContext[AppT]]
@@ -91,11 +73,11 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
     id = "runtime.checkpoint"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
 
-    def __init__(self, *, storage: RuntimeStorageRoute | None = None) -> None:
+    def __init__(self, *, storage: StorageRoute | None = None) -> None:
         self._storage = storage
 
     @property
-    def storage(self) -> RuntimeStorageRoute | None:
+    def storage(self) -> StorageRoute | None:
         return self._storage
 
     def bind(
@@ -154,27 +136,19 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     _service: AbstractCapability[AgentContext[AppT]] | None = None
 
     def __init__(
-        self, *, storage: RuntimeStorageRoute | None = None, cache: object | None = None,
+        self, *, storage: StorageRoute | None = None,
         commit: CommitPolicy = CommitPolicy.batch(
             batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
         ),
     ) -> None:
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "batch"}:
             raise ValueError("Trace requires sync or batch commit")
-        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
-        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
-            raise TypeError("cache must implement append, read_batch and ack together")
         self._commit = commit
         self._storage = storage
-        self._cache = cache
 
     @property
-    def storage(self) -> RuntimeStorageRoute | None:
+    def storage(self) -> StorageRoute | None:
         return self._storage
-
-    @property
-    def cache(self) -> object | None:
-        return self._cache
 
     @property
     def commit(self) -> CommitPolicy:

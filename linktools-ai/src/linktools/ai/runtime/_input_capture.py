@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Authorized, immutable input captures owned by Runtime storage."""
 
+from ..storage import StorageRetentionMode
+
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -29,11 +31,11 @@ from ._input import (
     captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
 )
 from ._execution_context import ExecutionInputContext
-from ._input_contract import MaterializedUserContent
+from ..model import MaterializedUserContent
 from ._object import read_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from .service_api import ExecutionService
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, input_capture_key, input_capture_expiry_key
+from .state import RuntimeDomain, RuntimeStorage, input_capture_key, input_capture_expiry_key
 from .state._codec import decode_domain, encode_domain
 from .state._contracts import StoredUserInput
 
@@ -148,7 +150,7 @@ class RuntimeInputCaptures:
                      *, expires_at: datetime | None = None) -> tuple[str, Mapping[str, JsonValue]]:
         if principal.tenant_id != self._storage.tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        if self._storage.plan.route(RuntimeDomain.TASK).retention is RuntimeRetentionMode.TRANSIENT:
+        if self._storage.plan.route(RuntimeDomain.TASK).retention is StorageRetentionMode.TRANSIENT:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         validate_idempotency_key(key)
         identity = canonical_sha256({"kind": kind, "key": key})
@@ -394,7 +396,7 @@ class RuntimeInputCaptures:
         await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_CAPTURE_INPUT, header)
         await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
         hold_id = None
-        if self._storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.TRANSIENT:
+        if self._storage.plan.route(RuntimeDomain.EXECUTION).retention is StorageRetentionMode.TRANSIENT:
             hold_id = "input-capture:" + uuid.uuid4().hex
             try:
                 await self._execution.acquire_dependency_hold(execution_id, tenant_id=principal.tenant_id, hold_id=hold_id)

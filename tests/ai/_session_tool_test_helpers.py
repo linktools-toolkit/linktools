@@ -15,7 +15,8 @@ from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
@@ -106,10 +107,10 @@ def _application(
 def _split_sqlite_storage(database: Path) -> RuntimeStorage:
     return RuntimeStorage(
         RuntimeStoragePlan(
-            conversation=RuntimeStorageRoute.sqlite(
+            conversation=StorageRoute.sqlite(
                 database.with_name(f"{database.stem}-conversation.db")
             ),
-            execution=RuntimeStorageRoute.sqlite(
+            execution=StorageRoute.sqlite(
                 database.with_name(f"{database.stem}-execution.db")
             ),
         )

@@ -23,8 +23,8 @@ from ..core import (
     validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from ._input import stored_user_input_view
 from .service_api import SessionTurn, SessionTurnItem
 from .state._contracts import (

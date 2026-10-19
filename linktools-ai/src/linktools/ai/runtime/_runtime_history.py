@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Read-only Runtime composition for persisted execution history."""
 
+from ..storage import StorageRetentionMode
+
 import json
 import heapq
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -46,8 +48,8 @@ from ._artifact import DefaultArtifactService
 from ._persistence_configuration import persistence_storage_configuration
 from .state._object_router import runtime_object_source_reads
 from ._event import project_event_payload
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService, _read_model_interaction_updates
 from ._runtime_identity import token_seed
@@ -76,7 +78,7 @@ from .service_api import (
     UsageReadCutoff,
     UsageSummary,
 )
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from .state import RuntimeDomain, RuntimeStorage
 from .state._execution_repositories import ExecutionRepositoryImpl
 from .state._step_archive import StagingAgentRunStore
 from .state._contracts import (
@@ -1182,7 +1184,7 @@ async def _open_runtime_history(
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         history_store = selected_storage.run_store.read_store(RuntimeDomain.TRACE)
-        if selected_storage.plan.route(RuntimeDomain.TRACE).retention is RuntimeRetentionMode.TRANSIENT:
+        if selected_storage.plan.route(RuntimeDomain.TRACE).retention is StorageRetentionMode.TRANSIENT:
             if not isinstance(history_store, StagingAgentRunStore):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             history_store = TransientExecutionHistoryStore(history_store, selected_storage.run_store)

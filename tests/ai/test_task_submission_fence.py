@@ -13,7 +13,8 @@ from linktools.ai.core import (
     AuthorizationAction, Principal, ResourceKind, ResourceRef, RunBudget, TaskStatus, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain, _encode_persisted_domain, encode_envelope,
 )
@@ -65,9 +66,9 @@ def _storage(backend: str, path: Path) -> RuntimeStorage:
     if backend == "sqlite":
         return RuntimeStorage.sqlite(path / "state.db")
     return RuntimeStorage(RuntimeStoragePlan(
-        task=RuntimeStorageRoute.filesystem(path / "task"),
-        evaluation=RuntimeStorageRoute.sqlite(path / "evaluation.db"),
-        execution=RuntimeStorageRoute.sqlite(path / "execution.db"),
+        task=StorageRoute.filesystem(path / "task"),
+        evaluation=StorageRoute.sqlite(path / "evaluation.db"),
+        execution=StorageRoute.sqlite(path / "execution.db"),
     ))
 
 

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Canonical versioned codecs for Runtime persistence values."""
 
+from ...storage import StorageRetentionMode
+
 import base64
 import binascii
 import hashlib
@@ -207,7 +209,7 @@ from ._task_graph_binding_capture import (
     read_task_graph_binding_capture_declarations,
 )
 from ._budget_records import BudgetModelReservation, BudgetToolReservation
-from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._plan import RuntimeDomain
 from ._step_contracts import (
     AgentRunRecord,
     StepEvent,
@@ -398,7 +400,7 @@ _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("operation_status", OperationStatus),
     ("resource_kind", ResourceKind),
     ("runtime_domain", RuntimeDomain),
-    ("runtime_retention_mode", RuntimeRetentionMode),
+    ("runtime_retention_mode", StorageRetentionMode),
     ("recovery_checkpoint_state", RecoveryCheckpointState),
     ("recovery_handoff_phase", RecoveryHandoffPhase),
     ("session_status", SessionStatus),

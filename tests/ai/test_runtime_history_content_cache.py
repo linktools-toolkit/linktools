@@ -19,7 +19,8 @@ from linktools.ai.runtime._message import encode_model_messages
 from linktools.ai.runtime._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._factory import _borrowed_runtime_history
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload, StorageReadCache
 
@@ -116,14 +117,15 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
 ) -> None:
     objects = _CountingObjects()
     cache = _RecordingCache()
-    route = RuntimeStorageRoute.sqlite(tmp_path / "runtime.db")
+    route = StorageRoute.sqlite(tmp_path / "runtime.db", cache=cache)
     storage = RuntimeStorage.from_plan(
         RuntimeStoragePlan(conversation=route, execution=route),
-        object_store=objects, cache=cache,
+        object_store=objects,
     )
     await storage.initialize(
         namespace="history", tenant_id="tenant",
         module_caches={RuntimeDomain.CONVERSATION: cache, RuntimeDomain.TRACE: cache},
+        module_routes={RuntimeDomain.CHECKPOINT: route.with_cache(None)},
     )
     try:
         archive = storage.run_store.read_store(domain)

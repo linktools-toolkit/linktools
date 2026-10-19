@@ -12,7 +12,8 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
 from ._session_tool_test_helpers import _split_sqlite_storage
@@ -37,8 +38,8 @@ def _storage(database: Path, phase: str) -> RuntimeStorage:
         return _split_sqlite_storage(database)
     if phase == "filesystem":
         return RuntimeStorage(RuntimeStoragePlan(
-            conversation=RuntimeStorageRoute.sqlite(database.with_suffix(".conversation.db")),
-            execution=RuntimeStorageRoute.filesystem(database.with_suffix(".execution")),
+            conversation=StorageRoute.sqlite(database.with_suffix(".conversation.db")),
+            execution=StorageRoute.filesystem(database.with_suffix(".execution")),
         ))
     return RuntimeStorage.sqlite(database)
 

@@ -4,7 +4,7 @@
 
 import time
 
-from ..core import CursorPayload, CursorSigner
+from ._paging import CursorPayload, CursorSigner
 from ..errors import AIError, ErrorCode
 
 _CURSOR_TTL_SECONDS = 3600

@@ -12,7 +12,8 @@ from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.storage import BatchWriteScope, CommitPolicy, InMemoryCacheBackend
+from linktools.ai.storage import BatchWriteScope, InMemoryCacheBackend
+from linktools.ai.core import CommitPolicy
 from linktools.ai.storage import _write_cache
 
 from .test_explicit_runtime_features import _FeatureModels

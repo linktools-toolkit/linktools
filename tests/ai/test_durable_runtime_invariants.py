@@ -36,7 +36,8 @@ from linktools.ai.runtime.state._durability import (
     run_durable_commit,
 )
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
-from linktools.ai.runtime.state._plan import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
@@ -249,9 +250,9 @@ def _run_store_for_preflight() -> RuntimeAgentRunStore:
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
-        conversation_retention=RuntimeRetentionMode.VOLATILE,
-        execution_retention=RuntimeRetentionMode.VOLATILE,
-        recovery_retention=RuntimeRetentionMode.VOLATILE,
+        conversation_retention=StorageRetentionMode.VOLATILE,
+        execution_retention=StorageRetentionMode.VOLATILE,
+        recovery_retention=StorageRetentionMode.VOLATILE,
     )
 
 

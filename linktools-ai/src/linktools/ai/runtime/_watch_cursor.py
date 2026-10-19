@@ -11,8 +11,8 @@ from collections.abc import Mapping
 
 from ..core import HmacCursorSigner, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from ._runtime_identity import token_seed
 
 _WATCH_CURSOR_VERSION = 1

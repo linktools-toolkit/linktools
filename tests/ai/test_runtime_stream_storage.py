@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.storage import InMemoryStreamBackend
 
 
@@ -15,15 +16,15 @@ from linktools.ai.storage import InMemoryStreamBackend
 async def test_storage_constructors_preserve_borrowed_stream_backend(tmp_path) -> None:
     backend = InMemoryStreamBackend(max_bytes=1024)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'external.db'}")
-    plan = RuntimeStoragePlan(execution=RuntimeStorageRoute.sqlite(tmp_path / "plan.db"))
+    plan = RuntimeStoragePlan(execution=StorageRoute.sqlite(tmp_path / "plan.db", cache=backend))
     stores = (
-        RuntimeStorage(plan, cache=backend),
+        RuntimeStorage(plan),
         RuntimeStorage.in_memory(cache=backend),
         RuntimeStorage.filesystem(tmp_path / "files", cache=backend),
         RuntimeStorage.sqlite(tmp_path / "state.db", cache=backend),
         RuntimeStorage.from_root(tmp_path / "root", cache=backend),
         RuntimeStorage.sql(engine, cache=backend),
-        RuntimeStorage.from_plan(plan, cache=backend),
+        RuntimeStorage.from_plan(plan),
     )
     try:
         for storage in stores:
@@ -55,10 +56,10 @@ def test_default_storage_has_no_shared_stream_backend() -> None:
     assert RuntimeStorage.in_memory().cache is None
 
 
-@pytest.mark.parametrize("route", (RuntimeStorageRoute.memory(), RuntimeStorageRoute.transient()))
-def test_nondurable_execution_accepts_unused_cache_capabilities(route) -> None:
+@pytest.mark.parametrize("route_factory", (StorageRoute.memory, StorageRoute.transient))
+def test_nondurable_execution_accepts_unused_cache_capabilities(route_factory) -> None:
     backend = InMemoryStreamBackend(max_bytes=1024)
-    storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=route), cache=backend)
+    storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=route_factory(cache=backend)))
     assert storage.cache is backend
 
 

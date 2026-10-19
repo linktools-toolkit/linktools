@@ -455,7 +455,8 @@ it does not retain the full intermediate trace or enable restart checkpoints.
 An execution without the admitted conversation guarantee cannot gain fork support
 from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
-With explicit `ConversationCapability(commit=CommitPolicy.terminal())`, eligible
+With `ConversationCapability()` and explicit
+`ExecutionCapability(commit=CommitPolicy.terminal())`, eligible
 terminal-only source turns retain this context in the existing final
 owner batch in one database write transaction. Object bodies still have their
 own I/O. Fork and retry executions retain their existing durable-path admission

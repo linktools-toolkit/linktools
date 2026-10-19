@@ -121,7 +121,8 @@ from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
-from ._tool_response_fixture import ToolResponseFixture, _ToolResponseManifest
+from ..capability import ToolResponseFixture
+from ._tool_response_fixture import _ToolResponseManifest, _load_tool_response_fixture
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
@@ -277,7 +278,7 @@ class AgentExecutor:
             try:
                 if self._tool_responses is None:
                     raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-                fixture = await self._tool_responses.load(reference)
+                fixture = await _load_tool_response_fixture(self._tool_responses, reference)
                 fixture.validate_servers(
                     binding.compiled_agent.mcp_servers,
                     binding.compiled_agent.mcp_policy,

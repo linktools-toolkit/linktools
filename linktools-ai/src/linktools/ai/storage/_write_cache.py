@@ -18,6 +18,7 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._cache import CacheBackend, read_cache, write_cache
+from ._write_buffer import WriteBufferBackend, WriteBufferEntry
 from ._contracts import StorageBatchResult, StorageChange, StorageOperation
 
 _Key = TypeVar("_Key", bound=Hashable)
@@ -31,7 +32,6 @@ _FLUSH_INTERVAL_SECONDS = 60.0
 _HOT_KEY_LIMIT = 128
 _HOT_HEADER = struct.Struct("!ddB16s")
 _HOT_PREFIX = b"linktools-read-v1\0"
-_Entry = tuple[str, Hashable, bytes | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,17 +59,6 @@ class BatchWriteFlushResult:
     status: BatchWriteStatus
 
 
-@runtime_checkable
-class _WriteBuffer(Protocol):
-    async def append(
-        self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool,
-    ) -> bool: ...
-
-    async def read_batch(self, scope: str, *, limit: int) -> tuple[_Entry, ...]: ...
-
-    async def ack(self, scope: str, ids: Sequence[str]) -> None: ...
-
-
 class BatchWriteScope:
     """One owner's batch scheduling and settlement over a borrowed cache.
 
@@ -80,11 +69,11 @@ class BatchWriteScope:
     """
 
     def __init__(
-        self, cache: object,
-        write_batch: Callable[[tuple[_Entry, ...]], Awaitable[None]],
+        self, cache: WriteBufferBackend,
+        write_batch: Callable[[tuple[WriteBufferEntry, ...]], Awaitable[None]],
         *, batch_size: int = 128, flush_interval: float = 60.0,
     ) -> None:
-        if not isinstance(cache, _WriteBuffer) or not all(
+        if not isinstance(cache, WriteBufferBackend) or not all(
             callable(getattr(cache, name, None)) for name in ("append", "read_batch", "ack")
         ):
             raise TypeError("cache must provide append, read_batch and ack")
@@ -401,7 +390,7 @@ class BatchWriteScope:
             self._settled += len(batch)
             self._resolution_event.set()
 
-    async def _ack(self, batch: tuple[_Entry, ...]) -> None:
+    async def _ack(self, batch: tuple[WriteBufferEntry, ...]) -> None:
         ids = tuple(entry[0] for entry in batch)
         deadline = monotonic() + _WRITE_TIMEOUT_SECONDS
         while True:
@@ -432,7 +421,7 @@ class BatchWriteScope:
                 continue
             return
 
-    async def _write(self, batch: tuple[_Entry, ...]) -> None:
+    async def _write(self, batch: tuple[WriteBufferEntry, ...]) -> None:
         try:
             # Retain callback ownership until its actual completion, so
             # cancellation cannot hide the final result or leave live I/O.
@@ -535,14 +524,14 @@ class StorageReadCache:
     later put or invalidation prevents that snapshot from being published.
     """
 
-    def __init__(self, cache: object | None, *, max_age_seconds: float = 3.0) -> None:
+    def __init__(self, cache: CacheBackend | None, *, max_age_seconds: float = 3.0) -> None:
         if (
             isinstance(max_age_seconds, bool)
             or not isinstance(max_age_seconds, (int, float))
             or not math.isfinite(max_age_seconds) or max_age_seconds <= 0
         ):
             raise ValueError("max_age_seconds must be finite and positive")
-        self._cache: CacheBackend | None = cache if all(
+        self._cache: CacheBackend | None = cache if isinstance(cache, CacheBackend) and all(
             callable(getattr(cache, name, None)) for name in ("get", "put", "delete")
         ) else None
         self._max_age = float(max_age_seconds)
@@ -704,7 +693,7 @@ class StorageBuffer(Generic[_Key, _Info]):
         store: _BufferStore[_Key, _Info],
         *,
         read_pending: bool = False,
-        cache: object | None = None,
+        cache: CacheBackend | WriteBufferBackend | None = None,
     ) -> None:
         if not isinstance(store, _BufferStore):
             raise TypeError("store must provide get and apply_batch")
@@ -715,13 +704,13 @@ class StorageBuffer(Generic[_Key, _Info]):
             raise TypeError("cache must provide the complete append/read_batch/ack capability")
         self._store = store
         self._read_pending = read_pending
-        self._hot = StorageReadCache(cache)
+        self._hot = StorageReadCache(cache if isinstance(cache, CacheBackend) else None)
         self._hot_scope = uuid4().hex
         self._hot_keys: OrderedDict[_Key, str] = OrderedDict()
         self._scope = BatchWriteScope(
             cache, self._consume_batch, batch_size=_BATCH_SIZE,
             flush_interval=_FLUSH_INTERVAL_SECONDS,
-        ) if all(methods) else None
+        ) if isinstance(cache, WriteBufferBackend) and all(methods) else None
         self._direct_active = 0
         self._direct_done = asyncio.Event()
         self._direct_done.set()
@@ -874,7 +863,7 @@ class StorageBuffer(Generic[_Key, _Info]):
             await self._hot.close()
         self._check_settlement()
 
-    async def _consume_batch(self, batch: tuple[_Entry, ...]) -> None:
+    async def _consume_batch(self, batch: tuple[WriteBufferEntry, ...]) -> None:
         latest: dict[_Key, _BufferedChange[_Key]] = {}
         for id, key, value in batch:
             change = _BufferedChange(key, value, id)

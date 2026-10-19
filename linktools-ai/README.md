@@ -134,9 +134,11 @@ of them. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent and Task observations, including evaluation work in that Runtime. The
 shared dataset remains caller-owned. Task, Evaluation and Artifact remain
 services and need no capability wrappers. Session metadata and display history
-are also built in; Conversation adds retained model context for future turns and
-execution forks. Its commit policy defaults to `CommitPolicy.sync()` from
-`linktools.ai.storage`. See [feature guarantees and commit
+are enabled by the default `SessionCapability`; use `SessionCapability(enabled=False)`
+to disable them explicitly. Conversation adds retained model context for future turns
+and execution forks. Execution commit timing belongs to
+`ExecutionCapability(commit=CommitPolicy.sync())`, using `CommitPolicy` from
+`linktools.ai.core`. See [feature guarantees and commit
 boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
 ## Evaluation
@@ -723,7 +725,7 @@ The binding contract does not persist Python output import paths or duplicate id
 
 ## 6. Sessions and executions
 
-Session metadata and a first turn are available without additional capabilities.
+Session metadata and a first turn are available through the default Session capability.
 An unretained completed turn makes its Session context unavailable for later
 resume or fork. To retain model context across resumed turns, register `ConversationCapability()` at Runtime scope before
 opening the Runtime:

@@ -20,7 +20,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.runtime import Execution, RuntimeExecutions, RuntimeHistory
-from linktools.ai.runtime import _cursor
+from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._model_interaction import build_context_projection

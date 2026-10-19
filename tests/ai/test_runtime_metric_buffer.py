@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.core import Page
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
-from linktools.ai.storage import InMemoryCacheBackend, BatchWriteScope, CommitPolicy
+from linktools.ai.storage import InMemoryCacheBackend, BatchWriteScope
+from linktools.ai.core import CommitPolicy
 from linktools.ai.storage import _write_cache as write_cache
 
 

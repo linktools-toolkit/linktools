@@ -3,7 +3,7 @@
 """Public capability extension contracts."""
 
 from ._persistence import ConversationCapability, CheckpointCapability, TraceCapability
-from ._tool_responses import ToolResponsesCapability
+from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
 from ._declaration import AgentDeclarationLoader
@@ -55,7 +55,13 @@ from ._workspace import (
 )
 from ..spec import mcp_server_selector, mcp_tool_selector
 
+from ._session import SessionCapability
+from ._execution import ExecutionCapability
+
 __all__ = [
+    "SessionCapability",
+    "ExecutionCapability",
+    "ToolResponseFixture",
     "ConversationCapability", "CheckpointCapability", "TraceCapability",
     "ToolResponsesCapability",
     "AssetCapability",

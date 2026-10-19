@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """External SQL route contract checks."""
 
-from linktools.ai.runtime.state import RuntimeStorageRoute
+from linktools.ai.storage import StorageRoute
 
 
 def test_sqlite_route_is_durable() -> None:
-    route = RuntimeStorageRoute.sqlite("runtime.db")
+    route = StorageRoute.sqlite("runtime.db")
     assert route.retention.value == "durable"

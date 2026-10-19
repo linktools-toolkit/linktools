@@ -17,7 +17,8 @@ from linktools.ai.evaluation import (
     ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan,
 )
 from linktools.ai.runtime._evaluation import RuntimeEvaluations
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._contracts import IdempotencyRecord
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._evaluation_records import (
@@ -39,9 +40,9 @@ def storage_for(kind: str, path: Path) -> RuntimeStorage:
     if kind == "sqlite":
         return RuntimeStorage.sqlite(path / "state.sqlite")
     return RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(path / "execution.sqlite"),
-        task=RuntimeStorageRoute.filesystem(path / "task"),
-        evaluation=RuntimeStorageRoute.sqlite(path / "evaluation.sqlite"),
+        execution=StorageRoute.sqlite(path / "execution.sqlite"),
+        task=StorageRoute.filesystem(path / "task"),
+        evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
     ))
 
 

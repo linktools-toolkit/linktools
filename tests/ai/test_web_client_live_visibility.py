@@ -4,6 +4,7 @@
 
 from linktools.ai.capability import TraceCapability
 from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.runtime import RuntimeDomain
 import asyncio
 import base64
 import json
@@ -74,7 +75,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     group = RuntimeFeatures[None]("web-client-live")
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
-    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536)), scope="runtime")
+    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE).with_cache(InMemoryCacheBackend(max_bytes=65536))), scope="runtime")
     async with Runtime.open(
         "web-client-live", models=models, storage=storage,
         features=group,

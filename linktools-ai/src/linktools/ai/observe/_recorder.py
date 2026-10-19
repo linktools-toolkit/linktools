@@ -12,15 +12,13 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..core import canonical_json_bytes
+from ..core import CommitPolicy, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import BatchWriteScope, CommitPolicy
+from ..storage import BatchWriteScope, WriteBufferBackend, WriteBufferEntry
 from ._codec import decode_observation_envelope, observation_envelope
 from ._model import MetricRecorderStatus, MetricFlushResult, Observation
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
-
     from ._metrics import Metrics
 
 _logger = environ.get_logger("ai.observe.recorder")
@@ -30,7 +28,7 @@ _WARNING_INTERVAL_SECONDS = 30.0
 class MetricRecording:
     """Own one dataset recording scope, never its borrowed store or cache."""
     def __init__(
-        self, metrics: Metrics, cache: object | None, *,
+        self, metrics: Metrics, cache: WriteBufferBackend | None, *,
         commit: CommitPolicy,
     ) -> None:
         self._metrics = metrics
@@ -124,7 +122,7 @@ class MetricRecording:
         )
 
     async def _write_batch(
-        self, batch: tuple[tuple[str, Hashable, bytes | None], ...],
+        self, batch: tuple[WriteBufferEntry, ...],
     ) -> None:
         observations = []
         for _, key, content in batch:

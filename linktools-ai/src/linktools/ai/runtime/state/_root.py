@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """RuntimeStorage lifecycle owner."""
 
+from ...storage import CacheCapabilities, StorageRoute, StorageRetentionMode
+
 import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,13 +32,7 @@ from ._contracts import (
     RecoveryRepositories,
     TaskRepositories,
 )
-from ._plan import (
-    RuntimeDomain,
-    RuntimeRetentionMode,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-    runtime_domain_uses_object_store,
-)
+from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 from ._store import (
     FactScanCursor,
     OperationScanCursor,
@@ -80,7 +77,7 @@ if TYPE_CHECKING:
     from ._steps import RuntimeAgentRunStore
 
 
-def _validate_cache(cache: object | None) -> None:
+def _validate_cache(cache: CacheCapabilities | None) -> None:
     if cache is None:
         return
     for methods in (
@@ -112,13 +109,12 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        cache: object | None = None,
     ) -> None:
         _validate_storage_configuration(plan, object_store)
-        _validate_cache(cache)
+        for domain in RuntimeDomain:
+            _validate_cache(plan.route(domain).cache)
         self._plan = plan
         self._external_object_store = object_store
-        self._cache = cache
         self._lifecycle = _RuntimeStorageLifecycle.NEW
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -141,9 +137,16 @@ class RuntimeStorage:
 
     @classmethod
     def in_memory(
-        cls, *, cache: object | None = None,
+        cls, *, cache: CacheCapabilities | None = None,
     ) -> "RuntimeStorage":
-        return cls(RuntimeStoragePlan(), cache=cache)
+        route = StorageRoute.memory(cache=cache)
+        return cls(RuntimeStoragePlan(
+            **{
+                domain.value: route
+                for domain in RuntimeDomain
+                if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
+            }
+        ))
 
     @classmethod
     def filesystem(
@@ -151,22 +154,21 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        cache: object | None = None,
+        cache: CacheCapabilities | None = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(path)
         return cls(
             RuntimeStoragePlan(
                 **{
-                    domain.value: RuntimeStorageRoute.filesystem(
+                    domain.value: StorageRoute.filesystem(
                         base if domain is RuntimeDomain.EXECUTION else base / domain.value,
-                        transaction_root=base,
+                        transaction_root=base, cache=cache,
                     )
                     for domain in RuntimeDomain
                     if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
                 }
             ),
             object_store=object_store,
-            cache=cache,
         )
 
     @classmethod
@@ -175,9 +177,9 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        cache: object | None = None,
+        cache: CacheCapabilities | None = None,
     ) -> "RuntimeStorage":
-        route = RuntimeStorageRoute.sqlite(path)
+        route = StorageRoute.sqlite(path, cache=cache)
         return cls(
             RuntimeStoragePlan(
                 **{
@@ -187,12 +189,11 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            cache=cache,
         )
 
     @classmethod
     def from_root(
-        cls, root: "str | Path", *, cache: object | None = None,
+        cls, root: "str | Path", *, cache: CacheCapabilities | None = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(root)
         return cls.sqlite(
@@ -207,9 +208,9 @@ class RuntimeStorage:
         engine: "AsyncEngine",
         *,
         object_store: "ObjectStore | None" = None,
-        cache: object | None = None,
+        cache: CacheCapabilities | None = None,
     ) -> "RuntimeStorage":
-        route = RuntimeStorageRoute.sql(engine)
+        route = StorageRoute.sql(engine, cache=cache)
         return cls(
             RuntimeStoragePlan(
                 **{
@@ -219,7 +220,6 @@ class RuntimeStorage:
                 }
             ),
             object_store=object_store,
-            cache=cache,
         )
 
     @classmethod
@@ -228,16 +228,15 @@ class RuntimeStorage:
         plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-        cache: object | None = None,
     ) -> "RuntimeStorage":
         return cls(
-            plan, object_store=object_store, cache=cache,
+            plan, object_store=object_store,
         )
 
     @property
-    def cache(self) -> object | None:
+    def cache(self) -> CacheCapabilities | None:
         """Borrowed optional cache capabilities; the host owns their lifecycle."""
-        return self._cache
+        return self._plan.route(RuntimeDomain.EXECUTION).cache
 
     @property
     def plan(self) -> RuntimeStoragePlan:
@@ -307,8 +306,8 @@ class RuntimeStorage:
         namespace: str,
         tenant_id: str,
         read_only: bool = False,
-        module_routes: Mapping[RuntimeDomain, RuntimeStorageRoute] | None = None,
-        module_caches: Mapping[RuntimeDomain, object | None] | None = None,
+        module_routes: Mapping[RuntimeDomain, StorageRoute] | None = None,
+        module_caches: Mapping[RuntimeDomain, CacheCapabilities | None] | None = None,
     ) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStorageLifecycle.NEW:
@@ -322,16 +321,26 @@ class RuntimeStorage:
             if not isinstance(read_only, bool):
                 raise TypeError("read_only must be bool")
             routes = dict(module_routes or {})
-            caches = dict(module_caches or {})
+            if any(not isinstance(route, StorageRoute) for route in routes.values()):
+                raise TypeError("module storage must use StorageRoute")
+            caches = {domain: route.cache for domain, route in routes.items()}
+            for domain, selected_cache in (module_caches or {}).items():
+                if domain in caches and caches[domain] is not selected_cache:
+                    raise ValueError("module route and cache override disagree")
+                caches[domain] = selected_cache
             module_domains = {RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
             if not routes.keys() <= module_domains or not caches.keys() <= module_domains:
                 raise ValueError("module storage only configures persistence archive domains")
             for value in caches.values():
                 _validate_cache(value)
-            self._plan = self._plan.with_module_routes(routes)
+            effective = self._plan
+            for domain, selected_cache in caches.items():
+                if domain is RuntimeDomain.CONVERSATION:
+                    effective = replace(effective, conversation=effective.conversation.with_cache(selected_cache))
+                else:
+                    routes[domain] = routes.get(domain, effective.route(domain)).with_cache(selected_cache)
+            self._plan = effective.with_module_routes(routes)
             _validate_storage_configuration(self._plan, self._external_object_store)
-            for domain in module_domains:
-                caches.setdefault(domain, None)
             self._lifecycle = _RuntimeStorageLifecycle.INITIALIZING
             try:
                 from ._materializer import materialize_runtime_storage
@@ -341,8 +350,6 @@ class RuntimeStorage:
                     namespace=namespace,
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
-                    cache=self._cache,
-                    module_caches=caches,
                     read_only=read_only,
                 )
                 self._assign_materialized(
@@ -1118,7 +1125,7 @@ def _validate_storage_configuration(
         raise TypeError("plan must be a RuntimeStoragePlan")
     if object_store is not None and not any(
         runtime_domain_uses_object_store(domain)
-        and plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+        and plan.route(domain).retention is StorageRetentionMode.DURABLE
         for domain in RuntimeDomain
     ):
         raise ValueError(
@@ -1126,23 +1133,23 @@ def _validate_storage_configuration(
         )
     if (
         plan.route(RuntimeDomain.CONVERSATION).retention
-        is RuntimeRetentionMode.DURABLE
+        is StorageRetentionMode.DURABLE
     ):
         if (
             plan.route(RuntimeDomain.EXECUTION).retention
-            is not RuntimeRetentionMode.DURABLE
+            is not StorageRetentionMode.DURABLE
         ):
             raise ValueError("durable conversation requires durable execution")
         if (
             plan.route(RuntimeDomain.RECOVERY).retention
-            is not RuntimeRetentionMode.DURABLE
+            is not StorageRetentionMode.DURABLE
         ):
             raise ValueError("durable conversation requires durable recovery")
     if (
         plan.route(RuntimeDomain.EVALUATION).retention
-        is RuntimeRetentionMode.DURABLE
+        is StorageRetentionMode.DURABLE
         and plan.route(RuntimeDomain.EXECUTION).retention
-        is not RuntimeRetentionMode.DURABLE
+        is not StorageRetentionMode.DURABLE
     ):
         raise ValueError("durable evaluation requires durable execution")
 

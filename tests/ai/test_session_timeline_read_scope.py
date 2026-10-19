@@ -10,7 +10,8 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._session_timeline import project_session_timeline
 from linktools.ai.runtime.state._store import active_state_scope
 
@@ -93,8 +94,8 @@ async def test_timeline_read_scope_uses_one_post_authorization_sql_snapshot(tmp_
 
 async def test_timeline_read_scope_keeps_separate_database_routes(tmp_path: Path) -> None:
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:

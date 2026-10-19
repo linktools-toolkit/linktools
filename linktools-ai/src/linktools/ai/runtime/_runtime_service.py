@@ -85,7 +85,7 @@ from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
 from ._execution_context import ExecutionInputContext
-from ._input_contract import normalize_input_files
+from ..model import normalize_input_files
 from ._input import CanonicalUserInput
 from ..observe import Metrics, MetricRecorderStatus, MetricFlushResult
 from ._metrics_service import _disabled_metric_status

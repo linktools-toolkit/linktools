@@ -13,7 +13,8 @@ from linktools.ai.core import (
     ExecutionStatus, HmacCursorSigner, Page, Principal, TenantAuthorizationPolicy, agent_conversation_id, agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeExecutions, RuntimeHistory, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import RuntimeExecutions, RuntimeHistory, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, build_context_projection
 from linktools.ai.runtime._transient_history import TransientExecutionHistoryStore
@@ -230,7 +231,7 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
     finally:
         await archive.close()
 
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
+    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         staged = replace(

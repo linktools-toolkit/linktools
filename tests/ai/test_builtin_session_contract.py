@@ -8,13 +8,13 @@ from copy import deepcopy
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ConversationCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, ConversationCapability, RuntimeFeatures
 from linktools.ai.core import Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    ListSessionRequest, Runtime, RuntimeContext, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
-)
-from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
+from linktools.ai.runtime import ListSessionRequest, Runtime, RuntimeContext, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
+from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.core import CommitPolicy
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -22,28 +22,28 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 _OWNER = Principal('owner', 'tenant')
 
 
-def _features(*, retain=False, cache=None):
+def _features(*, retain=False):
     features = RuntimeFeatures('builtin-session')
     features.agent('default', model='default', allow_tools=())
     if retain:
-        features.capability(ConversationCapability(cache=cache), scope='runtime')
+        features.capability(ConversationCapability(), scope='runtime')
     return features
 
 
 def _storage(path, backend='sqlite', cache=None):
     if backend == 'split_sqlite':
         return RuntimeStorage.from_plan(RuntimeStoragePlan(
-            conversation=RuntimeStorageRoute.sqlite(path / 'conversation.db'),
-            execution=RuntimeStorageRoute.sqlite(path / 'execution.db'),
-        ), cache=cache)
+            conversation=StorageRoute.sqlite(path / 'conversation.db', cache=cache),
+            execution=StorageRoute.sqlite(path / 'execution.db', cache=cache),
+        ))
     return (RuntimeStorage.sqlite(path / 'state.db', cache=cache) if backend == 'sqlite'
             else RuntimeStorage.filesystem(path / 'state', cache=cache))
 
 
-def _open(path, model, *, retain=False, backend='sqlite', cache=None, module_cache=None):
+def _open(path, model, *, retain=False, backend='sqlite', cache=None):
     return Runtime.open('builtin-session', storage=_storage(path, backend, cache),
                         models=_Models(_UsageFunctionModel(model)),
-                        features=_features(retain=retain, cache=module_cache),
+                        features=_features(retain=retain),
                         context=RuntimeContext(None, tenant_id='tenant'))
 
 
@@ -72,7 +72,7 @@ async def test_builtin_metadata_lifecycle_survives_feature_and_cache_changes(tmp
         assert foreign.value.code is ErrorCode.AUTHORIZATION_DENIED
 
     async with _open(tmp_path, model, backend=backend, retain=True,
-                     module_cache=InMemoryCacheBackend(max_bytes=1_000_000)) as runtime:
+                     cache=InMemoryCacheBackend(max_bytes=1_000_000)) as runtime:
         page = await runtime.sessions.list(ListSessionRequest(principal=_OWNER))
         assert [(item.session_id, item.metadata['title']) for item in page.items] == [('session', 'second')]
         session = await runtime.sessions.get('session', principal=_OWNER)
@@ -351,8 +351,9 @@ async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publicat
         return ModelResponse(parts=[TextPart('answer')])
 
     terminal = RuntimeFeatures('builtin-session')
+    terminal.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
     terminal.agent('default', model='default', allow_tools=())
-    terminal.capability(ConversationCapability(commit=CommitPolicy.terminal()), scope='runtime')
+    terminal.capability(ConversationCapability(), scope='runtime')
     models = _Models(_UsageFunctionModel(model))
     storage = _storage(tmp_path, cache=cache)
     async with Runtime.open('builtin-session', storage=storage, models=models,

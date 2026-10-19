@@ -679,14 +679,15 @@ async def test_marker_batch_terminal_does_not_deliver_prefetched_suffix() -> Non
 @pytest.mark.parametrize("retention", ("volatile", "transient"))
 async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_stream(retention: str) -> None:
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.runtime import RuntimeStoragePlan, RuntimeStorageRoute
+    from linktools.ai.runtime import RuntimeStoragePlan
+    from linktools.ai.storage import StorageRoute
 
     cache = _CombinedCache()
     storage = (
         RuntimeStorage.in_memory(cache=cache)
         if retention == "volatile"
         else RuntimeStorage.from_plan(
-            RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache,
+            RuntimeStoragePlan(execution=StorageRoute.transient(cache=cache)),
         )
     )
     group = RuntimeFeatures[None]("local-preview")

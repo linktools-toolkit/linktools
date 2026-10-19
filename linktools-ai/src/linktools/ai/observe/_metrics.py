@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..core import canonical_json_bytes, validate_persistence_namespace
+from ..core import CommitPolicy, canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
-from ..storage import CommitPolicy
+from ..storage import CacheBackend, WriteBufferBackend
 from ._codec import (
     same_definition_contract,
     observation_envelope,
@@ -59,7 +59,7 @@ class Metrics:
 
     def __init__(
         self, store: MetricStore, *, namespace: str = "default",
-        cache: object | None = None,
+        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> None:
         self._validate_commit(commit)
@@ -69,7 +69,7 @@ class Metrics:
             raise TypeError("cache must implement append, read_batch and ack together")
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
-        self._cache = cache if all(callable(method) for method in methods) else None
+        self._cache = cache if isinstance(cache, WriteBufferBackend) and all(callable(method) for method in methods) else None
 
     def recorder(self) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
@@ -83,7 +83,7 @@ class Metrics:
 
     @classmethod
     def in_memory(
-        cls, *, namespace: str = "default", cache: object | None = None,
+        cls, *, namespace: str = "default", cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         return cls(
@@ -94,7 +94,7 @@ class Metrics:
     @classmethod
     def sqlite(
         cls, path: str | Path, *, namespace: str = "default",
-        cache: object | None = None,
+        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         cls._validate_commit(commit)
@@ -106,7 +106,7 @@ class Metrics:
     @classmethod
     def sql(
         cls, engine: AsyncEngine, *, namespace: str = "default",
-        cache: object | None = None,
+        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         from ._sql import SqlMetricStore
@@ -120,7 +120,7 @@ class Metrics:
     @classmethod
     def from_store(
         cls, store: MetricStore, *, namespace: str = "default",
-        cache: object | None = None,
+        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         return cls(

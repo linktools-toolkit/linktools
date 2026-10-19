@@ -18,7 +18,8 @@ from linktools.ai.core import (
     principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._store import OperationQuery, stream_digest
 from linktools.ai.task import (
@@ -386,12 +387,12 @@ async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
 
 
 def test_durable_pure_task_graph_does_not_require_durable_execution(tmp_path) -> None:
-    task = RuntimeStorageRoute.filesystem(tmp_path / "task")
+    task = StorageRoute.filesystem(tmp_path / "task")
 
     state = RuntimeStorage.from_plan(
         RuntimeStoragePlan(
             task=task,
-            execution=RuntimeStorageRoute.transient(),
+            execution=StorageRoute.transient(),
         )
     )
     assert state.plan.route(RuntimeDomain.TASK).retention.value == "durable"

@@ -12,7 +12,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.mcp import MCPToolset
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry, ToolResponsesCapability
+from linktools.ai.capability import AssetCapability, AgentContext, ToolCallFailed, ToolCallRetry, ToolResponseFixture, ToolResponsesCapability
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError
 from linktools.ai.runtime._mcp import (
@@ -22,7 +22,7 @@ from linktools.ai.runtime._mcp import (
     materialize_mcp_capabilities,
 )
 from linktools.ai.runtime._tool import ToolOperationDecision
-from linktools.ai.runtime._tool_response_fixture import ToolResponseFixture
+from linktools.ai.runtime._tool_response_fixture import _load_tool_response_fixture
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector, mcp_tool_selector
 from linktools.ai.storage import StorageOverlay
 
@@ -78,7 +78,7 @@ async def _capabilities(
     ) if transport == "stdio" else MCPServerSpec(
         "server", transport=transport, url="https://example.invalid/mcp", revision=3,
     )
-    manifest = await fixture.load(fixture.ref)
+    manifest = await _load_tool_response_fixture(fixture, fixture.ref)
     return await materialize_mcp_capabilities(
         (server,),
         selectors or (mcp_server_selector("server"),),
@@ -90,6 +90,23 @@ async def _capabilities(
 
 
 @pytest.mark.asyncio
+async def test_fixture_declaration_retains_validated_immutable_reference_and_borrowed_reader() -> None:
+    store, fixture = await _store(_manifest())
+    try:
+        capability = ToolResponsesCapability(fixture)
+        assert capability.fixture is fixture
+        assert fixture.reader is store
+        with pytest.raises(FrozenInstanceError):
+            fixture.reader = object()
+        with pytest.raises(TypeError, match="ref must be AssetVersionRef"):
+            ToolResponseFixture(object(), store)
+        with pytest.raises(TypeError, match="reader must be AssetStoreReader"):
+            ToolResponseFixture(fixture.ref, object())
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_fixture_reads_saved_version_with_borrowed_reader_after_default_changes() -> None:
     store, original = await _store(_manifest())
     try:
@@ -98,7 +115,7 @@ async def test_fixture_reads_saved_version_with_borrowed_reader_after_default_ch
         await store.put(original.ref.key, canonical_json_bytes(updated))
         current_ref, = await store.resolve_versions((original.ref.key,))
         fixture = ToolResponseFixture(current_ref, store)
-        loaded = await fixture.load(original.ref)
+        loaded = await _load_tool_response_fixture(fixture, original.ref)
         tool = loaded.server("server").tools[0]
         assert tool.result({"options": {"b": 2, "a": 1}, "query": "ready"}) == {
             "url": "https://example.test/info",
@@ -113,7 +130,7 @@ async def test_fixture_reads_saved_version_with_borrowed_reader_after_default_ch
             fixture.ref = original.ref
         assert await store.get(original.ref.key) == canonical_json_bytes(updated)
         with pytest.raises(AIError):
-            await fixture.load(replace(original.ref, digest="0" * 64))
+            await _load_tool_response_fixture(fixture, replace(original.ref, digest="0" * 64))
     finally:
         await store.close()
 
@@ -213,7 +230,7 @@ async def test_fixture_native_failure_outcomes_settle_without_unknown(kind: str,
 async def test_fixture_coverage_and_named_revision_must_match_selected_servers() -> None:
     store, fixture = await _store(_manifest())
     try:
-        manifest = await fixture.load(fixture.ref)
+        manifest = await _load_tool_response_fixture(fixture, fixture.ref)
         for server, selectors in (
             (MCPServerSpec("missing", "unused"), (mcp_server_selector("missing"),)),
             (MCPServerSpec("server", "unused", revision=4), (mcp_server_selector("server"),)),
@@ -275,7 +292,7 @@ async def test_identical_argument_rows_do_not_consume_results() -> None:
     tool["responses"][1] = copy.deepcopy(tool["responses"][0])
     store, fixture = await _store(payload)
     try:
-        manifest = await fixture.load(fixture.ref)
+        manifest = await _load_tool_response_fixture(fixture, fixture.ref)
         recorded = manifest.server("server").tools[0]
         arguments = tool["responses"][0]["arguments"]
         assert recorded.result(arguments) == recorded.result(arguments)
@@ -294,7 +311,7 @@ async def test_fixture_rejects_ambiguous_or_nonfinite_json(raw: bytes) -> None:
         await store.put(fixture.ref.key, raw)
         invalid_ref, = await store.resolve_versions((fixture.ref.key,))
         with pytest.raises(AIError):
-            await fixture.load(invalid_ref)
+            await _load_tool_response_fixture(fixture, invalid_ref)
     finally:
         await store.close()
 

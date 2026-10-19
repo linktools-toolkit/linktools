@@ -35,7 +35,8 @@ pass through these hooks.
 ## Capability and service ownership
 
 All public capability declarations are imported from `linktools.ai.capability`,
-including `ConversationCapability`, `CheckpointCapability`, and `TraceCapability`.
+including `ExecutionCapability`, `SessionCapability`, `ConversationCapability`,
+`CheckpointCapability`, and `TraceCapability`.
 `linktools.ai.runtime` owns Runtime entry points and services; it does not provide duplicate capability exports.
 
 A captured declaration can be reused across Runtime instances. Runtime binds
@@ -79,7 +80,9 @@ persistent_work.capability(TraceCapability())
 
 `ConversationCapability()` retains committed model context for future turns and
 execution forks. Session creation, listing, resume, metadata, and display history
-are built-in Runtime services, available without this capability. Resume still
+are enabled by the default `SessionCapability`, independently of Conversation.
+Register `SessionCapability(enabled=False)` at Runtime scope to disable Session
+operations explicitly; no manual enable registration is needed by default. Resume still
 requires available committed context: an unretained completed turn makes Session
 history unavailable, and later resume or Session fork fails with
 `SESSION_HISTORY_UNAVAILABLE` rather than silently losing context. Enabling
@@ -120,27 +123,34 @@ Metrics retain their own batching; a conversation turn does not force a metrics 
 
 ### Module storage and cache configuration
 
-`ConversationCapability(cache=cache, commit=CommitPolicy.sync())` configures
-conversation content caching and write timing. Session metadata and the
-conversation route belong to the root `RuntimeStorage`: set
+`StorageRoute` and `StorageRetentionMode` are imported from `linktools.ai.storage`.
+A route bundles its backend with an optional borrowed cache, for example
+`StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
+persistence identity. Session and Conversation use the root `RuntimeStorage`
+resource; `ConversationCapability()` only selects context retention. Set
 `RuntimeStoragePlan(conversation=route, ...)` to customize that domain.
-`CheckpointCapability(storage=route)` and
-`TraceCapability(storage=route, cache=cache, commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))`
-configure their own archives. Omitted Trace and Checkpoint storage defaults to
-the execution route with separate logical partitions. Their routes must share
-the execution StateStorageGroup; incompatible routes fail during opening.
-Conversation may use a separate root route; that configuration uses durable
-admission and the recoverable prepared terminal handoff protocol rather than
-single-transaction deferred turns. Shared SQL engines and object stores remain
-borrowed resources.
+For plan-based construction, caches live on the routes rather than a second
+`RuntimeStorage` cache argument. Convenience factories such as
+`RuntimeStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
-A module's `cache=None` disables its content/read cache; it never inherits the
-root cache. Pass the same instance explicitly to share it. `RuntimeStorage.cache`
-supplies Session metadata/display caching, core turn coordination, live streams,
-and core record/object reads. Changing module caches cannot create a separate
-producer ownership namespace. Reuse the root storage plan and the same features
-with `RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read
-and export all custom routes without activating hooks or Metrics recorders.
+`CheckpointCapability(storage=route)` and
+`TraceCapability(storage=route, commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))`
+configure their archives. Omitted storage inherits the Runtime backend and cache
+with separate logical partitions. An explicit route supplies the complete
+resource: `cache=None` disables that route's cache instead of inheriting it.
+Trace and Checkpoint routes must share the execution StateStorageGroup;
+incompatible routes fail during opening. A separate root Conversation route
+uses durable admission and recoverable prepared terminal handoffs rather than
+single-transaction deferred turns. Shared SQL engines, caches, and object stores
+remain borrowed resources.
+
+`RuntimeStorage.cache` is the execution route cache and supplies Session
+metadata/display caching, turn coordination, live streams, and core record reads.
+Conversation content uses its route cache; shortcut storage factories share the
+supplied cache across these routes. A module resource override cannot create a separate producer ownership
+namespace. Reuse the root storage plan and the same features with
+`RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read and
+export all custom routes without activating hooks or Metrics recorders.
 Restored portable generations use their local routes and caches.
 
 Shared filesystem group manifests, locks and empty domain metadata are provisioned
@@ -204,18 +214,30 @@ existing confirmation outcome. It must not claim completion from force alone.
 
 ### Independent commit boundaries
 
-Import `CommitPolicy` from `linktools.ai.storage`. Its factories are
+Import `CommitPolicy` from `linktools.ai.core`. Its factories are
 `CommitPolicy.sync()`, `CommitPolicy.terminal()`, and
 `CommitPolicy.batch(batch_size=..., flush_interval=...)`. The policy selects
 write timing independently of storage routing and cache availability.
-Conversation supports sync and terminal; Trace and Metrics support sync and batch.
-Conversation defaults to `sync()`: new turns use durable admission even with
+Runtime execution supports sync and terminal; Trace and Metrics support sync and batch.
+`ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use durable admission even with
 a coordination cache. Shared admission ownership and idempotency coordination
 remain active for every policy, including a sync caller joining an already
-admitted terminal-policy turn. Opt into `ConversationCapability(commit=CommitPolicy.terminal())`
+admitted terminal-policy turn. Opt into `ExecutionCapability(commit=CommitPolicy.terminal())`
 to defer eligible ordinary native turns until the terminal boundary. Deferred
 admission additionally requires an explicitly configured `RuntimeStorage.cache`
 with the required coordination groups and compatible storage routes.
+Execution timing is independent of Conversation retention and Session activation.
+Execution is required and installed by default. Register one explicit
+`ExecutionCapability` on the runtime scope to replace its default configuration:
+
+```python
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.core import CommitPolicy
+
+features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+```
+
+`Runtime.open` does not take a separate execution commit policy.
 
 Conversation commits its final context, Session cursor, and corresponding
 Execution outcome at the turn boundary. Checkpoint retains its recovery-critical
@@ -356,8 +378,8 @@ by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 
 `TraceCapability(commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))` controls observation-only
 flush pressure (counted in observation boundaries) and maximum scheduled delay
-in seconds when `cache` supplies `append`, `read_batch` and `ack`. Each run owns
-an independent cache-backed recording scope. `cache=None` or a hot-content-only cache
+in seconds when the selected storage resource cache supplies `append`, `read_batch` and `ack`. Each run owns
+an independent cache-backed recording scope. A resource with `cache=None` or a hot-content-only cache
 awaits publication at each observation boundary; timing options do not create a
 hidden Runtime queue. A lower threshold or interval can make partial trace
 visible sooner at the cost of more writes.

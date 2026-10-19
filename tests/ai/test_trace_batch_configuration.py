@@ -7,7 +7,8 @@ import asyncio
 import pytest
 
 from linktools.ai.capability import TraceCapability
-from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
+from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.core import CommitPolicy
 from .test_observation_coalescing import _add_run, _observe, _setup
 from linktools.ai.runtime.state import RuntimeDomain
 
@@ -35,7 +36,7 @@ async def test_trace_custom_pressure_and_required_flush_are_independent(tmp_path
     state = await _setup(tmp_path, "memory")
     try:
         store = state.run_store
-        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
+        store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
         archive = store.read_store(RuntimeDomain.TRACE)
         await _observe(store, 1)
         assert await archive.list_events(agent_run_id="run") == []
@@ -59,8 +60,8 @@ async def test_trace_scheduler_respects_each_runs_deadline(tmp_path):
     try:
         await _add_run(state, "slow", "slow-execution")
         store = state.run_store
-        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=100, flush_interval=0.01)
-        store.trace_persistence.configure("slow", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=100, flush_interval=60.0)
+        store.trace_persistence.configure("run", batch_size=100, flush_interval=0.01)
+        store.trace_persistence.configure("slow", batch_size=100, flush_interval=60.0)
         archive = store.read_store(RuntimeDomain.TRACE)
         await _observe(store, 1, run_id="slow", execution_id="slow-execution")
         await _observe(store, 1)
@@ -118,10 +119,15 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
     await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
     await state.close()
     restored = _storage("sqlite", tmp_path)
-    await restored.initialize(namespace="observation-batches", tenant_id="tenant")
+    await restored.initialize(
+        namespace="observation-batches", tenant_id="tenant",
+        module_routes={RuntimeDomain.TRACE: restored.plan.route(RuntimeDomain.TRACE).with_cache(
+            InMemoryCacheBackend(max_bytes=65536),
+        )},
+    )
     try:
         store = restored.run_store
-        store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
+        store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(run, execution_id="execution")
         offset = store.trace_persistence.offsets["run"]

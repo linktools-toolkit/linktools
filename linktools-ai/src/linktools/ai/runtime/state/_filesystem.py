@@ -17,6 +17,7 @@ from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
 from ...storage import (
+    CacheBackend,
     FilesystemJournal, FilesystemMutationLock, FilesystemWriterLock, sync_directory,
 )
 from ._codec import decode_alias, decode_fact, decode_operation, decode_record
@@ -816,7 +817,7 @@ class FilesystemStateStore:
         runtime_domain: str,
         _range_index: bool = False,
         group: FilesystemStateStorageGroup | None = None,
-        cache: object | None = None,
+        cache: CacheBackend | None = None,
     ) -> None:
         self._root = Path(root).expanduser().resolve()
         self._namespace = namespace

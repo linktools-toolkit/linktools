@@ -17,7 +17,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ForkSessionRequest, RuntimeStorage
 from linktools.ai.runtime._history_projection import StepSessionHistoryReader
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
 from pydantic_ai.messages import (
@@ -107,8 +107,8 @@ async def _advance(
         )
 
 
-def _service(state: RuntimeStorage) -> DefaultSessionService:
-    return DefaultSessionService(
+def _service(state: RuntimeStorage) -> RuntimeSessionService:
+    return RuntimeSessionService(
         state.conversation,
         state.execution.executions,
         TenantAuthorizationPolicy(),

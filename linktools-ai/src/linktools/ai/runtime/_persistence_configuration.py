@@ -7,16 +7,17 @@ from collections.abc import Sequence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
 from ..errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
-from linktools.ai.capability import CheckpointCapability, TraceCapability
-from .state import RuntimeDomain, RuntimeStorageRoute
+from ..capability import CheckpointCapability, ConversationCapability, TraceCapability
+from ..storage import CacheCapabilities, StorageRoute
+from .state import RuntimeDomain
 
 
 def persistence_storage_configuration(
     capabilities: Sequence[AbstractCapability[object]],
-) -> tuple[dict[RuntimeDomain, RuntimeStorageRoute], dict[RuntimeDomain, object | None]]:
-    routes: dict[RuntimeDomain, RuntimeStorageRoute] = {}
-    caches: dict[RuntimeDomain, object | None] = {}
+) -> tuple[dict[RuntimeDomain, StorageRoute], dict[RuntimeDomain, CacheCapabilities | None]]:
+    routes: dict[RuntimeDomain, StorageRoute] = {}
+    caches: dict[RuntimeDomain, CacheCapabilities | None] = {}
+    selected: set[RuntimeDomain] = set()
 
     def collect(feature: AbstractCapability[object]) -> None:
         if isinstance(feature, WrapperCapability):
@@ -34,13 +35,14 @@ def persistence_storage_configuration(
             domain = RuntimeDomain.TRACE
         else:
             return
-        if domain in caches:
+        if domain in selected:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one persistence feature is allowed per module")
+        selected.add(domain)
         if isinstance(feature, (CheckpointCapability, TraceCapability)) and feature.storage is not None:
-            if not isinstance(feature.storage, RuntimeStorageRoute):
-                raise TypeError("storage must be RuntimeStorageRoute")
+            if not isinstance(feature.storage, StorageRoute):
+                raise TypeError("storage must be StorageRoute")
             routes[domain] = feature.storage
-        caches[domain] = feature.cache if isinstance(feature, (ConversationCapability, TraceCapability)) else None
+            caches[domain] = feature.storage.cache
 
     for capability in capabilities:
         collect(capability)

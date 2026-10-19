@@ -17,7 +17,7 @@ from ._wait import WaitResult
 from ._execution_observation import _ExecutionModelObservation
 from ._observation import _wait, _validate_wait, _await_stream_cleanup, _is_observation_cleanup, _owned_watch
 from ._execution_context import ExecutionInputContext
-from ._input_contract import UserPromptInput, validate_user_input
+from ..model import UserPromptInput, validate_user_input
 from ._watch_cursor import (
     decode_execution_watch_cursor,
     get_preview_positions, ExecutionWatchPositions,

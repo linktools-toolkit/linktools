@@ -16,7 +16,7 @@ from linktools.ai.core import (
     SessionStatus,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import ForkSessionRequest
 from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
@@ -153,7 +153,7 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
             },
             state.execution.executions.state_store,
         )
-        service = DefaultSessionService(
+        service = RuntimeSessionService(
             state.conversation,
             executions,  # type: ignore[arg-type]
             TenantAuthorizationPolicy(),

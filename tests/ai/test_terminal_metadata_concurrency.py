@@ -17,12 +17,8 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (
-    Runtime,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state._contracts import (
     ExecutionTerminalCommit,
@@ -43,16 +39,16 @@ from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels
 def _storage(tmp_path: Path, backend: str, split_session: bool) -> RuntimeStorage:
     if split_session:
         route = (
-            RuntimeStorageRoute.memory()
+            StorageRoute.memory()
             if backend == "memory"
-            else RuntimeStorageRoute.filesystem(tmp_path / "execution")
+            else StorageRoute.filesystem(tmp_path / "execution")
             if backend == "filesystem"
-            else RuntimeStorageRoute.sqlite(tmp_path / "execution.db")
+            else StorageRoute.sqlite(tmp_path / "execution.db")
         )
         return RuntimeStorage(
             RuntimeStoragePlan(
                 execution=route,
-                conversation=RuntimeStorageRoute.filesystem(tmp_path / "conversation"),
+                conversation=StorageRoute.filesystem(tmp_path / "conversation"),
             )
         )
     if backend == "memory":

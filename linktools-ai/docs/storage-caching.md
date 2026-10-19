@@ -12,7 +12,7 @@ store does not necessarily imply durable retention.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage(..., cache=...)` |
+| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage.sqlite(path, cache=...)` |
 | `ContentCache[KeyT, ValueT, InfoT]` | Bind a borrowed backend to domain keys and value encoding | Supply `StorageOverlay(content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
@@ -98,7 +98,8 @@ silently redirected into a local queue.
 
 ```python
 from linktools.ai.observe import Metrics
-from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
+from linktools.ai.core import CommitPolicy
+from linktools.ai.storage import InMemoryCacheBackend
 
 cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
 metrics = Metrics.sqlite(
@@ -404,7 +405,7 @@ remain in use.
 
 ## Ordered live streams
 
-`RuntimeStorage(..., cache=cache)` uses the optional `open_stream`/`read_stream`
+`RuntimeStorage.sqlite(path, cache=cache)` uses the optional `open_stream`/`read_stream`
 methods on that same borrowed instance for ordered, disposable live previews.
 `object_store` still owns authoritative payloads; `get`/`put`/`delete` on the
 cache instance, when available, cache reproducible content. A live preview

@@ -26,7 +26,8 @@ from linktools.ai.runtime._model_interaction import (
     model_response_projection,
     project_public_messages,
 )
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._contracts import TranscriptSpanRef
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
@@ -125,9 +126,9 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
-        conversation_retention=RuntimeRetentionMode.VOLATILE,
-        execution_retention=RuntimeRetentionMode.VOLATILE,
-        recovery_retention=RuntimeRetentionMode.VOLATILE,
+        conversation_retention=StorageRetentionMode.VOLATILE,
+        execution_retention=StorageRetentionMode.VOLATILE,
+        recovery_retention=StorageRetentionMode.VOLATILE,
     )
     await store.initialize()
     try:
@@ -152,9 +153,9 @@ async def test_runtime_run_store_continues_recovery_interaction_high_water() -> 
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=recovery,
-        conversation_retention=RuntimeRetentionMode.VOLATILE,
-        execution_retention=RuntimeRetentionMode.VOLATILE,
-        recovery_retention=RuntimeRetentionMode.VOLATILE,
+        conversation_retention=StorageRetentionMode.VOLATILE,
+        execution_retention=StorageRetentionMode.VOLATILE,
+        recovery_retention=StorageRetentionMode.VOLATILE,
     )
     await store.initialize()
     try:

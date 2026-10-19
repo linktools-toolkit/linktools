@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._commit_policy import CommitPolicy
 from ._budget import BudgetUsage, RunBudget
 from ._correlation import (
     CorrelationData,
@@ -97,7 +98,21 @@ from ._value import (
     normalize_thinking,
 )
 
+from ._handoff import HandoffGate, HandoffState
+
+from ._signed_cursor import encode_cursor, decode_cursor
+
+from ._domain import RuntimeDomain
+
 __all__ = [
+    "RuntimeDomain",
+    "encode_cursor",
+    "decode_cursor",
+
+    "HandoffGate",
+    "HandoffState",
+
+    "CommitPolicy",
     "BudgetUsage",
     "RunBudget",
     "ApprovalDecision",

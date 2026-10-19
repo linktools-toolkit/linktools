@@ -10,7 +10,17 @@ from ._errors import model_binding_error
 from ._registry import ModelRegistry
 from ._input import validate_model_input, validate_model_inputs
 
+from ._user_input import (CanonicalUserInput, MaterializedUserContent, append_user_input_text, UserPromptInput, validate_user_content, validate_user_input, normalize_input_files)
+
 __all__ = [
+    "CanonicalUserInput",
+    "MaterializedUserContent",
+    "append_user_input_text",
+    "UserPromptInput",
+    "validate_user_content",
+    "validate_user_input",
+    "normalize_input_files",
+
     "AudioMediaType", "DocumentMediaType", "ImageMediaType", "VideoMediaType",
     "ModelBinding", "ModelRegistry", "ModelResolver", "model_binding_error",
     "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse",

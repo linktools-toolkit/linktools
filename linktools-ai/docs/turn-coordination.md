@@ -1,7 +1,7 @@
 # Live turn coordination
 
 A host may expose the optional `TurnCoordinationBackend` method group on the
-same object it passes as `RuntimeStorage(..., cache=cache)`. The group is
+same object it passes as `RuntimeStorage.sqlite(path, cache=cache)`. The group is
 independent of hot bytes, pending writes, and preview streams. Adapters need
 only the complete groups they use; a partial group is a configuration error.
 There is no separate Runtime coordinator argument and no required base class.

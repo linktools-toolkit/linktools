@@ -18,7 +18,7 @@ from ._store import StateStore, StoredRecord, active_state_transaction
 class StateRecordCache:
     """Share committed record bytes without making cached values a CAS input."""
 
-    def __init__(self, store: StateStore, cache: object | None, *, scope: str) -> None:
+    def __init__(self, store: StateStore, cache: CacheBackend | None, *, scope: str) -> None:
         self._store = store
         self._scope = scope
         self._epoch = object()

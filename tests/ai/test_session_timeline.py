@@ -29,7 +29,7 @@ from linktools.ai.core import (
     agent_conversation_id as make_agent_conversation_id,
 )
 import linktools.ai.runtime._session_timeline as timeline_module
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import ExecutionView, SessionHistoryItem
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
@@ -316,7 +316,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             {"success": success, "failed": failed},
             state.execution.executions.state_store,
         )
-        service = DefaultSessionService(
+        service = RuntimeSessionService(
             state.conversation,
             executions,  # type: ignore[arg-type]
             TenantAuthorizationPolicy(),

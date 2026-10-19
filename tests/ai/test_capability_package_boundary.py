@@ -60,7 +60,7 @@ async def test_invalid_module_route_is_rejected_before_storage_initialization(
     monkeypatch.setattr(RuntimeStorage, "initialize", unexpected_initialize)
     monkeypatch.setattr(_FeatureModels, "capture", unexpected_model_capture)
     features = _features(capability(storage=object()))
-    with pytest.raises(TypeError, match="storage must be RuntimeStorageRoute"):
+    with pytest.raises(TypeError, match="storage must be StorageRoute"):
         async with Runtime.open(
             "invalid-route",
             storage=RuntimeStorage.in_memory(),

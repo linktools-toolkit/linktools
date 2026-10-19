@@ -46,7 +46,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
             lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
         )
         store = storage.run_store
-        store.trace_persistence.configure("run", cache=cache, flush_interval=60.0)
+        store.trace_persistence.configure("run", flush_interval=60.0)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
         store.stage_transcript("run", StagedTranscript((message,)))

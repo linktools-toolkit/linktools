@@ -5,23 +5,19 @@
 import json
 
 import pytest
-from linktools.ai.runtime.state import (
-    RuntimeDomain,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 
 
 def test_runtime_storage_plan_routes_each_domain_explicitly(tmp_path) -> None:
     transaction_root = tmp_path / "state"
     conversation_root = transaction_root / "conversation"
     plan = RuntimeStoragePlan(
-        conversation=RuntimeStorageRoute.filesystem(
+        conversation=StorageRoute.filesystem(
             conversation_root,
             transaction_root=transaction_root,
         ),
-        execution=RuntimeStorageRoute.filesystem(
+        execution=StorageRoute.filesystem(
             transaction_root,
             transaction_root=transaction_root,
         ),
@@ -36,11 +32,11 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     root = tmp_path / "runtime"
     state = RuntimeStorage.from_plan(
         RuntimeStoragePlan(
-            conversation=RuntimeStorageRoute.filesystem(
+            conversation=StorageRoute.filesystem(
                 root / "conversation",
                 transaction_root=root,
             ),
-            execution=RuntimeStorageRoute.filesystem(
+            execution=StorageRoute.filesystem(
                 root,
                 transaction_root=root,
             ),

@@ -379,13 +379,16 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         await release_provider.wait()
         return ModelResponse(parts=[TextPart("published answer")])
 
-    group = RuntimeFeatures("scheduled-history")
-    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536)), scope="runtime")
-    group.agent("default", model="default", allow_tools=())
     storage_path = tmp_path / "scheduled"
+    storage = RuntimeStorage.filesystem(storage_path)
+    group = RuntimeFeatures("scheduled-history")
+    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE).with_cache(
+        InMemoryCacheBackend(max_bytes=65536),
+    )), scope="runtime")
+    group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "scheduled-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.filesystem(storage_path), features=group,
+        storage=storage, features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal

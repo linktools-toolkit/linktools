@@ -14,7 +14,7 @@ from linktools.ai.core import HmacCursorSigner, Principal, PromptLimits, TenantA
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import (
     CreateSessionRequest,
     ExecutionHandle,
@@ -415,7 +415,7 @@ async def test_session_resume_preserves_explicit_execution_input_fields() -> Non
     execution = SimpleNamespace(
         start_for_session=AsyncMock(return_value=ExecutionHandle("execution")),
     )
-    service = DefaultSessionService(
+    service = RuntimeSessionService(
         storage.conversation, storage.execution.executions,
         TenantAuthorizationPolicy(), execution,
         HmacCursorSigner("session", b"session-key"), history_reader=object(),

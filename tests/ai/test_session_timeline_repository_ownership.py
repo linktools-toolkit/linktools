@@ -14,12 +14,8 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.runtime import (
-    RuntimeHistory,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
+from linktools.ai.runtime import RuntimeHistory, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     ExecutionRepository,
@@ -136,8 +132,8 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
     tmp_path: Path, split: bool, subclass: bool, phase: str,
 ) -> None:
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )) if split else RuntimeStorage.sqlite(tmp_path / "shared.db")
     try:
         await _populate(state)

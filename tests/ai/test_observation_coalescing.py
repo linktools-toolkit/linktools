@@ -19,9 +19,17 @@ from .test_incremental_projection_boundaries import _storage
 from .test_step_projection import _execution
 
 
-async def _setup(tmp_path: Path, backend: str):
+_DEFAULT_CACHE = object()
+
+
+async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
     state = _storage(backend, tmp_path)
-    await state.initialize(namespace="observation-batches", tenant_id="tenant")
+    if cache is _DEFAULT_CACHE:
+        cache = InMemoryCacheBackend(max_bytes=65536)
+    await state.initialize(
+        namespace="observation-batches", tenant_id="tenant",
+        module_routes={RuntimeDomain.TRACE: state.plan.route(RuntimeDomain.TRACE).with_cache(cache)},
+    )
     execution = replace(_execution(), revision=1)
     repository = state.execution.executions
     await repository.create_with_history_head(execution)
@@ -29,7 +37,7 @@ async def _setup(tmp_path: Path, backend: str):
         lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
     )
     state.run_store.trace_persistence.configure(
-        "run", cache=InMemoryCacheBackend(max_bytes=65536),
+        "run",
         batch_size=_trace_persistence.DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=_trace_persistence.DEFAULT_TRACE_FLUSH_INTERVAL,
     )
@@ -51,7 +59,7 @@ async def _add_run(state, run_id: str, execution_id: str) -> None:
         lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
     )
     state.run_store.trace_persistence.configure(
-        run_id, cache=InMemoryCacheBackend(max_bytes=65536),
+        run_id,
         batch_size=_trace_persistence.DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=_trace_persistence.DEFAULT_TRACE_FLUSH_INTERVAL,
     )
@@ -246,16 +254,16 @@ async def test_ongoing_observations_do_not_reset_first_dirty_deadline(
 
 @pytest.mark.asyncio
 async def test_transient_observations_do_not_schedule_durability_tasks() -> None:
-    from linktools.ai.runtime.state._plan import RuntimeRetentionMode
+    from linktools.ai.storage import StorageRetentionMode
     from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
 
     store = _steps.RuntimeAgentRunStore(
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None, recovery_archive=None,
-        conversation_retention=RuntimeRetentionMode.VOLATILE,
-        execution_retention=RuntimeRetentionMode.VOLATILE,
-        recovery_retention=RuntimeRetentionMode.VOLATILE,
+        conversation_retention=StorageRetentionMode.VOLATILE,
+        execution_retention=StorageRetentionMode.VOLATILE,
+        recovery_retention=StorageRetentionMode.VOLATILE,
     )
     await store.initialize()
     try:
@@ -481,7 +489,7 @@ async def test_buffer_callback_settles_before_release_rebind_or_pressure_drain(
                 await repository.state_store.mutate(
                     lambda tx: repository.admit_history_producer_in_transaction(tx, replace(_execution(), revision=2))
                 )
-                store.trace_persistence.configure("run", cache=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
+                store.trace_persistence.configure("run", flush_interval=60.0)
                 store.bind_execution_producer("run", execution_id="execution", producer_generation=2)
                 run = await archive.get_agent_run(agent_run_id="run")
                 assert run is not None

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned transient object and AgentRun retention."""
 
+from ...storage import StorageRetentionMode
+
 from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
@@ -10,7 +12,7 @@ from ...core import ExecutionStatus, agent_run_id
 from ...storage import ObjectStore
 from ._contracts import ConversationCursor, ConversationRepositories, ExecutionRepositories
 from ._execution_repositories import ExecutionRepositoryImpl
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStoragePlan
+from ._plan import RuntimeDomain, RuntimeStoragePlan
 from ._steps import RuntimeAgentRunStore
 
 if TYPE_CHECKING:
@@ -47,7 +49,7 @@ class RuntimeRetentionController:
         self._transient_domains = frozenset(
             domain
             for domain in RuntimeDomain
-            if plan.route(domain).retention is RuntimeRetentionMode.TRANSIENT
+            if plan.route(domain).retention is StorageRetentionMode.TRANSIENT
         )
         self._closed = False
 

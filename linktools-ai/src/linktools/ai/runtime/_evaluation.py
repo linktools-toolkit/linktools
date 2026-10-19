@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Dataset publication and persisted evaluation plans over native Task graphs."""
 
+from ..storage import StorageRetentionMode
+
 import asyncio
 import json
 import sys
@@ -61,7 +63,7 @@ from ._observation import (
 from ._watch_cursor import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
 )
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, SnapshotExclusiveGuard
+from .state import RuntimeDomain, RuntimeStorage, SnapshotExclusiveGuard
 from .state._contracts import IdempotencyRecord
 from .state._evaluation_records import (
     EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
@@ -286,8 +288,8 @@ class RuntimeEvaluations:
                    RuntimeDomain.RECOVERY, RuntimeDomain.ARTIFACT)
         for domain in domains:
             retention = self._storage.plan.route(domain).retention
-            if retention is RuntimeRetentionMode.TRANSIENT or (
-                    retention is RuntimeRetentionMode.VOLATILE and not policy.allow_volatile):
+            if retention is StorageRetentionMode.TRANSIENT or (
+                    retention is StorageRetentionMode.VOLATILE and not policy.allow_volatile):
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "evaluation evidence requires retained storage")
 
     async def start(
@@ -491,7 +493,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires independent Runtime ownership over shared storage")
                 for domain in (RuntimeDomain.EVALUATION, RuntimeDomain.TASK, RuntimeDomain.EXECUTION,
                                RuntimeDomain.RECOVERY, RuntimeDomain.ARTIFACT):
-                    if (other._storage.plan.route(domain).retention is not RuntimeRetentionMode.DURABLE
+                    if (other._storage.plan.route(domain).retention is not StorageRetentionMode.DURABLE
                             or other._storage.object_store(domain).store_id != self._storage.object_store(domain).store_id):
                         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires shared retained evidence stores")
                 await self._validate_definitions(record.manifest, selected)

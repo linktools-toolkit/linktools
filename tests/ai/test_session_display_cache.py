@@ -13,8 +13,9 @@ import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ConversationCapability
-from linktools.ai.runtime import RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime import RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
@@ -52,7 +53,7 @@ class _Cache(InMemoryCacheBackend):
 
 
 def _service(state, cache, authorization=None):
-    return DefaultSessionService(
+    return RuntimeSessionService(
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("display", b"display-test-key"), history_reader=object(),
@@ -354,8 +355,8 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
 
 async def test_display_cache_split_routes_keep_strong_fallback(tmp_path):
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
     cache = _Cache()
     await _prepare(state)
@@ -769,9 +770,9 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     elif retention == "volatile":
         storage = RuntimeStorage.in_memory(cache=cache)
     else:
-        storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache)
+        storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=StorageRoute.transient(cache=cache)))
     group = RuntimeFeatures[None]("display")
-    group.capability(ConversationCapability(cache=cache), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
         "display", storage=storage, models=_Models(TestModel()), features=group,
@@ -805,7 +806,7 @@ async def test_display_cache_custom_repository_keeps_original_read_path():
     try:
         sessions = state.conversation.sessions
         custom = CustomSessions(sessions.state_store, namespace=sessions.namespace, tenant_id=sessions.tenant_id)
-        service = DefaultSessionService(
+        service = RuntimeSessionService(
             replace(state.conversation, sessions=custom), state.execution.executions,
             TenantAuthorizationPolicy(), object(), HmacCursorSigner("display", b"display-test-key"),
             history_reader=object(), transcript_store=state.run_store.conversation_persistence, cache=cache,
@@ -867,7 +868,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
     cache = _Cache()
     storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache=cache)
     group = RuntimeFeatures[None]("display")
-    group.capability(ConversationCapability(cache=cache), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)

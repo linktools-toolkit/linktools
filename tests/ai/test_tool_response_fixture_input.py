@@ -14,11 +14,10 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.capability import RuntimeFeatures, ToolResponsesCapability
+from linktools.ai.capability import ConversationCapability, RuntimeFeatures, ToolResponseFixture, ToolResponsesCapability
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
-from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage, ToolResponseFixture
+from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.runtime._input import input_intent
 from linktools.ai.runtime.state._codec import _decode_enveloped_domain, decode_domain, encode_domain

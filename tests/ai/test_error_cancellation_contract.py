@@ -20,7 +20,7 @@ from linktools.ai.runtime._agent_executor import (
     _cleanup_agent_run_resources,
     _close_mcp_resources,
 )
-from linktools.ai.runtime._handoff import HandoffGate
+from linktools.ai.core import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
