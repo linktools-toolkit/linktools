@@ -293,18 +293,21 @@ async def test_reconcile_terminal_before_split_session_release_preserves_unavail
                             models=_Models(_UsageFunctionModel(model)), features=_features(),
                             context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        release = storage.conversation.sessions.release_execution
+        mutate = storage.conversation.sessions.state_store.mutate
         held = False
+        execution = None
 
-        async def hold_first_release(*args, **kwargs):
+        async def hold_first_release(callback):
             nonlocal held
-            if kwargs.get('history_unavailable') and not held:
-                held = True
-                release_entered.set()
-                await allow_release.wait()
-            return await release(*args, **kwargs)
+            if execution is not None and not held:
+                terminal = await storage.execution.executions.get(execution.execution_id, tenant_id='tenant')
+                if terminal.status.value == 'SUCCEEDED':
+                    held = True
+                    release_entered.set()
+                    await allow_release.wait()
+            return await mutate(callback)
 
-        monkeypatch.setattr(storage.conversation.sessions, 'release_execution', hold_first_release)
+        monkeypatch.setattr(storage.conversation.sessions.state_store, 'mutate', hold_first_release)
         execution = await session.start('first')
         finish_model.set()
         try:

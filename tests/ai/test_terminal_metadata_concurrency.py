@@ -13,6 +13,7 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionStatus,
+    RuntimeDomain,
     StopReason,
     UsageMetrics,
 )
@@ -250,6 +251,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
         namespace="terminal-readback",
         events=state.execution.events,
         conversation=state.conversation.sessions,
+        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
         recovery=state.recovery.checkpoints,
         background_tasks=set(),
     )
