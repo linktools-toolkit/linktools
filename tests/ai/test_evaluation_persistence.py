@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation facts share backend transactions and preserve every planned slot."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -17,7 +18,8 @@ from linktools.ai.evaluation import (
     ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan,
 )
 from linktools.ai.runtime._evaluation import RuntimeEvaluations
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._contracts import IdempotencyRecord
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._evaluation_records import (
@@ -39,9 +41,9 @@ def storage_for(kind: str, path: Path) -> RuntimeStorage:
     if kind == "sqlite":
         return RuntimeStorage.sqlite(path / "state.sqlite")
     return RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(path / "execution.sqlite"),
-        task=RuntimeStorageRoute.filesystem(path / "task"),
-        evaluation=RuntimeStorageRoute.sqlite(path / "evaluation.sqlite"),
+        execution=StorageRoute.sqlite(path / "execution.sqlite"),
+        task=StorageRoute.filesystem(path / "task"),
+        evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
     ))
 
 
@@ -132,6 +134,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
 async def test_dataset_publication_and_slot_arbitration_are_backend_atomic(backend: str, tmp_path: Path) -> None:
     storage = storage_for(backend, tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Runtime object-store routing and lifecycle ownership."""
 
+from ...storage import StorageRetentionMode
+
 import asyncio
 import hashlib
 import json
@@ -26,12 +28,7 @@ from ...storage import (
     TransientObjectStore,
     read_object,
 )
-from ._plan import (
-    RuntimeDomain,
-    RuntimeRetentionMode,
-    RuntimeStoragePlan,
-    runtime_domain_uses_object_store,
-)
+from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 _OBJECT_MAX_AGE_SECONDS = 3.0
@@ -54,8 +51,8 @@ class _RuntimeObjectRouter:
         stores: Mapping[RuntimeDomain, ObjectStore],
         *,
         close_guard_stores: Sequence[ObjectStore],
-        cache: object | None = None,
-        domain_caches: Mapping[RuntimeDomain, object | None] | None = None,
+        cache: CacheBackend | None = None,
+        domain_caches: Mapping[RuntimeDomain, CacheBackend | None] | None = None,
         cache_domains: Sequence[RuntimeDomain] = (),
         namespace: str = "",
         tenant_id: str = "",
@@ -255,8 +252,6 @@ def build_runtime_object_router(
     stores: Mapping[RuntimeDomain, object],
     contexts: Mapping[RuntimeDomain, SqlStorageContext],
     *,
-    cache: object | None = None,
-    domain_caches: Mapping[RuntimeDomain, object | None] | None = None,
     namespace: str = "",
     tenant_id: str = "",
 ) -> _RuntimeObjectRouter:
@@ -268,13 +263,13 @@ def build_runtime_object_router(
         if not runtime_domain_uses_object_store(domain):
             continue
         route = plan.route(domain)
-        if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
+        if route.retention is StorageRetentionMode.DURABLE and external is not None:
             values[domain] = external
-        elif route.retention is RuntimeRetentionMode.VOLATILE:
+        elif route.retention is StorageRetentionMode.VOLATILE:
             store = InMemoryObjectStore()
             values[domain] = store
             close_guard_stores.append(store)
-        elif route.retention is RuntimeRetentionMode.TRANSIENT:
+        elif route.retention is StorageRetentionMode.TRANSIENT:
             store = TransientObjectStore()
             values[domain] = store
             close_guard_stores.append(store)
@@ -300,11 +295,10 @@ def build_runtime_object_router(
     return _RuntimeObjectRouter(
         values,
         close_guard_stores=close_guard_stores,
-        cache=cache,
-        domain_caches=domain_caches,
+        domain_caches={domain: plan.route(domain).cache for domain in values},
         cache_domains=tuple(
             domain for domain in values
-            if plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+            if plan.route(domain).retention is StorageRetentionMode.DURABLE
         ),
         namespace=namespace,
         tenant_id=tenant_id,

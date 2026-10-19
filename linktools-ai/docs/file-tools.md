@@ -173,10 +173,7 @@ chunks and same-filesystem staging, still requiring O(N) IO and temporary disk.
 
 ## Tool selection and behavior contracts
 
-* Model-visible `read_file` uses behavior revision 3 for unified reads with MIME
-  admission. `write_file`, `search_files`, and `attach_files` use revision 2.
-  New `list_files` starts at 1; unchanged tools and wire versions do not change.
-  Capture/recompile affected Agent bindings deliberately.
+* Workspace tools use behavior revision 1 for the current unpublished contract.
 * `attach_files(paths=[...])` becomes `read_file(path=[...])`; explicit whole-text
   attachment becomes `read_file(path=..., as_file=True)`.
 * `find_files("*.png")` becomes `list_files(include_glob="**/*.png")` for its old

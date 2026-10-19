@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
+
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
@@ -76,7 +78,7 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
         assert {item.dimension for item in report.scores} == set(expected.dimensions)
         experiment_id = run.experiment_id
 
-    storage = RuntimeStorage.filesystem(root)
+    storage = RuntimeState(RuntimeStorage.filesystem(root))
     await storage.initialize(namespace="score-snapshot", tenant_id=PRINCIPAL.tenant_id, read_only=True)
     archive = InMemoryObjectStore("score-snapshot-archive")
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
@@ -86,7 +88,7 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
         await storage.close()
 
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(reference, object_store=archive, root=restored_root, limits=limits)
+    await RuntimeState.restore_snapshot(reference, object_store=archive, root=restored_root, limits=limits)
     async with Runtime.open("score-snapshot", models=FixtureModels(),
                             storage=RuntimeStorage.from_root(restored_root), context=CONTEXT) as restored:
         run = await restored.evaluations.get(experiment_id, principal=PRINCIPAL)

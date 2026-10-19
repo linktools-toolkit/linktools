@@ -31,6 +31,7 @@ from ..errors import AIError, ErrorCode
 from ._files import sync_directory
 from ._lock import FilesystemMutationLock, Lease
 from ._turn import TurnCoordination
+from ..core import WriteBufferEntry
 
 ContentCacheKey: TypeAlias = str
 
@@ -250,7 +251,7 @@ class InMemoryCacheBackend:
 
     async def read_batch(
         self, scope: str, *, limit: int,
-    ) -> "tuple[tuple[str, Hashable, bytes | None], ...]":
+    ) -> "tuple[WriteBufferEntry, ...]":
         """Read the ordered unacknowledged prefix without consuming it."""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("batch limit must be a positive integer")

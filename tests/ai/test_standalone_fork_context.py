@@ -14,14 +14,16 @@ from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from sqlalchemy import event
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage, ConversationCapability
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import _decode_step, _encode_step
 from linktools.ai.workspace import Workspace
 from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime._message import encode_model_messages
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -74,17 +76,17 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         expected = encode_model_messages(tuple(actual))
         source_id = source.execution_id
-        record = await state.execution.executions.get(source_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(source_id, tenant_id=runtime.tenant_id)
         assert record is not None and not record.durable_trace and not record.restart_checkpoints
         run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                               execution_id=source_id, agent_run_seq=record.agent_run_seq)
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         checkpoint = await archive.latest_checkpoint(agent_run_id=run_id)
         assert checkpoint is not None
         assert encode_model_messages(tuple(checkpoint.context_messages or checkpoint.messages)) == expected
         assert await archive.checkpoint_count(agent_run_id=run_id) == 1
         assert await archive.list_events(agent_run_id=run_id) == []
-        assert await state.run_store.read_store(RuntimeDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
+        assert await runtime._state.run_store.read_store(RuntimeDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
 
     async with Runtime.open("standalone-fork", storage=storage(), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         original = await runtime.executions.get(source_id)
@@ -107,11 +109,13 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
             return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id="call")])
         return ModelResponse(parts=[TextPart("answer")])
 
+    cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
     group = RuntimeFeatures("one-fork-boundary")
+    group.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", allow_tools=("lookup",))
     group.capability(ConversationCapability(), scope="runtime")
-    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
     async with Runtime.open("one-fork-boundary", storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         transactions = set()
 
@@ -119,7 +123,7 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
             if statement.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
                 transactions.add(connection.get_transaction())
 
-        engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
+        engine = runtime._state.execution.executions.state_store.storage_group.context.engine.sync_engine
         event.listen(engine, "before_cursor_execute", capture)
         try:
             source = await runtime.agents.get().start("question", idempotency_key="question")
@@ -191,7 +195,7 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         source = await runtime.agents.get().start("source")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
-        await _damage_fork_context(storage.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
+        await _damage_fork_context(runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
     with pytest.raises(AIError) as raised:
         async with Runtime.open("corrupt-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=models, features=group) as runtime:
             source = await runtime.executions.get(source_id)
@@ -215,10 +219,12 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
         return ModelResponse(parts=[TextPart("file read")])
 
     workspace = Workspace.load(tmp_path)
+    cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
     group = workspace_features("file-fork", workspace=workspace)
+    group.capability(ExecutionCapability(commit=CommitPolicy.terminal() if cached else CommitPolicy.sync(), coordination=cache), scope="runtime")
     group.agent("default", model="default", allow_tools=("read_file",))
     group.capability(ConversationCapability(), scope="runtime")
-    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         with capture_run_messages() as messages:
             source = await runtime.agents.get().start("read")
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -261,7 +267,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
             finally:
                 run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                                       execution_id=source.execution_id, agent_run_seq=1)
-                archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
+                archive = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
                 assert await archive.latest_checkpoint(agent_run_id=run_id) is None
                 if state == "running":
                     await source.cancel()

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Recovery checkpoint integrity and recoverable-frontier regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -37,6 +38,7 @@ def _checkpoint(
 @pytest.mark.asyncio
 async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="recovery-integrity", tenant_id="tenant")
     try:
         repository = state.recovery.checkpoints
@@ -56,6 +58,7 @@ async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
 @pytest.mark.asyncio
 async def test_completed_transition_removes_recoverable_checkpoint() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="recovery-complete", tenant_id="tenant")
     try:
         repository = state.recovery.checkpoints
@@ -87,6 +90,7 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
 @pytest.mark.asyncio
 async def test_missing_checkpoint_cannot_be_updated_as_recoverable() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="recovery-missing", tenant_id="tenant")
     try:
         with pytest.raises(AIError) as raised:

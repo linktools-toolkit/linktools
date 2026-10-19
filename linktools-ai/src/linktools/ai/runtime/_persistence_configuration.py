@@ -7,16 +7,17 @@ from collections.abc import Sequence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
 from ..errors import AIError, ErrorCode
-from ._conversation_capability import ConversationCapability
-from ._persistence_capabilities import CheckpointCapability, TraceCapability
-from .state import RuntimeDomain, RuntimeStorageRoute
+from ..capability import CheckpointCapability, ConversationCapability, TraceCapability
+from ..storage import StorageRoute
+from .state import RuntimeDomain
+from .persistence import CapabilityPersistence
 
 
 def persistence_storage_configuration(
     capabilities: Sequence[AbstractCapability[object]],
-) -> tuple[dict[RuntimeDomain, RuntimeStorageRoute], dict[RuntimeDomain, object | None]]:
-    routes: dict[RuntimeDomain, RuntimeStorageRoute] = {}
-    caches: dict[RuntimeDomain, object | None] = {}
+) -> dict[RuntimeDomain, StorageRoute]:
+    routes: dict[RuntimeDomain, StorageRoute] = {}
+    selected: set[RuntimeDomain] = set()
 
     def collect(feature: AbstractCapability[object]) -> None:
         if isinstance(feature, WrapperCapability):
@@ -34,15 +35,45 @@ def persistence_storage_configuration(
             domain = RuntimeDomain.TRACE
         else:
             return
-        if domain in caches:
+        if domain in selected:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one persistence feature is allowed per module")
-        if feature.storage is not None:
+        selected.add(domain)
+        if isinstance(feature, (CheckpointCapability, TraceCapability)) and feature.storage is not None:
+            if not isinstance(feature.storage, StorageRoute):
+                raise TypeError("storage must be StorageRoute")
             routes[domain] = feature.storage
-        caches[domain] = feature.cache if isinstance(feature, (ConversationCapability, TraceCapability)) else None
 
     for capability in capabilities:
         collect(capability)
-    return routes, caches
+    return routes
 
 
-__all__ = ["persistence_storage_configuration"]
+__all__ = ["persistence_storage_configuration", "capability_storage_configuration"]
+
+
+def capability_storage_configuration(
+    capabilities: Sequence[tuple[str, AbstractCapability[object]]], *, default_route: StorageRoute,
+) -> dict[str, StorageRoute]:
+    """Resolve optional participants without binding their run callbacks."""
+    routes: dict[str, StorageRoute] = {}
+
+    def collect(capability: AbstractCapability[object], registered_id: str | None) -> None:
+        if isinstance(capability, WrapperCapability):
+            collect(capability.wrapped, None)
+        elif isinstance(capability, CombinedCapability):
+            for child in capability.capabilities:
+                collect(child, None)
+        elif isinstance(capability, CapabilityPersistence):
+            identity = capability.id or registered_id
+            if not identity:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            if identity in routes:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            route = capability.storage or default_route
+            if not isinstance(route, StorageRoute):
+                raise TypeError("Persistent capability storage must use StorageRoute")
+            routes[identity] = route
+
+    for identity, capability in capabilities:
+        collect(capability, identity)
+    return routes

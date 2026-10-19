@@ -35,7 +35,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
     async with Runtime.open("capture", models=_TaskTestModels(), storage=storage) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         entered = asyncio.Event()
 
@@ -65,7 +65,7 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
         view = await runtime.executions.inspect(state.execution_id, principal=principal)
         assert view.status is ExecutionStatus.CANCELLED
         assert view.task_attempt == 0
-        record = await storage.execution.executions.get(state.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(state.execution_id, tenant_id=principal.tenant_id)
         assert record.dependency_hold_ids == ()
         with pytest.raises(AIError) as missing:
             await runtime.executions.capture_input(state.execution_id,
@@ -100,7 +100,7 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
     async with Runtime.open("capture", models=_TaskTestModels(), storage=storage) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel_task
         cleanup_failed = asyncio.Event()
@@ -150,7 +150,7 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
         view = await runtime.executions.inspect(state.execution_id, principal=principal)
         assert view.status is (ExecutionStatus.CANCELLED if cancel_recovery else ExecutionStatus.SUCCEEDED)
         assert calls == ([] if cancel_recovery else ["run"])
-        record = await storage.execution.executions.get(state.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(state.execution_id, tenant_id=principal.tenant_id)
         assert record.dependency_hold_ids == ()
         if not cancel_recovery:
             assert await run.result("work") == "ok"
@@ -177,7 +177,7 @@ async def test_invocation_capture_repeated_cancellation_waits_for_cleanup(
 
     task = Task("capture.work", handler, cancel=cancel, effect_policy="none")
     async with Runtime.open("capture", models=_TaskTestModels(), storage=storage) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel_task
         entered = asyncio.Event()
@@ -253,7 +253,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
     consumer = Task("capture.consumer", consume, normalize=normalize, effect_policy="none")
     candidate = Task("capture.candidate", consume, normalize=reproject, effect_policy="none")
     async with Runtime.open("callable-ready", models=_TaskTestModels(), storage=storage) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -301,7 +301,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
                 principal=principal, idempotency_key=mode)
             assert (await replay.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
             assert await replay.result("consumer") == {"value": expected, "dependency": "captured dependency"}
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
         assert record.dependency_hold_ids == ()
 
 

@@ -150,7 +150,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
                 engine=engine)
             await asyncio.wait_for(entered.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
             experiment_id = run.experiment_id
-            repository = initial.evaluation.records
+            repository = runtime._state.evaluation.records
             record = await repository.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
             saved = next(intent for intent in record.intents if intent.scorer_slot_id is not None)
             assert not saved.confirmed and not saved.released
@@ -189,7 +189,7 @@ async def test_scoring_intent_replays_original_input_and_rejects_changed_context
         sample = received[0]
         assert sample.case_ref == (case.ref if include_case_context else None)
         assert sample.label_provenance == (case.label_provenance if include_case_context else None)
-        record = await reopened.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         restored = next(intent for intent in record.intents if intent.scorer_slot_id is not None)
         assert canonical_json_bytes(encode_domain(restored.submission)) == original_bytes
         assert sample.to_mapping() == saved.submission.graph.nodes[0].input

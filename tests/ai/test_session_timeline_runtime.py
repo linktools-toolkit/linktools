@@ -10,7 +10,8 @@ import pytest
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import ConversationCapability, Page, Runtime, RuntimeHistory, SessionTurn
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Page, Runtime, RuntimeHistory, SessionTurn
 from linktools.ai.runtime.state import RuntimeStorage
 
 from ._runtime_test_helpers import RuntimeUsageModels

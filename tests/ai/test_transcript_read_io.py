@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bounded transcript reads retain their captured range and integrity checks."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import aclosing
 from dataclasses import replace
@@ -31,7 +32,7 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'transcript.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="transcript-read-io", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -90,7 +91,7 @@ async def test_transcript_range_excludes_appends_after_reading_starts(
     backend: str, reader: str, page_size: int,
 ) -> None:
     monkeypatch.setattr(_history, "_TRANSCRIPT_PAGE_SIZE", page_size)
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-read-cut", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -131,7 +132,7 @@ async def test_transcript_range_checks_all_returned_facts_before_finishing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     backend: str, corruption: str, page_size: int,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-range-integrity", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -173,7 +174,7 @@ async def test_transcript_payload_and_yield_release_state_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     backend: str, reader: str, finish: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-payload-scope", tenant_id="tenant")
     task = None
     try:
@@ -247,7 +248,7 @@ async def test_empty_transcript_range_validates_head_without_loading_facts(
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'empty-range.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="transcript-empty-range", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -292,7 +293,7 @@ async def test_transcript_first_yield_prefetches_only_one_bounded_fact_page(
 ) -> None:
     from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-lazy-page", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -335,7 +336,7 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
 ) -> None:
     from linktools.ai.runtime.state._memory import InMemoryStateStore
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-separate-store", tenant_id="tenant")
     other = InMemoryStateStore()
     await other.initialize()
@@ -385,7 +386,7 @@ async def test_session_range_retains_custom_history_scalar_contract(
 ) -> None:
     from linktools.ai.runtime.state._conversation_repositories import ConversationHistoryRepositoryImpl
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     namespace = "transcript-custom-history"
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
@@ -452,7 +453,7 @@ async def test_batched_history_range_validates_descriptor_and_head(
 ) -> None:
     from linktools.ai.runtime.state._contracts import TranscriptOwnerDomain
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-batch-integrity", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -498,7 +499,7 @@ async def test_batched_history_range_validates_descriptor_and_head(
 
 @pytest.mark.parametrize("start", (0, 1))
 async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-seek-hint", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -526,7 +527,7 @@ async def test_invalid_seek_hint_falls_back_to_validated_facts(start: int) -> No
 
 @pytest.mark.parametrize("mismatch", ("namespace", "tenant"))
 async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-original", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -548,7 +549,7 @@ async def test_history_batch_does_not_bypass_transcript_scope(mismatch: str) -> 
 
 
 async def test_history_batch_preserves_head_decode_error_priority() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-error-priority", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())

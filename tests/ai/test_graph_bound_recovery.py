@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Graph recovery authorizes control separately from bound execution identity."""
 
+from linktools.ai.runtime.state import RuntimeState
+
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -61,7 +63,7 @@ class _GraphAuthorization:
 
 
 class _RecoveryBackend:
-    def __init__(self, storage: RuntimeStorage) -> None:
+    def __init__(self, storage: RuntimeState) -> None:
         self.storage = storage
         self.operations = []
         self.claims = {}
@@ -111,7 +113,7 @@ async def _graph_recovery(
         submission = await runtime.tasks.bind(task).prepare_submission(
             graph, idempotency_key="prepare-bound-graph", principal=_ORIGIN,
         )
-        await storage.task.admissions.admit_prepared(submission)
+        await runtime._state.task.admissions.admit_prepared(submission)
         runner = runtime._task_node_runtime
         assert runner is not None
         await runner.activate_graph(submission.graph, (task,), ())
@@ -128,36 +130,36 @@ async def _graph_recovery(
                 error_code=(None if node_id == "live" and live_status is not None
                             else ErrorCode.STORAGE_RECOVERY_REQUIRED.value),
             )
-            await storage.execution.executions.create_with_history_head(record)
-            leases.append(await storage.task.tasks.claim(
+            await runtime._state.execution.executions.create_with_history_head(record)
+            leases.append(await runtime._state.task.tasks.claim(
                 graph.graph_id, node_id, tenant_id="default",
                 owner="stopped-worker", lease_seconds=30,
             ))
         for lease in leases:
             if lease.node_id == "live" and live_status is not None:
-                await storage.task.tasks.bind_execution(
+                await runtime._state.task.tasks.bind_execution(
                     lease, tenant_id="default", execution_id="execution-live",
                 )
                 if live_status is TaskStatus.WAITING:
-                    await storage.task.tasks.handoff_execution(
+                    await runtime._state.task.tasks.handoff_execution(
                         lease, tenant_id="default", execution_id="execution-live",
                     )
                 continue
-            await storage.task.tasks.mark_recovery_required(
+            await runtime._state.task.tasks.mark_recovery_required(
                 lease, tenant_id="default", execution_id=f"execution-{lease.node_id}",
                 error_code=ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
                 error_digest=canonical_sha256({"node": lease.node_id}),
             )
-        backend = _RecoveryBackend(storage)
+        backend = _RecoveryBackend(runtime._state)
         runner._recovery_backend = backend
         launcher = _Launcher()
         service = DefaultTaskGraphService(
-            storage.task, authorization, launcher, preflight=runner,
+            runtime._state.task, authorization, launcher, preflight=runner,
             bound_execution_recovery=runner,
         )
         authorization.setup = False
         authorization.calls.clear()
-        yield runtime, storage, service, backend, launcher, authorization
+        yield runtime, runtime._state, service, backend, launcher, authorization
 
 
 @pytest.mark.asyncio

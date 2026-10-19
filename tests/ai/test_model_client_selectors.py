@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Exact model-request selectors retain identity, authorization, and lazy bodies."""
 
+from linktools.ai.runtime.state import RuntimeState
 import hashlib
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -20,7 +21,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelClientRequest, ModelClientResponse
 from linktools.ai.runtime import Execution, RuntimeExecutions, RuntimeHistory
-from linktools.ai.runtime import _cursor
+from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._model_interaction import build_context_projection
@@ -50,7 +51,7 @@ def _object_keys(value):
 
 @asynccontextmanager
 async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         root = _record(ExecutionStatus.STARTED, 2)

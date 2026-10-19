@@ -8,7 +8,7 @@ import socket
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from typing import Any
 
 import pytest
@@ -651,7 +651,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
             effect = effects[0]
             execution_id = execution.execution_id
             assert remote.effects == ["committed"]
-        await storage.close()
+        await runtime._state.close()
         remote.lose_result = False
         restored = RuntimeStorage.filesystem(state_path)
         restored_features = _group(_spec(remote, headers={"X-Rotated": "true"}))
@@ -676,7 +676,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
                 assert result.status is ExecutionStatus.SUCCEEDED
                 assert remote.effects == ["committed"]
         finally:
-            await restored.close()
+            await runtime._state.close()
         await _wait_closed(remote)
 
 
@@ -997,7 +997,7 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.MCP_CLEANUP_FAILED.value
             assert "private-cleanup-response" not in str(result)
-            operations = await storage.recovery.tools.list_by_execution(
+            operations = await runtime._state.recovery.tools.list_by_execution(
                 execution.execution_id,
                 tenant_id=runtime.default_principal.tenant_id,
             )

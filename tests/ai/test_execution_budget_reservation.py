@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution reservations publish their budget scope atomically."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -31,12 +32,12 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     objects = InMemoryObjectStore("snapshot")
     async with Runtime.open(namespace, models=RuntimeUsageModels(), storage=storage) as runtime:
-        store = storage.execution.budgets.state_store
+        store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
         committed = asyncio.Event()
         release = asyncio.Event()
         reservations = []
-        reserve = storage.execution.executions.reserve_start
+        reserve = runtime._state.execution.executions.reserve_start
 
         async def capture_reservation(value):
             reservations.append(value)
@@ -50,7 +51,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
             return value
 
         with monkeypatch.context() as patch:
-            patch.setattr(storage.execution.executions, "reserve_start", capture_reservation)
+            patch.setattr(runtime._state.execution.executions, "reserve_start", capture_reservation)
             patch.setattr(store, "mutate", pause_after_commit)
             start = asyncio.create_task(runtime.agents.get().start(
                 "hello", budget=budget, idempotency_key="cancelled",
@@ -70,7 +71,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
         reservation = reservations[0]
         scope = reservation.execution.budget_scope_id
         if scope is not None:
-            assert (await storage.execution.budgets.read(scope)).limits == budget
+            assert (await runtime._state.execution.budgets.read(scope)).limits == budget
 
         # A concurrent idempotency loser must not create its own unused scope.
         loser_id = "losing-execution"
@@ -88,6 +89,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
 
     reader = (RuntimeStorage.filesystem(tmp_path / "source") if backend == "filesystem"
               else RuntimeStorage.sqlite(tmp_path / "source.db"))
+    reader = RuntimeState(reader)
     await reader.initialize(namespace=namespace, tenant_id="default", read_only=True)
     try:
         reference = await reader.export_snapshot(object_store=objects, limits=limits)
@@ -95,7 +97,7 @@ async def test_cancelled_reservation_snapshot_restores_and_replays(
         await reader.close()
 
     restored = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(reference, object_store=objects, root=restored, limits=limits)
+    await RuntimeState.restore_snapshot(reference, object_store=objects, root=restored, limits=limits)
     async with Runtime.open(namespace, models=RuntimeUsageModels(),
                             storage=RuntimeStorage.from_root(restored)) as runtime:
         run = await runtime.agents.get().start("hello", budget=budget, idempotency_key="cancelled")
@@ -119,7 +121,7 @@ async def test_failed_reservation_rolls_back_budget_scope(
                RuntimeStorage.filesystem(tmp_path / "source") if backend == "filesystem" else
                RuntimeStorage.sqlite(tmp_path / "source.db"))
     async with Runtime.open("failed-budget-reservation", models=RuntimeUsageModels(), storage=storage) as runtime:
-        store = storage.execution.budgets.state_store
+        store = runtime._state.execution.budgets.state_store
         mutate = store.mutate
 
         async def fail_before_commit(callback):

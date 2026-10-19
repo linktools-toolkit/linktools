@@ -202,7 +202,7 @@ async def test_saved_rescore_reports_expire_with_the_source_and_are_purged(
             await runtime.evaluations.get_report(saved.report_id, principal=PRINCIPAL)
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         with pytest.raises(AIError):
-            await storage.evaluation.records.get_report(saved.report_id)
+            await runtime._state.evaluation.records.get_report(saved.report_id)
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_coordinator_does_not_retry_unexpired_read_failures(
 
         async def stopped():
             while True:
-                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                 if record.dispositions and run.experiment_id not in runtime.evaluations._watchers:
                     return record
                 await asyncio.sleep(0.01)
@@ -304,7 +304,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
 
         async def settled():
             while True:
-                record = await storage.evaluation.records.get(rescored.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                record = await runtime._state.evaluation.records.get(rescored.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                 if (record.gate != "open" and all(intent.released for intent in record.intents) and
                         any(item.disposition.terminal for item in record.dispositions)):
                     return record
@@ -319,7 +319,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         await runtime.evaluations.purge_expired(principal=PRINCIPAL, now=clock.now(), exclusive=Offline())
         with pytest.raises(AIError):
-            await storage.evaluation.records.get_report(saved.report_id)
+            await runtime._state.evaluation.records.get_report(saved.report_id)
 
 
 @pytest.mark.asyncio

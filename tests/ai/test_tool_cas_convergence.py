@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
@@ -92,10 +93,10 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     await provision_runtime_database(engine)
     await engine.dispose()
 
-    state = RuntimeStorage.sqlite(
+    state = RuntimeState(RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
-    )
+    ))
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -144,7 +145,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
 async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
     tmp_path,
 ) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "expired-tool-claim.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "expired-tool-claim.db"))
     await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -170,7 +171,7 @@ async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
 
 @pytest.mark.asyncio
 async def test_expired_replay_safe_claim_returns_to_pending() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="tool-expired-replay-safe", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -196,7 +197,7 @@ async def test_expired_replay_safe_claim_returns_to_pending() -> None:
 
 @pytest.mark.asyncio
 async def test_live_tool_claim_is_not_reconciled_early() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="tool-live-claim", tenant_id="tenant")
     try:
         repository = state.recovery.tools
@@ -536,7 +537,7 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_expired_non_replay_safe_admission_commits_unknown_before_raising() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools

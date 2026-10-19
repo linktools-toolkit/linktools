@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable Session admission and ownership contracts."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -52,7 +53,7 @@ def _session() -> SessionRecord:
     )
 
 
-async def _admission_result(state: RuntimeStorage, execution_id: str) -> str:
+async def _admission_result(state: RuntimeState, execution_id: str) -> str:
     try:
         record = await state.conversation.sessions.admit_execution(
             "session",
@@ -68,6 +69,7 @@ async def _admission_result(state: RuntimeStorage, execution_id: str) -> str:
 @pytest.mark.asyncio
 async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-admission-memory", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -118,6 +120,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
     state = RuntimeStorage.sql(engine)
+    state = RuntimeState(state)
     await state.initialize(namespace="session-admission-sql", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
     try:
@@ -137,6 +140,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
         await state.close()
 
         reopened = RuntimeStorage.sql(engine)
+        reopened = RuntimeState(reopened)
         await reopened.initialize(namespace="session-admission-sql", tenant_id="tenant")
         try:
             persisted = await reopened.conversation.sessions.get(
@@ -293,6 +297,7 @@ class _RejectingBackend:
 @pytest.mark.asyncio
 async def test_rejected_admission_terminalizes_pending_start() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -381,6 +386,7 @@ async def test_rejected_start_preserves_admission_truth_and_cleanup_before_metri
     commit_phase: str, cancel_metric: bool,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="rejected-start-metric", tenant_id="tenant")
     entered = asyncio.Event()
     release = asyncio.Event()

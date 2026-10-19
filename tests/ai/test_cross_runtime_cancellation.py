@@ -10,7 +10,11 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import ConversationCapability, TraceCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -54,11 +58,11 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
         monkeypatch.setattr(LocalExecutionBackend, "_commit_success", pause_success)
 
+    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("remote-cancel-release")
     group.capability(ConversationCapability(), scope="runtime")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
-    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     try:
         async with Runtime.open(
@@ -98,19 +102,22 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                 )
                 assert outcome.cancelled is False
                 tenant = owner.default_principal.tenant_id
-                pending_head = await remote_storage.execution.executions.get_history_head(
+                pending_head = await remote._state.execution.executions.get_history_head(
                     execution.execution_id, tenant_id=tenant,
                 )
                 await execution.history(include_content=True)
                 while_active = await owner.executions.inspect(execution.execution_id, principal=owner.default_principal)
                 assert while_active.status is ExecutionStatus.CANCELLING
                 assert pending_head.state.value == "open"
-                assert owner_storage.run_store._staging._runs
+                assert owner._state.run_store._staging._runs
                 backend = owner._execution_service.runtime_backend()
                 worker = backend._tasks[execution.execution_id]
-                run_stores = (owner_storage.run_store, remote_storage.run_store)
-                observation_tasks = {store.trace_persistence.scheduler_task for store in run_stores
-                                     if store.trace_persistence.scheduler_task is not None}
+                run_stores = (owner._state.run_store, remote._state.run_store)
+                observation_tasks = {
+                    buffer.scope._writer
+                    for store in run_stores for buffer in store.trace_persistence._buffers.values()
+                    if buffer.scope is not None and buffer.scope._writer is not None
+                }
                 release.set()
                 worker_outcomes = await asyncio.wait_for(
                     asyncio.gather(asyncio.shield(worker), return_exceptions=True), 10,
@@ -131,7 +138,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         await asyncio.sleep(0.01)
                 await asyncio.wait_for(released(), 10)
                 result = await remote.executions.result(execution.execution_id, principal=owner.default_principal)
-                sealed = await remote_storage.execution.executions.get_history_head(
+                sealed = await remote._state.execution.executions.get_history_head(
                     execution.execution_id, tenant_id=tenant,
                 )
                 history = await execution.history(include_content=True)
@@ -146,8 +153,10 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         tasks = observation_tasks | backend._checkpoint_tasks
                         for store in run_stores:
                             tasks.update(store._background_tasks)
-                            if store.trace_persistence.scheduler_task is not None:
-                                tasks.add(store.trace_persistence.scheduler_task)
+                            tasks.update(
+                                buffer.scope._writer for buffer in store.trace_persistence._buffers.values()
+                                if buffer.scope is not None and buffer.scope._writer is not None
+                            )
                         tasks.difference_update(joined)
                         if not tasks:
                             return
@@ -155,11 +164,11 @@ async def test_remote_cancel_releases_revoked_producer_staging(
                         joined.update(tasks)
 
                 await asyncio.wait_for(settled(), 10)
-                assert await owner_storage.execution.executions.get_history_head(
+                assert await owner._state.execution.executions.get_history_head(
                     execution.execution_id, tenant_id=tenant,
                 ) == sealed
                 assert (await execution.history(include_content=True)).items == history.items
-                run_store = owner_storage.run_store
+                run_store = owner._state.run_store
                 assert run_store.trace_persistence.dirty == set()
                 assert run_store.trace_persistence.offsets == {}
                 assert run_store._durability_flights == {}
@@ -245,7 +254,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
         execution = await owner.agents.get("default").start("run both")
         try:
             await asyncio.wait_for(asyncio.gather(fast_entered.wait(), slow_entered.wait()), 10)
-            await owner_storage.run_store.flush_dirty_execution_projections(
+            await owner._state.run_store.flush_dirty_execution_projections(
                 execution_id=execution.execution_id,
             )
             outcome = await remote.executions.cancel(
@@ -267,7 +276,7 @@ async def test_remote_cancel_settles_individual_tool_before_stopping_sibling(
                 assert view.status is ExecutionStatus.RECOVERY_REQUIRED
             assert slow_stopped.is_set()
             assert requests == 1
-            operations = await owner_storage.recovery.tools.list_by_execution(
+            operations = await owner._state.recovery.tools.list_by_execution(
                 execution.execution_id, tenant_id=owner.default_principal.tenant_id,
             )
             assert next(item for item in operations if item.tool_call_id == "fast-call").status is ToolOperationStatus.COMPLETED
@@ -289,7 +298,6 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
     from linktools.ai.capability import AgentContext
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.runtime.state._sql import _SqlTransaction
-    from linktools.ai.runtime.state._trace_persistence import TracePersistence
 
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -307,11 +315,11 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         del messages, info
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
+    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("projection-cancel-conflict")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=60.0)), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
-    owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     original_replace = _SqlTransaction.replace_record
 
     async def project_before_cancel_replace(transaction, record, *, expected_storage_revision):
@@ -323,8 +331,6 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             transaction, record, expected_storage_revision=expected_storage_revision,
         )
 
-    # Keep the batch pending until the cancel CAS, rather than race a timer.
-    monkeypatch.setattr(TracePersistence, "schedule", lambda self: None)
     monkeypatch.setattr(_SqlTransaction, "replace_record", project_before_cancel_replace)
     async with Runtime.open(
         "projection-cancel-conflict", models=_Models(_UsageFunctionModel(model)),
@@ -337,7 +343,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         try:
             await asyncio.wait_for(entered.wait(), 10)
             tenant = owner.default_principal.tenant_id
-            repository = owner_storage.execution.executions
+            repository = owner._state.execution.executions
             before = await repository.get(execution.execution_id, tenant_id=tenant)
             key = repository._key("execution", execution.execution_id)
             before_stored = await repository.state_store.read(lambda tx: tx.get_record(key))
@@ -345,7 +351,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
 
             async def project_after_cancel_read() -> None:
                 await cancel_read.wait()
-                await owner_storage.run_store.flush_dirty_execution_projections(
+                await owner._state.run_store.flush_dirty_execution_projections(
                     execution_id=execution.execution_id,
                 )
 
@@ -362,7 +368,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             assert before is not None and after is not None
             assert after.status is before.status is ExecutionStatus.STARTED
             assert (after.revision, after.event_seq) == (before.revision, before.event_seq)
-            events = await owner_storage.execution.events.list(
+            events = await owner._state.execution.events.list(
                 execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
             )
             assert not any(item.event_type == "CANCEL_REQUESTED" for item in events.items)
@@ -372,7 +378,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
             release.set()
             result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.CANCELLED
-            events = await owner_storage.execution.events.list(
+            events = await owner._state.execution.events.list(
                 execution.execution_id, tenant_id=tenant, after_event_seq=0, limit=100,
             )
             assert sum(item.event_type == "CANCEL_REQUESTED" for item in events.items) == 1

@@ -16,8 +16,7 @@ from sqlalchemy import event
 
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, ResourceKind, StopReason, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor, ExecutionEventAppend, ExecutionHistoryState,
     ExecutionStartReservation, ExecutionTerminalCommit, ExecutionTerminalCommitResult,
@@ -40,7 +39,7 @@ _NAMESPACE = "pending-turn"
 
 @dataclass(frozen=True)
 class _TurnState:
-    storage: RuntimeStorage
+    storage: RuntimeState
     commands: RuntimeStateCommands
     session: SessionRecord
 
@@ -57,7 +56,7 @@ class _PendingTurn:
 
 @asynccontextmanager
 async def _turn_state(backend: str, path: Path) -> AsyncIterator[_TurnState]:
-    storage = _storage(backend, path)
+    storage = RuntimeState(_storage(backend, path))
     await storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         session = await storage.conversation.sessions.create(replace(
@@ -405,7 +404,7 @@ async def test_pending_turn_independent_connections_choose_one_session_winner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str,
 ) -> None:
     async with _turn_state("sqlite", tmp_path) as first:
-        second_storage = _storage("sqlite", tmp_path)
+        second_storage = RuntimeState(_storage("sqlite", tmp_path))
         await second_storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(second_storage, _runtime_commands(second_storage, _NAMESPACE), first.session)

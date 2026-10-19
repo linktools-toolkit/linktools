@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pending and source-first writers share one live admission owner."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -27,7 +28,7 @@ _PRINCIPAL = Principal("owner", "tenant", "service")
 
 class _Coordinator(_PendingTurnCoordination):
     def __init__(self, cache):
-        super().__init__(cache, namespace="mixed-admission", tenant_id="tenant")
+        super().__init__(cache, cache, namespace="mixed-admission", tenant_id="tenant")
         self.claims = []
 
     async def claim(self, **kwargs):
@@ -44,6 +45,7 @@ class _Coordinator(_PendingTurnCoordination):
 @asynccontextmanager
 async def _writers():
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="mixed-admission", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     services = []
@@ -66,6 +68,7 @@ async def _writers():
 
 
 def _pending_callback(service, *, entered=None, release=None, claims=None):
+    service._terminal_commit = True
     async def start(request, reservation, session, coordination):
         assert coordination is not None and coordination.lease is not None
         if claims is not None:
@@ -157,6 +160,7 @@ async def test_ineligible_pending_writer_keeps_claim_through_legacy_launch_then_
             claims.append(coordination)
             return None
 
+        pending._terminal_commit = True
         pending._runtime_bridge.pending_start = decline
         backend = pending.runtime_backend()
         launch = backend.launch
@@ -182,6 +186,7 @@ async def test_admission_errors_release_only_the_acquired_lease(monkeypatch, pat
 
         service = pending if path == "pending" else legacy
         if path == "pending":
+            service._terminal_commit = True
             service._runtime_bridge.pending_start = fail
         else:
             monkeypatch.setattr(state.execution.executions, "reserve_start", fail)
@@ -241,6 +246,7 @@ async def test_duplicate_admission_reports_unknown_if_owner_fails_before_publica
             await release.wait()
             raise AIError(ErrorCode.SESSION_BUSY)
 
+        pending._terminal_commit = True
         pending._runtime_bridge.pending_start = fail
         first = asyncio.create_task(_start(pending))
         await asyncio.wait_for(entered.wait(), 2)

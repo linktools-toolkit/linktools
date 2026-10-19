@@ -44,7 +44,7 @@ async def test_start_replay_refreshes_only_a_mixed_terminal_view(
         agent = runtime.agents.get()
         execution = await agent.start("work", idempotency_key="same")
         await asyncio.wait_for(entered.wait(), 2)
-        repository = storage.execution.idempotency
+        repository = runtime._state.execution.idempotency
         original_get = type(repository).get
         reads = 0
         stale = None

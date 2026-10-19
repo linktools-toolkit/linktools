@@ -18,7 +18,7 @@ from linktools.ai.runtime import (
     ExecutionRequest,
     ResumeSessionRequest,
 )
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.spec import AgentSpec, MCPServerSpec, SkillSpec
 from linktools.ai.core import Principal, PrincipalKind
 from pydantic_ai.capabilities import AbstractCapability
@@ -228,8 +228,7 @@ class _CaptureSessionExecution:
 
 @pytest.mark.asyncio
 async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
-    service = object.__new__(DefaultSessionService)
-    service._conversation_enabled = True
+    service = object.__new__(RuntimeSessionService)
     capture = _CaptureSessionExecution()
     service._authorization = _AllowAuthorization()
     service._execution = capture
@@ -246,9 +245,9 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     async def _reconcile(record: object) -> object:
         return record
 
-    service._session_consumer = _consumer
-    service._authorized = _authorized
-    service._reconcile_terminal_admission = _reconcile
+    service.consume_session = _consumer
+    service.read_authorized = _authorized
+    service.reconcile_admission = _reconcile
 
     await service.resume(
         "agent",

@@ -40,6 +40,7 @@ from linktools.ai.runtime.state._store import (
     StoredRecord,
 )
 from linktools.ai.spec import AgentSpec
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
@@ -132,10 +133,10 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeStorage.sqlite(
+    state = RuntimeState(RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
-    )
+    ))
     await state.initialize(namespace="sql-error-contract", tenant_id="tenant")
     store = state.execution.executions.state_store
 
@@ -334,7 +335,7 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
 
 
 def _runtime_commands(
-    state: RuntimeStorage,
+    state: RuntimeState,
     namespace: str,
     background_tasks: "set[asyncio.Task[object]] | None" = None,
 ) -> RuntimeStateCommands:
@@ -361,10 +362,10 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeStorage.sqlite(
+    state = RuntimeState(RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
-    )
+    ))
     await state.initialize(namespace="parallel-tools", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(
@@ -831,7 +832,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
 
 
 async def test_operation_compaction_keeps_one_stream_anchor() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
     now = datetime.now(timezone.utc)
 
@@ -886,3 +887,50 @@ async def test_operation_compaction_keeps_one_stream_anchor() -> None:
         assert next_value.sequence == 4
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_shared_storage_configuration_binds_independent_runtime_lifetimes(
+    tmp_path: Path, backend: str,
+) -> None:
+    from contextlib import AsyncExitStack
+
+    from linktools.ai.runtime import Runtime
+    from ._runtime_test_helpers import RuntimeUsageModels
+
+    storage = (
+        RuntimeStorage.in_memory()
+        if backend == "memory"
+        else RuntimeStorage.sqlite(tmp_path / "shared.db")
+    )
+    plan = storage.plan
+    objects = storage.object_store
+    async with AsyncExitStack() as stack:
+        first, second = await asyncio.gather(*(
+            stack.enter_async_context(Runtime.open(
+                "shared-configuration", models=RuntimeUsageModels(), storage=storage,
+            ))
+            for _ in range(2)
+        ))
+        assert first._state is not second._state
+        assert first._state.ready and second._state.ready
+        first_result = (await first.agents.get().run("first", timeout_seconds=10)).result
+        assert first_result.output == {"text": "done"}
+        await first.close()
+        assert not first._state.ready
+        assert second._state.ready
+        second_result = (await second.agents.get().run("second", timeout_seconds=10)).result
+        assert second_result.output == {"text": "done"}
+    assert not second._state.ready
+    assert storage.plan is plan
+    assert storage.object_store is objects
+
+    async with Runtime.open(
+        "shared-configuration", models=RuntimeUsageModels(), storage=storage,
+    ) as reopened:
+        assert reopened._state is not first._state
+        assert reopened._state is not second._state
+        assert reopened._state.ready
+        result = (await reopened.agents.get().run("reopened", timeout_seconds=10)).result
+        assert result.output == {"text": "done"}
+    assert not reopened._state.ready

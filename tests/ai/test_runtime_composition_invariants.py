@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime composition and ownership invariants."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 import json
 import os
 import runpy

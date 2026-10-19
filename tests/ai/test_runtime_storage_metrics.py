@@ -11,7 +11,8 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import MetricsCapability, Runtime, RuntimeStorage
+
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from pydantic_ai.models.test import TestModel
 
 
@@ -49,9 +50,8 @@ class _Models:
         return _ModelBinding()
 
 
-def _agent_group(metrics: Metrics) -> RuntimeFeatures[object]:
+def _agent_group() -> RuntimeFeatures[object]:
     group = RuntimeFeatures[object]("application")
-    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     return group
 
@@ -64,9 +64,9 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
 
     async with Runtime.open(
         "default",
-        models=_Models(),  # type: ignore[arg-type]
+        metrics=metrics, models=_Models(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        features=_agent_group(metrics),
+        features=_agent_group(),
     ) as runtime:
         result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED

@@ -43,12 +43,12 @@ async def test_repeated_report_previews_preserve_state_and_objects(
         ), PRINCIPAL, "evaluate"), engine=runtime.tasks.bind(target, scorer))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         await runtime.evaluations.close()
-        records = storage.evaluation.records
+        records = runtime._state.evaluation.records
         before_record = await records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         before_rows = await records.state_store.read(lambda transaction: transaction.list_records(RecordQuery(kind="evaluation_report")))
         before_objects = {
             (item.key, item.digest, item.size)
-            async for item in storage.object_store(RuntimeDomain.EVALUATION).list_objects()
+            async for item in runtime._state.object_store(RuntimeDomain.EVALUATION).list_objects()
         }
         previews = [await run.preview_report() for _ in range(3)]
         assert await records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id) == before_record
@@ -57,7 +57,7 @@ async def test_repeated_report_previews_preserve_state_and_objects(
         ) == before_rows
         assert {
             (item.key, item.digest, item.size)
-            async for item in storage.object_store(RuntimeDomain.EVALUATION).list_objects()
+            async for item in runtime._state.object_store(RuntimeDomain.EVALUATION).list_objects()
         } == before_objects
         for preview in previews:
             assert preview.completion == "complete"

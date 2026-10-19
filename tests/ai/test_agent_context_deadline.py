@@ -5,7 +5,7 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
-from linktools.ai.runtime import ConversationCapability, CheckpointCapability
+from linktools.ai.capability import ConversationCapability, CheckpointCapability
 
 import pytest
 from pydantic_ai import RunContext
@@ -57,13 +57,13 @@ async def test_deadline_inherits_across_retry_fork_and_graph_without_worker_read
     async with Runtime.open("context-deadline", models=RuntimeUsageModels(), storage=storage,
                             features=_group(contexts)) as runtime:
         reads: list[str] = []
-        read = storage.execution.budgets.read
+        read = runtime._state.execution.budgets.read
 
         async def counted_read(scope_id: str):
             reads.append(scope_id)
             return await read(scope_id)
 
-        monkeypatch.setattr(storage.execution.budgets, "read", counted_read)
+        monkeypatch.setattr(runtime._state.execution.budgets, "read", counted_read)
         backend = runtime._execution_service.runtime_backend()
         launch = backend.launch
         launch_reads: dict[str, int] = {}
@@ -124,13 +124,13 @@ async def test_cold_recovery_restores_absolute_deadline_once(tmp_path: Path, mon
                             features=features,
                             auto_recover=False) as runtime:
         reads: list[str] = []
-        read = storage.execution.budgets.read
+        read = runtime._state.execution.budgets.read
 
         async def counted_read(scope_id: str):
             reads.append(scope_id)
             return await read(scope_id)
 
-        monkeypatch.setattr(storage.execution.budgets, "read", counted_read)
+        monkeypatch.setattr(runtime._state.execution.budgets, "read", counted_read)
         await runtime.executions.recover(execution_id, principal=runtime.default_principal,
                                          idempotency_key="recover")
         result = (await runtime.executions.wait(execution_id, principal=runtime.default_principal)).result

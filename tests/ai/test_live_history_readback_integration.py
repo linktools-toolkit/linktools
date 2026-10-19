@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Live event locators read the same transcript before and after archival."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 import asyncio
 import json
 from collections.abc import Awaitable, Callable

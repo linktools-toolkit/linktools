@@ -102,6 +102,7 @@
     "resource_ref",
     "result_record",
     "session_record",
+    "session_turn_commit",
     "stored_agent_run_checkpoint",
     "object_ref",
     "stored_payload",

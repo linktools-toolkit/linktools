@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state.schema import build_runtime_sql_metadata
@@ -26,7 +27,7 @@ async def test_local_sqlite_uses_builtin_object_store_and_self_provisions_schema
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "runtime.sqlite"
-    state = RuntimeStorage.sqlite(database)
+    state = RuntimeState(RuntimeStorage.sqlite(database))
 
     await state.initialize(namespace="sqlite-io", tenant_id="tenant")
     try:
@@ -67,7 +68,7 @@ async def test_existing_incompatible_sqlite_is_not_implicitly_migrated(
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
 
-    state = RuntimeStorage.sqlite(database)
+    state = RuntimeState(RuntimeStorage.sqlite(database))
     await state.initialize(namespace="sqlite-existing", tenant_id="tenant")
     await state.close()
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
@@ -94,14 +95,15 @@ async def test_from_root_uses_runtime_sqlite_and_filesystem_objects(
     runtime_root = tmp_path / "runtime"
     database = runtime_root / "runtime.db"
     objects_path = runtime_root / "objects"
-    state = RuntimeStorage.from_root(runtime_root)
+    storage = RuntimeStorage.from_root(runtime_root)
 
     assert all(
-        state.plan.route(domain).kind == "sqlite"
-        and state.plan.route(domain).path == database.resolve()
+        storage.plan.route(domain).kind == "sqlite"
+        and storage.plan.route(domain).path == database.resolve()
         for domain in RuntimeDomain
     )
 
+    state = RuntimeState(storage)
     await state.initialize(namespace="sqlite-layout", tenant_id="tenant")
     try:
         store = state.object_store(RuntimeDomain.EXECUTION)

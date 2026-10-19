@@ -5,8 +5,12 @@ its recorded content. Live progress can arrive before its history is persisted.
 Detailed execution persistence requires `TraceCapability()` registered
 at Runtime scope; storage retention alone does not select it. Without this
 capability, the owning Runtime exposes its existing live staging content while
-retained locally. Final results follow execution retention; Session history
-requires `ConversationCapability()` and follows conversation retention. See
+retained locally. Final results follow execution retention. Session management is supplied by the default `SessionCapability`; retained
+conversation content and model context for subsequent turns require
+`ConversationCapability()` and follows conversation retention. An unretained
+completed turn makes subsequent resume/fork fail with
+`SESSION_HISTORY_UNAVAILABLE`; it cannot be repaired by enabling Conversation
+later. See
 [optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
 
 For runs with restart checkpoints disabled, model-boundary control checks may
@@ -17,10 +21,10 @@ terminal commits and result consumption retain their authoritative transaction
 checks. Task-owned runs and their delegated descendants keep source-only model control
 checks, including on transient execution routes.
 
-With durable trace enabled, retained execution routes coalesce observation writes
-with one Runtime-owned timer. The first queued observation starts a three-second window; the shared
-tick flushes queued runs. A run reaching 128 observation boundaries flushes
-earlier. Each run keeps its own transaction and completion barrier, so a blocked
+With durable trace enabled and an explicit `CommitPolicy.batch(buffer=...)`,
+Trace coalesces observation writes through its owned cache-buffer scopes. The
+default batch policy flushes at 128 observation boundaries or after three seconds.
+Without a write-buffer cache, observation writes are synchronous. Each run keeps its own transaction and completion barrier, so a blocked
 run does not stop another run's publication. An idle Runtime performs no flush.
 Storage latency and contention can extend publication time. A blocked provider
 or tool does not need to produce another event for that scheduled flush to run.
@@ -229,6 +233,33 @@ watch cursor. Reconnecting from that cursor can redeliver their later persisted
 form; reconcile by exact logical identity and lifecycle state. A non-null event
 coordinate certifies that event's persistence, not a newer transcript or model
 interaction read boundary. None of these coordinates are interchangeable.
+
+With `ConversationCapability`, each admitted completed session turn retains its canonical
+user input and public final output alongside the transcript range. `SessionTurn.output`
+is the committed execution output, including structured JSON or JSON null; it is
+not reconstructed from model text parts. Check `status` to distinguish successful
+null output from failed or cancelled turns, whose output is absent. Turns with no
+model messages still retain their input, status and safe error details.
+
+Completed timeline entries are owned by Conversation and remain readable after
+Execution records are removed. Object-backed input and output bytes are retained
+in the Conversation object store before publishing the turn. Runtime close and
+session close do not delete durable conversation history; existing offline object
+cleanup uses the retained turn references as roots. Forks retain the selected
+parent turn prefix. Model context compaction does not rewrite the canonical input
+or final output. Without `ConversationCapability`, standalone execution results
+retain their existing execution-scoped lifetime.
+
+A same-group terminal commit publishes execution and conversation together. With
+separate transaction groups, transcript preparation can precede execution commit,
+but the completed turn envelope is published only after terminal truth is durable,
+with session release. An active timeline never infers successful output from a
+prepared transcript. If execution terminal state is durable but the retained turn
+receipt is still unconfirmed, result and retained timeline reads report a typed
+storage recovery error. Admission and execution retention remain held until the
+existing prepared handoff is reconciled; execution business status is not rewritten.
+Malformed retained data remains an integrity error. Failed or cancelled turn
+input can appear in the timeline without being added to the next model context.
 
 Session timeline references use one-based `turn_seq` within their owning
 session; `timeline_parent_turn_seq` fixes the parent-session turn cutoff for
@@ -451,7 +482,9 @@ it does not retain the full intermediate trace or enable restart checkpoints.
 An execution without the admitted conversation guarantee cannot gain fork support
 from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
-For eligible terminal-only source turns, this context joins the existing final
+With `ConversationCapability()` and explicit
+`ExecutionCapability(commit=CommitPolicy.terminal())`, eligible
+terminal-only source turns retain this context in the existing final
 owner batch in one database write transaction. Object bodies still have their
 own I/O. Fork and retry executions retain their existing durable-path admission
 and do not inherit that one-write-transaction guarantee.
@@ -566,3 +599,13 @@ still exceed the target, and the summary request itself must fit the selected
 model. Custom capabilities that enlarge input after the compaction hook remain
 responsible for that late change. Runtime neither rejects a request solely from
 this heuristic nor adds a token-counting network request on every model call.
+
+## Resource declarations and read scopes
+
+`RuntimeStorage` is a reusable resource declaration. Opening a Runtime or
+`RuntimeHistory` creates a separate operational binding over those resources;
+closing one binding does not mutate the declaration or close borrowed backends.
+Repositories, retained-content readers, and snapshot/cleanup operations belong
+to the binding, rather than to the configuration object. Use the domain/history
+APIs for reads and `RuntimeSnapshot` for portable snapshots. Explicit route
+overrides must also be supplied when opening history over custom domain routes.

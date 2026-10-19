@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Canonical model-request lifecycle ownership and replay contracts."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -124,7 +125,7 @@ def test_metadata_can_be_prepared_until_request_content_is_published() -> None:
 async def test_interaction_identity_survives_preparation_and_completion(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -164,7 +165,7 @@ async def test_interaction_identity_survives_preparation_and_completion(
 async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -200,7 +201,7 @@ async def test_prepared_request_is_immutable_and_failed_preparation_is_visible(
 async def test_concurrent_completion_keeps_exactly_one_terminal_result(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -226,7 +227,7 @@ async def test_concurrent_completion_keeps_exactly_one_terminal_result(
 async def test_canonical_interaction_pages_and_snapshot_sequences_include_running(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -263,7 +264,7 @@ async def test_recovered_producer_interrupts_unknown_requests_and_fences_old_wri
     from linktools.ai.core import ExecutionStatus
     from .test_history_projection_conformance import _record
 
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         repository = storage.execution.executions
@@ -322,7 +323,7 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
     from linktools.ai.runtime.state._step_contracts import StepEvent
     from .test_history_projection_conformance import _record
 
-    storage = _storage("sqlite", tmp_path)
+    storage = RuntimeState(_storage("sqlite", tmp_path))
     await storage.initialize(namespace="request-lifecycle", tenant_id="tenant")
     try:
         await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))

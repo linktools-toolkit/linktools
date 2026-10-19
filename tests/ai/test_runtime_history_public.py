@@ -542,6 +542,8 @@ class _ResultExecutions:
             created_at=terminal_at,
         )
         self.record = SimpleNamespace(
+            retention_closed=False,
+            conversation=False,
             execution_id="execution",
             tenant_id="tenant",
             binding_kind="task",

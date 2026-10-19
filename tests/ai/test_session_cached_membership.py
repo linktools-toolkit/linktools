@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Display facts have bounded freshness; authorization decisions never do."""
 
+from linktools.ai.runtime.state import RuntimeState
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,7 @@ def clock(monkeypatch):
 async def test_cached_display_facts_skip_sql_but_recheck_policy_and_local_writes(tmp_path, clock):
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
+    state = RuntimeState(state)
     await _prepare(state, body=True)
     allowed = True
     calls = 0
@@ -76,8 +78,10 @@ async def test_other_owner_membership_deletion_is_bounded_by_original_three_seco
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
     state = RuntimeStorage.sqlite(path, cache=cache)
+    state = RuntimeState(state)
     await _prepare(state, body=True)
     other = RuntimeStorage.sqlite(path)
+    other = RuntimeState(other)
     await other.initialize(namespace="display", tenant_id="tenant")
     try:
         service = _service(state, cache)
@@ -105,8 +109,10 @@ async def test_newer_whole_display_survives_older_cached_session_revision(tmp_pa
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
     state = RuntimeStorage.sqlite(path, cache=cache)
+    state = RuntimeState(state)
     await _prepare(state, body=True)
     other = RuntimeStorage.sqlite(path)
+    other = RuntimeState(other)
     await other.initialize(namespace="display", tenant_id="tenant")
     engine = state.conversation.sessions.state_store.storage_group.context.engine
     statements = []
@@ -137,12 +143,14 @@ async def test_cached_execution_absence_does_not_reject_new_source_display(tmp_p
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     path = tmp_path / "state.db"
     state = RuntimeStorage.sqlite(path, cache=cache)
+    state = RuntimeState(state)
     await state.initialize(
-            namespace="display", tenant_id="tenant", module_caches={RuntimeDomain.CONVERSATION: cache},
+            namespace="display", tenant_id="tenant",
         )
     other = RuntimeStorage.sqlite(path)
     try:
         assert await state.execution.executions.get_many(("active",), tenant_id="tenant") == {}
+        other = RuntimeState(other)
         await _prepare(other, body=True)
         service = _service(state, cache)
         detail = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
@@ -156,6 +164,16 @@ async def test_cached_execution_absence_does_not_reject_new_source_display(tmp_p
             ))
 
         await other.execution.executions.state_store.mutate(remove)
+        clock.now += 3.001
+        assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == detail
+
+        async def remove_retained_turn(transaction):
+            records = await transaction.scan_records()
+            await transaction.delete_records(tuple(
+                record.key_digest for record in records if record.kind == "session_turn_commit"
+            ))
+
+        await other.conversation.sessions.state_store.mutate(remove_retained_turn)
         clock.now += 3.001
         with pytest.raises(AIError, match="STORAGE_INTEGRITY_ERROR"):
             await service.refresh("session", principal=_PRINCIPAL, max_age=3)
@@ -176,10 +194,12 @@ async def test_cached_canonical_page_projects_live_pending_without_freezing_prog
     cache = InMemoryCacheBackend(max_bytes=1_000_000)
     state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
     if with_history:
+        state = RuntimeState(state)
         await _prepare(state, body=True)
     else:
+        state = RuntimeState(state)
         await state.initialize(
-            namespace="display", tenant_id="tenant", module_caches={RuntimeDomain.CONVERSATION: cache},
+            namespace="display", tenant_id="tenant",
         )
         await state.conversation.sessions.create(_session())
     pending = _execution("pending", status=ExecutionStatus.STARTED, prompt="live question")
@@ -188,7 +208,7 @@ async def test_cached_canonical_page_projects_live_pending_without_freezing_prog
     async def observe(session_id, *, tenant_id):
         return pending
 
-    service._pending_session_execution = observe
+    service._runtime_pending_session_execution = observe
     engine = state.conversation.sessions.state_store.storage_group.context.engine
     statements = []
 
@@ -245,7 +265,7 @@ async def test_pending_to_terminal_history_repairs_old_head_and_then_reads_witho
             finish.set()
             await execution.wait(timeout_seconds=5)
             await reader.executions.result(execution.execution_id, principal=reader.default_principal)
-            engine = state.conversation.sessions.state_store.storage_group.context.engine
+            engine = reader._state.conversation.sessions.state_store.storage_group.context.engine
             statements = []
 
             def capture(_connection, _cursor, statement, *_args):

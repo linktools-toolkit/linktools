@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Step projection and local stream behavior."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def _execution() -> ExecutionRecord:
 
 @pytest.mark.asyncio
 async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
-    state = RuntimeStorage.filesystem(tmp_path / "runtime")
+    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="step-io", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -138,7 +139,7 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> None:
-    state = RuntimeStorage.filesystem(tmp_path / "runtime")
+    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="agent-run-recovery", tenant_id="tenant")
     try:
         recovery = state.run_store.read_store(RuntimeDomain.CHECKPOINT)

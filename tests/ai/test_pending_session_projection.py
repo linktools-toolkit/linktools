@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Live cached Conversation turns share Session display paging without durable writes."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
@@ -11,18 +12,20 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage, ConversationCapability
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest, ListSessionRequest
 from linktools.ai.runtime.state._store import active_state_scope, record_key_digest
 from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 from .test_session_refresh import _service
-from .test_session_timeline import _execution, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -40,8 +43,9 @@ async def _runtimes(tmp_path, *, cache, shared=True):
 
     def group():
         value = RuntimeFeatures("pending-session-display")
+        value.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
         value.agent("default", model="default", allow_tools=())
-        value.capability(ConversationCapability(cache=cache), scope="runtime")
+        value.capability(ConversationCapability(), scope="runtime")
         return value
 
     def block_next():
@@ -56,7 +60,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
             runtime = await stack.enter_async_context(Runtime.open(
                 "pending-session-display", storage=storage, models=models, features=group(),
             ))
-            values.append((runtime, storage))
+            values.append((runtime, runtime._state))
         try:
             yield values, entered, finish, block_next
         finally:
@@ -165,7 +169,7 @@ async def test_pending_session_projection_source_wins_observation_race(
         execution = await session.start("question")
         await asyncio.wait_for(entered.wait(), 5)
         service = reader.sessions._service
-        observe = service._pending_session_execution
+        observe = service._runtime_pending_session_execution
         crossed = False
 
         async def cross_boundary(session_id, *, tenant_id):
@@ -183,7 +187,7 @@ async def test_pending_session_projection_source_wins_observation_race(
                     assert await owner.executions._service.acquire_dependency_hold(execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold")
             return pending
 
-        monkeypatch.setattr(service, "_pending_session_execution", cross_boundary)
+        monkeypatch.setattr(service, "_runtime_pending_session_execution", cross_boundary)
         detail = await reader.sessions.refresh("session", principal=reader.default_principal, limit=1, max_age=60)
         assert crossed
         assert [turn.execution_id for turn in detail.timeline.items] == [execution.execution_id]
@@ -191,7 +195,10 @@ async def test_pending_session_projection_source_wins_observation_race(
         canonical = await reader_storage.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
         assert canonical is not None and detail.timeline.items[0].status is canonical.status
         assert detail.session.active_execution_id == (execution.execution_id if transition == "promote" else None)
-        assert detail.timeline.items[0].conversation_committed is (transition == "complete")
+        assert detail.timeline.items[0].conversation_committed is (transition in {"complete", "cancel"})
+        if transition == "cancel":
+            assert detail.timeline.items[0].status is ExecutionStatus.CANCELLED
+            assert detail.timeline.items[0].output is None and detail.timeline.items[0].items == ()
         if transition == "promote":
             await owner.executions._service.release_dependency_hold(execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold")
         finish.set()
@@ -202,6 +209,7 @@ async def test_pending_session_projection_source_wins_observation_race(
 @pytest.mark.parametrize("method", ("get", "refresh", "timeline"))
 async def test_pending_session_projection_denial_precedes_observation(principal: Principal, method: str) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())
@@ -210,7 +218,7 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
         async def forbidden(*args, **kwargs):
             raise AssertionError("unauthorized caller reached a live observation")
 
-        service._pending_session_execution = forbidden
+        service._runtime_pending_session_execution = forbidden
         with pytest.raises(AIError) as denied:
             await getattr(service, method)("session", principal=principal)
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
@@ -221,6 +229,7 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
 @pytest.mark.parametrize("fault", ("owner", "session", "child", "terminal", "older_session"))
 async def test_pending_session_projection_rejects_unbound_observations(fault: str) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         record = await storage.conversation.sessions.create(_session())
@@ -239,7 +248,7 @@ async def test_pending_session_projection_rejects_unbound_observations(fault: st
             assert (session_id, tenant_id) == ("session", "tenant")
             return pending
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         principal = Principal("owner", "tenant")
         detail = await service.refresh("session", principal=principal)
         assert detail.session.active_execution_id is None and detail.timeline.items == ()
@@ -294,6 +303,7 @@ async def test_pending_session_projection_no_cache_keeps_source_admission(tmp_pa
 @pytest.mark.parametrize("limit", (1, 10))
 async def test_pending_session_projection_cannot_fill_missing_source_execution(limit: int) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())
@@ -306,7 +316,7 @@ async def test_pending_session_projection_cannot_fill_missing_source_execution(l
         async def observe(session_id, *, tenant_id):
             return pending
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         with pytest.raises(AIError) as unavailable:
             await service.refresh("session", principal=Principal("owner", "tenant"), limit=limit)
         assert unavailable.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -317,6 +327,7 @@ async def test_pending_session_projection_cannot_fill_missing_source_execution(l
 @pytest.mark.parametrize("method", ("timeline", "refresh"))
 async def test_pending_session_projection_older_page_cannot_fill_missing_source_execution(method: str) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         sessions = storage.conversation.sessions
@@ -328,6 +339,10 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
                     _execution(execution_id, status=ExecutionStatus.FAILED, prompt="canonical"), result=None,
                 ))
             await sessions.admit_execution("session", tenant_id="tenant", execution_id=execution_id, expected=None)
+            if execution_id == "newer":
+                await _commit_empty_turn(
+                    storage, await storage.execution.executions.get(execution_id, tenant_id="tenant"),
+                )
             await sessions.release_execution("session", tenant_id="tenant", execution_id=execution_id)
         service = _service(storage)
         principal = Principal("owner", "tenant")
@@ -342,7 +357,7 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
         async def observe(session_id, *, tenant_id):
             return pending
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         with pytest.raises(AIError) as still_unavailable:
             await read("session", principal=principal, limit=1, cursor=newest.next_cursor)
         assert still_unavailable.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -358,6 +373,7 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
     method: str, max_age: float, keep_active: bool, observation: str,
 ) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         sessions = storage.conversation.sessions
@@ -387,7 +403,7 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
                 return None
             return replace(_execution("rejected", status=ExecutionStatus.STARTED, prompt="observation"), principal_id="other")
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         options = {"max_age": max_age} if method == "refresh" else {}
         with pytest.raises(AIError) as denied:
             await getattr(service, method)("session", principal=principal, limit=1, **options)

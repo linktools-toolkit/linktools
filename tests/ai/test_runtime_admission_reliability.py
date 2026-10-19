@@ -79,7 +79,7 @@ async def test_invalid_convenience_keys_never_activate_or_write(
             guarded.setattr(engine, "_activate_graph", _reject_side_effect)
             guarded.setattr(runtime._task_node_runtime, "activate_graph", _reject_side_effect)
             for domain in RuntimeDomain:
-                guarded.setattr(storage.object_store(domain), "put", _reject_side_effect)
+                guarded.setattr(runtime._state.object_store(domain), "put", _reject_side_effect)
             for operation in operations:
                 with pytest.raises(AIError) as raised:
                     await operation()

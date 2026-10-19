@@ -14,15 +14,9 @@ from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import (
-    Runtime,
-    ConversationCapability,
-    CheckpointCapability,
-    TraceCapability,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
+from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
@@ -113,10 +107,10 @@ def _application(
 def _split_sqlite_storage(database: Path) -> RuntimeStorage:
     return RuntimeStorage(
         RuntimeStoragePlan(
-            conversation=RuntimeStorageRoute.sqlite(
+            conversation=StorageRoute.sqlite(
                 database.with_name(f"{database.stem}-conversation.db")
             ),
-            execution=RuntimeStorageRoute.sqlite(
+            execution=StorageRoute.sqlite(
                 database.with_name(f"{database.stem}-execution.db")
             ),
         )
@@ -312,14 +306,14 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
             features=application,
         ) as runtime:
             session = runtime.agents.get("default").session("session")
-            before_replay = await state.execution.executions.get(
+            before_replay = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
             assert before_replay is not None
             same = await session.start("inspect", idempotency_key="turn-1")
             assert same.execution_id == execution_id
             if before_replay.status is ExecutionStatus.STARTED:
-                assert await state.execution.executions.get(
+                assert await runtime._state.execution.executions.get(
                     execution_id, tenant_id=runtime.default_principal.tenant_id,
                 ) == before_replay
                 assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
@@ -378,6 +372,6 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
                     "assistant",
                 ]
     finally:
-        await state.close()
+        await runtime._state.close()
         if engine is not None:
             await engine.dispose()

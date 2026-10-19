@@ -12,15 +12,13 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..core import canonical_json_bytes
+from ..core import CommitPolicy, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import BatchWriteScope
+from ..storage import BatchWriteScope, BatchWriteScopeFactory, WriteBufferEntry
 from ._codec import decode_observation_envelope, observation_envelope
 from ._model import MetricRecorderStatus, MetricFlushResult, Observation
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
-
     from ._metrics import Metrics
 
 _logger = environ.get_logger("ai.observe.recorder")
@@ -28,10 +26,20 @@ _WARNING_INTERVAL_SECONDS = 30.0
 
 
 class MetricRecording:
-    """Own one dataset recording scope, never its borrowed store or cache."""
-    def __init__(self, metrics: Metrics, cache: object | None) -> None:
+    """Own one dataset recording scope, never its borrowed store or buffer."""
+    def __init__(
+        self, metrics: Metrics, *,
+        commit: CommitPolicy,
+        batch_scopes: BatchWriteScopeFactory | None = None,
+    ) -> None:
         self._metrics = metrics
-        self._scope = None if cache is None else BatchWriteScope(cache, self._write_batch)
+        self._scope = None
+        if commit.buffer is not None and commit.mode == "batch":
+            factory = BatchWriteScope if batch_scopes is None else batch_scopes
+            self._scope = factory(
+                commit.buffer, self._write_batch,
+                batch_size=commit.batch_size, flush_interval=commit.flush_interval,
+            )
         self._accepting = True
         self._accepted = 0
         self._persisted = 0
@@ -116,7 +124,7 @@ class MetricRecording:
         )
 
     async def _write_batch(
-        self, batch: tuple[tuple[str, Hashable, bytes | None], ...],
+        self, batch: tuple[WriteBufferEntry, ...],
     ) -> None:
         observations = []
         for _, key, content in batch:

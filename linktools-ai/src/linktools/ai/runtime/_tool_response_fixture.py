@@ -4,15 +4,15 @@
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
-from ..asset import AssetStoreReader, AssetVersionRef
-from ..capability import ToolCallFailed, ToolCallRetry
+from ..asset import AssetVersionRef
+from ..capability import ToolCallFailed, ToolCallRetry, ToolResponseFixture
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, mcp_tool_selector, parse_mcp_tool_selector
@@ -27,36 +27,20 @@ _DEFINITION_ADAPTER = TypeAdapter(ToolDefinition)
 _ARGUMENTS_ADAPTER = TypeAdapter(dict[str, Any])
 
 
-@dataclass(frozen=True, slots=True)
-class ToolResponseFixture:
-    """Bind a default immutable response Asset to a borrowed version reader.
-
-    The Runtime pins ``ref`` at admission. Recovery reads its saved reference
-    through the same reader, even when the Runtime's default has changed.
-    This object never initializes or closes the reader.
-    """
-
-    ref: AssetVersionRef
-    reader: AssetStoreReader = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.ref, AssetVersionRef):
-            raise TypeError("tool response fixture ref must be AssetVersionRef")
-        if not isinstance(self.reader, AssetStoreReader):
-            raise TypeError("tool response fixture reader must be AssetStoreReader")
-
-    async def load(self, saved_ref: AssetVersionRef) -> "_ToolResponseManifest":
-        """Read exactly the execution's pinned Asset version, without fallback."""
-        if not isinstance(saved_ref, AssetVersionRef):
-            raise TypeError("saved fixture ref must be AssetVersionRef")
-        values = await self.reader.read_versions((saved_ref,))
-        if len(values) != 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            payload = json.loads(values[0], object_pairs_hook=_unique_object)
-            return _decode_manifest(normalize_json_value(payload))
-        except (ValueError, TypeError, UnicodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+async def _load_tool_response_fixture(
+    fixture: ToolResponseFixture, saved_ref: AssetVersionRef,
+) -> "_ToolResponseManifest":
+    """Read exactly the execution's pinned Asset version, without fallback."""
+    if not isinstance(saved_ref, AssetVersionRef):
+        raise TypeError("saved fixture ref must be AssetVersionRef")
+    values = await fixture.reader.read_versions((saved_ref,))
+    if len(values) != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        payload = json.loads(values[0], object_pairs_hook=_unique_object)
+        return _decode_manifest(normalize_json_value(payload))
+    except (ValueError, TypeError, UnicodeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +261,3 @@ def _decode_outcome(value: JsonValue) -> bytes:
     else:
         raise ValueError("fixture outcome must be native success, failed, or retry")
     return canonical_json_bytes(value)
-
-
-__all__ = ["ToolResponseFixture"]

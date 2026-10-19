@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._history import TranscriptRepository
 from linktools.ai.runtime.state._object_router import (
     _RuntimeObjectRouter,
@@ -237,10 +238,11 @@ async def test_invalid_reference_metadata_still_fails_integrity(cache_enabled: b
 async def test_only_durable_routes_use_cache_backend(tmp_path: Path) -> None:
     store, cache = RecordingStore(), RecordingCache()
     plan = RuntimeStoragePlan(
-        conversation=RuntimeStorageRoute.filesystem(tmp_path / "durable"),
-        artifact=RuntimeStorageRoute.transient(),
+        conversation=StorageRoute.filesystem(tmp_path / "durable", cache=cache),
+        artifact=StorageRoute.transient(cache=cache),
+        memory=StorageRoute.memory(cache=cache),
     )
-    objects = build_runtime_object_router(plan, store, {}, {}, cache=cache)
+    objects = build_runtime_object_router(plan, store, {}, {})
     for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.ARTIFACT, RuntimeDomain.MEMORY):
         ref = await put(objects.object_store(domain))
         await objects.read_object(domain, ref)

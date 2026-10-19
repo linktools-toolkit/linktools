@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..core import canonical_json_bytes, validate_persistence_namespace
+from ..core import CommitPolicy, canonical_json_bytes, validate_persistence_namespace
+from ..storage import BatchWriteScopeFactory
 from ..errors import AIError, ErrorCode
 from ._codec import (
     same_definition_contract,
@@ -43,27 +44,33 @@ _CANONICAL_QUERY_FIELDS = frozenset(
     {"source_namespace", "tenant_id", "status", "error_code"}
 )
 _RESERVED_PREFIX = "linktools."
+_DEFAULT_COMMIT = CommitPolicy.batch(batch_size=128, flush_interval=60.0)
 _MAX_RECORD_BATCH = 256
 _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 
 
 class Metrics:
-    """Metrics dataset facade without a user-visible lifecycle."""
+    """Close-free dataset; each recorder owns its batching lifetime.
+
+    A batch commit policy uses its explicit buffer to flush at its threshold
+    or interval from the first pending observation, whichever comes first.
+    Sync policies, explicit writes and buffer-free recording await persistence.
+    """
 
     def __init__(
         self, store: MetricStore, *, namespace: str = "default",
-        cache: object | None = None,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> None:
-        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
-        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
-            raise TypeError("cache must implement append, read_batch and ack together")
+        self._validate_commit(commit)
+        self._commit = commit
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
-        self._cache = cache if all(callable(method) for method in methods) else None
 
-    def recorder(self) -> MetricRecorder:
+    def recorder(self, *, batch_scopes: BatchWriteScopeFactory | None = None) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
-        return MetricRecording(self, self._cache)
+        return MetricRecording(
+            self, commit=self._commit, batch_scopes=batch_scopes,
+        )
 
     @property
     def namespace(self) -> str:
@@ -71,32 +78,56 @@ class Metrics:
 
     @classmethod
     def in_memory(
-        cls, *, namespace: str = "default", cache: object | None = None,
+        cls, *, namespace: str = "default",
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
-        return cls(InMemoryMetricStore(), namespace=namespace, cache=cache)
+        return cls(
+            InMemoryMetricStore(), namespace=namespace,
+            commit=commit,
+        )
 
     @classmethod
     def sqlite(
         cls, path: str | Path, *, namespace: str = "default",
-        cache: object | None = None,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
-        return cls(SQLiteMetricStore(path), namespace=namespace, cache=cache)
+        cls._validate_commit(commit)
+        return cls(
+            SQLiteMetricStore(path), namespace=namespace,
+            commit=commit,
+        )
 
     @classmethod
     def sql(
         cls, engine: AsyncEngine, *, namespace: str = "default",
-        cache: object | None = None,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         from ._sql import SqlMetricStore
 
-        return cls(SqlMetricStore(engine), namespace=namespace, cache=cache)
+        cls._validate_commit(commit)
+        return cls(
+            SqlMetricStore(engine), namespace=namespace,
+            commit=commit,
+        )
 
     @classmethod
     def from_store(
         cls, store: MetricStore, *, namespace: str = "default",
-        cache: object | None = None,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
-        return cls(store, namespace=namespace, cache=cache)
+        return cls(
+            store, namespace=namespace,
+            commit=commit,
+        )
+
+    @classmethod
+    def _validate_commit(cls, commit: CommitPolicy) -> None:
+        if not isinstance(commit, CommitPolicy):
+            raise TypeError("commit must be CommitPolicy")
+        if commit.mode == "terminal":
+            raise ValueError("Metrics does not support terminal commit policy")
+        if commit.mode == "batch" and commit.batch_size > _MAX_RECORD_BATCH:
+            raise ValueError(f"Metrics batch_size must not exceed {_MAX_RECORD_BATCH}")
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):

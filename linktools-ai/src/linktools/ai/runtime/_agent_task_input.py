@@ -19,7 +19,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import TaskDependencyState, TaskNodeInvocation, TaskResultRef
 from ._input import decode_task_prompt_draft, task_prompt_draft, validate_user_input
-from ._input_contract import CanonicalUserInput, MaterializedUserContent, UserPromptInput
+from ..model import CanonicalUserInput, MaterializedUserContent, UserPromptInput
 from ._execution_context import ExecutionInputContext
 
 if TYPE_CHECKING:

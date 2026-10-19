@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Context metadata is captured together before loading any payloads."""
 
+from linktools.ai.runtime.state import RuntimeState
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ pytestmark = pytest.mark.asyncio
 async def test_empty_context_batches_projection_and_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str,
 ) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -65,7 +66,7 @@ async def test_empty_context_batches_projection_and_head(
 async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, reader: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())
@@ -101,7 +102,7 @@ async def test_context_metadata_keeps_projection_precedence_and_releases_scope(
 async def test_empty_context_requires_head_before_session_descriptor(
     tmp_path: Path, backend: str, reader: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="context-metadata", tenant_id="tenant")
     try:
         repository = state.run_store.read_store(RuntimeDomain.CONVERSATION).transcript_repository

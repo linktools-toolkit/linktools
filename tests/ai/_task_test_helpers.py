@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """Shared Task test helpers and test-only legacy fixture adapters."""
 
+from linktools.ai.runtime.state import RuntimeState
 from collections.abc import Callable, Mapping
 from typing import TypeVar
 
 from linktools.ai.capability import RuntimeFeatures as _RuntimeFeatures
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, Runtime
 from linktools.ai.task import (
     Task,
     TaskExpander,
@@ -240,7 +241,7 @@ async def start_task_request(runtime: Runtime[object], request: TaskGraphRequest
 
 
 async def admit_graph(
-    state: RuntimeStorage,
+    state: RuntimeState,
     graph: TaskGraph,
     *,
     tenant_id: str = "tenant",

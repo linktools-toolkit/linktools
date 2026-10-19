@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """Runtime service protocols and transport-neutral request values."""
 
+from ..execution import (CancelExecutionRequest, CancelExecutionResult, ExecutionHandle, ExecutionView, project_execution_view, ExecutionResult)
+
+from ..session import (SessionHistoryItem, SessionTurnItem, SessionTurn, SessionHistoryReader, CreateSessionRequest, ListSessionRequest, ResumeSessionRequest, ForkSessionRequest, UpdateSessionRequest, CloseSessionRequest, SessionView, SessionDetail)
+
 from collections.abc import AsyncIterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -37,7 +41,7 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..model import ModelClientRequest
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent, TaskGraphInfo
 from ._execution_context import ExecutionInputContext
-from ._input_contract import (
+from ..model import (
     UserPromptInput,
     normalize_input_files,
     validate_user_input,
@@ -155,143 +159,6 @@ class ForkExecutionRequest:
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
         object.__setattr__(self, "files", files)
-
-
-@dataclass(frozen=True, slots=True)
-class CancelExecutionRequest:
-    principal: Principal
-    idempotency_key: str
-    force: bool = False
-
-    def __post_init__(self) -> None:
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class CancelExecutionResult:
-    execution_id: str
-    cancelled: bool
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionHandle:
-    execution_id: str
-
-
-class _ExecutionViewSource(Protocol):
-    execution_id: str
-    agent_id: str | None
-    status: ExecutionStatus
-    lineage_kind: ExecutionLineageKind
-    parent_execution_id: str | None
-    root_execution_id: str
-    parent_invocation_id: str | None
-    session_id: str | None
-    binding_kind: str
-    task_id: str | None
-    task_attempt: int
-    task_deadline_at: datetime | None
-    task_next_attempt_at: datetime | None
-    event_seq: int
-    started_at: datetime | None
-    result: "ResultRecord | None"
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionView:
-    """Execution state, with the original start and recorded result timestamps.
-
-    ``terminal_at`` is the durable result's creation time, not the wall-clock
-    instant when its terminal storage transaction became visible.
-    """
-
-    execution_id: str
-    agent_id: str | None
-    status: ExecutionStatus
-    lineage_kind: ExecutionLineageKind
-    parent_execution_id: str | None
-    root_execution_id: str
-    parent_invocation_id: str | None
-    session_id: str | None = None
-    binding_kind: str = "agent"
-    task_id: str | None = None
-    task_attempt: int = 0
-    task_deadline_at: datetime | None = None
-    task_next_attempt_at: datetime | None = None
-    event_seq: int = 0
-    started_at: datetime | None = None
-    terminal_at: datetime | None = None
-
-
-def project_execution_view(source: object) -> ExecutionView:
-    """Project an internal execution source into the stable public view."""
-    value = cast(_ExecutionViewSource, source)
-    return ExecutionView(
-        execution_id=value.execution_id,
-        agent_id=value.agent_id,
-        status=value.status,
-        lineage_kind=value.lineage_kind,
-        parent_execution_id=value.parent_execution_id,
-        root_execution_id=value.root_execution_id,
-        parent_invocation_id=value.parent_invocation_id,
-        session_id=value.session_id,
-        binding_kind=value.binding_kind,
-        task_id=value.task_id,
-        task_attempt=value.task_attempt,
-        task_deadline_at=value.task_deadline_at,
-        task_next_attempt_at=value.task_next_attempt_at,
-        event_seq=value.event_seq,
-        started_at=value.started_at,
-        terminal_at=None if value.result is None else value.result.created_at,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionResult:
-    execution_id: str
-    status: ExecutionStatus
-    output: JsonValue | None
-    usage: UsageMetrics
-    error_code: "str | None" = None
-    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
-    error_diagnostics: "ErrorDiagnostics | None" = None
-
-    def __post_init__(self) -> None:
-        details = dict(self.safe_error_details)
-        object.__setattr__(self, "safe_error_details", details)
-        if self.error_diagnostics is not None and not isinstance(
-            self.error_diagnostics, ErrorDiagnostics
-        ):
-            raise ValueError("execution result error diagnostics are invalid")
-        if self.status is ExecutionStatus.SUCCEEDED:
-            if (
-                self.error_code is not None
-                or details
-                or self.error_diagnostics is not None
-            ):
-                raise ValueError("successful execution result cannot carry an error")
-            return
-        if self.status is ExecutionStatus.CANCELLED:
-            if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
-                raise ValueError(
-                    "cancelled execution result requires EXECUTION_CANCELLED"
-                )
-            if self.output is not None or self.error_diagnostics is not None:
-                raise ValueError(
-                    "cancelled execution result cannot carry output or diagnostics"
-                )
-            return
-        if self.status is ExecutionStatus.FAILED:
-            if self.error_code is None:
-                raise ValueError("failed execution result requires an error code")
-            if self.error_code == ErrorCode.EXECUTION_CANCELLED.value:
-                raise ValueError(
-                    "failed execution result cannot carry EXECUTION_CANCELLED"
-                )
-            if self.output is not None:
-                raise ValueError("failed execution result cannot carry output")
-            return
-        raise ValueError("execution result requires a terminal status")
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,48 +491,6 @@ class UsageSummary:
         object.__setattr__(self, "cutoffs", cutoffs)
 
 
-@dataclass(frozen=True, slots=True)
-class SessionHistoryItem:
-    message_seq: int
-    item_kind: str
-    content: JsonValue
-    tool_name: "str | None" = None
-    tool_call_id: "str | None" = None
-
-    def __post_init__(self) -> None:
-        if self.message_seq < 1 or not isinstance(self.item_kind, str) or not self.item_kind:
-            raise ValueError("session history item is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class SessionTurnItem:
-    ordinal: int
-    item_kind: str
-    content: JsonValue
-    tool_name: "str | None" = None
-    tool_call_id: "str | None" = None
-
-    def __post_init__(self) -> None:
-        if self.ordinal < 1 or not self.item_kind:
-            raise ValueError("session timeline item is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class SessionTurn:
-    execution_id: str
-    status: ExecutionStatus
-    created_at: datetime
-    updated_at: datetime
-    user_input: JsonValue
-    conversation_committed: bool
-    items: tuple[SessionTurnItem, ...]
-    error_code: "str | None" = None
-    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
-
-
 class ExecutionHistoryReader(Protocol):
     async def capture_model_interaction_cutoffs(
         self, execution_id: str, *, tenant_id: str,
@@ -749,38 +574,6 @@ class ExecutionHistoryReader(Protocol):
     ) -> UsageSummary: ...
 
 
-class SessionHistoryReader(Protocol):
-    async def history(
-        self,
-        session_id: str,
-        *,
-        tenant_id: str,
-        continuation_agent_run_id: "str | None",
-        continuation_history_id: "str | None" = None,
-        cursor: "str | None",
-        limit: int,
-    ) -> "Page[SessionHistoryItem]": ...
-
-
-@dataclass(frozen=True, slots=True)
-class CreateSessionRequest:
-    principal: Principal
-    session_id: str
-    idempotency_key: str
-    cwd: "str | None" = None
-    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class ListSessionRequest:
-    principal: Principal
-    cursor: "str | None" = None
-    limit: int = 100
-
-
 @dataclass(frozen=True, slots=True)
 class ListExecutionRequest:
     principal: Principal
@@ -792,91 +585,6 @@ class ListExecutionRequest:
 
     def __post_init__(self) -> None:
         validate_page_limit(self.limit)
-
-
-@dataclass(frozen=True, slots=True)
-class ResumeSessionRequest:
-    principal: Principal
-    user_prompt: "UserPromptInput"
-    idempotency_key: str
-    memory_scope: "str | None"
-    mode: ExecutionMode
-    planning: bool
-    thinking: ThinkingValue
-    correlation: CorrelationData = field(default_factory=dict)
-    files: tuple[str, ...] = ()
-    budget: RunBudget | None = None
-
-    def __post_init__(self) -> None:
-        if self.budget is not None and not isinstance(self.budget, RunBudget):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
-        files = normalize_input_files(self.files)
-        validate_idempotency_key(self.idempotency_key)
-        if self.memory_scope is not None:
-            validate_memory_scope(self.memory_scope)
-        mode = normalize_execution_mode(self.mode)
-        thinking = normalize_thinking(self.thinking)
-        if not isinstance(self.planning, bool) or mode == "plan" and not self.planning:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "correlation", _request_correlation(self.correlation))
-        object.__setattr__(self, "files", files)
-
-
-@dataclass(frozen=True, slots=True)
-class ForkSessionRequest:
-    principal: Principal
-    new_session_id: str
-    idempotency_key: str = ""
-    cwd: "str | None" = None
-
-    def __post_init__(self) -> None:
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class UpdateSessionRequest:
-    principal: Principal
-    expected_revision: int
-    idempotency_key: str
-    metadata: "Mapping[str, JsonValue]"
-    cwd: "str | None" = None
-
-    def __post_init__(self) -> None:
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class CloseSessionRequest:
-    principal: Principal
-    idempotency_key: str
-    force: bool = False
-    wait_timeout_seconds: int = 30
-
-    def __post_init__(self) -> None:
-        validate_idempotency_key(self.idempotency_key)
-        if not 1 <= self.wait_timeout_seconds <= 300:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-
-@dataclass(frozen=True, slots=True)
-class SessionView:
-    session_id: str
-    agent_id: str
-    status: SessionStatus
-    revision: int = 0
-    cwd: "str | None" = None
-    active_execution_id: "str | None" = None
-    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
-    history_quality: str = "complete"
-
-
-@dataclass(frozen=True, slots=True)
-class SessionDetail:
-    session: SessionView
-    timeline: Page[SessionTurn]
 
 
 @dataclass(frozen=True, slots=True)

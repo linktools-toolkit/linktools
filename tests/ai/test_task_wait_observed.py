@@ -11,7 +11,7 @@ import pytest
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Runtime, RuntimeContext, TaskGraphRun, WaitResult
-from linktools.ai.runtime import _cursor
+from linktools.ai.core import _signed_cursor as _cursor
 from linktools.ai.runtime.service_api import ExecutionView, _ExecutionStreamFailure
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphInfo, TaskGraphState, TaskNode, TaskNodeView
 

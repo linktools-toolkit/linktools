@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Dataset retention reads are bounded without dropping case validation."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ async def test_dataset_expiry_preserves_all_case_deadlines_and_integrity(
     tmp_path: Path, backend: str, fault: str | None,
 ) -> None:
     storage = storage_for(backend, tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="dataset-reads", tenant_id="tenant")
     try:
         repository = storage.evaluation.records
@@ -89,7 +91,7 @@ async def test_case_pages_batch_only_selected_content_in_original_order(tmp_path
         spec = DatasetSpec(DatasetRef("dataset", 1), tuple(CaseSpec.task(
             CaseRef("dataset", str(index), 1), input={"index": index}) for index in range(65)))
         await runtime.evaluations.publish_dataset(spec, principal=principal, idempotency_key="publish")
-        repository = storage.evaluation.records
+        repository = runtime._state.evaluation.records
         statements = []
         def capture(_connection, _cursor, sql, _parameters, _context, _many):
             if sql.startswith("SELECT"):
@@ -136,6 +138,7 @@ async def test_required_case_batch_preserves_first_unavailable_position(
     from linktools.ai.runtime.state._evaluation_records import EvaluationContentTombstone
 
     storage = storage_for(backend, tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="case-errors", tenant_id="tenant")
     try:
         repository = storage.evaluation.records
@@ -186,7 +189,7 @@ async def test_evaluation_consumers_bound_case_queries_and_reload_missing_conten
             CaseRef("ordered", name, 1), input={"answer": name}, expected=name,
         ) for name in ("third", "first", "second")))
         dataset = await owner.publish_dataset(spec, principal=PRINCIPAL, idempotency_key="dataset")
-        repository = storage.evaluation.records
+        repository = runtime._state.evaluation.records
         keys = {repository._key("evaluation_case", [case.ref.dataset_id, case.ref.case_id,
                                                    case.ref.revision]).hex() for case in spec.cases}
         statements = []

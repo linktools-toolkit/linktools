@@ -15,12 +15,14 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import (Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
-                                 ConversationCapability, CheckpointCapability, TraceCapability)
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
+from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
+from linktools.ai.core import CommitPolicy
 from linktools.ai.storage._database import SqlStorageContext
 
 
@@ -72,18 +74,16 @@ def _features(*capabilities) -> RuntimeFeatures:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("split_storage", (False, True))
-async def test_minimal_runtime_rejects_conversation_but_runs_agent(tmp_path: Path, split_storage: bool):
+async def test_minimal_runtime_supports_sessions_without_retained_model_context(tmp_path: Path, split_storage: bool):
     storage = (RuntimeStorage(RuntimeStoragePlan(
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
     )) if split_storage else RuntimeStorage.in_memory())
     async with Runtime.open("minimal", storage=storage, models=_FeatureModels(), features=_definitions()) as runtime:
-        with pytest.raises(AIError) as missing:
-            await runtime.agents.get().create_session("session")
-        assert missing.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
-        execution = await runtime.agents.get().start("question")
+        session = await runtime.agents.get().create_session("session")
+        execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
         with pytest.raises(AIError) as missing:
@@ -94,17 +94,18 @@ async def test_minimal_runtime_rejects_conversation_but_runs_agent(tmp_path: Pat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cache_kind", ("none", "unsupported", "full"))
 @pytest.mark.parametrize("evidence", ("none", "checkpoint", "trace"))
-async def test_conversation_pending_requires_complete_cache(tmp_path, monkeypatch, cache_kind, evidence):
+async def test_conversation_pending_requires_complete_coordination(tmp_path, monkeypatch, cache_kind, evidence):
     entered, release = asyncio.Event(), asyncio.Event()
     async def model(messages, info):
         entered.set()
         await release.wait()
         return ModelResponse(parts=[TextPart("done")])
+    cache = InMemoryCacheBackend(max_bytes=2**20) if cache_kind == "full" else InMemoryStreamBackend(max_bytes=2**20) if cache_kind == "unsupported" else None
     features = _features(ConversationCapability())
+    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     if evidence != "none":
         features.capability(CheckpointCapability() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
-    cache = InMemoryCacheBackend(max_bytes=2**20) if cache_kind == "full" else object() if cache_kind == "unsupported" else None
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
+    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache if cache_kind == "full" else None)
     async with Runtime.open("pending", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         writes = []
@@ -118,7 +119,7 @@ async def test_conversation_pending_requires_complete_cache(tmp_path, monkeypatc
         await asyncio.wait_for(entered.wait(), 5)
         pending = cache_kind == "full" and evidence == "none"
         try:
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert (record is None) == pending
             if pending:
                 assert writes == []
@@ -144,17 +145,17 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
         execution = await runtime.agents.get().start("read a file")
         async def wait_for_deferred():
             while True:
-                record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                 if record and record.status is ExecutionStatus.WAITING_DEFERRED:
                     return record
                 await asyncio.sleep(.01)
 
         record = await asyncio.wait_for(wait_for_deferred(), timeout=5)
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
-        checkpoint = await storage.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        checkpoint = await runtime._state.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert checkpoint is not None and checkpoint.state is RecoveryCheckpointState.WAITING
         assert checkpoint.pending_tools is not None
-        approvals = await storage.recovery.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
+        approvals = await runtime._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
         assert len(approvals) == 1 and approvals[0].status is ApprovalStatus.PENDING
 
 
@@ -184,18 +185,20 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
 ) -> None:
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
     calls = []
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=2**20))
+    cache = InMemoryCacheBackend(max_bytes=2**20)
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache)
     owner = {}
     async def lookup(context: AgentContext[None]) -> str:
-        record = await state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
+        record = await runtime._state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
         calls.append(record)
         return 'value'
     async def model(messages, info):
         if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
-            assert await state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
+            assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('tool-pending')
+    group.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
     group.capability(ConversationCapability(), scope='runtime')
@@ -231,32 +234,35 @@ async def test_reconstructed_test_pending_cancel_promotes_and_quiesces_before_ca
             await asyncio.Event().wait()
         finally:
             stopped.set()
+    cache = InMemoryCacheBackend(max_bytes=2**20)
     group = RuntimeFeatures('cancel-pending')
+    group.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     group.agent('default', model='default', allow_tools=())
     group.capability(ConversationCapability(), scope='runtime')
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=2**20))
+    state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache)
     async with Runtime.open('pending-cancel', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
-        assert await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
+        assert await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
         await execution.cancel()
         assert stopped.is_set()
         result = (await execution.wait(timeout_seconds=5)).result
         assert result.status is ExecutionStatus.CANCELLED
-        record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.status is ExecutionStatus.CANCELLED
 
 
 
 @pytest.mark.asyncio
 async def test_cached_lost_ack_reconciles_without_replay(tmp_path, monkeypatch):
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=2**20))
+    cache = InMemoryCacheBackend(max_bytes=2**20)
+    storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
     calls = []
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart("done")])
-    async with Runtime.open("lost-ack", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=_features(ConversationCapability())) as runtime:
+    async with Runtime.open("lost-ack", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=_features(ConversationCapability(), ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache))) as runtime:
         session = await runtime.agents.get().create_session("session")
         original = SqlStorageContext.run_mutation
         writes = []
@@ -326,5 +332,5 @@ async def test_capture_does_not_reinterpret_later_feature_registration():
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         await execution.wait(timeout_seconds=5)
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.conversation and not record.durable_trace

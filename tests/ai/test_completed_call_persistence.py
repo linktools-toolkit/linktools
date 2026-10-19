@@ -13,6 +13,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeHistory
@@ -23,7 +24,7 @@ from linktools.ai.runtime._model_interaction import StagedContextInline, StagedC
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _wait_for_committed
 from .test_incremental_projection_boundaries import _storage
@@ -32,7 +33,7 @@ from .test_live_history_readback_integration import _Models
 
 @pytest.mark.asyncio
 async def test_running_public_metadata_does_not_read_prepared_request_payloads(tmp_path: Path) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace="metadata-only", tenant_id="tenant")
     try:
         prepared = StagedModelInteraction(

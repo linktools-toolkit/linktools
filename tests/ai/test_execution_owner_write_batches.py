@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Final owner writes retain fencing while avoiding duplicate guard updates."""
 
+from linktools.ai.runtime.state import RuntimeState
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -80,6 +81,7 @@ async def test_final_control_cas_preserves_business_records_and_uses_fewer_write
             path = tmp_path / str(scalar)
             path.mkdir()
             state = _storage(backend, path)
+            state = RuntimeState(state)
             states.append(state)
             await state.initialize(namespace="owner-final", tenant_id="tenant")
             await _seed(state, current)
@@ -122,6 +124,7 @@ async def test_producer_final_cas_preserves_generation_and_subclass_guard(tmp_pa
         path = tmp_path / str(scalar)
         path.mkdir()
         state = _storage(backend, path)
+        state = RuntimeState(state)
         await state.initialize(namespace="owner-admit", tenant_id="tenant")
         try:
             source = state.execution.executions
@@ -144,6 +147,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str,
 ) -> None:
     state = _storage("sqlite", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="owner-conflict", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
@@ -177,6 +181,7 @@ async def test_closed_terminal_any_member_conflict_rolls_back_every_final_value(
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_closed_final_cas_is_early_fence_and_later_failure_rolls_back(tmp_path: Path, backend: str) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="owner-rollback", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
@@ -207,6 +212,7 @@ async def test_terminal_keeps_execution_first_when_dialect_updates_members_indiv
     from linktools.ai.storage import SQLiteDialect
 
     state = _storage("sqlite", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="owner-lock-order", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), execution_id="execution-0", root_execution_id="execution-0",
                       revision=1, durable_trace=False)
@@ -255,6 +261,7 @@ async def test_aborted_terminal_batch_retries_whole_owner_write_set(
         pass
 
     state = _storage("sqlite", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="owner-retry", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:
@@ -309,6 +316,7 @@ async def test_read_committed_terminal_and_tool_guard_share_execution_first_orde
     engine = create_async_engine(url, isolation_level="READ COMMITTED")
     await provision_database(engine)
     state = RuntimeStorage.sql(engine)
+    state = RuntimeState(state)
     await state.initialize(namespace="owner-lock-order", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), execution_id="execution-0", root_execution_id="execution-0",
                       revision=1, durable_trace=False)
@@ -373,6 +381,7 @@ async def test_closed_terminal_lost_ack_uses_complete_readback_without_reapplyin
     from linktools.ai.runtime.state._contracts import ExecutionTerminalCommitResult
 
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="owner-ack", tenant_id="tenant")
     current = replace(_record(ExecutionStatus.STARTED, 1), revision=1, durable_trace=False)
     try:

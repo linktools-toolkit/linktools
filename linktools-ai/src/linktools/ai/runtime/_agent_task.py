@@ -37,7 +37,7 @@ from ._agent_task_input import (
     AgentTaskInputContext,
     _AgentTaskContextError,
 )
-from ._input_contract import CanonicalUserInput, validate_user_input
+from ..model import CanonicalUserInput, validate_user_input
 
 if TYPE_CHECKING:
     from ..core import RunBudget

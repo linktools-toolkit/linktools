@@ -23,6 +23,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.execution import ExecutionManager
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
     ExecutionResult,
@@ -192,6 +193,7 @@ def test_error_codes_have_fixed_retryability(code: ErrorCode, retryable: bool) -
 @pytest.mark.asyncio
 async def test_execution_result_before_terminal_is_not_ready() -> None:
     service = object.__new__(DefaultExecutionService)
+    service._management = ExecutionManager(SimpleNamespace(), _AllowAll())
 
     async def load_authorized(
         execution_id: str,

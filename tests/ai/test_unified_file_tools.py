@@ -191,9 +191,9 @@ def test_unified_file_behavior_revisions_do_not_bump_unchanged_tools(tmp_path: P
     contributions = workspace_features("workspace", workspace=Workspace.load(tmp_path))._contributions
     revisions = {item.id: item.revision for item in contributions}
     assert {name: revisions[name] for name in ("read_file", "write_file", "search_files")} == {
-        "read_file": 3, "write_file": 2, "search_files": 2,
+        "read_file": 1, "write_file": 1, "search_files": 1,
     }
-    assert revisions["attach_files"] == 2
+    assert revisions["attach_files"] == 1
     assert revisions["edit_file"] == revisions["list_files"] == 1
 
 

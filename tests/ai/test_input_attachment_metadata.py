@@ -19,7 +19,7 @@ from linktools.ai.runtime._input import (
     merge_captured_input_files,
     task_prompt_draft,
 )
-from linktools.ai.runtime._input_contract import MaterializedUserContent
+from linktools.ai.model import MaterializedUserContent
 
 
 class _Files:

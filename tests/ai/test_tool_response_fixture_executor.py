@@ -12,7 +12,7 @@ from linktools.ai.core import PromptLimits, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor, _AgentRunScope
 from linktools.ai.runtime._mcp import _MCPBinding
-from linktools.ai.runtime._tool_response_fixture import ToolResponseFixture
+from linktools.ai.capability import ToolResponseFixture
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector
 
 from .test_tool_response_fixture import _manifest, _store

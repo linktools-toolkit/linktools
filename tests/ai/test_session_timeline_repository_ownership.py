@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Injected timeline repositories retain their independent task and read ownership."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -14,24 +15,20 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.runtime import (
-    RuntimeHistory,
-    RuntimeStorage,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
+from linktools.ai.runtime import RuntimeHistory, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
     SessionRepository,
-    SessionTurnCommitRef,
+    SessionTurnCommit,
 )
 from linktools.ai.runtime.state._conversation_repositories import SessionRepositoryImpl
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
 from sqlalchemy import event
 
-from .test_session_timeline import _execution, _session
+from .test_session_timeline import _commit_empty_turn, _execution, _session
 
 pytestmark = pytest.mark.asyncio
 
@@ -81,7 +78,7 @@ class ParallelSessions:
 
     async def list_timeline_commits(
         self, session_id: str, *, tenant_id: str, start_turn_seq: int, end_turn_seq: int,
-    ) -> tuple[SessionTurnCommitRef, ...]:
+    ) -> tuple[SessionTurnCommit, ...]:
         read = self.repository.list_timeline_commits(
             session_id, tenant_id=tenant_id, start_turn_seq=start_turn_seq, end_turn_seq=end_turn_seq,
         )
@@ -97,7 +94,7 @@ class ParallelSessionSubclass(SessionRepositoryImpl):
 
     async def list_timeline_commits(
         self, session_id: str, *, tenant_id: str, start_turn_seq: int, end_turn_seq: int,
-    ) -> tuple[SessionTurnCommitRef, ...]:
+    ) -> tuple[SessionTurnCommit, ...]:
         read = super().list_timeline_commits(
             session_id, tenant_id=tenant_id, start_turn_seq=start_turn_seq, end_turn_seq=end_turn_seq,
         )
@@ -105,7 +102,7 @@ class ParallelSessionSubclass(SessionRepositoryImpl):
 
 
 def _history(
-    state: RuntimeStorage, *, executions: ExecutionRepository | None = None,
+    state: RuntimeState, *, executions: ExecutionRepository | None = None,
     sessions: SessionRepository | None = None,
 ) -> RuntimeHistory:
     return RuntimeHistory(
@@ -118,7 +115,7 @@ def _history(
     )
 
 
-async def _populate(state: RuntimeStorage) -> None:
+async def _populate(state: RuntimeState) -> None:
     await state.initialize(namespace="timeline-owner", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
     await state.execution.executions.create(replace(
@@ -126,6 +123,16 @@ async def _populate(state: RuntimeStorage) -> None:
     ))
     await state.conversation.sessions.admit_execution(
         "session", tenant_id="tenant", execution_id="failed", expected=None,
+    )
+    await _commit_empty_turn(state, await state.execution.executions.get("failed", tenant_id="tenant"))
+    await state.conversation.sessions.release_execution(
+        "session", tenant_id="tenant", execution_id="failed",
+    )
+    await state.execution.executions.create(
+        _execution("active", status=ExecutionStatus.PENDING_START, prompt="pending prompt"),
+    )
+    await state.conversation.sessions.admit_execution(
+        "session", tenant_id="tenant", execution_id="active", expected=None,
     )
 
 
@@ -136,10 +143,11 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
     tmp_path: Path, split: bool, subclass: bool, phase: str,
 ) -> None:
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )) if split else RuntimeStorage.sqlite(tmp_path / "shared.db")
     try:
+        state = RuntimeState(state)
         await _populate(state)
         principal = Principal("owner", "tenant")
         expected = await _history(state).session_timeline("session", principal=principal)
@@ -158,7 +166,8 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
             injected["sessions"] = adapter
         actual = await _history(state, **injected).session_timeline("session", principal=principal)
         assert actual == expected
-        assert [turn.execution_id for turn in actual.items] == ["failed"]
+        assert [turn.execution_id for turn in actual.items] == ["failed", "active"]
+        assert [turn.conversation_committed for turn in actual.items] == [True, False]
     finally:
         await state.close()
 
@@ -166,6 +175,7 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
 async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: Path) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "builtin.db")
     try:
+        state = RuntimeState(state)
         await _populate(state)
         engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
         statements, begins = [], []
@@ -183,7 +193,7 @@ async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: 
         finally:
             event.remove(engine, "before_cursor_execute", statement)
             event.remove(engine, "begin", begin)
-        assert [turn.execution_id for turn in result.items] == ["failed"]
+        assert [turn.execution_id for turn in result.items] == ["failed", "active"]
         assert len(begins) == 2  # Fresh authorization header, then one metadata snapshot.
         assert sum(sql.lstrip().upper().startswith("SELECT") for sql in statements) == 6
     finally:

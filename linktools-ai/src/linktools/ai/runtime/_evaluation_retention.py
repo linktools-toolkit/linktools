@@ -11,10 +11,11 @@ from ..core import AuthorizationAction, AuthorizationPolicy, Principal, Resource
 from ..errors import AIError, ErrorCode
 from ..evaluation import EvaluationPurgeResult
 from ..task import TaskSubmissionCancellation
-from ..storage import ObjectRef
+from ..storage import ObjectRef, ObjectStore
 from ._runtime_identity import task_graph_binding_capture_key
-from .state import RuntimeDomain, RuntimeStorage, SnapshotExclusiveGuard, input_capture_key
+from .state import RuntimeDomain, RuntimeSnapshotOperations, SnapshotExclusiveGuard, input_capture_key
 from .state._evaluation_records import EvaluationLaunchIntent, EvaluationRecord
+from .state._contracts import EvaluationRepository
 
 if TYPE_CHECKING:
     from ._input_capture import RuntimeInputCaptures
@@ -39,12 +40,16 @@ class _HeldExclusive:
 
 class EvaluationRetention:
     def __init__(
-        self, storage: RuntimeStorage, authorization: AuthorizationPolicy,
+        self, authorization: AuthorizationPolicy,
         cancel_submission: Callable[[EvaluationRecord, EvaluationLaunchIntent, Principal, str], Awaitable[TaskSubmissionCancellation]],
         captures: "RuntimeInputCaptures",
-        *, release_scopes: Callable[[str], Awaitable[None]] | None = None,
+        *, tenant_id: str, repository: EvaluationRepository, task_objects: ObjectStore,
+        maintenance: RuntimeSnapshotOperations, release_scopes: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        self._storage = storage
+        self._tenant_id = tenant_id
+        self._repository = repository
+        self._task_objects = task_objects
+        self._maintenance = maintenance
         self._authorization = authorization
         self._cancel_submission = cancel_submission
         self._captures = captures
@@ -57,11 +62,11 @@ class EvaluationRetention:
         validate_page_limit(limit)
         if now.tzinfo is None:
             raise ValueError("retention time must be timezone-aware")
-        if principal.tenant_id != self._storage.tenant_id:
+        if principal.tenant_id != self._tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.EVALUATION_PURGE,
             ResourceRef(ResourceKind.EVALUATION, "retention", principal.tenant_id, principal.principal_id))
-        repository = self._storage.evaluation.records
+        repository = self._repository
         records = await repository.list_expired(now=now, limit=limit, owner_principal_id=principal.principal_id)
         purged, blocked, ready = [], [], []
         for record in records:
@@ -95,7 +100,7 @@ class EvaluationRetention:
                         task_graph_binding_capture_key(submission.namespace, submission.tenant_id,
                                                        submission.graph_id, submission.request_digest),
                     )
-                    source = self._storage.object_store(RuntimeDomain.TASK)
+                    source = self._task_objects
                     for key in keys:
                         stat = await source.stat(key)
                         if stat is not None:
@@ -112,7 +117,7 @@ class EvaluationRetention:
             for receipt in pending:
                 await self._authorization.authorize(principal, AuthorizationAction.EVALUATION_PURGE,
                     ResourceRef(ResourceKind.EVALUATION, receipt.evaluation_id, principal.tenant_id, receipt.owner_principal_id))
-            result = await self._storage.purge_unreferenced_objects(
+            result = await self._maintenance.purge_unreferenced_objects(
                 (*tuple(candidate for receipt in pending for candidate in receipt.objects),
                  *((RuntimeDomain.TASK, reference) for reference in expired_inputs)),
                 exclusive=_HeldExclusive(), limit=limit)

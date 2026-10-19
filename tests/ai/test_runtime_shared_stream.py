@@ -8,11 +8,13 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
-from linktools.ai.runtime import Runtime, RuntimeStorage, MetricsCapability
+
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeDomain
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models
 
@@ -64,12 +66,11 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
 
     group = RuntimeFeatures[None]("shared-preview")
     group.agent("default", model="default", allow_tools=())
-    from linktools.ai.runtime import RuntimeDomain
     from .test_runtime_content_cache_integration import CountingObjects, _put
 
     backend = _CombinedCache()
-    metrics = Metrics.in_memory(cache=backend)
-    group.capability(MetricsCapability(metrics=metrics), scope="runtime")
+    group.capability(ExecutionCapability(coordination=backend), scope="runtime")
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=backend))
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async def assert_persisted_metrics(expected: int) -> None:
@@ -87,15 +88,15 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
     owner_storage = RuntimeStorage.sqlite(path, object_store=objects, cache=backend)
     reader_storage = RuntimeStorage.sqlite(path, object_store=objects, cache=backend)
     async with Runtime.open(
-        "shared-preview", models=models, features=group,
+        "shared-preview", metrics=metrics, models=models, features=group,
         storage=owner_storage,
     ) as producer:
         async with Runtime.open(
-            "shared-preview", models=models, features=group,
+            "shared-preview", metrics=metrics, models=models, features=group,
             storage=reader_storage,
         ) as reader:
-            assert await owner_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
-            assert await reader_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
+            assert await producer._state.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
+            assert await reader._state.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
             assert objects.reads == 1
             execution = await producer.agents.get().start("question")
             await asyncio.wait_for(entered.wait(), 5)
@@ -123,7 +124,7 @@ async def test_two_runtimes_observe_preview_before_completion(tmp_path) -> None:
             await producer.close()
             await assert_persisted_metrics(1)
             assert not backend.closed
-            assert await reader_storage.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
+            assert await reader._state.read_object(RuntimeDomain.EXECUTION, reference) == b"shared cached body"
             second = await reader.agents.get().run("another question", timeout_seconds=5)
             assert second.result.output == {"text": "hello world"}
             await assert_persisted_metrics(1)
@@ -146,12 +147,13 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
     group = RuntimeFeatures[None]("shared-reconnect")
     group.agent("default", model="default", allow_tools=())
     backend = _CountingStreamBackend()
+    group.capability(ExecutionCapability(coordination=backend), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
     async with Runtime.open("reconnect", models=models, features=group,
-                            storage=RuntimeStorage.sqlite(path, cache=backend)) as owner:
+                            storage=RuntimeStorage.sqlite(path)) as owner:
         async with Runtime.open("reconnect", models=models, features=group,
-                                storage=RuntimeStorage.sqlite(path, cache=backend)) as other:
+                                storage=RuntimeStorage.sqlite(path)) as other:
             execution = await owner.agents.get().start("question")
             remote = await other.executions.get(execution.execution_id)
             stream = remote.watch(include_content=True)
@@ -169,7 +171,7 @@ async def test_remote_cursor_resumes_preview_without_cancelling_producer(tmp_pat
                 await stream.aclose()
             assert not release.is_set()
             async with Runtime.open("reconnect", models=models, features=group,
-                                    storage=RuntimeStorage.sqlite(path, cache=backend)) as reconnected:
+                                    storage=RuntimeStorage.sqlite(path)) as reconnected:
                 remote = await reconnected.executions.get(execution.execution_id)
                 resumed = remote.watch(include_content=True, cursor=cursor)
                 backend.read_entered.clear()
@@ -493,21 +495,22 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
     application = workspace_features("application", workspace=workspace)
     application.agent("default", model="default", allow_tools=("read_file",))
     backend = _CountingStreamBackend()
+    application.capability(ExecutionCapability(coordination=backend), scope="runtime")
     path = tmp_path / "resume.db"
-    state = RuntimeStorage.sqlite(path, cache=backend)
+    state = RuntimeStorage.sqlite(path)
     async with Runtime.open("resume-preview", models=_ToolModels(), storage=state,
                             features=application) as owner:
         execution = await owner.agents.get().start("read a file")
         tenant = owner.tenant_id
         await _wait_for_committed(
-            lambda: state.execution.executions.get(execution.execution_id, tenant_id=tenant),
+            lambda: owner._state.execution.executions.get(execution.execution_id, tenant_id=tenant),
             lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
         )
         worker = owner._execution_service.runtime_backend()._tasks.get(execution.execution_id)
         if worker is not None:
             await asyncio.wait_for(asyncio.shield(worker), 10)
-        approvals = await state.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
-        await state.recovery.approvals.decide(
+        approvals = await owner._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
+        await owner._state.recovery.approvals.decide(
             approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
             idempotency_key_digest="a" * 64, decision=ApprovalDecision.DENY,
             principal_id=owner.default_principal.principal_id, decision_digest="b" * 64,
@@ -515,7 +518,7 @@ async def test_waiting_resume_opens_each_durable_admission_once(tmp_path) -> Non
         )
     assert len(backend.open_keys) == 1
     async with Runtime.open("resume-preview", models=_ToolModels(),
-                            storage=RuntimeStorage.sqlite(path, cache=backend),
+                            storage=RuntimeStorage.sqlite(path),
                             features=application) as resumed:
         result = await resumed.executions.wait(execution.execution_id,
                                                principal=resumed.default_principal, timeout_seconds=10)
@@ -679,24 +682,26 @@ async def test_marker_batch_terminal_does_not_deliver_prefetched_suffix() -> Non
 @pytest.mark.parametrize("retention", ("volatile", "transient"))
 async def test_nondurable_runtime_keeps_combined_cache_without_opening_shared_stream(retention: str) -> None:
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.runtime import RuntimeStoragePlan, RuntimeStorageRoute
+    from linktools.ai.runtime import RuntimeStoragePlan
+    from linktools.ai.storage import StorageRoute
 
     cache = _CombinedCache()
     storage = (
         RuntimeStorage.in_memory(cache=cache)
         if retention == "volatile"
         else RuntimeStorage.from_plan(
-            RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache,
+            RuntimeStoragePlan(execution=StorageRoute.transient(cache=cache)),
         )
     )
     group = RuntimeFeatures[None]("local-preview")
+    group.capability(ExecutionCapability(coordination=cache), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "local-preview", storage=storage, models=_Models(TestModel()), features=group,
     ) as runtime:
         execution = await runtime.agents.get().run("hello", timeout_seconds=5)
         assert execution.result is not None
-        assert storage.cache is cache
+        assert storage.plan.route(RuntimeDomain.EXECUTION).cache is cache
     assert cache.open_keys == []
     assert not cache.closed
 

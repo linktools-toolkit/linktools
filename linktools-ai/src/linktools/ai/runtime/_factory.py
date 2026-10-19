@@ -17,6 +17,8 @@ from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
     ToolResponsesCapability,
+    SessionCapability,
+    ExecutionCapability,
     AgentContext,
     AssetCapability,
     AssetSkillSource,
@@ -26,6 +28,7 @@ from ..capability import (
     SkillSourceRegistry,
 )
 from ..core import (
+    CommitPolicy,
     AuthorizationAction,
     AuthorizationPolicy,
     HmacCursorSigner,
@@ -35,6 +38,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..observe import Metrics
 from ..model import ModelRegistry
 from ..spec import (
     AgentSpec,
@@ -42,7 +46,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import ObjectStore, PayloadPolicy, StreamBackend
+from ..storage import BatchWriteScope, CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -72,22 +76,23 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._capabilities import runtime_feature_leaves
-from ._conversation_capability import ConversationCapability
-from ._metrics_capability import MetricsCapability, MetricsRecordingBinding
-from ._persistence_configuration import persistence_storage_configuration
-from ._persistence_capabilities import (
-    TraceCapability,
-    CheckpointCapability,
-)
+from ..storage import StorageRoute
+from .persistence import CapabilityPersistence
+from ._capability_writes import RuntimeCapabilityWrites
+from linktools.ai.capability import ConversationCapability
+from ._metrics_service import MetricsService
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
+from linktools.ai.capability import TraceCapability, CheckpointCapability
 from ._runtime_history import RuntimeHistory
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
-from ._session import DefaultSessionService
+from ._session import RuntimeSessionService
 from ._subagent import SubagentDispatcher
 from ._transient_history import TransientExecutionHistoryStore
-from ._tool_response_fixture import ToolResponseFixture
+from ..capability import ToolResponseFixture
 from .service_api import CancelExecutionRequest, ExecutionHistoryReader, SessionHistoryReader
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from ..storage import StorageRetentionMode
+from .state import RuntimeDomain, RuntimeStorage, RuntimeState
 from .state._contracts import BudgetRepository, TaskAdmissionRepository
 from .state._step_archive import StagingAgentRunStore
 
@@ -97,10 +102,11 @@ _logger = environ.get_logger("ai.runtime.factory")
 
 @dataclass(frozen=True, slots=True)
 class _RuntimeComponents:
+    state: RuntimeState
     catalog: AgentCatalog
     compiler: AgentCompiler
     execution: DefaultExecutionService
-    session: DefaultSessionService
+    session: RuntimeSessionService
     graph: DefaultTaskGraphService
     evaluation: RuntimeEvaluations
     approval: DefaultApprovalService
@@ -111,7 +117,7 @@ class _RuntimeComponents:
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
-    metric_control: MetricsRecordingBinding | None
+    metric_control: MetricsService | None
     binding_resolver: _AgentBindingResolver
     history: object
     task_admissions: TaskAdmissionRepository
@@ -126,6 +132,7 @@ async def compose_runtime_components(
     tenant_id: "str | None" = None,
     models: ModelRegistry,
     storage: RuntimeStorage,
+    metrics: Metrics | None = None,
     features: "RuntimeFeatures[AppT] | RuntimeFeaturesCapture[AppT] | None" = None,
     auto_recover: bool = True,
 ) -> _RuntimeComponents:
@@ -153,6 +160,10 @@ async def compose_runtime_components(
     groups = tuple(captures)
     selected_limits = PromptLimits() if not groups else groups[0].limits
     authorization = None if not groups else groups[0].authorization
+    execution_capability = ExecutionCapability()
+    execution_declared = False
+    session_capability = SessionCapability()
+    session_declared = False
     tool_responses: ToolResponseFixture | None = None
     group_ids = tuple(group.group_id for group in groups)
     if len(group_ids) != len(set(group_ids)):
@@ -168,7 +179,7 @@ async def compose_runtime_components(
     if workspace is not None:
         workspace.policy.validate()
 
-    selected_storage: RuntimeStorage | None = None
+    selected_state: RuntimeState | None = None
     workspace_access: WorkspaceAccess | None = None
     input_materializer: ExecutionInputMaterializer | None = None
     initialized = False
@@ -182,8 +193,15 @@ async def compose_runtime_components(
                 asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
         def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
+            if isinstance(capability, CapabilityPersistence):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capabilities require runtime scope")
             if isinstance(capability, (
-                CheckpointCapability, TraceCapability, ConversationCapability, MetricsCapability, ToolResponsesCapability,
+                CheckpointCapability,
+                TraceCapability,
+                ConversationCapability,
+                ToolResponsesCapability,
+                SessionCapability,
+                ExecutionCapability,
             )):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Runtime feature capabilities require Runtime scope")
 
@@ -202,8 +220,18 @@ async def compose_runtime_components(
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 declared_ids.add(leaf.id)
 
-        def consume_assets(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
-            nonlocal tool_responses
+        def consume_runtime_declaration(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
+            nonlocal tool_responses, session_capability, session_declared, execution_capability, execution_declared
+            if isinstance(capability, ExecutionCapability):
+                if execution_declared:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                execution_capability, execution_declared = capability, True
+                return None
+            if isinstance(capability, SessionCapability):
+                if session_declared:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                session_capability, session_declared = capability, True
+                return None
             if isinstance(capability, ToolResponsesCapability):
                 if tool_responses is not None:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -214,7 +242,7 @@ async def compose_runtime_components(
             if isinstance(capability, AssetCapability):
                 return None
             if isinstance(capability, WrapperCapability):
-                wrapped = capability.wrapped.visit_and_replace(consume_assets)
+                wrapped = capability.wrapped.visit_and_replace(consume_runtime_declaration)
                 if wrapped is None:
                     return None
                 rebound = copy(capability)
@@ -222,10 +250,43 @@ async def compose_runtime_components(
                 return rebound
             return capability
 
-        runtime_capabilities = tuple(
-            selected for candidate in candidates if candidate.scope == "runtime"
-            if (selected := candidate.value.visit_and_replace(consume_assets)) is not None
-        )
+        capability_routes: dict[str, StorageRoute] = {}
+        capability_revisions: dict[str, int] = {}
+        runtime_capability_values = []
+        for candidate in candidates:
+            if candidate.scope != "runtime":
+                continue
+
+            def capture_persistence(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
+                if isinstance(capability, WrapperCapability):
+                    wrapped = capability.wrapped.visit_and_replace(capture_persistence)
+                    if wrapped is None:
+                        return None
+                    rebound = copy(capability)
+                    rebound.wrapped = wrapped
+                    return rebound
+                selected = consume_runtime_declaration(capability)
+                if selected is None or not isinstance(selected, CapabilityPersistence):
+                    return selected
+                identity = selected.id
+                if identity is None:
+                    if capability is not candidate.value:
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capability leaves require a registered identity")
+                    identity = candidate.id
+                if identity in capability_routes:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                if selected.storage is not None and not isinstance(selected.storage, StorageRoute):
+                    raise TypeError("Persistent capability storage must use StorageRoute")
+                capability_routes[identity] = selected.storage or storage.plan.route(RuntimeDomain.EXECUTION)
+                capability_revisions[identity] = candidate.revision
+                bound = copy(selected)
+                bound.id = identity
+                return bound
+
+            selected = candidate.value.visit_and_replace(capture_persistence)
+            if selected is not None:
+                runtime_capability_values.append(selected)
+        runtime_capabilities = tuple(runtime_capability_values)
         runtime_ids: set[str] = set()
 
         def register_runtime_id(capability: AbstractCapability[AgentContext[AppT]]) -> None:
@@ -236,6 +297,11 @@ async def compose_runtime_components(
 
         for capability in runtime_capabilities:
             capability.apply(register_runtime_id)
+        module_routes = persistence_storage_configuration(runtime_capabilities)
+        capability_routes = capability_storage_configuration(
+            tuple((capability.id or "", capability) for capability in runtime_capabilities),
+            default_route=storage.plan.route(RuntimeDomain.EXECUTION),
+        )
         candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -284,15 +350,23 @@ async def compose_runtime_components(
         effective_tenant_id = (
             "default" if tenant_id is None else validate_tenant_id(tenant_id)
         )
-        selected_storage = storage
-        module_routes, module_caches = persistence_storage_configuration(runtime_capabilities)
-        await selected_storage.initialize(
+        selected_state = RuntimeState(storage)
+        await selected_state.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
             module_routes=module_routes,
-            module_caches=module_caches,
+            capability_routes=capability_routes,
         )
 
+        if selected_state.capability_stores:
+            selected_state.run_store.capability_writes = RuntimeCapabilityWrites(
+                selected_state.capability_stores, namespace=resolved_namespace, tenant_id=effective_tenant_id,
+                durable_capability_ids=selected_state.durable_capability_ids,
+                require_active_run=selected_state.run_store.require_active_capability_run,
+                has_active_execution=selected_state.run_store.has_active_execution_producer,
+                marker_store=selected_state.capability_marker_store(),
+            )
+        selected_state.run_store.capability_revisions = capability_revisions
         initialized = True
         for group in groups:
             await group.verify_source_revision()
@@ -320,24 +394,24 @@ async def compose_runtime_components(
         input_materializer = ExecutionInputMaterializer(
             workspace_access,
             selected_limits,
-            object_store=selected_storage.object_store(RuntimeDomain.EXECUTION),
+            object_store=selected_state.object_store(RuntimeDomain.EXECUTION),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
         runtime_token_seed = token_seed(resolved_namespace)
         history_reader = _execution_history_reader(
             resolved_namespace,
-            selected_storage,
+            selected_state,
             runtime_token_seed,
         )
         session_history_reader = StepSessionHistoryReader(
-            store=selected_storage.run_store.read_store(RuntimeDomain.CONVERSATION),
+            store=selected_state.run_store.read_store(RuntimeDomain.CONVERSATION),
             cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
-            sessions=selected_storage.conversation.sessions,
+            sessions=selected_state.conversation.sessions,
         )
         memory_store_factory = _memory_store_factory(
             resolved_namespace,
-            selected_storage,
+            selected_state,
         )
         selected_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)
@@ -345,7 +419,10 @@ async def compose_runtime_components(
         )
         ownership_transferred = True
         components = await _build_local_components(
-            storage=selected_storage,
+            state=selected_state,
+            metrics=metrics,
+            commit=execution_capability.commit,
+            coordination=execution_capability.coordination,
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
@@ -367,7 +444,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             input_materializer=input_materializer,
-            session_execution_ready=True,
+            session_execution_ready=session_capability.enabled,
             auto_recover=auto_recover,
             tool_responses=tool_responses,
         )
@@ -385,7 +462,7 @@ async def compose_runtime_components(
     except BaseException:
         if not ownership_transferred:
             await _cleanup_compose_resources(
-                selected_storage=selected_storage,
+                selected_state=selected_state,
                 initialized=initialized,
                 input_materializer=input_materializer,
                 workspace_access=workspace_access,
@@ -400,9 +477,9 @@ def _runtime_close_actions(
     execution: DefaultExecutionService,
     backend: LocalExecutionBackend | None,
     input_materializer: ExecutionInputMaterializer,
-    metric_buffer: MetricsRecordingBinding | None,
-    storage: RuntimeStorage,
-    session: DefaultSessionService | None = None,
+    metric_buffer: MetricsService | None,
+    state: RuntimeState,
+    session: RuntimeSessionService | None = None,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if session is not None:
@@ -426,7 +503,7 @@ def _runtime_close_actions(
     actions.append(("runtime.input", input_materializer.close))
     if metric_buffer is not None:
         actions.append(("runtime.metrics", metric_buffer.close))
-    actions.append(("runtime.storage", storage.close))
+    actions.append(("runtime.state", state.close))
     return tuple(actions)
 
 
@@ -446,7 +523,7 @@ async def _run_cleanup_actions(
 
 async def _cleanup_compose_resources(
     *,
-    selected_storage: RuntimeStorage | None,
+    selected_state: RuntimeState | None,
     initialized: bool,
     input_materializer: ExecutionInputMaterializer | None,
     workspace_access: WorkspaceAccess | None,
@@ -456,8 +533,8 @@ async def _cleanup_compose_resources(
         actions.append(("runtime.compose.input", input_materializer.close))
     elif workspace_access is not None:
         actions.append(("runtime.compose.workspace_access", workspace_access.close))
-    if initialized and selected_storage is not None:
-        actions.append(("runtime.compose.storage", selected_storage.close))
+    if initialized and selected_state is not None:
+        actions.append(("runtime.compose.state", selected_state.close))
     await _run_cleanup_actions(actions, stop_on_error=False)
 
 
@@ -481,33 +558,33 @@ def _validate_candidate_uniqueness(
 
 def _execution_history_reader(
     namespace: str,
-    storage: RuntimeStorage,
+    state: RuntimeState,
     runtime_token_seed: bytes,
 ) -> StepExecutionHistoryReader:
-    local_store = storage.run_store.read_store(RuntimeDomain.TRACE, durable=False)
+    local_store = state.run_store.read_store(RuntimeDomain.TRACE, durable=False)
     if not isinstance(local_store, StagingAgentRunStore):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    transient_store = TransientExecutionHistoryStore(local_store, storage.run_store)
-    history_store = storage.run_store.read_store(RuntimeDomain.TRACE)
-    if storage.plan.route(RuntimeDomain.TRACE).retention is RuntimeRetentionMode.TRANSIENT:
+    transient_store = TransientExecutionHistoryStore(local_store, state.run_store)
+    history_store = state.run_store.read_store(RuntimeDomain.TRACE)
+    if state.plan.route(RuntimeDomain.TRACE).retention is StorageRetentionMode.TRANSIENT:
         if not isinstance(history_store, StagingAgentRunStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        history_store = TransientExecutionHistoryStore(history_store, storage.run_store)
+        history_store = TransientExecutionHistoryStore(history_store, state.run_store)
     return StepExecutionHistoryReader(
         namespace=namespace,
-        executions=storage.execution.executions,
+        executions=state.execution.executions,
         store=history_store,
         transient_store=transient_store,
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
-        tool_operations=storage.recovery.tools,
-        notifications=storage.run_store,
-        durable_history_available=storage.run_store.model_interaction_history_available,
+        tool_operations=state.recovery.tools,
+        notifications=state.run_store,
+        durable_history_available=state.run_store.model_interaction_history_available,
     )
 
 
 def _memory_store_factory(
     namespace: str,
-    storage: RuntimeStorage,
+    state: RuntimeState,
 ) -> "Callable[[str, str, str, ObjectStore, bool], MemoryStore]":
     def build(
         tenant_id: str,
@@ -517,7 +594,7 @@ def _memory_store_factory(
         transient: bool,
     ) -> MemoryStore:
         return RuntimeMemoryStore(
-            storage.memory,
+            state.memory,
             object_store=object_store,
             namespace=namespace,
             tenant_id=tenant_id,
@@ -537,18 +614,21 @@ def _capture_host_cwd() -> "str | None":
 
 
 def _require_storage_identity(
-    storage: RuntimeStorage,
+    state: RuntimeState,
     *,
     namespace: str,
     tenant_id: str,
 ) -> None:
-    if storage.namespace != namespace or storage.tenant_id != tenant_id:
+    if state.namespace != namespace or state.tenant_id != tenant_id:
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
 
 async def _build_local_components(
     *,
-    storage: RuntimeStorage,
+    state: RuntimeState,
+    metrics: Metrics | None,
+    commit: CommitPolicy,
+    coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None,
     catalog: AgentCatalog,
     compiler: AgentCompiler,
     authorization: AuthorizationPolicy,
@@ -574,7 +654,7 @@ async def _build_local_components(
     auto_recover: bool,
     tool_responses: ToolResponseFixture | None,
 ) -> _RuntimeComponents:
-    metric_buffer: MetricsRecordingBinding | None = None
+    metric_buffer: MetricsService | None = None
     metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
@@ -590,14 +670,14 @@ async def _build_local_components(
             execution_id,
             tenant_id=tenant_id,
         )
-        return await storage.retention.release_execution_handoff(
+        return await state.retention.release_execution_handoff(
             execution_id, tenant_id=tenant_id, terminal_commit=terminal_commit,
         )
 
     try:
-        if not storage.ready:
+        if not state.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        _require_storage_identity(storage, namespace=namespace, tenant_id=tenant_id)
+        _require_storage_identity(state, namespace=namespace, tenant_id=tenant_id)
         runtime_bridge = _ExecutionRuntimeBridge()
         if isinstance(history_reader, StepExecutionHistoryReader):
             history_reader.bind_pending_execution_reader(runtime_bridge.pending_turns.read_execution)
@@ -613,37 +693,18 @@ async def _build_local_components(
         conversation = any(
             isinstance(value, ConversationCapability) for value in persistence_capabilities
         )
-        metric_capabilities = tuple(
-            value for value in persistence_capabilities if isinstance(value, MetricsCapability)
-        )
-        if len(metric_capabilities) > 1:
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one Metrics dataset is allowed per Runtime")
-        automatic_metrics = bool(metric_capabilities)
-        metric_buffer = metric_capabilities[0].open_recording() if metric_capabilities else None
+        batch_scopes = BatchWriteScope.scoped_factory()
+        state.run_store.trace_persistence.bind_batch_scopes(batch_scopes)
+        metric_buffer = None if metrics is None else MetricsService(metrics, batch_scopes=batch_scopes)
         metric_source_namespace = None if metric_buffer is None else namespace
-        agent_metric_buffer = metric_buffer.recorder if automatic_metrics and metric_buffer is not None else None
-        if metric_buffer is not None:
-            def bind_metrics(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]]:
-                if isinstance(capability, WrapperCapability):
-                    rebound = copy(capability)
-                    rebound.wrapped = capability.wrapped.visit_and_replace(bind_metrics)
-                    return rebound
-                if isinstance(capability, MetricsCapability):
-                    return metric_buffer.bind(capability)
-                return capability
-
-            runtime_capabilities = tuple(
-                bound for template in runtime_capabilities
-                if (bound := template.visit_and_replace(bind_metrics)) is not None
-            )
-        if storage.cache is not None:
+        if coordination is not None:
             runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(
-                storage.cache, namespace=namespace, tenant_id=tenant_id,
+                coordination, namespace=namespace, tenant_id=tenant_id,
             ))
         stream_cache = (
-            storage.cache
-            if isinstance(storage.cache, StreamBackend)
-            and storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.DURABLE
+            coordination
+            if isinstance(coordination, StreamBackend)
+            and state.plan.route(RuntimeDomain.EXECUTION).retention is StorageRetentionMode.DURABLE
             else None
         )
         live_broker = LiveExecutionEventBroker(shared=(
@@ -652,7 +713,7 @@ async def _build_local_components(
             )
         ))
         history_service = DefaultExecutionHistoryService(
-            storage.execution.executions,
+            state.execution.executions,
             authorization,
             history_reader,
             HmacCursorSigner("execution", runtime_token_seed),
@@ -664,11 +725,11 @@ async def _build_local_components(
             sandbox=sandbox,
         )
         execution = DefaultExecutionService(
-            storage.execution,
-            storage.object_store(RuntimeDomain.EXECUTION),
+            state.execution,
+            state.object_store(RuntimeDomain.EXECUTION),
             authorization,
-            sessions=storage.conversation.sessions,
-            task_admissions=storage.task.admissions,
+            sessions=state.conversation.sessions,
+            task_admissions=state.task.admissions,
             catalog=catalog,
             compiler=compiler,
             runtime_bridge=runtime_bridge,
@@ -682,10 +743,11 @@ async def _build_local_components(
             input_materializer=input_materializer,
             session_execution_ready=session_execution_ready,
             tool_responses=tool_responses,
-            object_reader=storage.read_object,
+            object_reader=state.read_object,
             restart_checkpoints=restart_checkpoints,
             durable_trace=durable_trace,
             conversation=conversation,
+            terminal_commit=commit.mode == "terminal",
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -698,7 +760,7 @@ async def _build_local_components(
             skill_sources,
             runtime_capabilities=runtime_capabilities,
             asset_sources=asset_sources,
-            metrics=agent_metric_buffer,
+            metrics=metric_buffer,
             sandbox=sandbox,
             tool_responses=tool_responses,
         )
@@ -708,7 +770,7 @@ async def _build_local_components(
         ]
         if metric_buffer is not None:
             actions.append(("runtime.build.metrics", metric_buffer.close))
-        actions.append(("runtime.build.storage", storage.close))
+        actions.append(("runtime.build.state", state.close))
         await _run_cleanup_actions(actions, stop_on_error=False)
         raise
 
@@ -719,15 +781,15 @@ async def _build_local_components(
     ) -> MemoryStore:
         if memory_store_factory is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        route = storage.plan.route(RuntimeDomain.MEMORY)
-        transient = route.retention is RuntimeRetentionMode.TRANSIENT
+        route = state.plan.route(RuntimeDomain.MEMORY)
+        transient = route.retention is StorageRetentionMode.TRANSIENT
         store = (
-            storage.working_object_store(
+            state.working_object_store(
                 RuntimeDomain.MEMORY,
                 owner_scope=f"execution:{execution_id}",
             )
             if transient
-            else storage.object_store(RuntimeDomain.MEMORY)
+            else state.object_store(RuntimeDomain.MEMORY)
         )
         return memory_store_factory(
             memory_tenant,
@@ -737,7 +799,7 @@ async def _build_local_components(
             transient,
         )
 
-    session: DefaultSessionService | None = None
+    session: RuntimeSessionService | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
     graph_service: DefaultTaskGraphService | None = None
     coordinator: _RuntimeCloseCoordinator | None = None
@@ -746,16 +808,16 @@ async def _build_local_components(
     async def worker_completed(execution_id: str) -> None:
         await execution.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
 
-    exclusive_execution_writer = storage.plan.route(RuntimeDomain.EXECUTION).kind == "filesystem"
+    exclusive_execution_writer = state.plan.route(RuntimeDomain.EXECUTION).kind == "filesystem"
     try:
         backend = LocalExecutionBackend(
-            storage.conversation,
-            storage.execution,
-            storage.recovery,
-            storage.object_store(RuntimeDomain.EXECUTION),
-            storage.object_store(RuntimeDomain.RECOVERY),
+            state.conversation,
+            state.execution,
+            state.recovery,
+            state.object_store(RuntimeDomain.EXECUTION),
+            state.object_store(RuntimeDomain.RECOVERY),
             namespace,
-            storage.run_store,
+            state.run_store,
             executor,
             catalog,
             restore_binding=compiler.restore,
@@ -766,29 +828,29 @@ async def _build_local_components(
             instruction_resolver=instruction_resolver,
             app=app,
             run_stores={
-                domain: storage.run_store.read_store(domain)
+                domain: state.run_store.read_store(domain)
                 for domain in (
                     RuntimeDomain.CONVERSATION,
                     RuntimeDomain.TRACE,
                     RuntimeDomain.CHECKPOINT,
                 )
             },
-            agent_run_lifecycle=storage.run_store,
+            agent_run_lifecycle=state.run_store,
             memory_store_factory=build_memory_store,
             conversation_durable=(
-                storage.plan.route(RuntimeDomain.CONVERSATION).retention
-                is RuntimeRetentionMode.DURABLE
+                state.plan.route(RuntimeDomain.CONVERSATION).retention
+                is StorageRetentionMode.DURABLE
             ),
             input_materializer=input_materializer,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
             payload_policy=payload_policy,
             execution_objects_durable=(
-                storage.plan.route(RuntimeDomain.EXECUTION).retention
-                is RuntimeRetentionMode.DURABLE
+                state.plan.route(RuntimeDomain.EXECUTION).retention
+                is StorageRetentionMode.DURABLE
             ),
-            tool_operations=storage.recovery.tools,
-            metric_recorder=agent_metric_buffer,
+            tool_operations=state.recovery.tools,
+            metric_recorder=metric_buffer,
             worker_completed=worker_completed,
             exclusive_execution_writer=exclusive_execution_writer,
             pending_turns=runtime_bridge.pending_turns,
@@ -802,23 +864,21 @@ async def _build_local_components(
         runtime_bridge.pending_cancel_promote = lambda execution_id: backend.promote_pending_execution(
             execution_id, allow_cancelled=True,
         )
-        storage.run_store.bind_pending_producer_guard(backend.require_pending_producer)
-        session = DefaultSessionService(
-            storage.conversation,
-            storage.execution.executions,
+        state.run_store.bind_pending_producer_guard(backend.require_pending_producer)
+        session = RuntimeSessionService(
+            state.conversation,
+            state.execution.executions,
             authorization,
             execution,
             HmacCursorSigner("session", runtime_token_seed),
-            conversation_enabled=conversation,
             history_reader=session_history_reader,
-            cache=(
-                next((feature.cache for feature in persistence_capabilities if isinstance(feature, ConversationCapability)), None)
-                if all(storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
-                       for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION))
-                else None
-            ),
-            transcript_store=storage.run_store.conversation_persistence,
-            release_terminal=storage.retention.release_session,
+            enabled=session_execution_ready,
+            cache=(state.plan.route(RuntimeDomain.CONVERSATION).cache if all(
+                state.plan.route(domain).retention is StorageRetentionMode.DURABLE
+                for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION)
+            ) else None),
+            transcript_store=state.run_store.conversation_persistence,
+            release_terminal=state.retention.release_session,
             pending_session_execution=runtime_bridge.pending_turns.read_session_execution,
             workspace_access=input_materializer.access,
         )
@@ -828,90 +888,96 @@ async def _build_local_components(
             await backend.promote_pending_execution(execution_id)
 
         input_captures = RuntimeInputCaptures(
-            namespace, storage, authorization, execution, input_materializer,
+            namespace, authorization, execution, input_materializer,
+            tenant_id=tenant_id,
+            execution_repositories=state.execution,
+            task_repositories=state.task,
+            object_stores={domain: state.object_store(domain) for domain in RuntimeDomain},
+            execution_retention=state.plan.route(RuntimeDomain.EXECUTION).retention,
+            task_retention=state.plan.route(RuntimeDomain.TASK).retention,
             prepare_pending_capture=prepare_pending_capture,
         )
         task_graph_binding_captures = TaskGraphBindingCaptureStore(
             namespace,
-            storage.object_store(RuntimeDomain.TASK),
+            state.object_store(RuntimeDomain.TASK),
         )
         task_runner = RuntimeTaskNodeRunner(
             execution,
             namespace=namespace,
             app=app,
             authorization=authorization,
-            task_state=storage.task.tasks,
+            task_state=state.task.tasks,
             input_captures=input_captures,
-            task_admissions=storage.task.admissions,
-            execution_state=storage.execution.executions,
+            task_admissions=state.task.admissions,
+            execution_state=state.execution.executions,
             recovery_backend=backend,
             resolve_agent_binding=binding_resolver.resolve_contract,
-            budgets=storage.execution.budgets,
-            task_objects=storage.object_store(RuntimeDomain.TASK),
-            artifact_state=storage.artifact,
-            artifact_objects=storage.object_store(RuntimeDomain.ARTIFACT),
+            budgets=state.execution.budgets,
+            task_objects=state.object_store(RuntimeDomain.TASK),
+            artifact_state=state.artifact,
+            artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
             binding_captures=task_graph_binding_captures,
             input_materializer=ExecutionInputMaterializer(
                 input_materializer.access,
                 limits,
-                object_store=storage.object_store(RuntimeDomain.TASK),
+                object_store=state.object_store(RuntimeDomain.TASK),
                 object_key_factory=object_key_factory,
                 payload_policy=PayloadPolicy(inline_limit_bytes=0),
                 object_domain=RuntimeDomain.TASK,
             ),
             task_durable=(
-                storage.plan.route(RuntimeDomain.TASK).retention
-                is RuntimeRetentionMode.DURABLE
+                state.plan.route(RuntimeDomain.TASK).retention
+                is StorageRetentionMode.DURABLE
             ),
             execution_durable=(
-                storage.plan.route(RuntimeDomain.EXECUTION).retention
-                is RuntimeRetentionMode.DURABLE
+                state.plan.route(RuntimeDomain.EXECUTION).retention
+                is StorageRetentionMode.DURABLE
             ),
             recovery_durable=(
-                storage.plan.route(RuntimeDomain.RECOVERY).retention
-                is RuntimeRetentionMode.DURABLE
+                state.plan.route(RuntimeDomain.RECOVERY).retention
+                is StorageRetentionMode.DURABLE
             ),
         )
         backend.bind_recovery_relaunch_guard(task_runner.allow_execution_relaunch)
         task_launcher = LocalTaskGraphLauncher(
-            storage.task.tasks,
+            state.task.tasks,
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
             acquire_execution_hold=execution.acquire_dependency_hold,
             release_execution_hold=execution.release_dependency_hold,
         )
         graph_service = DefaultTaskGraphService(
-            storage.task,
+            state.task,
             authorization,
             task_launcher,
             local_waiter=task_launcher,
             preflight=task_runner,
             bound_execution_recovery=task_runner,
-            metric_recorder=None if metric_buffer is None else metric_buffer.recorder,
+            metric_recorder=metric_buffer,
             metric_source_namespace=metric_source_namespace,
         )
         approval = DefaultApprovalService(
-            storage.recovery.approvals,
-            storage.execution.executions,
-            storage.recovery.checkpoints,
+            state.recovery.approvals,
+            state.execution.executions,
+            state.recovery.checkpoints,
             authorization,
-            objects=storage.object_store(RuntimeDomain.RECOVERY),
+            objects=state.object_store(RuntimeDomain.RECOVERY),
             continuation=backend,
         )
         external = DefaultExternalService(
-            storage.recovery.external_calls,
-            storage.execution.executions,
-            storage.recovery.checkpoints,
+            state.recovery.external_calls,
+            state.execution.executions,
+            state.recovery.checkpoints,
             authorization,
-            objects=storage.object_store(RuntimeDomain.RECOVERY),
+            objects=state.object_store(RuntimeDomain.RECOVERY),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             continuation=backend,
         )
         event = DefaultEventService(
-            storage.execution.executions,
-            storage.execution.events,
+            state.execution.executions,
+            state.execution.events,
             authorization,
             backend.worker_failure,
             live_broker,
@@ -919,18 +985,22 @@ async def _build_local_components(
             pending_stream=runtime_bridge.pending_turns.read_stream,
         )
         artifact = DefaultArtifactService(
-            storage.artifact,
+            state.artifact,
             authorization,
             token_seed=runtime_token_seed,
             cursor_signer=HmacCursorSigner("artifact", runtime_token_seed),
         )
         history = _borrowed_runtime_history(
-            history_service, tenant_id=tenant_id, storage=storage,
+            history_service, tenant_id=tenant_id, state=state,
             authorization=authorization, artifact=artifact,
         )
         evaluation = RuntimeEvaluations(
-            namespace, storage, authorization, execution, graph_service,
+            namespace, authorization, execution, graph_service,
             input_captures, history,
+            tenant_id=tenant_id, plan=state.plan,
+            evaluation_repositories=state.evaluation, task_repositories=state.task,
+            object_stores={domain: state.object_store(domain) for domain in RuntimeDomain},
+            maintenance=state.snapshot_operations(),
             cursor_signer=HmacCursorSigner("evaluation", runtime_token_seed),
             asset_readers=tuple(asset_sources.values()),
         )
@@ -947,14 +1017,14 @@ async def _build_local_components(
             backend=backend,
             input_materializer=input_materializer,
             metric_buffer=metric_buffer,
-            storage=storage,
+            state=state,
             session=session,
         )
         close_actions = (("runtime.evaluation", evaluation.close), *close_actions)
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
-        if auto_recover and RuntimeDomain.RECOVERY in storage.plan.durable_domains:
+        if auto_recover and RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,
             )
@@ -969,13 +1039,14 @@ async def _build_local_components(
                 backend=backend,
                 input_materializer=input_materializer,
                 metric_buffer=metric_buffer,
-                storage=storage,
+                state=state,
                 session=session,
             )
         )
         await _run_cleanup_actions(abort_actions)
         raise
     return _RuntimeComponents(
+        state=state,
         catalog=catalog,
         compiler=compiler,
         execution=execution,
@@ -993,8 +1064,8 @@ async def _build_local_components(
         metric_control=metric_buffer,
         binding_resolver=binding_resolver,
         history=history,
-        task_admissions=storage.task.admissions,
-        budgets=storage.execution.budgets,
+        task_admissions=state.task.admissions,
+        budgets=state.execution.budgets,
         input_captures=input_captures,
     )
 
@@ -1003,28 +1074,28 @@ def _borrowed_runtime_history(
     service: DefaultExecutionHistoryService,
     *,
     tenant_id: str,
-    storage: RuntimeStorage,
+    state: RuntimeState,
     authorization: object,
     artifact: DefaultArtifactService,
 ) -> "RuntimeHistory":
     return RuntimeHistory(
         service,
         tenant_id=tenant_id,
-        executions=storage.execution.executions,
-        events=storage.execution.events,
-        sessions=storage.conversation.sessions,
-        conversation=storage.conversation,
-        session_transcript_store=storage.run_store.conversation_persistence,
-        tasks=storage.task.tasks,
+        executions=state.execution.executions,
+        events=state.execution.events,
+        sessions=state.conversation.sessions,
+        conversation=state.conversation,
+        session_transcript_store=state.run_store.conversation_persistence,
+        tasks=state.task.tasks,
         authorization=authorization,
-        namespace=storage.namespace,
-        execution_objects=storage.object_store(RuntimeDomain.EXECUTION),
-        task_objects=storage.object_store(RuntimeDomain.TASK),
-        object_reader=storage.read_object,
+        namespace=state.namespace,
+        execution_objects=state.object_store(RuntimeDomain.EXECUTION),
+        task_objects=state.object_store(RuntimeDomain.TASK),
+        object_reader=state.read_object,
         artifacts=artifact,
         cursor_signer=HmacCursorSigner(
             "runtime-history",
-            token_seed(storage.namespace),
+            token_seed(state.namespace),
         ),
     )
 

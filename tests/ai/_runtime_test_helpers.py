@@ -24,7 +24,7 @@ from linktools.ai.asset import AssetStore
 from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability, tool_metadata
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import TraceCapability, CheckpointCapability
+from linktools.ai.capability import TraceCapability, CheckpointCapability
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
@@ -59,7 +59,7 @@ class _Models:
     provider = "test"
     model_identity = "test:live-history"
     model_digest = "a" * 64
-    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history", "vision": False}
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "live-history", "input_mime_types": ["application/*", "audio/*", "text/*", "video/*"]}
 
     def __init__(self, model: FunctionModel) -> None:
         self.model = model

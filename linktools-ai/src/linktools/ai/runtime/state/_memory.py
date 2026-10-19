@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from linktools.core import environ
 
+from ...storage import CacheBackend
 from ...errors import AIError, ErrorCode
 from ._memory_transaction import _MemoryTransaction, _validate_transaction_integrity
 from ._record_cache import StateRecordCache
@@ -155,7 +156,7 @@ class InMemoryStateStorageGroup:
 class InMemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
-    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: object | None = None) -> None:
+    def __init__(self, group: InMemoryStateStorageGroup | None = None, *, cache: CacheBackend | None = None) -> None:
         self._records: dict[bytes, StoredRecord] = {}
         self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}

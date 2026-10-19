@@ -49,7 +49,7 @@ async def run_durable_commit(
 ) -> DurableCommitResult[ValueT]:
     """Resolve durable truth before propagating caller cancellation."""
     task = asyncio.create_task(operation())
-    value, operation_error, operation_cancelled = await _await_owned_task(
+    value, operation_error, operation_cancelled = await await_owned_task(
         task,
         background_tasks,
     )
@@ -63,7 +63,7 @@ async def run_durable_commit(
         )
 
     readback_task = asyncio.create_task(readback())
-    observation, readback_error, readback_cancelled = await _await_owned_task(
+    observation, readback_error, readback_cancelled = await await_owned_task(
         readback_task,
         background_tasks,
     )
@@ -89,7 +89,7 @@ async def run_durable_commit(
     )
 
 
-async def _await_owned_task(
+async def await_owned_task(
     task: "asyncio.Task[ValueT]",
     background_tasks: "set[asyncio.Task[object]]",
 ) -> "tuple[ValueT | None, BaseException | None, bool]":
@@ -146,4 +146,5 @@ __all__ = [
     "DurableCommitResult",
     "DurableCommitState",
     "run_durable_commit",
+    "await_owned_task",
 ]

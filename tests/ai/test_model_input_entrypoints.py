@@ -33,26 +33,24 @@ def test_default_runtime_reads_workspace_inputs_and_environment_model(
 
 
 
-def test_default_runtime_rejects_invalid_legacy_environment(
+def test_default_runtime_ignores_unrelated_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
-    with pytest.raises(AIError, match="input_types") as raised:
-        _local_models(Workspace.load(tmp_path))
-    assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
-    assert raised.value.safe_details == {"reason": "legacy_vision_configuration"}
+    binding = _local_models(Workspace.load(tmp_path)).capture().resolve("default")
+    assert binding.contract["input_mime_types"] == []
 
 
-def test_workspace_configuration_rejects_removed_input_declarations(
+def test_workspace_configuration_rejects_invalid_input_types(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_MODEL", "testing/inputs")
     config = tmp_path / ".linktools" / "config.yaml"
     config.parent.mkdir()
-    config.write_text("input_capabilities:\n  - media_type: image/png\n    status: supported\n")
+    config.write_text("input_types: image/png\n")
     with pytest.raises(AIError) as raised:
         _local_models(Workspace.load(tmp_path))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID

@@ -8,6 +8,8 @@ from ._cache import (
     InMemoryCacheBackend,
     TieredCacheBackend,
 )
+from ._route import StorageRoute, StorageRetentionMode
+from ..core import WriteBufferBackend, WriteBufferEntry
 from ._composition import (
     ContentCache,
     StorageLayer,
@@ -120,9 +122,13 @@ from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
 from ._turn import TurnCoordination, TurnCoordinationBackend
 
-from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
+from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteScopeFactory, BatchWriteStatus
 
 __all__ = [
+    "StorageRoute",
+    "StorageRetentionMode",
+    "WriteBufferBackend",
+    "WriteBufferEntry",
     "TurnCoordination",
     "TurnCoordinationBackend",
     "StreamBackend",
@@ -133,6 +139,7 @@ __all__ = [
     "StorageReadCache",
     "BatchWriteFlushResult",
     "BatchWriteScope",
+    "BatchWriteScopeFactory",
     "BatchWriteStatus",
     "TABLE_PREFIX",
     "AtomicBatchStorageWriter",

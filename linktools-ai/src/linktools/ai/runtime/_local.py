@@ -79,7 +79,7 @@ from ..storage import (
 )
 from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity, _TerminalMetricDelivery
-from ._metrics import (
+from ._metrics_service import (
     _capture_execution_terminal,
     _record_metric_observation,
     _record_storage_operation,
@@ -100,7 +100,7 @@ from .recovery import (
 )
 from ._budget import RunBudgetContext
 from .service_api import ExecutionRequest
-from ._conversation_capability import ConversationCapability
+from ._conversation_service import ConversationService
 from .state import RuntimeDomain
 from .state._commands import RuntimeStateCommands
 from .state._execution_repositories import ExecutionRepositoryImpl
@@ -380,6 +380,7 @@ class LocalExecutionBackend:
             ),
             background_tasks=self._checkpoint_tasks,
             observe_cancellation=not exclusive_execution_writer,
+            capability_writes=(run_store.capability_writes if isinstance(run_store, RuntimeAgentRunStore) else None),
         )
         self._recovery_coordinator = _RecoveryCoordinator(
             self,
@@ -459,10 +460,16 @@ class LocalExecutionBackend:
     ) -> None:
         if execution.session_id is None:
             return
+        if execution.conversation and execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            result = await self._execution.executions.get_result(execution.execution_id, tenant_id=self._tenant_id)
+            await self._runtime_commands.finish_conversation_turn(execution, result)
+            return
         await self._conversation.sessions.release_execution(
             execution.session_id,
             tenant_id=self._tenant_id,
             execution_id=execution.execution_id,
+            history_unavailable=execution.invalidates_session_history,
+            require_turn_commit=execution.conversation,
         )
 
     async def _commit_start_recovery_checkpoint(
@@ -1280,6 +1287,8 @@ class LocalExecutionBackend:
                     execution.session_id,
                     tenant_id=self._tenant_id,
                     execution_id=owner_id,
+                    history_unavailable=owner.invalidates_session_history,
+                    require_turn_commit=owner.conversation,
                 )
                 _logger.info(
                     "released terminal session owner: session=%s execution=%s",
@@ -1465,6 +1474,8 @@ class LocalExecutionBackend:
                 current.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
+                history_unavailable=current.invalidates_session_history,
+                require_turn_commit=current.conversation,
             )
             if released.active_execution_id == current.execution_id:
                 raise AIError(
@@ -2352,7 +2363,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if checkpoint.handoff_phase is RecoveryHandoffPhase.PREPARED:
             if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
-                if execution.session_id is not None and handoff.conversation is None:
+                if execution.conversation and execution.session_id is not None and handoff.conversation is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if handoff.source_agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2429,6 +2440,8 @@ class LocalExecutionBackend:
                         execution.session_id,
                         tenant_id=self._tenant_id,
                         execution_id=execution.execution_id,
+                        history_unavailable=execution.invalidates_session_history,
+                        require_turn_commit=execution.conversation,
                     )
                 await self._complete_handoff(checkpoint)
                 self._publish_terminal_event(
@@ -2517,6 +2530,21 @@ class LocalExecutionBackend:
         intent = handoff.conversation
         if intent is None:
             return
+        terminal = await self.load_execution(checkpoint.execution_id, tenant_id=self._tenant_id)
+        if terminal is not None and terminal.status in {
+            ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+        }:
+            result = await self._execution.executions.get_result(
+                checkpoint.execution_id, tenant_id=self._tenant_id,
+            )
+            try:
+                await self._runtime_commands.verify_conversation_turn(terminal, result)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_RECOVERY_REQUIRED:
+                    raise
+            else:
+                # An acknowledged turn must not replay its cursor over a later turn.
+                return
         session = await self._load_session(
             intent.session_id, tenant_id=self._tenant_id
         )
@@ -2554,8 +2582,6 @@ class LocalExecutionBackend:
             history_id=history_id,
             message_count=end_message_index,
         )
-        if session.continuation == effective_next_cursor:
-            return
         if intent.expected_cursor is None:
             start_message_index = 0
         else:
@@ -2590,17 +2616,11 @@ class LocalExecutionBackend:
                 release_execution=False,
                 history_quality="complete",
             )
-            await self._conversation.sessions.commit_timeline_turn_in_transaction(
-                transaction,
-                intent.session_id,
-                tenant_id=self._tenant_id,
-                execution_id=checkpoint.execution_id,
-                start_message_index=start_message_index,
-                end_message_index=end_message_index,
-            )
+
 
         try:
-            await self._conversation.sessions.state_store.mutate(commit_conversation)
+            if session.continuation != effective_next_cursor:
+                await self._conversation.sessions.state_store.mutate(commit_conversation)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
@@ -2610,6 +2630,13 @@ class LocalExecutionBackend:
             )
             if latest is None or latest.continuation != effective_next_cursor:
                 raise
+
+        terminal = await self.load_execution(checkpoint.execution_id, tenant_id=self._tenant_id)
+        if terminal is not None and terminal.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            result = await self._execution.executions.get_result(checkpoint.execution_id, tenant_id=self._tenant_id)
+            await self._runtime_commands.finish_conversation_turn(
+                terminal, result, message_range=(start_message_index, end_message_index),
+            )
 
     async def _complete_handoff(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:
@@ -2871,6 +2898,25 @@ class LocalExecutionBackend:
             outcome.usage,
             outcome.result_created_at,
         )
+        conversation_message_range = None
+        if handoff.conversation is not None:
+            intent = handoff.conversation
+            retained_session = await self._load_session(intent.session_id, tenant_id=self._tenant_id)
+            start = 0 if intent.expected_cursor is None else intent.expected_cursor.message_count
+            history_id = intent.next_cursor.history_id
+            if history_id is None and retained_session is not None:
+                history_id = retained_session.history_id
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            end = await self._run_store.conversation_persistence.conversation_message_count(
+                history_id=history_id, agent_run_id=intent.next_cursor.agent_run_id,
+                tenant_id=self._tenant_id,
+            )
+            expected_continuation = replace(intent.next_cursor, history_id=history_id, message_count=end)
+            if (start is None or end <= start or retained_session is None
+                    or retained_session.continuation != expected_continuation):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            conversation_message_range = (start, end)
         handoff_started = False
 
         async def finish_handoff(committed: ExecutionTerminalCommitResult) -> None:
@@ -2898,6 +2944,7 @@ class LocalExecutionBackend:
                     dict(outcome.terminal_event_payload),
                 ),
                 agent_run_id=terminal_agent_run_id,
+                conversation_message_range=conversation_message_range,
                 handoff=finish_handoff,
             )
             current = committed.execution
@@ -3475,7 +3522,7 @@ class LocalExecutionBackend:
                     history = list(accepted_context.model_messages())
                     loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
                 elif session_history_source:
-                    loaded_context = await ConversationCapability.load_session_context(
+                    loaded_context = await ConversationService.load_session_context(
                         execution=current, session=session, history_id=history_id,
                         tenant_id=self._tenant_id, run_store=self._run_store,
                         conversation_archive=self._run_stores[RuntimeDomain.CONVERSATION],
@@ -3924,6 +3971,16 @@ class LocalExecutionBackend:
                         committed = observed
                         publish_readback = True
                 if publish_readback:
+                    if committed.conversation and committed.session_id is not None:
+                        retained_result = await self._execution.executions.get_result(
+                            execution_id, tenant_id=self._tenant_id,
+                        )
+                        if retained_result is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from terminal_error
+                        try:
+                            await self._runtime_commands.verify_conversation_turn(committed, retained_result)
+                        except AIError as publication_error:
+                            raise terminal_error from publication_error
                     await self._publish_persisted_terminal_event(committed)
             metric_status = (
                 "CANCELLED"
@@ -4108,7 +4165,7 @@ class LocalExecutionBackend:
         session = None if execution.session_id is None else await self._load_session(
             execution.session_id, tenant_id=self._tenant_id,
         )
-        return await ConversationCapability.load_history(
+        return await ConversationService.load_history(
             execution, session=session, namespace=self._namespace, tenant_id=self._tenant_id,
             run_store=self._run_store,
             execution_run_store=self._get_run_store(RuntimeDomain.TRACE),
@@ -5326,7 +5383,8 @@ class LocalExecutionBackend:
                         source_domain = RuntimeDomain.RECOVERY
                 conversation = None
                 if (
-                    status is ExecutionStatus.SUCCEEDED
+                    current.conversation
+                    and status is ExecutionStatus.SUCCEEDED
                     and current.session_id is not None
                     and agent_run_id is not None
                 ):
@@ -5558,6 +5616,7 @@ class LocalExecutionBackend:
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
                 turn.reservation, commit, expected_session=turn.session,
+                capability_run_id=agent_run_id,
                 next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),
                 conversation_agent_run=None if turn.session is None else run,
                 conversation_checkpoint=None if turn.session is None else checkpoint,
@@ -5732,7 +5791,7 @@ class LocalExecutionBackend:
         conversation_agent_run = None
         conversation_checkpoint = None
         expected_cursor = None
-        if current.session_id is not None and status is ExecutionStatus.SUCCEEDED:
+        if current.conversation and current.session_id is not None and status is ExecutionStatus.SUCCEEDED:
             conversation_agent_run = await self._run_store.get_agent_run(agent_run_id=agent_run_id or "")
             conversation_checkpoint = await self._run_store.latest_checkpoint(
                 agent_run_id=agent_run_id or ""
@@ -5777,6 +5836,7 @@ class LocalExecutionBackend:
         expected_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
+        conversation_message_range: tuple[int, int] | None = None,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         recovery_run: AgentRunRecord | None = None,
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
@@ -5828,6 +5888,7 @@ class LocalExecutionBackend:
                             expected_cursor=expected_cursor,
                             conversation_agent_run=conversation_agent_run,
                             conversation_checkpoint=conversation_checkpoint,
+                            conversation_message_range=conversation_message_range,
                             recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
                             recovery_run=recovery_run,
                             recovery_checkpoint=recovery_checkpoint,
@@ -5908,6 +5969,10 @@ class LocalExecutionBackend:
                                         or commit.producer_generation is not None
                                         and head.producer_generation != commit.producer_generation):
                                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                            try:
+                                await self._runtime_commands.verify_conversation_turn(observed, commit.result)
+                            except AIError as publication_error:
+                                raise error from publication_error
                             committed = ExecutionTerminalCommitResult(
                                 observed,
                                 commit.result,
@@ -5986,6 +6051,7 @@ class LocalExecutionBackend:
         expected_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
         conversation_checkpoint: AgentRunCheckpoint | None = None,
+        conversation_message_range: tuple[int, int] | None = None,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         recovery_run: AgentRunRecord | None = None,
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
@@ -6025,6 +6091,7 @@ class LocalExecutionBackend:
             next_cursor=next_cursor,
             conversation_agent_run=conversation_agent_run,
             conversation_checkpoint=conversation_checkpoint,
+                            conversation_message_range=conversation_message_range,
             recovery_agent_run_checkpoint=recovery_agent_run_checkpoint,
             recovery_run=recovery_run,
             recovery_checkpoint=recovery_checkpoint,
@@ -6032,6 +6099,7 @@ class LocalExecutionBackend:
             execution_events=step_events,
             execution_checkpoints=checkpoints,
             execution_projections=execution_projections,
+            capability_run_id=agent_run_id,
             audit_events=pending_audit,
             background_tasks=self._execution_task_set(current.execution_id),
         )

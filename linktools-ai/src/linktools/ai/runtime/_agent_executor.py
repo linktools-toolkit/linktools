@@ -108,6 +108,7 @@ from ..workspace import (
 )
 
 from ._budget import RunBudgetContext, RunBudgetCapability
+from ._tool_metrics import ToolMetricContext
 from ._capabilities import compose_platform_capabilities, runtime_feature_leaves
 from ._agent_run_recorder import AgentRunRecorder
 from .state._steps import RuntimeAgentRunStore
@@ -115,13 +116,13 @@ from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._memory import MemoryStore
-from ._metrics_capability import MetricsCapability
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
-from ._tool_response_fixture import ToolResponseFixture, _ToolResponseManifest
+from ..capability import ToolResponseFixture
+from ._tool_response_fixture import _ToolResponseManifest, _load_tool_response_fixture
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
@@ -277,7 +278,7 @@ class AgentExecutor:
             try:
                 if self._tool_responses is None:
                     raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-                fixture = await self._tool_responses.load(reference)
+                fixture = await _load_tool_response_fixture(self._tool_responses, reference)
                 fixture.validate_servers(
                     binding.compiled_agent.mcp_servers,
                     binding.compiled_agent.mcp_policy,
@@ -950,8 +951,6 @@ async def _materialize_agent(
             compiled_agent.skill_definitions,
             skill_sources,
             resource_paths=scope.skill_resource_paths,
-            preloaded_skill_ids=compiled_agent.spec.preload_skills,
-            max_preloaded_bytes=scope.limits.max_preloaded_skill_bytes,
         )
         capabilities.append(skill_capability)
 
@@ -989,17 +988,10 @@ async def _materialize_agent(
         )
     )
 
-    metric_feature = next(
-        (leaf for template in runtime_capabilities for leaf in runtime_feature_leaves(template)
-         if isinstance(leaf, MetricsCapability)),
-        None,
-    )
-    if metrics is not None and metric_feature is None:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     tool_metrics = (
         None
         if metrics is None
-        else metric_feature.bind_tool_observer(
+        else ToolMetricContext(metrics,
             source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
@@ -1131,7 +1123,7 @@ async def _materialize_agent(
     model_observation = (
         ModelObservationCapability(None, **model_observation_kwargs)
         if metrics is None
-        else metric_feature.bind_model_observer(**model_observation_kwargs)
+        else ModelObservationCapability(metrics, **model_observation_kwargs)
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(

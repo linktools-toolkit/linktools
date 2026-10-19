@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Web Session timeline projection regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -24,12 +25,13 @@ from linktools.ai.core import (
     HmacCursorSigner,
     Principal,
     SessionStatus,
+    StopReason,
     TenantAuthorizationPolicy,
     UsageMetrics,
     agent_conversation_id as make_agent_conversation_id,
 )
 import linktools.ai.runtime._session_timeline as timeline_module
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import ExecutionView, SessionHistoryItem
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
@@ -41,6 +43,33 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import StoredPayload
+
+
+def _commit_fields(execution: ExecutionRecord) -> dict[str, object]:
+    return {
+        "stored_user_input": execution.stored_user_input,
+        "output": execution.result.output if execution.result is not None else None,
+        "status": execution.status,
+        "created_at": execution.created_at,
+        "updated_at": execution.updated_at,
+        "error_code": execution.error_code,
+        "safe_error_details": execution.safe_error_details,
+    }
+
+
+async def _commit_empty_turn(state: RuntimeState, execution: ExecutionRecord) -> None:
+    """Publish a terminal turn with no model messages through the current writer."""
+    sessions = state.conversation.sessions
+
+    async def commit(transaction):
+        await sessions.commit_timeline_turn_in_transaction(
+            transaction, execution.session_id, tenant_id="tenant",
+            execution_id=execution.execution_id,
+            start_message_index=0, end_message_index=0,
+            **_commit_fields(execution),
+        )
+
+    await sessions.state_store.mutate(commit)
 
 
 def _binding() -> AgentBindingContract:
@@ -85,7 +114,7 @@ def _execution(
             StoredPayload.inline_json({"text": "ok"})
             if status is ExecutionStatus.SUCCEEDED
             else None,
-            "end_turn" if status is ExecutionStatus.SUCCEEDED else "error",
+            StopReason.END_TURN if status is ExecutionStatus.SUCCEEDED else StopReason.ERROR,
             UsageMetrics(),
             now,
         )
@@ -146,7 +175,7 @@ class _ExecutionService:
 
 
 async def _materialize_conversation(
-    state: RuntimeStorage, history_id: str
+    state: RuntimeState, history_id: str
 ) -> tuple[str, int]:
     agent_run_id = "timeline-conversation-run"
     agent_conversation_id = make_agent_conversation_id(
@@ -205,6 +234,7 @@ async def _materialize_conversation(
 @pytest.mark.asyncio
 async def test_session_timeline_restores_original_prompt_without_runtime_instructions() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         created = await state.conversation.sessions.create(_session())
@@ -239,6 +269,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 execution_id="success",
                 start_message_index=0,
                 end_message_index=message_count,
+                **_commit_fields(success),
             )
             await state.conversation.sessions.advance_continuation_in_transaction(
                 transaction,
@@ -306,6 +337,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 message_count=message_count,
             ),
         )
+        await _commit_empty_turn(state, failed)
         await state.conversation.sessions.release_execution(
             "session",
             tenant_id="tenant",
@@ -316,7 +348,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             {"success": success, "failed": failed},
             state.execution.executions.state_store,
         )
-        service = DefaultSessionService(
+        service = RuntimeSessionService(
             state.conversation,
             executions,  # type: ignore[arg-type]
             TenantAuthorizationPolicy(),
@@ -339,7 +371,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             "prompt": {"kind": "text", "text": "failed prompt"},
             "files": [],
         }
-        assert latest.items[0].conversation_committed is False
+        assert latest.items[0].conversation_committed is True
         assert latest.items[0].items == ()
         assert latest.items[0].error_code == "MODEL_UNAVAILABLE"
         assert latest.next_cursor is not None
@@ -367,7 +399,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
         assert "INTERNAL RETRY PROMPT" not in rendered
         assert "stale answer" not in rendered
         assert older.next_cursor is None
-        assert executions.get_many_calls == 2
+        assert executions.get_many_calls == 0
 
         restored = [
             message

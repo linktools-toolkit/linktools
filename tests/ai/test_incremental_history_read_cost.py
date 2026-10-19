@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Small history pages do not materialize an entire run's event facts."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from .test_history_request_association import _history
 from .test_history_projection_conformance import _record
 
 
-async def _seed_trace(storage: RuntimeStorage, count: int):
+async def _seed_trace(storage: RuntimeState, count: int):
     await storage.initialize(namespace="history", tenant_id="tenant")
     await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
     run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1)
@@ -44,7 +45,7 @@ async def _seed_trace(storage: RuntimeStorage, count: int):
     return storage.run_store.read_store(RuntimeDomain.TRACE), run_id
 
 
-async def _append_backdated_trace(storage: RuntimeStorage, run_id: str, count: int) -> None:
+async def _append_backdated_trace(storage: RuntimeState, run_id: str, count: int) -> None:
     timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for index in range(count):
         await storage.run_store.append_event(StepEvent(
@@ -194,7 +195,7 @@ async def test_old_trace_cutoff_does_not_rescan_for_each_later_backdated_event(
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
     for count in (32, 64, 128):
-        storage = RuntimeStorage.in_memory()
+        storage = RuntimeState(RuntimeStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, 1)
             await _append_backdated_trace(storage, run_id, count)
@@ -220,7 +221,7 @@ async def test_sql_trace_query_count_is_independent_of_examined_events(tmp_path:
     for count in (32, 64, 128):
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'trace-{count}.db'}")
         await provision_database(engine)
-        storage = RuntimeStorage.sql(engine)
+        storage = RuntimeState(RuntimeStorage.sql(engine))
         statements = []
 
         def capture(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
@@ -264,7 +265,7 @@ async def test_run_release_scans_owned_cleanup_data_once_per_batch(monkeypatch: 
     monkeypatch.setattr(_MemoryOverlay, "__iter__", iterate)
     costs = []
     for count in (32, 64, 128):
-        storage = RuntimeStorage.in_memory()
+        storage = RuntimeState(RuntimeStorage.in_memory())
         try:
             archive, run_id = await _seed_trace(storage, count)
             examined = 0

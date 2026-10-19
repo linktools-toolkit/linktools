@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Batched publication preserves authorization, retention, and transaction truth."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import getpass
 from collections import Counter
@@ -32,7 +33,7 @@ def _dataset(name: str, count: int, *, revision: int = 1) -> DatasetSpec:
     ))
 
 
-async def _assert_publication(runtime: Runtime, peer: Runtime, state: RuntimeStorage) -> None:
+async def _assert_publication(runtime: Runtime, peer: Runtime, state: RuntimeState) -> None:
     original = _dataset("atomic", 1)
     await runtime.evaluations.publish_dataset(original, principal=_PRINCIPAL, idempotency_key="first")
     extended = DatasetSpec(DatasetRef("atomic", 2), (
@@ -119,11 +120,11 @@ async def _assert_sql_publication(engine: AsyncEngine) -> None:
                 await runtime.evaluations.publish_dataset(large, principal=_PRINCIPAL, idempotency_key="large")
                 assert large_parameters and max(large_parameters) <= 1
                 for case in large.cases:
-                    restored = await state.evaluation.records.get_case(case.ref)
+                    restored = await runtime._state.evaluation.records.get_case(case.ref)
                     assert restored.input.input["text"] == "x" * 70000
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", capture)
-            await _assert_publication(runtime, peer, state)
+            await _assert_publication(runtime, peer, runtime._state)
 
 
 @pytest.mark.asyncio
@@ -140,7 +141,7 @@ async def test_publication_batches_preserve_backend_atomicity(tmp_path: Path, ba
              else RuntimeStorage.filesystem(tmp_path))
     context = RuntimeContext(None, tenant_id=_PRINCIPAL.tenant_id)
     async with Runtime.open("evaluation-io", models=ModelRegistry(), storage=state, context=context) as runtime:
-        await _assert_publication(runtime, runtime, state)
+        await _assert_publication(runtime, runtime, runtime._state)
     if backend == "filesystem":
         async with Runtime.open("evaluation-io", models=ModelRegistry(),
                                 storage=RuntimeStorage.filesystem(tmp_path), context=context) as reopened:

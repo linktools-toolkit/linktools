@@ -5,9 +5,10 @@
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.runtime._persistence_services import TraceService
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 from pydantic_ai.capabilities import CombinedCapability
 from linktools.ai.runtime._run_hooks import (
     AgentRunCapture,
@@ -51,7 +52,7 @@ def _persistence(
         agent_id="agent",
         agent_run_id=agent_run_id,
     )
-    return CombinedCapability([capture, TraceCapability().bind(capture)])
+    return CombinedCapability([capture, TraceCapability().bind(TraceService(capture))])
 
 
 def _model_metrics(

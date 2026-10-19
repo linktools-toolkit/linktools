@@ -16,7 +16,8 @@ from linktools.ai.asset import (
 from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._execution import DefaultExecutionService
@@ -47,20 +48,19 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
         await original_preflight(service)
 
     monkeypatch.setattr(DefaultExecutionService, "preflight_close", observe_preflight)
-    storage = RuntimeStorage.sqlite(
-        tmp_path / "state.db", cache=BlockingCache(max_bytes=2**20),
-    )
-    original_close = storage.close
+    cache = BlockingCache(max_bytes=2**20)
+    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+    original_close = RuntimeState.close
 
-    async def close_storage():
+    async def close_storage(owner):
         assert published.is_set(), "storage closed before admitted publication settled"
-        await original_close()
+        await original_close(owner)
         storage_closed.set()
 
-    monkeypatch.setattr(storage, "close", close_storage)
+    monkeypatch.setattr(RuntimeState, "close", close_storage)
     async with Runtime.open(
         "pending-admission-close", storage=storage,
-        models=_Models(_UsageFunctionModel(model)), features=_group(),
+        models=_Models(_UsageFunctionModel(model)), features=_group(coordination=cache),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
         starting = asyncio.create_task(session.start("question", idempotency_key="request"))

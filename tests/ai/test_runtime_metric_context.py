@@ -7,6 +7,8 @@ from ._runtime_test_helpers import workspace_features
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from linktools.ai.core import CommitPolicy
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -20,10 +22,9 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.runtime import MetricsCapability, Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._metrics import RuntimeMetricRecorder
-from linktools.ai.runtime._metrics_capability import MetricsRecordingBinding
+from linktools.ai.runtime._metrics_service import MetricsService
 from linktools.ai.workspace import Workspace
 
 
@@ -87,17 +88,16 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
     )
 
     features = workspace_features("workspace", workspace=workspace)
-    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open(
         "default",
-        context=context,
+        metrics=metrics, context=context,
         models=models,
         storage=RuntimeStorage.in_memory(),
         features=features,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
-        assert isinstance(control, MetricsRecordingBinding)
-        assert await control.recorder.try_record(observation) is True
+        assert isinstance(control, MetricsService)
+        assert await control.try_record(observation) is True
         flushed = await runtime.metrics.flush()
         assert flushed.completed is True
 
@@ -162,7 +162,7 @@ async def test_runtime_recorder_reports_later_source_failure_after_enrichment_fa
         ) -> None:
             raise OSError("source unavailable")
 
-    recorder = RuntimeMetricRecorder(Metrics.from_store(FailingStore()).recorder())
+    recorder = MetricsService(Metrics.from_store(FailingStore()))
     assert not await recorder.try_record(object())  # type: ignore[arg-type]
     assert recorder.status().last_failure_code == "ENRICHMENT_FAILED"
     observation = Observation(
@@ -181,14 +181,13 @@ async def test_runtime_recorder_reports_later_source_failure_after_enrichment_fa
 async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> None:
     from linktools.ai.storage import InMemoryCacheBackend
 
-    metrics = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
-    features = RuntimeFeatures("shared-metrics")
-    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
+    features = await RuntimeFeatures("shared-metrics").capture()
     async with Runtime.open(
-        "first", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
+        "first", metrics=metrics, models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
     ) as first:
         async with Runtime.open(
-            "second", models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
+            "second", metrics=metrics, models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
         ) as second:
             observation = Observation(
                 version=1, observation_id="second-pending", kind="test.metric",
@@ -196,7 +195,7 @@ async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> N
                 tenant_id="default", status="SUCCEEDED", error_code=None,
                 correlation={}, dimensions={}, measurements=(),
             )
-            assert await second._metric_control.recorder.try_record(observation)
+            assert await second._metric_control.try_record(observation)
             await first.close()
             assert second.metrics.status().accepting
             assert second.metrics.status().pending == 1
@@ -235,20 +234,19 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             await super().put_observations(namespace, observations)
             returned.set()
 
-    metrics = Metrics.from_store(CancellingStore(), cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    metrics = Metrics.from_store(CancellingStore(), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     storage = RuntimeStorage.in_memory()
-    original_close = storage.close
+    original_close = RuntimeState.close
 
-    async def close_storage() -> None:
+    async def close_storage(owner) -> None:
         assert returned.is_set()
         storage_closed.set()
-        await original_close()
+        await original_close(owner)
 
-    monkeypatch.setattr(storage, "close", close_storage)
+    monkeypatch.setattr(RuntimeState, "close", close_storage)
     features = RuntimeFeatures("close-metrics")
-    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open(
-        "close-owner", models=ModelRegistry(), storage=storage, features=features,
+        "close-owner", metrics=metrics, models=ModelRegistry(), storage=storage, features=features,
     ) as runtime:
         observation = Observation(
             version=1, observation_id="close-inflight", kind="test.metric",
@@ -256,7 +254,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             tenant_id="default", status="SUCCEEDED", error_code=None,
             correlation={}, dimensions={}, measurements=(),
         )
-        assert await runtime._metric_control.recorder.try_record(observation)
+        assert await runtime._metric_control.try_record(observation)
         await runtime.metrics.flush(timeout_seconds=0)
         await asyncio.wait_for(entered.wait(), 1)
         closing = asyncio.create_task(runtime.close())
@@ -275,3 +273,28 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
     assert storage_closed.is_set()
     assert runtime.metrics.status().persisted == 1
     assert runtime.metrics.status().pending == 0
+
+
+@pytest.mark.asyncio
+async def test_metrics_resources_do_not_enter_captured_agent_binding_identity() -> None:
+    from linktools.ai.agent import AgentCompiler
+
+    features = RuntimeFeatures("metric-resource-identity")
+    features.agent("default")
+    capture = await features.capture()
+    models = ModelRegistry.openai(model="unused-offline-model")
+    bindings = []
+    for metrics in (None, Metrics.in_memory(), Metrics.in_memory()):
+        async with Runtime.open(
+            "metric-resource-identity", models=models,
+            storage=RuntimeStorage.in_memory(), features=capture, metrics=metrics,
+        ) as runtime:
+            compiled = runtime.agents.get().derive(instructions=("fixed binding",)).compiled
+            assert compiled is not None
+            compiler = AgentCompiler(
+                model_resolver=models.capture(), candidates=(),
+                agents={compiled.spec.id: compiled.spec},
+            )
+            bindings.append(compiler.bind(compiled).binding_contract.to_payload())
+            assert runtime.metrics.status().enabled is (metrics is not None)
+    assert bindings[0] == bindings[1] == bindings[2]

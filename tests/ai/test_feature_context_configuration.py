@@ -166,10 +166,9 @@ def test_restored_history_forwards_current_features(monkeypatch, tmp_path):
 async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkeypatch, captured):
     import shutil
 
-    from linktools.ai.runtime import (
-        CheckpointCapability, ConversationCapability, RuntimeDomain, RuntimeSnapshot,
-        RuntimeStorageRoute, TraceCapability,
-    )
+    from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+    from linktools.ai.runtime import RuntimeDomain, RuntimeSnapshot
+    from linktools.ai.storage import StorageRoute
     from linktools.ai.runtime.state import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore
 
@@ -178,16 +177,20 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     from .test_public_persistence_configuration import _Cache
 
     source = tmp_path / 'source'
-    routes = {domain: RuntimeStorageRoute.filesystem(source / 'modules' / domain.value, transaction_root=source)
+    routes = {domain: StorageRoute.filesystem(source / 'modules' / domain.value, transaction_root=source)
               for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT, RuntimeDomain.TRACE)}
+    def source_storage() -> RuntimeStorage:
+        return RuntimeStorage(replace(RuntimeStorage.filesystem(source).plan, conversation=routes[RuntimeDomain.CONVERSATION]))
+
     cache = _Cache()
-    group = _features(ConversationCapability(storage=routes[RuntimeDomain.CONVERSATION], cache=cache),
+    routes[RuntimeDomain.TRACE] = routes[RuntimeDomain.TRACE].with_cache(cache)
+    group = _features(ConversationCapability(),
                       CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
-                      TraceCapability(storage=routes[RuntimeDomain.TRACE], cache=cache))
+                      TraceCapability(storage=routes[RuntimeDomain.TRACE]))
     policy = Policy()
     group._authorization = policy
     capture = await group.capture()
-    async with Runtime.open('restore-policy', models=_FeatureModels(), storage=RuntimeStorage.filesystem(source),
+    async with Runtime.open('restore-policy', models=_FeatureModels(), storage=source_storage(),
                             features=capture) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
@@ -197,7 +200,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     objects = InMemoryObjectStore('snapshot')
     limits = SnapshotLimits(max_entries=10000, max_bytes=16 * 1024 * 1024)
     ref = await RuntimeSnapshot.create('restore-policy', tenant_id=principal.tenant_id,
-                                       storage=RuntimeStorage.filesystem(source), object_store=objects,
+                                       storage=source_storage(), object_store=objects,
                                        features=capture, exclusive=_SnapshotGuard(), limits=limits)
     restored = await RuntimeSnapshot.restore(ref, object_store=objects, target=tmp_path / 'restored',
                                             namespace='restore-policy', tenant_id=principal.tenant_id, limits=limits)

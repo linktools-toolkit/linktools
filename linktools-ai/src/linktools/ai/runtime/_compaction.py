@@ -18,7 +18,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
@@ -28,7 +27,6 @@ from pydantic_ai.settings import ModelSettings, merge_model_settings
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
-    DeduplicateFileReads,
     SummarizingCompaction,
     TieredCompaction,
     estimate_context_tokens,
@@ -45,8 +43,7 @@ from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
-_TEXT_READ_POLICY = "workspace_file_read_v1"
-_UNIFIED_READ_POLICY = "workspace_file_read_v2"
+_UNIFIED_READ_POLICY = "workspace_file_read_v1"
 _SUPERSEDED_FILE_READ = "[superseded file read]"
 _logger = environ.get_logger("ai.runtime.compaction")
 
@@ -97,36 +94,21 @@ class _ContextProjectionSink(Protocol):
     ) -> None: ...
 
 
-class _WorkspaceFileReadDeduplication(DeduplicateFileReads[Any]):
+class _WorkspaceFileReadDeduplication(AbstractCapability[Any]):
     """Preserve file-input metadata while compacting only proven text repeats."""
 
     def __init__(self, policies: Callable[[], Mapping[str, str]]) -> None:
         self._policies = policies
-        super().__init__(
-            file_key=lambda call: _context_dedupe_file_key(call, policies()),
-        )
+
+    async def before_model_request(
+        self, ctx: PydanticRunContext[Any], request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        return replace(request_context, messages=await self.compact(request_context.messages, ctx))
 
     async def compact(
-        self,
-        messages: list[ModelMessage],
-        ctx: PydanticRunContext[Any],
+        self, messages: list[ModelMessage], ctx: PydanticRunContext[Any],
     ) -> list[ModelMessage]:
-        string_returns = {
-            (part.tool_name, part.tool_call_id)
-            for message in messages
-            if isinstance(message, ModelRequest)
-            for part in message.parts
-            if isinstance(part, ToolReturnPart) and isinstance(part.content, str)
-        }
-        legacy = DeduplicateFileReads[Any](
-            file_key=lambda call: (
-                self.file_key(call)
-                if (call.tool_name, call.tool_call_id) in string_returns
-                else None
-            ),
-        )
-        compacted = await legacy.compact(messages, ctx)
-        return _deduplicate_text_entries(compacted, self._policies())
+        return _deduplicate_text_entries(messages, self._policies())
 
 
 class _ObservedCompactionModel(WrapperModel):
@@ -476,7 +458,7 @@ class CompactionCapability(AbstractCapability[None]):
         keep_result_tools = frozenset(self._policy.keep_result_tools)
         context_dedupe_by_tool = dict(self._policy.context_dedupe_by_tool)
         if any(
-            value not in {_TEXT_READ_POLICY, _UNIFIED_READ_POLICY}
+            value != _UNIFIED_READ_POLICY
             for value in context_dedupe_by_tool.values()
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -525,15 +507,6 @@ def _validate_pending_binary_content(
     ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID,
                       safe_details={"reason": "file_request_budget_exceeded"})
-
-
-def _context_dedupe_file_key(
-    call: ToolCallPart,
-    policies: Mapping[str, str],
-) -> str | None:
-    if policies.get(call.tool_name) != _TEXT_READ_POLICY:
-        return None
-    return _workspace_file_key(call)
 
 
 def _deduplicate_text_entries(
@@ -620,37 +593,6 @@ def _text_read_key(value: object) -> str | None:
         return None
     return json.dumps(
         {"path": path, "hash": digest, "coverage": coverage, "lossy": lossy},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _workspace_file_key(call: ToolCallPart) -> str | None:
-    try:
-        arguments = call.args_as_dict()
-    except (TypeError, ValueError):
-        return None
-    if set(arguments).difference({"path", "offset", "limit"}):
-        return None
-    path = arguments.get("path")
-    if not isinstance(path, str):
-        return None
-    try:
-        normalized = validate_workspace_path(path)
-    except (TypeError, ValueError, AIError):
-        return None
-    offset = arguments.get("offset", 0)
-    limit = arguments.get("limit")
-    if (
-        not isinstance(offset, int)
-        or isinstance(offset, bool)
-        or offset < 0
-        or limit is not None
-        and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0)
-    ):
-        return None
-    return json.dumps(
-        {"path": normalized, "offset": offset, "limit": limit},
         sort_keys=True,
         separators=(",", ":"),
     )

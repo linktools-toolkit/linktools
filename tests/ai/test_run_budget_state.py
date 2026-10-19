@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Shared budget admission, durable usage, and backend parity."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import sqlite3
 from dataclasses import FrozenInstanceError, replace
@@ -30,6 +31,7 @@ async def budget_storage(request, tmp_path):
         storage = RuntimeStorage.filesystem(tmp_path / "runtime")
     else:
         storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         yield storage
@@ -119,6 +121,7 @@ async def test_sql_admission_rechecks_local_receipt_settled_after_snapshot(
 ):
     database = tmp_path / "budget.db"
     storage = RuntimeStorage.sqlite(database)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
@@ -326,6 +329,7 @@ async def test_budget_snapshot_validates_reservation_projection(budget_storage):
 @pytest.mark.asyncio
 async def test_cancelled_admission_retains_count_and_marks_unknown(monkeypatch):
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         budgets = storage.execution.budgets
@@ -357,6 +361,7 @@ async def test_cancelled_admission_retains_count_and_marks_unknown(monkeypatch):
 @pytest.mark.asyncio
 async def test_commit_readback_recovers_own_admission_without_granting_duplicate(monkeypatch):
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         budgets = storage.execution.budgets
@@ -385,6 +390,7 @@ async def test_budget_reopen_retains_counts_unknown_and_dispatch_identities(back
                 else RuntimeStorage.sqlite(tmp_path / "state.db"))
 
     storage = open_storage()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     budgets = storage.execution.budgets
     await budgets.ensure("tokens", RunBudget(total_tokens=100))
@@ -395,6 +401,7 @@ async def test_budget_reopen_retains_counts_unknown_and_dispatch_identities(back
     await budgets.admit_tool("counts", "tool")
     await storage.close()
     storage = open_storage()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         budgets = storage.execution.budgets
@@ -418,7 +425,9 @@ async def test_shared_budget_counts_across_independent_sqlite_instances(tmp_path
         return RuntimeStorage.sqlite(tmp_path / "state.db")
 
     first, second = open_storage(), open_storage()
+    first = RuntimeState(first)
     await first.initialize(namespace="budget-tests", tenant_id="tenant")
+    second = RuntimeState(second)
     await second.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         await first.execution.budgets.ensure("scope", RunBudget(tool_calls=3))
@@ -440,6 +449,7 @@ async def test_shared_budget_counts_across_independent_sqlite_instances(tmp_path
 async def test_storage_close_drains_cancelled_budget_commit_before_releasing_backend(tmp_path, monkeypatch):
     path = tmp_path / "state"
     storage = RuntimeStorage.filesystem(path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     budgets = storage.execution.budgets
     await budgets.ensure("scope", RunBudget(total_tokens=20))
@@ -468,6 +478,7 @@ async def test_storage_close_drains_cancelled_budget_commit_before_releasing_bac
         await budgets.admit_model("scope", "next")
     assert closed.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     reopened = RuntimeStorage.filesystem(path)
+    reopened = RuntimeState(reopened)
     await reopened.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         usage = await reopened.execution.budgets.read("scope")
@@ -484,6 +495,7 @@ async def test_budget_reservations_survive_portable_snapshot(backend, tmp_path):
                 else RuntimeStorage.sqlite(tmp_path / "state.db"))
 
     storage = open_storage()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-tests", tenant_id="tenant")
     budgets = storage.execution.budgets
     await budgets.ensure("scope", RunBudget(total_tokens=30))
@@ -494,6 +506,7 @@ async def test_budget_reservations_survive_portable_snapshot(backend, tmp_path):
     expected = await budgets.read("scope")
     await storage.close()
     reader = open_storage()
+    reader = RuntimeState(reader)
     await reader.initialize(namespace="budget-tests", tenant_id="tenant", read_only=True)
     objects = InMemoryObjectStore("budget-snapshot")
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
@@ -502,8 +515,9 @@ async def test_budget_reservations_survive_portable_snapshot(backend, tmp_path):
     finally:
         await reader.close()
     root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(reference, object_store=objects, root=root, limits=limits)
+    await RuntimeState.restore_snapshot(reference, object_store=objects, root=root, limits=limits)
     restored = RuntimeStorage.from_root(root)
+    restored = RuntimeState(restored)
     await restored.initialize(namespace="budget-tests", tenant_id="tenant")
     try:
         assert await restored.execution.budgets.read("scope") == expected

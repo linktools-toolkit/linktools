@@ -17,7 +17,7 @@ from linktools.ai.runtime._input import (
     decode_user_content_payload,
     task_prompt_draft,
 )
-from linktools.ai.runtime._input_contract import validate_user_content
+from linktools.ai.model import validate_user_content
 from linktools.ai.workspace import SandboxResource, SandboxSession, WorkspaceAccess
 
 

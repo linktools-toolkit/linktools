@@ -5,6 +5,7 @@
 from ._runtime_test_helpers import workspace_features
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.asset import (
     AssetStore,
     DirectoryAssetBackend,
@@ -23,7 +24,7 @@ from pydantic_ai_harness.memory import Memory
 
 @pytest.mark.asyncio
 async def test_runtime_memory_store_implements_harness_path_storage() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -52,7 +53,7 @@ async def test_runtime_memory_store_implements_harness_path_storage() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="memory-capability", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -84,7 +85,7 @@ async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None
 
 @pytest.mark.asyncio
 async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -114,7 +115,7 @@ async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_store_remains_writable_across_missing_delete_receipts() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -214,7 +215,7 @@ def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
-    from linktools.ai.runtime import ConversationCapability
+    from linktools.ai.capability import ConversationCapability
 
     features = workspace_features("workspace", workspace=workspace)
     features.capability(ConversationCapability(), scope="runtime")

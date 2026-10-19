@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution input and final tool-boundary regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from linktools.ai.core import HmacCursorSigner, Principal, PromptLimits, TenantA
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import (
     CreateSessionRequest,
     ExecutionHandle,
@@ -411,15 +412,15 @@ async def test_materializer_rejects_invalid_files_before_workspace_access(files:
 @pytest.mark.asyncio
 async def test_session_resume_preserves_explicit_execution_input_fields() -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="resume-input", tenant_id="tenant")
     execution = SimpleNamespace(
         start_for_session=AsyncMock(return_value=ExecutionHandle("execution")),
     )
-    service = DefaultSessionService(
+    service = RuntimeSessionService(
         storage.conversation, storage.execution.executions,
         TenantAuthorizationPolicy(), execution,
         HmacCursorSigner("session", b"session-key"), history_reader=object(),
-        conversation_enabled=True,
     )
     request = _file_request(ResumeSessionRequest, ["b.txt", "a.txt", "b.txt"])
     try:

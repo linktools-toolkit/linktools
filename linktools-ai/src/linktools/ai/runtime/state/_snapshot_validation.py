@@ -22,7 +22,7 @@ from ...task import (
     TaskNodeView,
     TaskResultRecord,
 )
-from ._codec import _decode_enveloped_domain, decode_envelope
+from ._codec import _decode_enveloped_domain, decode_envelope, decode_session_turn_commit
 from ._contracts import (
     ApprovalRecord,
     ArtifactRecord,
@@ -39,6 +39,7 @@ from ._contracts import (
     ModelInteractionRecord,
     RecoveryCheckpoint,
     SessionRecord,
+    SessionTurnCommit,
     StoredAgentRunCheckpoint,
     TaskPreparedInputRecord,
     ToolOperationRecord,
@@ -405,7 +406,7 @@ def _canonical_aliases(
 
 def _decode_record(record: StoredRecord) -> object:
     if record.kind == "session_turn_commit":
-        return _decode_session_turn_commit(record.data)
+        return decode_session_turn_commit(record.data)
     if record.kind == "history_association":
         sequence = record.data.get("sequence")
         if set(record.data) != {"sequence"} or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
@@ -518,43 +519,6 @@ def _validate_history_association_coverage(
             stored = records.get(key)
             if stored is None or not _same_physical_identity(stored, association) or stored.data != association.data:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _decode_session_turn_commit(value: object) -> Mapping[str, object]:
-    expected = {
-        "version",
-        "session_id",
-        "turn_seq",
-        "execution_id",
-        "start_message_index",
-        "end_message_index",
-    }
-    if not isinstance(value, Mapping) or set(value) != expected:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    version = value["version"]
-    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if any(
-        not isinstance(value[name], str) or not value[name]
-        for name in ("session_id", "execution_id")
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    turn_seq = value["turn_seq"]
-    start = value["start_message_index"]
-    end = value["end_message_index"]
-    if (
-        isinstance(turn_seq, bool)
-        or not isinstance(turn_seq, int)
-        or turn_seq < 1
-        or isinstance(start, bool)
-        or not isinstance(start, int)
-        or start < 0
-        or isinstance(end, bool)
-        or not isinstance(end, int)
-        or end <= start
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return dict(value)
 
 
 def _task_graph_parents(
@@ -914,9 +878,9 @@ def _expected_session_turn_commit(
     value: object,
     records: Mapping[bytes, StoredRecord],
 ) -> StoredRecord:
-    fields = cast(Mapping[str, object], value)
-    session_id = cast(str, fields["session_id"])
-    turn_seq = cast(int, fields["turn_seq"])
+    commit = cast(SessionTurnCommit, value)
+    session_id = commit.session_id
+    turn_seq = commit.turn_seq
     _require_anchor(
         namespace, tenant_id, domain, records, "session", session_id
     )

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Tool leaf lifetime keeps its durable claim live and preserves fencing."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -54,7 +55,7 @@ class _Clock:
 @asynccontextmanager
 async def _runtime(
     monkeypatch: pytest.MonkeyPatch,
-) -> AsyncIterator[tuple[RuntimeStorage, RuntimeToolOperationBridge, _Clock]]:
+) -> AsyncIterator[tuple[RuntimeState, RuntimeToolOperationBridge, _Clock]]:
     clock = _Clock()
 
     async def now(transaction: _MemoryTransaction) -> datetime:
@@ -66,6 +67,7 @@ async def _runtime(
         boundary_module, "asyncio", SimpleNamespace(**{**vars(asyncio), "sleep": clock.sleep})
     )
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="tool-lease", tenant_id="tenant")
     bridge = RuntimeToolOperationBridge(
         state.recovery.tools,

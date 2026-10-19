@@ -16,7 +16,8 @@ from pydantic_ai.models.function import AgentInfo
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, TraceCapability
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.workspace import Workspace
 

@@ -6,9 +6,11 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage._database import SqlStorageContext
 from pydantic_ai.messages import ModelResponse, TextPart
 
@@ -42,8 +44,8 @@ async def test_first_provider_has_three_metadata_commits_and_original_authority(
             execution = await session.start('question', idempotency_key='same')
             try:
                 await asyncio.wait_for(entered.wait(), 5)
-                current = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
-                head = await state.execution.executions.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
+                current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                head = await runtime._state.execution.executions.get_history_head(execution.execution_id, tenant_id=runtime.tenant_id)
                 assert current.status is ExecutionStatus.STARTED
                 assert current.revision == 3 and current.agent_run_seq == 1
                 assert current.input_context is not None
@@ -81,7 +83,7 @@ async def test_startup_unknown_commit_never_repeats_provider(
              RuntimeStorage.sqlite(tmp_path / 'state.db'))
     async with Runtime.open('startup-ack', storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
-        group_type = type(state.execution.executions.state_store.storage_group)
+        group_type = type(runtime._state.execution.executions.state_store.storage_group)
         original = group_type.mutate
         faults = []
         def matches(value):
@@ -187,7 +189,7 @@ async def test_busy_admission_keeps_rejected_key_after_owner_finishes(tmp_path: 
         with pytest.raises(AIError) as replay:
             await second.agents.get().session('session').start('other', idempotency_key='rejected')
         assert replay.value.code is ErrorCode.SESSION_BUSY
-        records = await second_state.execution.executions.list_by_session('session', tenant_id=second.tenant_id)
+        records = await second._state.execution.executions.list_by_session('session', tenant_id=second.tenant_id)
         assert len(records) == 2
         assert {value.status for value in records} == {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED}
         assert len(calls) == 1
@@ -220,7 +222,7 @@ async def test_cancel_during_context_preparation_never_calls_provider(
             result = await asyncio.wait_for(execution.wait(), 5)
         assert result.result.status is ExecutionStatus.CANCELLED
         assert calls == []
-        observed = await state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
+        observed = await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)
         assert observed.active_execution_id is None
 
 
@@ -262,12 +264,12 @@ async def test_preparation_failure_stays_unclaimed_and_can_be_explicitly_cancell
             with pytest.raises(AIError):
                 await asyncio.wait_for(execution.wait(), 5)
         assert observed and calls == []
-        current = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert current.agent_run_seq == 0 and current.input_context is None
         await execution.cancel(force=True, idempotency_key='explicit-cancel')
-        current = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert current.status is ExecutionStatus.CANCELLED
-        assert (await state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)).active_execution_id is None
+        assert (await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)).active_execution_id is None
 
 
 @pytest.mark.asyncio
@@ -308,7 +310,7 @@ async def test_remote_cancel_during_preparation_settles_without_provider(
                 release.set()
             assert (await asyncio.wait_for(execution.wait(), 5)).result.status is ExecutionStatus.CANCELLED
         assert calls == []
-        assert (await first_state.conversation.sessions.get('session', tenant_id=first.tenant_id)).active_execution_id is None
+        assert (await first._state.conversation.sessions.get('session', tenant_id=first.tenant_id)).active_execution_id is None
 
 
 @pytest.mark.asyncio
@@ -333,7 +335,7 @@ async def test_prepared_attempt_member_conflict_rolls_back_authority_and_context
     from .test_checkpoint_write_batches import _snapshot
     from .test_history_projection_conformance import _record
 
-    state = RuntimeStorage.sqlite(tmp_path / 'state.db')
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / 'state.db'))
     await state.initialize(namespace='startup-member-cas', tenant_id='tenant')
     try:
         execution = replace(_record(ExecutionStatus.STARTED, 0), revision=1, durable_trace=False)
@@ -409,7 +411,7 @@ async def test_deadline_expires_during_preparation_without_dispatch(
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='key', budget=RunBudget(deadline_at=now + timedelta(seconds=30)))
         await asyncio.wait_for(preparing.wait(), 5)
-        before = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert before.agent_run_seq == 0 and before.input_context is None
         clock[0] = now + timedelta(seconds=60)
         release.set()
@@ -419,7 +421,7 @@ async def test_deadline_expires_during_preparation_without_dispatch(
         usage = await execution.budget_usage()
         assert usage.model_requests == usage.in_flight_model_requests == usage.unknown_model_requests == 0
         assert calls == []
-        assert (await state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)).active_execution_id is None
+        assert (await runtime._state.conversation.sessions.get('session', tenant_id=runtime.tenant_id)).active_execution_id is None
 
 
 @pytest.mark.asyncio
@@ -441,8 +443,8 @@ async def test_admission_readback_rejects_real_session_partial(
     state = RuntimeStorage.sqlite(tmp_path / 'state.db')
     async with Runtime.open('partial-review', storage=state, models=_Models(_UsageFunctionModel(model)), features=capabilities) as runtime:
         session = await runtime.agents.get().create_session('session')
-        group = state.execution.executions.state_store.storage_group
-        repository = state.conversation.sessions
+        group = runtime._state.execution.executions.state_store.storage_group
+        repository = runtime._state.conversation.sessions
         original = type(group).mutate
         async def mutate(owner, stores, callback):
             outer = active_state_scope() is None
@@ -465,7 +467,7 @@ async def test_admission_readback_rejects_real_session_partial(
                 await session.start('question', idempotency_key='key')
         assert caught.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert len(faults) == 1 and calls == []
-        current = await state.execution.executions.get(faults[0], tenant_id=runtime.tenant_id)
+        current = await runtime._state.execution.executions.get(faults[0], tenant_id=runtime.tenant_id)
         assert current.status is ExecutionStatus.STARTED and current.agent_run_seq == 0
         value = await repository.get('session', tenant_id=runtime.tenant_id)
         assert value is None if partial == 'missing' else value.active_execution_id is None

@@ -15,7 +15,7 @@ from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
     DefaultExecutionService,
 )
-from linktools.ai.runtime._handoff import HandoffGate
+from linktools.ai.core import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._pending_turn import _PendingExecutionTurns
 from linktools.ai.task import DefaultTaskGraphService

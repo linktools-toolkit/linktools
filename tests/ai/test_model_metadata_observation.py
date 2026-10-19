@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bounded History metadata reads and recorder-local invalidations."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -25,7 +26,9 @@ from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.core import CommitPolicy
+from linktools.ai.capability import TraceCapability
+from linktools.ai.storage import InMemoryCacheBackend
 
 from .test_model_interaction_lifecycle_paging import (
     _Executions, _HistoryStore, _interaction, _reader,
@@ -157,7 +160,7 @@ async def test_model_metadata_disabled_archive_does_not_certify_empty_remote_his
 async def test_model_metadata_subscription_preserves_capture_races_and_isolates_executions() -> None:
     from linktools.ai.runtime.state._contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
 
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     repository = storage.execution.executions
     await repository.state_store.mutate(lambda transaction: repository.insert_history_head_in_transaction(
@@ -213,7 +216,7 @@ async def test_model_metadata_subscription_preserves_capture_races_and_isolates_
 
 @pytest.mark.asyncio
 async def test_model_metadata_excludes_uncommitted_staging() -> None:
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     execution = _record("root")
     reader = StepExecutionHistoryReader(
@@ -378,13 +381,16 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
         await release_provider.wait()
         return ModelResponse(parts=[TextPart("published answer")])
 
-    group = RuntimeFeatures("scheduled-history")
-    group.capability(TraceCapability(), scope="runtime")
-    group.agent("default", model="default", allow_tools=())
     storage_path = tmp_path / "scheduled"
+    storage = RuntimeStorage.filesystem(storage_path)
+    group = RuntimeFeatures("scheduled-history")
+    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(
+        buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0,
+    )), scope="runtime")
+    group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "scheduled-history", models=_Models(_UsageFunctionModel(model)),
-        storage=RuntimeStorage.filesystem(storage_path), features=group,
+        storage=storage, features=group,
     ) as runtime:
         execution = await runtime.agents.get("default").start("scheduled prompt")
         principal = runtime.default_principal

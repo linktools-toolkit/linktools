@@ -90,6 +90,15 @@ readers resume with `after_event_seq`; execution-tree readers use the
 per-execution `after_event_seqs` mapping.
 External side effects require an idempotent consumer; delivery is at least once.
 
+Live preview positions are separate from durable event sequences. When the
+bounded preview range is still available, reconnect resumes after the text
+already acknowledged, including inside a coalesced delta. Keep displayed text
+and thinking across that reconnect. A `STREAM_RESET` event invalidates only the
+preview for its execution; clear that preview before applying subsequent deltas.
+Transport changes, producer epochs, or discarded ranges can require this reset.
+Cursors are resume state, not event identifiers: do not suppress a received frame
+because its opaque cursor equals an earlier frame's cursor.
+
 Cursors are opaque and bind namespace, tenant, operation identity, observation
 kind, and content mode. Graph, execution, and evaluation cursors are not
 interchangeable. Owner and known resumed-member validation completes before an

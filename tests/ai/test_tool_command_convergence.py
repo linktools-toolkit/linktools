@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
@@ -294,7 +295,7 @@ async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_
     from linktools.ai.runtime.state._codec import decode_domain, encode_domain
     from .test_execution_recovery_commands import _commands, _execution
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="tool-producer-fence", tenant_id="tenant")
     try:
         execution = replace(_execution(datetime.now(timezone.utc)), revision=1)

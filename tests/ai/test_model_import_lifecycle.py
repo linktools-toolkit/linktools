@@ -23,7 +23,7 @@ def test_custom_model_startup_defers_openai_until_provider_operations(tmp_path: 
             route_id = "offline"
             provider = "test"
             model_identity = "test:offline"
-            contract = {"provider": provider, "model_identity": model_identity, "vision": False}
+            contract = {"provider": provider, "model_identity": model_identity, "input_mime_types": ["application/x-offline"]}
 
             def materialize(self) -> TestModel:
                 return TestModel(custom_output_text="offline answer")

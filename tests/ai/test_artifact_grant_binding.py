@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Artifact grants stay bound to the durable authorization receipt."""
 
+from linktools.ai.runtime.state import RuntimeState
 import hashlib
 import hmac
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ class _RecordingAuthorization:
 @pytest.mark.asyncio
 async def test_artifact_list_authorizes_the_execution_identity() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="artifact-list", tenant_id="tenant")
     try:
         await state.artifact.records.put_metadata(
@@ -102,6 +104,7 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="artifact-grant", tenant_id="tenant")
     try:
         reference = ObjectRef(

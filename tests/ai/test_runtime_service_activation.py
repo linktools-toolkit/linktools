@@ -12,7 +12,9 @@ import pytest
 from linktools.ai.core import TaskStatus
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorageRoute
+from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._store import StateStore
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 
@@ -26,22 +28,22 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
 ) -> None:
     storage = (RuntimeStorage.in_memory() if backend == "memory"
                else RuntimeStorage.sqlite(tmp_path / "runtime.db"))
-    initialize = storage.initialize
+    initialize = RuntimeState.initialize
 
     async def initialize_and_guard(
-        *, namespace: str, tenant_id: str, read_only: bool = False,
-        module_routes: Mapping[RuntimeDomain, RuntimeStorageRoute] | None = None,
-        module_caches: Mapping[RuntimeDomain, object | None] | None = None,
+        state: RuntimeState, *, namespace: str, tenant_id: str, read_only: bool = False,
+        module_routes: Mapping[RuntimeDomain, StorageRoute] | None = None,
+        capability_routes: Mapping[str, StorageRoute] | None = None,
     ) -> None:
         # Shared schema provisioning is permitted; domain business IO is not.
         await initialize(
-            namespace=namespace, tenant_id=tenant_id, read_only=read_only,
-            module_routes=module_routes, module_caches=module_caches,
+            state, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
+            module_routes=module_routes, capability_routes=capability_routes,
         )
         service_stores = {
-            storage.task.tasks.state_store,
-            storage.evaluation.records.state_store,
-            storage.artifact.records.state_store,
+            state.task.tasks.state_store,
+            state.evaluation.records.state_store,
+            state.artifact.records.state_store,
         }
 
         async def unused_service_io(*args: object, **kwargs: object) -> object:
@@ -67,7 +69,7 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
             for name in ("read_many", "mutate"):
                 monkeypatch.setattr(group, name, guard_group_operation(getattr(group, name)))
 
-    monkeypatch.setattr(storage, "initialize", initialize_and_guard)
+    monkeypatch.setattr(RuntimeState, "initialize", initialize_and_guard)
     async with Runtime.open("idle-services", models=ModelRegistry(), storage=storage) as runtime:
         assert runtime.tasks is not None
         assert runtime.evaluations is not None
@@ -77,7 +79,7 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
         assert launcher is not None
         assert not launcher._graphs
         assert not runtime.evaluations._watchers
-    assert not storage.ready
+    assert not runtime._state.ready
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Completion during a scheduler read must not delay ready dependents."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 
 import pytest
@@ -21,6 +22,7 @@ async def test_completed_dependency_during_state_read_starts_consumer_before_idl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="completion-race", tenant_id="tenant")
     release = asyncio.Event()
     consumer_started = asyncio.Event()

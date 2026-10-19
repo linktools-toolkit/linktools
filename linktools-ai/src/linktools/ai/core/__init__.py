@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._commit_policy import CommitPolicy
+from ._write_buffer import WriteBufferBackend, WriteBufferEntry
 from ._budget import BudgetUsage, RunBudget
 from ._correlation import (
     CorrelationData,
@@ -19,7 +21,7 @@ from ._ids import (
     agent_conversation_id,
     agent_run_id,
 )
-from ._limits import PromptLimits
+from ._limits import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL, PromptLimits
 from ._json import (
     ImmutableJsonMapping,
     JsonValue,
@@ -97,7 +99,23 @@ from ._value import (
     normalize_thinking,
 )
 
+from ._handoff import HandoffGate, HandoffState
+
+from ._signed_cursor import encode_cursor, decode_cursor
+
+from ._domain import RuntimeDomain
+
 __all__ = [
+    "RuntimeDomain",
+    "encode_cursor",
+    "decode_cursor",
+
+    "HandoffGate",
+    "HandoffState",
+
+    "CommitPolicy",
+    "WriteBufferBackend",
+    "WriteBufferEntry",
     "BudgetUsage",
     "RunBudget",
     "ApprovalDecision",
@@ -125,6 +143,8 @@ __all__ = [
     "Principal",
     "PrincipalKind",
     "PromptLimits",
+    "DEFAULT_TRACE_BATCH_SIZE",
+    "DEFAULT_TRACE_FLUSH_INTERVAL",
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",

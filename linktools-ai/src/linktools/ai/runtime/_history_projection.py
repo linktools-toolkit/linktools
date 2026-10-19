@@ -32,8 +32,8 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from ._journal import (
     DURATION_NS_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,

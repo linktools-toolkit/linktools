@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._execution_context import ExecutionInputContext
 from linktools.ai.runtime._local import LocalExecutionBackend
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -55,7 +56,7 @@ async def test_changes_after_launch_are_observed_before_provider(
             elif change == "close":
                 await remote.close(force=True, idempotency_key="remote-close", wait_timeout_seconds=1)
             else:
-                observed = await second_state.conversation.sessions.get("session", tenant_id=second.tenant_id)
+                observed = await second._state.conversation.sessions.get("session", tenant_id=second.tenant_id)
                 await remote.update(expected_revision=observed.revision, metadata={"marker": "after"},
                                     idempotency_key="remote-update")
         finally:
@@ -64,13 +65,13 @@ async def test_changes_after_launch_are_observed_before_provider(
         if change == "metadata":
             assert result.status is ExecutionStatus.SUCCEEDED
             assert len(calls) == 1
-            current = await first_state.execution.executions.get(execution.execution_id, tenant_id=first.tenant_id)
+            current = await first._state.execution.executions.get(execution.execution_id, tenant_id=first.tenant_id)
             context = ExecutionInputContext.from_payload(current.input_context.payload.decode())
             assert context.session_metadata == {"marker": "after"}
         else:
             assert result.status is ExecutionStatus.CANCELLED
             assert calls == []
-        session_record = await second_state.conversation.sessions.get("session", tenant_id=second.tenant_id)
+        session_record = await second._state.conversation.sessions.get("session", tenant_id=second.tenant_id)
         assert session_record.active_execution_id is None
         if change == "close":
             assert session_record.status is SessionStatus.CLOSED
@@ -121,6 +122,6 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         results = await asyncio.wait_for(asyncio.gather(one.wait(), two.wait()), 5)
         assert all(value.result.status is ExecutionStatus.SUCCEEDED for value in results)
         assert len(calls) == 1
-        current = await first_state.execution.executions.get(one.execution_id, tenant_id=first.tenant_id)
+        current = await first._state.execution.executions.get(one.execution_id, tenant_id=first.tenant_id)
         assert current.agent_run_seq == 1
-        assert (await first_state.conversation.sessions.get("session", tenant_id=first.tenant_id)).active_execution_id is None
+        assert (await first._state.conversation.sessions.get("session", tenant_id=first.tenant_id)).active_execution_id is None

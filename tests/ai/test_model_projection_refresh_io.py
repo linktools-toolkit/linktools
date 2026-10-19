@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Active model projections refresh contiguous identities with bounded reads."""
 
+from linktools.ai.runtime.state import RuntimeState
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from .test_step_projection import _execution
 async def test_active_projection_refresh_preserves_all_admitted_identities(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -67,7 +68,7 @@ async def test_refresh_keeps_sparse_ranges_and_bounded_pages(
     from linktools.ai.runtime import RuntimeStorage
     from linktools.ai.runtime.service_api import ModelInteractionReadBoundary, UsageReadCutoff
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -107,7 +108,7 @@ async def test_batched_refresh_propagates_authority_and_integrity_failures(failu
     from linktools.ai.errors import AIError, ErrorCode
     from linktools.ai.runtime import RuntimeStorage
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)

@@ -982,7 +982,8 @@ async function watchExecution(id,generation) {
         }
         else {
           const event=item.event,payload=event.payload || {};
-          if(item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
+          if(item.depth===0 && event.event_type==='STREAM_RESET'){state.liveText='';state.liveThinking='';}
+          else if(item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
           else if(item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
           else if(!event.event_type.endsWith('_DELTA')) {
             state.events.set(eventKey(item),item);
@@ -1006,8 +1007,6 @@ async function watchExecution(id,generation) {
     } catch(error) {
       if(!current())return;
       connection('Reconnecting',true);
-      // Live deltas can be replayed from the bounded buffer; only the Runtime cursor is durable.
-      state.liveText='';state.liveThinking='';renderLive();
       let refreshed=false;
       try {refreshed=await refreshObservation(id,generation);}
       catch {if(current())connection('Reconnecting · Runtime read unavailable',true);}

@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """Completed client exchanges are readable before their execution finishes."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.core import CommitPolicy
+from linktools.ai.capability import TraceCapability
+from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.runtime import RuntimeDomain
 import asyncio
 import base64
 import json
@@ -73,12 +76,12 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
     group = RuntimeFeatures[None]("web-client-live")
     group.tool(wait_for_release, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("wait_for_release",))
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     async with Runtime.open(
         "web-client-live", models=models, storage=storage,
         features=group,
     ) as runtime:
-        commit = storage.run_store.commit_captured_execution_projection
+        commit = runtime._state.run_store.commit_captured_execution_projection
 
         async def observed_commit(
             captured: CapturedExecutionProjection, flight: _AgentRunProjectionFlight,
@@ -95,7 +98,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
                     await release_commit.wait()
             await commit(captured, flight, execution_id=execution_id)
 
-        monkeypatch.setattr(storage.run_store, "commit_captured_execution_projection", observed_commit)
+        monkeypatch.setattr(runtime._state.run_store, "commit_captured_execution_projection", observed_commit)
         execution = await runtime.agents.get("default").start("原始\nrequest with  spaces")
         async with _client(create_app(runtime=runtime)) as http:
             path = f"/api/executions/{execution.execution_id}/models?include_client_requests=true"

@@ -92,4 +92,4 @@ async def test_declared_cancel_callback_runs_without_claiming_external_rollback(
                 assert recovered.status is TaskStatus.RECOVERY_REQUIRED
             assert calls == [execution.execution_id]
     finally:
-        await storage.close()
+        await runtime._state.close()

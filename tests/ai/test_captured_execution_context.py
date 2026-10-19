@@ -2,18 +2,20 @@
 # -*- coding: utf-8 -*-
 """Historical reexecution imports the accepted framework context, not live state."""
 
+from linktools.ai.runtime.state import RuntimeState
 from ._runtime_test_helpers import workspace_features
 
 from collections.abc import Mapping
 from pathlib import Path
-from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 
 import pytest
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal
-from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, TraceCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state import RuntimeDomain
 from .test_task_mixed_node_reliability import _TaskTestModels, _TaskTestModelBinding
@@ -61,7 +63,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
         interaction = (await replay.model_interactions(include_content=True)).items[0]
         assert "candidate-only behavior" in str(interaction.request)
         assert "original-only behavior" not in str(interaction.request)
-        record = await storage.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
         assert record.session_id is None and record.parent_execution_id is None and record.context_imported
         assert record.principal_id == replay_principal.principal_id
         recapture = await runtime.executions.capture_input(replay.execution_id, CaptureInputRequest(replay_principal, "context-replay-0001"))
@@ -78,7 +80,7 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("captured-memory", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
-        memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
+        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
                                     namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("facts.txt", "old content", expected_version=None)
         source = await runtime.agents.get().start("question", memory_scope="production", principal=principal)
@@ -89,8 +91,8 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
         await memory.write("facts.txt", "new production content", expected_version=original.version)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
-        isolated = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
+        record = await runtime._state.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
+        isolated = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=replay.execution_id, memory_scope=record.memory_scope)
         frozen = await isolated.read("facts.txt", max_chars=1000)
         assert frozen.content == "old content" and frozen.version == original.version
@@ -179,10 +181,11 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
     async with Runtime.open("portable-context", models=_NoToolsModels(), storage=storage, features=group) as runtime:
         execution = await runtime.agents.get().start("question", input_context=baseline, principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == "object"
     archive = InMemoryObjectStore("context-snapshot")
     storage = RuntimeStorage.filesystem(source_root)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="portable-context", tenant_id=principal.tenant_id, read_only=True)
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
     try:
@@ -190,7 +193,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
     finally:
         await storage.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
+    await RuntimeState.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
     async with Runtime.open("portable-context", models=_NoToolsModels(), storage=RuntimeStorage.from_root(restored_root), features=group) as runtime:
         capture = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "restored-context"))
         imported = await runtime._input_captures.read_agent(capture, principal=principal)
@@ -329,7 +332,7 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("model-memory-context", models=Models(), storage=storage, features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
-        memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
+        memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("memory/facts.md", "frozen memory value", expected_version=None)
         source = await runtime.agents.get().start("read memory", memory_scope="production", principal=principal)

@@ -11,8 +11,9 @@ import traceback
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.runtime import CheckpointCapability, ConversationCapability, TraceCapability
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
 from ._session_tool_test_helpers import _split_sqlite_storage
@@ -37,8 +38,8 @@ def _storage(database: Path, phase: str) -> RuntimeStorage:
         return _split_sqlite_storage(database)
     if phase == "filesystem":
         return RuntimeStorage(RuntimeStoragePlan(
-            conversation=RuntimeStorageRoute.sqlite(database.with_suffix(".conversation.db")),
-            execution=RuntimeStorageRoute.filesystem(database.with_suffix(".execution")),
+            conversation=StorageRoute.sqlite(database.with_suffix(".conversation.db")),
+            execution=StorageRoute.filesystem(database.with_suffix(".execution")),
         ))
     return RuntimeStorage.sqlite(database)
 
@@ -74,8 +75,8 @@ def _runtime_process(
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id
-                execution = await state.execution.executions.get(execution_id, tenant_id=tenant)
-                head = await state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
+                execution = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
+                head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
                 assert execution is not None and head is not None
                 return {
                     "execution_id": execution_id, "status": execution.status.value,
@@ -97,7 +98,7 @@ def _runtime_process(
 
                     backend.launch = pause_launch
                 elif phase == "pending":
-                    original_claim = state.execution.executions.claim_start
+                    original_claim = runtime._state.execution.executions.claim_start
 
                     async def pause_claim(claim):
                         nonlocal execution_id
@@ -106,7 +107,7 @@ def _runtime_process(
                         await release_admission.wait()
                         return await original_claim(claim)
 
-                    state.execution.executions.claim_start = pause_claim
+                    runtime._state.execution.executions.claim_start = pause_claim
                 elif phase == "handoff":
                     original_handoff = backend._reconcile_handoff
 
@@ -165,7 +166,7 @@ def _runtime_process(
                     await asyncio.wait_for(entered.wait(), 10)
                     connection.send(await snapshot())
                 elif command == "cancel_events":
-                    events = await state.execution.events.list(
+                    events = await runtime._state.execution.events.list(
                         execution_id, tenant_id=runtime.default_principal.tenant_id,
                         after_event_seq=0, limit=100,
                     )
@@ -176,7 +177,7 @@ def _runtime_process(
                         ),
                     })
                 elif command == "flush_trace":
-                    await state.run_store.flush_dirty_execution_projections(
+                    await runtime._state.run_store.flush_dirty_execution_projections(
                         execution_id=execution_id,
                     )
                     connection.send(await snapshot())

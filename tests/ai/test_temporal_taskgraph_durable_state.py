@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable TaskGraph state-machine regression coverage."""
 
+from linktools.ai.runtime.state import RuntimeState
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ async def test_reconcile_propagates_transitive_blocked_state(
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
         await provision_database(engine)
         state = RuntimeStorage.sql(engine)
+    state = RuntimeState(state)
     await state.initialize(namespace=f"task-reconcile-{backend}", tenant_id="tenant")
     try:
         graph = TaskGraph(

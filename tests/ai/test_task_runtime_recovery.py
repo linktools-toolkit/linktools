@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public Runtime recovery coverage for durable TaskGraph state."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import fields
 from pathlib import Path
@@ -70,6 +71,7 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
+    state = RuntimeState(state)
     await state.initialize(
         namespace="default",
         tenant_id="default",
@@ -167,7 +169,7 @@ async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expir
         await recovery.recover(idempotency_key="recover-expired-lease")
         run = await engine.get(graph.graph_id, principal=execution_principal)
         result = (await run.wait(timeout_seconds=10)).result
-        page = await reopened.task.admissions.list_recoverable_page(
+        page = await runtime._state.task.admissions.list_recoverable_page(
             cursor=None,
             limit=128,
         )

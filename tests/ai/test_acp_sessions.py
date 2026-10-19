@@ -81,3 +81,51 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
         ListSessionRequest(principal, cursor=None, limit=200),
         ListSessionRequest(principal, cursor="opaque-next-page", limit=200),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coordination", ("stream", "combined", "none"))
+async def test_acp_workspace_uses_explicit_execution_coordination(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, coordination: str,
+) -> None:
+    from pydantic_ai.models.test import TestModel
+
+    from linktools.ai.acp import ACPApplication
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.core import ExecutionStatus
+    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.workspace import Workspace
+
+    from ._runtime_test_helpers import _Models
+    from .test_runtime_shared_stream import _CombinedCache, _CountingStreamBackend
+
+    cache = _CombinedCache()
+    streams = _CountingStreamBackend()
+    declaration = (
+        None if coordination == "none" else ExecutionCapability(
+            coordination=streams if coordination == "stream" else cache,
+        )
+    )
+    application = ACPApplication.for_workspace(
+        Workspace.load(tmp_path), models=_Models(TestModel(call_tools=[])),
+        storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache),
+        execution=declaration,
+    )
+    served = False
+
+    async def serve(agent: ACPAgent) -> None:
+        nonlocal served
+        session = await agent._runtime.agents.get().create_session("acp-session")
+        result = await session.run("hello", timeout_seconds=5)
+        assert result.result.status is ExecutionStatus.SUCCEEDED
+        assert (await agent._runtime.sessions.get(
+            session.session_id, principal=agent._principal,
+        )).session_id == session.session_id
+        served = True
+
+    monkeypatch.setattr("linktools.ai.acp.serve_stdio", serve)
+    await application.serve(memory_scope="memory")
+    assert served
+    assert bool(streams.open_keys) is (coordination == "stream")
+    assert bool(cache.open_keys) is (coordination == "combined")
+    assert not cache.closed

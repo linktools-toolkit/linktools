@@ -4,6 +4,8 @@
 
 from ._runtime_test_helpers import workspace_features
 
+from linktools.ai.runtime.state import RuntimeState
+
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
@@ -34,7 +36,7 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.migrate import provision_database
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import (
     EvaluationTrialScope, Runtime, RuntimeContext, RuntimeStorage, TaskEngine, TaskGraphRun,
 )
@@ -163,7 +165,7 @@ async def _request(
 
 class Scopes:
     def __init__(
-        self, root: Path, storage: RuntimeStorage, make_storage: Callable[[], RuntimeStorage],
+        self, root: Path, storage: RuntimeState, make_storage: Callable[[], RuntimeStorage],
         tasks: tuple[Task[Path], ...], *, namespace: str = NAMESPACE,
         tenant_id: str = PRINCIPAL.tenant_id,
     ) -> None:
@@ -177,7 +179,7 @@ class Scopes:
         self.closed: list[EvaluationTrialScope] = []
         self.workspaces: list[Path] = []
         self.runtimes: list[Runtime[Path]] = []
-        self.stores: list[RuntimeStorage] = []
+        self.stores: list[RuntimeState] = []
 
     @asynccontextmanager
     async def __call__(self, scope: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -198,7 +200,6 @@ class Scopes:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "retained.txt").write_text("application-owned workspace", encoding="utf-8")
         child_storage = self.make_storage()
-        assert child_storage is not self.storage
         token = _SCOPE_CONTEXT.set(scope)
         try:
             async with Runtime.open(
@@ -207,10 +208,11 @@ class Scopes:
                 features=workspace_features("workspace", workspace=Workspace.load(workspace)),
                 auto_recover=False,
             ) as child:
+                assert child._state is not self.storage
                 self.opened.append(scope)
                 self.workspaces.append(workspace)
                 self.runtimes.append(child)
-                self.stores.append(child_storage)
+                self.stores.append(child._state)
                 yield child.tasks.bind(*self.tasks)
         finally:
             try:
@@ -251,7 +253,7 @@ async def test_scoped_targets_and_rescores_share_durable_facts_but_own_local_wor
     storage = make_storage()
     try:
         async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-            scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+            scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
             request = await _request(runtime, tasks)
             run = await runtime.evaluations.start(request, engine=runtime.tasks.bind(*tasks), trial_scope=scopes)
             view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
@@ -265,7 +267,7 @@ async def test_scoped_targets_and_rescores_share_durable_facts_but_own_local_wor
             assert len(set(scopes.workspaces)) == 2
             assert calls == scopes.workspaces[:1]
             assert all(not store.ready for store in scopes.stores)
-            assert storage.ready
+            assert runtime._state.ready
             assert (await run.scores()).items[0].score.dimensions == {"quality": 1.0}
 
             rescored = await run.rescore(RescoreRequest((_scorer(tasks[1]),), "rescore"),
@@ -321,7 +323,7 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
 
         @asynccontextmanager
         async def scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[None]]:
-            record = await storage.evaluation.records.get(descriptor.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            record = await runtime._state.evaluation.records.get(descriptor.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             assert any(intent.submission == descriptor.submission for intent in record.intents)
             models = FixtureModels()
             child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
@@ -368,7 +370,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
     completed_outputs: list[str] = []
     opened: list[tuple[EvaluationTrialScope, Path]] = []
     closed: list[EvaluationTrialScope] = []
-    child_stores: list[RuntimeStorage] = []
+    child_stores: list[RuntimeState] = []
     model_prompts: list[str] = []
     interrupted = True
     group = RuntimeFeatures[Path]("recoverable-scoped-agent")
@@ -425,7 +427,7 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
                 auto_recover=False) as child:
                 target = child.tasks.from_agent("scopes.recovery-agent", child.agents.get())
                 opened.append((descriptor, workspace))
-                child_stores.append(child_storage)
+                child_stores.append(child._state)
                 with monkeypatch.context() as fault:
                     if models.interrupt:
                         backend = child._execution_service.runtime_backend()
@@ -464,30 +466,30 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
                 engine=runtime.tasks.bind(target, scorer), trial_scope=scope)
             await asyncio.wait_for(model_entered.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
             record = await _wait_for_committed(
-                lambda: storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id),
+                lambda: runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id),
                 lambda value: value is not None and bool(value.intents) and value.intents[0].confirmed,
                 timeout=EVALUATION_COMPLETION_TIMEOUT_SECONDS,
             )
             original_submission = record.intents[0].submission
             graph_id = original_submission.graph.graph_id
             bound = await _wait_for_committed(
-                lambda: storage.task.tasks.graph_state(graph_id, tenant_id=PRINCIPAL.tenant_id),
+                lambda: runtime._state.task.tasks.graph_state(graph_id, tenant_id=PRINCIPAL.tenant_id),
                 lambda value: value is not None and value.node_states[0].execution_id is not None,
                 timeout=EVALUATION_COMPLETION_TIMEOUT_SECONDS,
             )
             execution_id = bound.node_states[0].execution_id
-            original = await storage.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
-            checkpoint = await storage.recovery.checkpoints.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
+            original = await runtime._state.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
+            checkpoint = await runtime._state.recovery.checkpoints.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
             assert checkpoint is not None
             assert original.status is ExecutionStatus.STARTED
             stop_owner.set()
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "needs_attention"
             await _until(lambda: len(closed) == 1)
-            stopped = await storage.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
+            stopped = await runtime._state.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
             assert stopped.status is ExecutionStatus.RECOVERY_REQUIRED
             assert completed_outputs == []
             experiment_id = run.experiment_id
-        assert not storage.ready and not child_stores[0].ready
+        assert not runtime._state.ready and not child_stores[0].ready
 
         interrupted = False
         reopened_models = FixtureModels()
@@ -512,10 +514,10 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
             assert recovered_targets[1][0].submission == original_submission
             assert all(descriptor.principal == PRINCIPAL for descriptor, _ in opened)
             assert all((workspace / "retained.txt").exists() for _, workspace in opened)
-            final_graph = await reopened.task.tasks.graph_state(graph_id, tenant_id=PRINCIPAL.tenant_id)
+            final_graph = await runtime._state.task.tasks.graph_state(graph_id, tenant_id=PRINCIPAL.tenant_id)
             assert final_graph.node_states[0].execution_id == execution_id
             assert final_graph.nodes[0].input_capture == bound.nodes[0].input_capture
-            current = await reopened.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
+            current = await runtime._state.execution.executions.get(execution_id, tenant_id=PRINCIPAL.tenant_id)
             assert current.status is ExecutionStatus.SUCCEEDED
             assert current.principal_id == original.principal_id == PRINCIPAL.principal_id
             assert current.principal_kind == original.principal_kind == PRINCIPAL.kind
@@ -554,7 +556,7 @@ async def test_human_score_resumes_only_in_the_coordinator_that_owns_its_scope(
 
     storage = make_storage()
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-        scopes = Scopes(tmp_path / "owner", storage, make_storage, (task,))
+        scopes = Scopes(tmp_path / "owner", runtime._state, make_storage, (task,))
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("human", 1), (
             CaseSpec.task(CaseRef("human", "one", 1), input={"answer": "private case input"}),
         )), principal=PRINCIPAL, idempotency_key="publish-human")
@@ -566,9 +568,9 @@ async def test_human_score_resumes_only_in_the_coordinator_that_owns_its_scope(
             while True:
                 pending = (await run.scores()).items[0]
                 if pending.scorer_graph is not None and pending.scorer_execution is not None:
-                    state = await storage.task.tasks.graph_state(pending.scorer_graph.graph_id,
+                    state = await runtime._state.task.tasks.graph_state(pending.scorer_graph.graph_id,
                         tenant_id=PRINCIPAL.tenant_id)
-                    record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                    record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                     if (any(intent.scorer_slot_id == "human" and intent.confirmed for intent in record.intents)
                             and any(node.node_id == "score" and node.status is TaskStatus.WAITING
                                     for node in state.node_states)):
@@ -584,7 +586,7 @@ async def test_human_score_resumes_only_in_the_coordinator_that_owns_its_scope(
             foreign_storage = make_storage()
             async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=foreign_storage,
                                     context=CONTEXT, auto_recover=False) as foreign:
-                foreign_scopes = Scopes(tmp_path / "foreign", foreign_storage, make_storage, (task,))
+                foreign_scopes = Scopes(tmp_path / "foreign", foreign._state, make_storage, (task,))
                 observed = await foreign.evaluations.start(request,
                     engine=foreign.tasks.bind(task), trial_scope=foreign_scopes)
                 assert observed.experiment_id == run.experiment_id
@@ -626,7 +628,7 @@ async def test_local_scope_is_closed_on_target_error_cancellation_and_coordinato
 
     storage = make_storage()
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-        scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+        scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
         engine = runtime.tasks.bind(*tasks)
         policy = (EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60)
                   if termination == "retention" else None)
@@ -694,7 +696,7 @@ async def test_local_scope_is_closed_on_target_error_cancellation_and_coordinato
                         await asyncio.wait_for(graph_reading.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
                         cancelling = asyncio.create_task(run.cancel(idempotency_key="cancel"))
                         await asyncio.wait_for(receipt_waiting.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
-                        state = await storage.task.tasks.graph_state(descriptor.submission.graph.graph_id,
+                        state = await runtime._state.task.tasks.graph_state(descriptor.submission.graph.graph_id,
                             tenant_id=PRINCIPAL.tenant_id)
                         assert state.status is TaskStatus.CANCELLED
                         release_graph_read.set()
@@ -719,13 +721,13 @@ async def test_local_scope_is_closed_on_target_error_cancellation_and_coordinato
                 view = (await cancelled.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
                 assert view.completion == "cancelled", view.needs_attention
             elif termination == "retention":
-                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                 graph_id = record.intents[0].submission.graph.graph_id
 
                 class Offline:
                     @asynccontextmanager
                     async def offline_exclusivity(self) -> AsyncIterator[None]:
-                        state = await storage.task.tasks.graph_state(graph_id, tenant_id=PRINCIPAL.tenant_id)
+                        state = await runtime._state.task.tasks.graph_state(graph_id, tenant_id=PRINCIPAL.tenant_id)
                         assert state.status is TaskStatus.CANCELLED
                         await runtime.evaluations.close()
                         yield
@@ -739,7 +741,7 @@ async def test_local_scope_is_closed_on_target_error_cancellation_and_coordinato
             await _until(lambda: all(not store.ready for store in scopes.stores))
             assert scopes.closed == scopes.opened
             assert all((workspace / "retained.txt").exists() for workspace in scopes.workspaces)
-            assert storage.ready
+            assert runtime._state.ready
         finally:
             release.set()
 
@@ -767,7 +769,7 @@ async def test_scope_cleanup_failure_is_observable_without_repeating_context_exi
     storage = make_storage()
     manager = Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT)
     runtime = await manager.__aenter__()
-    scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+    scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
     @asynccontextmanager
     async def broken_scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -815,7 +817,7 @@ async def test_scope_cleanup_failure_is_observable_without_repeating_context_exi
         except ScopeCleanupError:
             pass
         finally:
-            await storage.close()
+            await runtime._state.close()
     assert len(cleanup_attempts) == 1
 
 
@@ -843,7 +845,7 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
     storage = make_storage()
     manager = Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT)
     runtime = await manager.__aenter__()
-    scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+    scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
     @asynccontextmanager
     async def failing_scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -865,7 +867,7 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
         with monkeypatch.context() as initial:
             initial.setattr(runtime.evaluations, "_watch", lambda *args, **kwargs: None)
             run = await runtime.evaluations.start(request, engine=engine, trial_scope=failing_scope)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         for plan in record.manifest.trials:
             trial = TargetTrialRef(run.experiment_id, plan.trial_id)
             slot = f"target:{trial.trial_id}"
@@ -877,7 +879,7 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
                 idempotency_key=f"evaluation:{run.experiment_id}:{slot}",
                 correlation={"evaluation_experiment": run.experiment_id,
                              "evaluation_trial": trial.trial_id, "evaluation_slot": slot})
-            await storage.evaluation.records.register_launch_intent(run.experiment_id,
+            await runtime._state.evaluation.records.register_launch_intent(run.experiment_id,
                 EvaluationLaunchIntent(slot, trial, None, submission, None), capacity=3)
         assert scopes.opened == []
         with pytest.raises((AIError, ScopeCleanupError)) as failure:
@@ -897,7 +899,7 @@ async def test_reconcile_attempts_every_owned_scope_cleanup_when_one_exit_fails(
         except ScopeCleanupError:
             pass
         finally:
-            await storage.close()
+            await runtime._state.close()
     assert sorted(exited) == sorted(slots[:2])
 
 
@@ -935,7 +937,7 @@ async def test_cancel_before_admission_never_opens_a_trial_scope(
                 await runtime.evaluations.start(request, engine=engine)
             assert mode_changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         assert (await repeated.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
-        record = await storage.evaluation.records.get(cancelled.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(cancelled.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.intents == ()
         assert opened == []
 
@@ -948,7 +950,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
     calls: list[Path | None] = []
     opened: list[EvaluationTrialScope] = []
     closed: list[EvaluationTrialScope] = []
-    child_stores: list[RuntimeStorage] = []
+    child_stores: list[RuntimeState] = []
     output = tmp_path / "target-output.txt"
 
     async def target(context: TaskNodeContext[Path]) -> JsonValue:
@@ -970,13 +972,13 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
     @asynccontextmanager
     async def scope(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
         child_storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
-        child_stores.append(child_storage)
         try:
             async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=child_storage,
                 context=RuntimeContext(tmp_path if child_environment in {"app", "both"} else None,
                                        tenant_id=PRINCIPAL.tenant_id),
                 features=workspace if child_environment in {"workspace", "both"} else None,
                 auto_recover=False) as child:
+                child_stores.append(child._state)
                 opened.append(descriptor)
                 yield child.tasks.bind(*tasks)
         finally:
@@ -991,7 +993,7 @@ async def test_explicit_live_effects_run_in_each_trial_runtime_environment(
         view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         await _until(lambda: bool(opened) and closed == opened)
         assert all(not child_storage.ready for child_storage in child_stores)
-        assert storage.ready
+        assert runtime._state.ready
         assert view.completion == "complete", view.needs_attention
         assert calls == [tmp_path if child_environment in {"app", "both"} else None]
         assert output.read_text(encoding="utf-8") == "private case input"
@@ -1026,7 +1028,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
         with monkeypatch.context() as paused:
             paused.setattr(runtime.evaluations, "_watch", lambda *args, **kwargs: None)
             run = await runtime.evaluations.start(request, engine=engine)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         trial = TargetTrialRef(run.experiment_id, record.manifest.trials[0].trial_id)
         slot = f"target:{trial.trial_id}"
         graph = TaskGraph(canonical_sha256({"experiment": run.experiment_id, "slot": slot}), (
@@ -1036,11 +1038,11 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
             idempotency_key=f"evaluation:{run.experiment_id}:{slot}",
             correlation={"evaluation_experiment": run.experiment_id,
                          "evaluation_trial": trial.trial_id, "evaluation_slot": slot})
-        await storage.evaluation.records.register_launch_intent(run.experiment_id,
+        await runtime._state.evaluation.records.register_launch_intent(run.experiment_id,
             EvaluationLaunchIntent(slot, trial, None, submission, None), capacity=1)
         assert not record.manifest.trial_scope_required
         assert calls == []
-        assert await storage.task.admissions.submission_status(submission.ref) is None
+        assert await runtime._state.task.admissions.submission_status(submission.ref) is None
 
     reopened = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened,
@@ -1052,7 +1054,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
             principal=PRINCIPAL, idempotency_key="resume-live")
         view = (await resumed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        current = await reopened.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        current = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         intent = next(item for item in current.intents if item.slot_id == slot)
         assert current.manifest == record.manifest
         assert intent.confirmed and intent.submission == submission
@@ -1060,7 +1062,7 @@ async def test_reconcile_preserves_unscoped_live_submission_with_app_and_workspa
         completed_trial = (await resumed.trials()).items[0]
         assert completed_trial.graph_ref.graph_id == submission.graph.graph_id
         assert (await resumed.scores()).items[0].score.dimensions == {"quality": 1.0}
-        graph = await reopened.task.tasks.graph_state(submission.graph.graph_id, tenant_id=PRINCIPAL.tenant_id)
+        graph = await runtime._state.task.tasks.graph_state(submission.graph.graph_id, tenant_id=PRINCIPAL.tenant_id)
         assert graph.node_states[0].execution_id == completed_trial.subject.execution_id
         await runtime.evaluations.reconcile(run.experiment_id, engine=engine,
             principal=PRINCIPAL, idempotency_key="resume-live")
@@ -1090,7 +1092,7 @@ async def test_cancellation_seals_pending_entry_before_awaiting_the_native_fence
 
     storage = make_storage()
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-        scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+        scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
         @asynccontextmanager
         async def stubborn_entry(descriptor: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -1129,7 +1131,7 @@ async def test_cancellation_seals_pending_entry_before_awaiting_the_native_fence
             assert calls == []
             assert len(scopes.opened) == 1 and scopes.closed == scopes.opened
             assert not scopes.stores[0].ready
-            assert await storage.task.admissions.submission_status(scopes.opened[0].submission.ref) == "cancelled"
+            assert await runtime._state.task.admissions.submission_status(scopes.opened[0].submission.ref) == "cancelled"
         finally:
             release_entry.set()
             release_target.set()
@@ -1179,11 +1181,11 @@ async def test_scope_creation_permission_is_local_once_and_failure_remains_cance
             engine=engine, trial_scope=missing_workspace)
         await asyncio.wait_for(entered.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert len(scopes) == 1 and scopes[0].newly_prepared
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert len(record.intents) == 1
         submission = record.intents[0].submission
-        assert await storage.task.admissions.submission_status(submission.ref) == "prepared"
-        assert await storage.task.admissions.get(submission.graph.graph_id, tenant_id=PRINCIPAL.tenant_id) is None
+        assert await runtime._state.task.admissions.submission_status(submission.ref) == "prepared"
+        assert await runtime._state.task.admissions.get(submission.graph.graph_id, tenant_id=PRINCIPAL.tenant_id) is None
 
         # A concurrent waiter uses the same reserved local entry, including
         # the one-time creator disposition, rather than opening another scope.
@@ -1202,10 +1204,10 @@ async def test_scope_creation_permission_is_local_once_and_failure_remains_cance
         assert len(scopes) == 2 and not scopes[1].newly_prepared
         assert scopes[1].submission == scopes[0].submission
         await run.cancel(idempotency_key="cancel-missing-workspace")
-        cancelled = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        cancelled = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert cancelled.gate == "closed_cancel" and all(intent.released for intent in cancelled.intents)
         assert len(scopes) == 2 and calls == []
-        assert await storage.task.admissions.submission_status(submission.ref) == "cancelled"
+        assert await runtime._state.task.admissions.submission_status(submission.ref) == "cancelled"
         resumed = await runtime.evaluations.reconcile(run.experiment_id, engine=engine,
             principal=PRINCIPAL, idempotency_key="settle-cancellation", trial_scope=missing_workspace)
         assert (await resumed.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
@@ -1236,7 +1238,7 @@ async def test_interrupted_scope_entry_closes_local_resources_and_reconciles_the
 
     storage = make_storage()
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-        scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+        scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
 
         @asynccontextmanager
         async def suspended(scope: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -1252,18 +1254,18 @@ async def test_interrupted_scope_entry_closes_local_resources_and_reconciles_the
         assert len(scopes.closed) == 1
         assert scopes.closed == scopes.opened
         assert calls == []
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert len(record.intents) == 1
         pending = record.intents[0]
         assert not pending.confirmed and not pending.released
-        assert await storage.task.admissions.submission_status(pending.submission.ref) == "prepared"
+        assert await runtime._state.task.admissions.submission_status(pending.submission.ref) == "prepared"
         assert scopes.opened[0].newly_prepared
         experiment_id = run.experiment_id
 
     reopened = make_storage()
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=reopened, context=CONTEXT,
                             auto_recover=False) as runtime:
-        resumed_scopes = Scopes(tmp_path / "workspaces", reopened, make_storage, tasks)
+        resumed_scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
         with pytest.raises(AIError) as missing_scope:
             await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*tasks),
                 principal=PRINCIPAL, idempotency_key="missing-scope")
@@ -1340,7 +1342,7 @@ async def test_incompatible_scope_engine_is_closed_before_target_execution(
 
     storage = RuntimeStorage.sqlite(tmp_path / "state.sqlite")
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-        scopes = Scopes(tmp_path / "workspaces", storage, make_child_storage, child_tasks,
+        scopes = Scopes(tmp_path / "workspaces", runtime._state, make_child_storage, child_tasks,
             namespace="wrong-namespace" if mismatch == "namespace" else NAMESPACE,
             tenant_id="wrong-tenant" if mismatch == "tenant" else PRINCIPAL.tenant_id)
         run = await runtime.evaluations.start(await _request(runtime, tasks),
@@ -1350,12 +1352,12 @@ async def test_incompatible_scope_engine_is_closed_before_target_execution(
         await _until(lambda: all(not store.ready for store in scopes.stores))
         assert called == []
         assert scopes.closed == scopes.opened
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.dispositions
         assert any(item.disposition.reason_code in {
             str(ErrorCode.BINDING_CONFLICT), str(ErrorCode.EVALUATION_INCOMPATIBLE),
         } for item in record.dispositions)
-        assert await storage.task.admissions.submission_status(scopes.opened[0].submission.ref) in {"prepared", "cancelled"}
+        assert await runtime._state.task.admissions.submission_status(scopes.opened[0].submission.ref) in {"prepared", "cancelled"}
 
 
 @pytest.mark.asyncio
@@ -1390,8 +1392,8 @@ async def test_closing_one_coordinator_does_not_stop_another_experiments_child(
         Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage_b, context=CONTEXT,
                      auto_recover=False) as second,
     ):
-        scopes_a = Scopes(tmp_path / "a", storage_a, make_storage, tasks)
-        scopes_b = Scopes(tmp_path / "b", storage_b, make_storage, tasks)
+        scopes_a = Scopes(tmp_path / "a", first._state, make_storage, tasks)
+        scopes_b = Scopes(tmp_path / "b", second._state, make_storage, tasks)
         run_a = await first.evaluations.start(await _request(first, tasks, key="first"),
             engine=first.tasks.bind(*tasks), trial_scope=scopes_a)
         run_b = await second.evaluations.start(await _request(second, tasks, key="second"),
@@ -1404,8 +1406,8 @@ async def test_closing_one_coordinator_does_not_stop_another_experiments_child(
             assert len(scopes_b.closed) == 1
             assert scopes_a.closed == []
             assert not finished_a.is_set()
-            assert storage_a.ready and storage_b.ready
-            record_b = await storage_b.evaluation.records.get(run_b.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            assert first._state.ready and second._state.ready
+            record_b = await second._state.evaluation.records.get(run_b.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             assert len(record_b.intents) == 1
             release_a.set()
             assert (await run_a.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
@@ -1442,8 +1444,8 @@ async def test_remote_logical_release_does_not_claim_another_coordinators_scope_
         Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage_b, context=CONTEXT,
                      auto_recover=False) as second,
     ):
-        scopes_a = Scopes(tmp_path / "a", storage_a, make_storage, tasks)
-        scopes_b = Scopes(tmp_path / "b", storage_b, make_storage, tasks)
+        scopes_a = Scopes(tmp_path / "a", first._state, make_storage, tasks)
+        scopes_b = Scopes(tmp_path / "b", second._state, make_storage, tasks)
 
         @asynccontextmanager
         async def delayed_teardown(scope: EvaluationTrialScope) -> AsyncIterator[TaskEngine[Path]]:
@@ -1463,7 +1465,7 @@ async def test_remote_logical_release_does_not_claim_another_coordinators_scope_
 
             async def confirmed() -> None:
                 while True:
-                    record = await storage_a.evaluation.records.get(run_a.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                    record = await first._state.evaluation.records.get(run_a.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                     if any(intent.scorer_slot_id is None and intent.confirmed for intent in record.intents):
                         return
                     await asyncio.sleep(0.01)
@@ -1476,7 +1478,7 @@ async def test_remote_logical_release_does_not_claim_another_coordinators_scope_
             await asyncio.wait_for(teardown_started.wait(), EVALUATION_COMPLETION_TIMEOUT_SECONDS)
             view = (await run_b.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
             assert view.completion == "complete", view.needs_attention
-            record = await storage_b.evaluation.records.get(run_b.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            record = await second._state.evaluation.records.get(run_b.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             assert all(intent.released for intent in record.intents)
             assert scopes_a.closed == []
             assert scopes_a.stores[0].ready
@@ -1508,13 +1510,13 @@ async def test_retention_never_deletes_application_owned_trial_workspaces(tmp_pa
 
     storage = make_storage()
     async with Runtime.open(NAMESPACE, models=ModelRegistry(), storage=storage, context=CONTEXT) as runtime:
-        scopes = Scopes(tmp_path / "workspaces", storage, make_storage, tasks)
+        scopes = Scopes(tmp_path / "workspaces", runtime._state, make_storage, tasks)
         policy = EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60)
         run = await runtime.evaluations.start(await _request(runtime, tasks, policy=policy),
             engine=runtime.tasks.bind(*tasks), trial_scope=scopes)
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         await _until(lambda: len(scopes.closed) == 2)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         purged = await runtime.evaluations.purge_expired(principal=PRINCIPAL,
             now=record.metadata_expires_at + timedelta(seconds=1), exclusive=Offline())
         assert purged.evaluations == (run.experiment_id,)

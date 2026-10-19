@@ -10,7 +10,8 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability, CheckpointCapability
+from linktools.ai.capability import ConversationCapability, CheckpointCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
 

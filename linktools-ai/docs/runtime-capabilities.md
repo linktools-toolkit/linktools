@@ -32,22 +32,44 @@ applied to direct Agent runs, Sessions, delegated Agents, Agent-backed Tasks and
 resumed/recovered runs. Plain Python Task bodies and external SDK calls do not
 pass through these hooks.
 
+## Capability and service ownership
+
+All public capability declarations are imported from `linktools.ai.capability`,
+including `ExecutionCapability`, `SessionCapability`, `ConversationCapability`,
+`CheckpointCapability`, and `TraceCapability`.
+`linktools.ai.runtime` owns Runtime entry points and services; it does not provide duplicate capability exports.
+
+A captured declaration can be reused across Runtime instances. Runtime binds
+isolated `ConversationService`, `CheckpointService` and `TraceService` instances
+for each run without changing the declaration or its custom native hooks.
+`MetricsService` owns one Runtime recording lifetime shared by Agent, Task and
+Evaluation, over a borrowed Metrics dataset, and enriches observations without
+creating a second recording queue.
+Conversation, Checkpoint and Trace persistence owners keep their existing
+module-specific reads, buffers and commit boundaries.
+
+Module storage routes are validated during Runtime or read-only assembly,
+before storage initialization. Invalid route values do not start storage I/O.
+Session identity and combined execution-history queries remain owned by
+`SessionService` and `ExecutionHistoryService` respectively.
+
 ## Optional execution persistence
 
-Conversation, interrupted-execution recovery, detailed trace and automatic Agent
-metrics are separate, explicit Runtime-scoped capabilities. Passing durable
-storage alone does not enable them. Supply one `RuntimeFeatures` declaration or
+Conversation, interrupted-execution recovery and detailed trace are separate,
+explicit Runtime-scoped capabilities. Passing durable storage alone does not
+enable them. Automatic metrics use the independent `Runtime.open(metrics=...)`
+resource described below. Supply one `RuntimeFeatures` declaration or
 its `RuntimeFeaturesCapture` through `features`; complete registrations
 before capture or opening the Runtime.
 
 ```python
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.runtime import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
 
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
 chat.capability(ConversationCapability())
-# Runtime.open(..., features=chat) supports Sessions and conversation forks.
+# Runtime.open(..., features=chat) retains model context and supports execution forks.
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
@@ -56,10 +78,17 @@ persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
-`ConversationCapability()` retains committed conversation context and Session
-projections. Creating or continuing a Session, or forking conversation, requires
-this capability; missing support fails with `CAPABILITY_REQUIRED_MISSING` before
-side effects. Checkpoint or trace data alone does not grant conversation access.
+`ConversationCapability()` retains committed model context for future turns and
+execution forks. Session creation, listing, resume, metadata, and display history
+are enabled by the default `SessionCapability`, independently of Conversation.
+Register `SessionCapability(enabled=False)` at Runtime scope to disable Session
+operations explicitly; no manual enable registration is needed by default. Resume still
+requires available committed context: an unretained completed turn makes Session
+history unavailable, and later resume or Session fork fails with
+`SESSION_HISTORY_UNAVAILABLE` rather than silently losing context. Enabling
+Conversation later cannot reconstruct that missing history. Execution forks
+require an admitted conversation guarantee; checkpoint or trace data alone does
+not grant it.
 `CheckpointCapability()` retains before-request and after-node recovery context.
 `TraceCapability()` retains execution transcript, step facts and model interactions;
 trace alone cannot resume an interrupted run. Register the combination required
@@ -77,42 +106,61 @@ Shared storage provisioning is independent of service activation.
 ### Automatic Runtime metrics
 
 `Metrics` remains the shared dataset for Agent, Task, Evaluation and application
-recording. Register its sole Runtime entry point explicitly:
+recording. Supply the borrowed dataset at the sole Runtime entry point:
 
 ```python
-from linktools.ai.runtime import MetricsCapability
-
-group.capability(MetricsCapability(metrics=metrics))
-# Runtime.open(..., features=group)
+async with Runtime.open("app", models=models, storage=storage, features=group, metrics=metrics) as runtime:
+    ...
 ```
 
-The Runtime-scoped capability selects automatic Agent, Task and Evaluation
-recording, independently of Agent filtering. Without it, Runtime creates no
+The optional `Runtime.open(metrics=...)` resource enables automatic Agent and Task
+recording, including evaluation work in that Runtime, independently of Agent filtering. Without it, Runtime creates no
 automatic recorder. Application calls on the dataset remain available directly.
-One per-Runtime binding owns the shared recorder and drain lifecycle. Metrics
-retain their own batching; a conversation turn does not force a metrics flush.
+One per-Runtime service owns its recorder and drain lifecycle. Closing Runtime
+does not close the shared dataset, engine or cache. `metrics=None` disables
+automatic recording. Read-only history and snapshots never activate recording.
+Metrics retain their own batching; a conversation turn does not force a metrics flush.
 
 ### Module storage and cache configuration
 
-`ConversationCapability(storage=route, cache=cache)`,
-`CheckpointCapability(storage=route)` and
-`TraceCapability(storage=route, cache=cache)` configure their own archives.
-Omitted storage inherits the corresponding Runtime base route; Trace and
-Checkpoint default to the execution route with separate logical partitions.
-Trace and Checkpoint routes must share the execution StateStorageGroup;
-incompatible routes fail during opening. Conversation may use a separate store:
-that configuration uses durable admission and the recoverable prepared terminal
-handoff protocol, rather than deferred single-transaction turns. Shared SQL engines and object stores
-remain borrowed resources, rather than one connection or close per capability.
+`StorageRoute` and `StorageRetentionMode` are imported from `linktools.ai.storage`.
+A route bundles its backend with an optional borrowed hot-read cache, for example
+`StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
+persistence identity. Session and Conversation use the root `RuntimeStorage`
+resource; `ConversationCapability()` only selects context retention. Set
+`RuntimeStoragePlan(conversation=route, ...)` to customize that domain.
+For plan-based construction, caches live on the routes rather than a second
+`RuntimeStorage` cache argument. Convenience factories such as
+`RuntimeStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
-A module's `cache=None` disables its hot/read cache; it never inherits the root
-cache. Pass the same cache instance explicitly to share it. `RuntimeStorage.cache`
-still supplies core turn coordination, live streams and core record/object reads.
-Changing module caches cannot create a separate producer ownership namespace.
-Use the same features declaration or capture with `RuntimeHistory.open(features=...)`
-to read custom module routes without activating native hooks or Metrics recorders.
-Pass that same `features=` value to `RuntimeSnapshot.create()` so export captures
-all configured module archives; restored portable generations use their local routes.
+`CheckpointCapability(storage=route)` and
+`TraceCapability(storage=route, commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=3.0))`
+configure their archives. Omitted storage inherits the Runtime backend and cache
+with separate logical partitions. An explicit route supplies the complete
+resource: `cache=None` disables that route's cache instead of inheriting it.
+Trace and Checkpoint routes must share the execution StateStorageGroup;
+incompatible routes fail during opening. A separate root Conversation route
+uses durable admission and recoverable prepared terminal handoffs rather than
+single-transaction deferred turns. Shared SQL engines, caches, and object stores
+remain borrowed resources.
+
+The workspace ACP convenience entry point accepts the same execution declaration:
+`ACPApplication.for_workspace(workspace, models=models, storage=storage,
+execution=ExecutionCapability(coordination=cache))`. Its workspace and conversation
+capabilities remain built in. A cache attached only to storage does not enable
+turn or stream coordination.
+
+`ExecutionCapability(coordination=cache)` explicitly supplies shared turn
+coordination and live streams. The execution route cache only serves hot
+execution record reads. Session metadata/display and Conversation content
+use the Conversation route cache; shortcut storage factories apply the supplied
+hot cache to their routes. Pending-turn visibility comes through the explicit
+coordination channel, not through the hot cache.
+A module resource override cannot create a separate producer ownership
+namespace. Reuse the root storage plan and the same features with
+`RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read and
+export all custom routes without activating hooks or Metrics recorders.
+Restored portable generations use their local routes and caches.
 
 Shared filesystem group manifests, locks and empty domain metadata are provisioned
 independently of selected features to preserve atomic recovery and historical reads.
@@ -175,24 +223,86 @@ existing confirmation outcome. It must not claim completion from force alone.
 
 ### Independent commit boundaries
 
-There is no public terminal-commit capability or global commit-mode option.
-Conversation commits its final context, Session cursor and corresponding
-Execution outcome at the turn boundary. Checkpoint commits recovery-critical
-context at its model/tool boundaries. Trace publishes completed observation
-batches and drains its queued records on completion or close. Metrics use their
-separate batching lifecycle. One module does not force unrelated modules to
-flush at every boundary.
+Import `CommitPolicy` from `linktools.ai.core`. Its factories are
+`CommitPolicy.sync()`, `CommitPolicy.terminal()`, and
+`CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...)`. The policy
+pairs write timing with its optional borrowed buffer, independently of read
+cache routing. In batch mode without a buffer, observation writes await the source. A buffer
+never becomes a hot-read cache and is never closed by the policy.
+Runtime execution supports sync and terminal. Trace supports sync, batch and terminal;
+Metrics supports sync and batch. Conversation has a fixed terminal boundary;
+Checkpoint has fixed model/tool safety boundaries. They do not accept timing
+preferences that would weaken those guarantees.
+`ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use durable admission even with
+a coordination cache. Shared admission ownership and idempotency coordination
+remain active for every policy, including a sync caller joining an already
+admitted terminal-policy turn. Opt into `ExecutionCapability(commit=CommitPolicy.terminal())`
+to defer eligible ordinary native turns until the terminal boundary. Deferred
+admission additionally requires explicitly configured `coordination`
+with the required coordination groups and compatible storage routes.
+Execution timing is independent of Conversation retention and Session activation.
+Execution is required and installed by default. Register one explicit
+`ExecutionCapability` on the runtime scope to replace its default configuration:
 
-With Conversation enabled and an explicitly configured `RuntimeStorage.cache` supporting the
-required groups, eligible ordinary native execution can defer its initial state
-until the terminal boundary. Before side effects, Task ownership or another durable dependency
-requires state, Runtime establishes the necessary durable facts. Authorization,
-idempotency, producer fencing, tool-effect ownership and unknown-commit readback
-remain part of the execution core in every combination. A process crash cannot
-recover an uncommitted turn merely because conversation or trace was enabled.
+```python
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.core import CommitPolicy
 
-Multiple Runtime instances need shared cache turn coordination for provisional
-live turns. Without an injected cache, or when its required groups are absent,
+features.capability(ExecutionCapability(
+    commit=CommitPolicy.terminal(), coordination=shared_cache,
+), scope="runtime")
+```
+
+`Runtime.open` does not take a separate execution commit policy.
+
+Use `TraceCapability(commit=CommitPolicy.terminal())` to retain optional trace
+observations in process-local staging until a required publication boundary. It
+needs no write buffer and does not make pending facts durable or hot-readable.
+When Trace, Conversation and Execution resolve to the same transaction resource,
+the existing terminal transaction includes the trace tail and final conversation
+state. Explicit flush and recovery/tool safety boundaries may publish earlier.
+
+Enabling durable Trace still requires durable admission and producer fencing,
+even with `ExecutionCapability(commit=CommitPolicy.terminal())`. The terminal
+transaction is shared; the entire traced turn is not promised to use only one
+transaction. This reduces intermediate optional projection transactions, not
+necessarily SQL statement count or network round trips. Trace and Checkpoint
+currently require the same transaction resource as Execution; incompatible
+routes are rejected during initialization. No distributed transaction is implied.
+
+```python
+from linktools.ai.capability import (
+    ConversationCapability, ExecutionCapability, RuntimeFeatures, TraceCapability,
+)
+from linktools.ai.core import CommitPolicy
+from linktools.ai.runtime import RuntimeStorage
+
+features = RuntimeFeatures("traced-chat")
+features.agent("default", model="default")
+features.capability(ConversationCapability())
+features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+features.capability(TraceCapability(commit=CommitPolicy.terminal()))
+storage = RuntimeStorage.sqlite("chat.db")
+# Pass storage and features to Runtime.open with your model configuration.
+# Required admission/fencing writes remain; the final trace tail shares the
+# conversation/execution terminal transaction.
+```
+
+Conversation commits its final context, Session cursor, and corresponding
+Execution outcome at the turn boundary. Checkpoint retains its recovery-critical
+model/tool boundaries. Trace defaults to batch size 128 and a 3-second interval;
+Metrics defaults to batch size 128 and a 60-second interval. Explicit flush,
+completion, close, and required safety barriers remain authoritative. One module
+does not force unrelated modules to flush at every boundary.
+
+Before side effects, Task ownership, or another durable dependency requires
+state, Runtime establishes the necessary durable facts. Authorization,
+idempotency, producer fencing, tool-effect ownership, and unknown-commit readback
+remain part of the execution core. A process crash cannot recover an uncommitted
+turn merely because Conversation or Trace was enabled.
+
+Multiple Runtime instances need shared turn coordination for provisional
+live turns. Without injected coordination, or when its required groups are absent,
 Runtime retains ordinary durable admission. It does not silently substitute
 private coordination. Remote preview remains
 provisional. Result completion and unknown-commit resolution use authoritative
@@ -312,3 +422,38 @@ See the native [custom capability documentation](https://ai.pydantic.dev/capabil
 for public hook signatures and lifecycle. Provider quota details are documented
 by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 [Anthropic](https://platform.claude.com/docs/en/api/rate-limits).
+
+### Observation batch timing
+
+`TraceCapability(commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=3.0))` controls observation-only
+flush pressure (counted in observation boundaries) and maximum scheduled delay
+in seconds when `commit.buffer` supplies `append`, `read_batch` and `ack`. Each run owns
+an independent cache-backed recording scope. A policy with `buffer=None`
+awaits publication at each observation boundary; timing options do not create a
+hidden Runtime queue. A lower threshold or interval can make partial trace
+visible sooner at the cost of more writes.
+Explicit flush, tool-effect, checkpoint and terminal safety boundaries can
+publish earlier and cannot be delayed by these options. Cache configuration does
+not weaken those boundaries.
+
+Metrics recording independently accepts
+`commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60.0)` on its dataset
+constructors. With `buffer=None`, automatic observations remain
+synchronous; timing options do not introduce an in-memory queue. These settings
+are resource scheduling policy, not model-visible execution binding identity.
+
+Inside one Runtime, equal batch size/interval and the same borrowed buffer
+share automatic threshold and earliest-pending-deadline scheduling. The default
+Trace 128/3 and Metrics 128/60 policies therefore remain separate. Explicitly
+matching both values combines their pending queue-entry count; Trace entries
+are observation markers, not SQL rows. Each owner still writes and settles
+independently in its own transactions. Explicit flush, close and safety
+boundaries remain owner-local, and separate Runtime instances do not share
+a scheduler.
+
+## Optional atomic persistence
+
+Runtime-scoped native capabilities can opt into the structural
+[`CapabilityPersistence` protocol](capability-persistence.md) to submit run-local
+writes using `storage` and `commit`. Compatible participants share actual
+transactions; the guide specifies failure, forced-boundary and recovery limits.

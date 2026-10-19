@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """TaskGraph explicit cancellation semantics."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 
 import pytest
@@ -16,6 +17,7 @@ from linktools.ai.task import TaskGraph, TaskNode
 @pytest.mark.asyncio
 async def test_cancel_preserves_terminal_nodes_and_unsettled_active_work() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-cancel-semantics", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -70,6 +72,7 @@ async def test_cancel_preserves_terminal_nodes_and_unsettled_active_work() -> No
 @pytest.mark.asyncio
 async def test_whole_graph_cancel_overrides_historical_failure_after_settlement() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-cancel-final-status", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -120,6 +123,7 @@ async def test_whole_graph_cancel_overrides_historical_failure_after_settlement(
 @pytest.mark.asyncio
 async def test_cancel_does_not_terminalize_expired_claim_without_execution_binding() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-cancel-unbound-claim", tenant_id="tenant")
     try:
         repository = state.task.tasks

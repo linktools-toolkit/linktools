@@ -122,7 +122,8 @@ class _ProjectionOffset:
     transcript_messages: int = 0
     interactions: int = 0
     observation_task: asyncio.Task[None] | None = None
-    observation_boundaries: int = 0
+    observation_batch_size: int | None = None
+    observation_flush_interval: float | None = None
     observation_execution_id: str | None = None
     observation_producer_generation: int | None = None
 

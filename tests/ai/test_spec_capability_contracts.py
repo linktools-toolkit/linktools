@@ -104,14 +104,12 @@ def _expected_mcp_tool_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{server_token}__{tool_token}"
 
 
-def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
+def test_skill_wildcard_preserves_explicit_requirements() -> None:
     spec = AgentSpec(
         "agent",
         allow_skills=("*", "required"),
-        preload_skills=("preloaded",),
     )
     assert spec.allow_skills == ("*", "required")
-    assert spec.preload_skills == ("preloaded",)
 
 
 def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() -> None:

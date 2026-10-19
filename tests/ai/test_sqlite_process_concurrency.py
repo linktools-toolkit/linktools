@@ -65,11 +65,12 @@ def _local_metrics_worker(root: str, barrier) -> None:
 
 def _runtime_bootstrap_worker(database: str, barrier) -> None:
     from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.runtime.state import RuntimeState
 
     barrier.wait()
 
     async def run() -> None:
-        state = RuntimeStorage.sqlite(Path(database))
+        state = RuntimeState(RuntimeStorage.sqlite(Path(database)))
         await state.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
         await state.close()
 
@@ -78,13 +79,14 @@ def _runtime_bootstrap_worker(database: str, barrier) -> None:
 
 def _artifact_write_worker(database: str, barrier) -> None:
     from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.runtime.state import RuntimeState
     from linktools.ai.runtime.state._contracts import ArtifactRecord
     from linktools.ai.storage import ObjectRef
 
     barrier.wait()
 
     async def run() -> None:
-        state = RuntimeStorage.sqlite(Path(database))
+        state = RuntimeState(RuntimeStorage.sqlite(Path(database)))
         await state.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
         try:
             created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -147,6 +149,7 @@ async def test_runtime_sqlite_bootstrap_converges_across_processes(
     tmp_path: Path,
 ) -> None:
     from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.runtime.state import RuntimeState
 
     database = tmp_path / "runtime.db"
     context = multiprocessing.get_context("spawn")
@@ -161,7 +164,7 @@ async def test_runtime_sqlite_bootstrap_converges_across_processes(
 
     _join_processes(processes)
 
-    state = RuntimeStorage.sqlite(database)
+    state = RuntimeState(RuntimeStorage.sqlite(database))
     await state.initialize(
         namespace=_NAMESPACE,
         tenant_id=_TENANT_ID,
@@ -175,9 +178,10 @@ async def test_runtime_sqlite_concurrent_idempotent_writes_converge(
     tmp_path: Path,
 ) -> None:
     from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.runtime.state import RuntimeState
 
     database = tmp_path / "runtime.db"
-    initial = RuntimeStorage.sqlite(database)
+    initial = RuntimeState(RuntimeStorage.sqlite(database))
     await initial.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
     await initial.close()
 
@@ -193,7 +197,7 @@ async def test_runtime_sqlite_concurrent_idempotent_writes_converge(
 
     _join_processes(processes)
 
-    state = RuntimeStorage.sqlite(database)
+    state = RuntimeState(RuntimeStorage.sqlite(database))
     await state.initialize(
         namespace=_NAMESPACE,
         tenant_id=_TENANT_ID,

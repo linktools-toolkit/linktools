@@ -10,7 +10,8 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import TaskStatus
-from linktools.ai.runtime import AgentTaskInput, TraceCapability, CheckpointCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import TraceCapability, CheckpointCapability
+from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel, _wait_for_committed
@@ -63,7 +64,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
             execution_id = state.node_states[0].execution_id
             assert execution_id is not None
             identities.append(execution_id)
-            record = await storage.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
+            record = await runtime._state.execution.executions.get(execution_id, tenant_id=runtime.tenant_id)
             assert record is not None and record.requires_task_invocation_capture
             assert record.restart_checkpoints and record.durable_trace
             boundary = await _wait_for_committed(
@@ -81,7 +82,7 @@ async def test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, d
             if delegated:
                 child, = await runtime.executions.list_children(execution_id, principal=runtime.default_principal)
                 identities.append(child.execution_id)
-                child_record = await storage.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
+                child_record = await runtime._state.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
                 assert child_record is not None and not child_record.requires_task_invocation_capture
                 assert child_record.restart_checkpoints and child_record.durable_trace
             assert observed
@@ -133,13 +134,13 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
         try:
             await asyncio.wait_for(entered["root"].wait(), 5)
             async with Runtime.open("inheritance", models=models, storage=delegated, features=capabilities(False)) as borrower:
-                child_id = await _start_delegated_execution(borrower, delegated, root.execution_id, "child")
+                child_id = await _start_delegated_execution(borrower, borrower._state, root.execution_id, "child")
                 await asyncio.wait_for(entered["child"].wait(), 5)
-                grandchild_id = await _start_delegated_execution(borrower, delegated, child_id, "grandchild")
+                grandchild_id = await _start_delegated_execution(borrower, borrower._state, child_id, "grandchild")
                 await asyncio.wait_for(entered["grandchild"].wait(), 5)
                 identities = (root.execution_id, child_id, grandchild_id)
                 for execution_id in identities:
-                    record = await delegated.execution.executions.get(execution_id, tenant_id=borrower.tenant_id)
+                    record = await borrower._state.execution.executions.get(execution_id, tenant_id=borrower.tenant_id)
                     assert record is not None
                     assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)
                 release.set()
@@ -152,6 +153,6 @@ async def test_delegated_guarantees_follow_frozen_parent_across_runtime(tmp_path
     reopened_storage = RuntimeStorage.sqlite(database)
     async with Runtime.open("inheritance", models=models, storage=reopened_storage, features=capabilities(False)) as reopened:
         for execution_id in identities:
-            record = await reopened_storage.execution.executions.get(execution_id, tenant_id=reopened.tenant_id)
+            record = await reopened._state.execution.executions.get(execution_id, tenant_id=reopened.tenant_id)
             assert record is not None
             assert (record.restart_checkpoints, record.durable_trace) == (restart, trace)

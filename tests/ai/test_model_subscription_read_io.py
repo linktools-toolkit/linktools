@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Subscriptions preserve fresh authorization without duplicate owner queries."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def _reader(state, *, executions=None, reader_type=StepExecutionHistoryReader):
 
 
 async def test_model_subscription_eliminates_duplicate_sql_owner_lookup(tmp_path: Path) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -71,7 +72,7 @@ async def test_model_subscription_eliminates_duplicate_sql_owner_lookup(tmp_path
 async def test_model_subscription_fails_closed_before_registering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, denial: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -104,7 +105,7 @@ async def test_model_subscription_fails_closed_before_registering(
 async def test_model_subscription_preserves_custom_and_different_reader_authority(
     tmp_path: Path, owner: str,
 ) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -139,7 +140,7 @@ async def test_model_subscription_preserves_custom_and_different_reader_authorit
 
 
 async def test_model_subscription_preserves_custom_reader_override(tmp_path: Path) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())

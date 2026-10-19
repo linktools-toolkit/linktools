@@ -18,6 +18,7 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._cache import CacheBackend, read_cache, write_cache
+from ..core import WriteBufferBackend, WriteBufferEntry
 from ._contracts import StorageBatchResult, StorageChange, StorageOperation
 
 _Key = TypeVar("_Key", bound=Hashable)
@@ -31,7 +32,6 @@ _FLUSH_INTERVAL_SECONDS = 60.0
 _HOT_KEY_LIMIT = 128
 _HOT_HEADER = struct.Struct("!ddB16s")
 _HOT_PREFIX = b"linktools-read-v1\0"
-_Entry = tuple[str, Hashable, bytes | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,15 +59,61 @@ class BatchWriteFlushResult:
     status: BatchWriteStatus
 
 
-@runtime_checkable
-class _WriteBuffer(Protocol):
-    async def append(
-        self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool,
-    ) -> bool: ...
+class BatchWriteScopeFactory(Protocol):
+    """Construct owner-local scopes sharing one composition's scheduling."""
 
-    async def read_batch(self, scope: str, *, limit: int) -> tuple[_Entry, ...]: ...
+    def __call__(
+        self, cache: WriteBufferBackend,
+        write_batch: Callable[[tuple[WriteBufferEntry, ...]], Awaitable[None]],
+        *, batch_size: int = 128, flush_interval: float = 60.0,
+    ) -> BatchWriteScope: ...
 
-    async def ack(self, scope: str, ids: Sequence[str]) -> None: ...
+
+class _BatchWriteSchedule:
+    """Wake independent owners together; never consume or settle their queues."""
+
+    def __init__(self, batch_size: int, interval: float, release: Callable[[], None]) -> None:
+        self._batch_size = batch_size
+        self._interval = interval
+        self._release = release
+        self._members: dict[BatchWriteScope, float | None] = {}
+        self._timer: asyncio.TimerHandle | None = None
+
+    def add(self, scope: BatchWriteScope) -> None:
+        self._members[scope] = None
+
+    def remove(self, scope: BatchWriteScope) -> None:
+        self._members.pop(scope, None)
+        self.changed()
+        if not self._members:
+            self._release()
+
+    def changed(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        now = monotonic()
+        count = 0
+        earliest: float | None = None
+        for scope, first in self._members.items():
+            pending = scope._accepted - max(scope._settled, scope._flush_target)
+            if pending > 0 and scope._accepting and not scope._stop_requested:
+                first = now if first is None else first
+                count += pending
+                earliest = first if earliest is None else min(earliest, first)
+            else:
+                first = None
+            self._members[scope] = first
+        if not count or earliest is None:
+            return
+        delay = earliest + self._interval - now
+        if count >= self._batch_size or delay <= 0:
+            for scope in self._members:
+                if scope._accepting and not scope._stop_requested:
+                    scope._request_flush(scope._accepted, notify=False)
+                    self._members[scope] = None
+            return
+        self._timer = asyncio.get_running_loop().call_later(delay, self.changed)
 
 
 class BatchWriteScope:
@@ -79,21 +125,60 @@ class BatchWriteScope:
     distributed claiming and crash recovery are not implied.
     """
 
+    @classmethod
+    def scoped_factory(cls) -> BatchWriteScopeFactory:
+        """Share automatic thresholds/deadlines only inside this factory.
+
+        Buffer identity and timing values form a group. Each owner retains its
+        own queue, callback, settlement and explicit flush/close boundaries.
+        """
+        schedules: dict[tuple[int, int, float], _BatchWriteSchedule] = {}
+
+        def create(
+            cache: WriteBufferBackend,
+            write_batch: Callable[[tuple[WriteBufferEntry, ...]], Awaitable[None]],
+            *, batch_size: int = 128, flush_interval: float = 60.0,
+        ) -> BatchWriteScope:
+            scope = cls(
+                cache, write_batch, batch_size=batch_size, flush_interval=flush_interval,
+            )
+            key = (id(cache), batch_size, float(flush_interval))
+            schedule = schedules.get(key)
+            if schedule is None:
+                schedule = _BatchWriteSchedule(
+                    batch_size, float(flush_interval), lambda: schedules.pop(key, None),
+                )
+                schedules[key] = schedule
+            scope._schedule = schedule
+            schedule.add(scope)
+            return scope
+
+        return create
+
     def __init__(
-        self, cache: object,
-        write_batch: Callable[[tuple[_Entry, ...]], Awaitable[None]],
+        self, cache: WriteBufferBackend,
+        write_batch: Callable[[tuple[WriteBufferEntry, ...]], Awaitable[None]],
+        *, batch_size: int = 128, flush_interval: float = 60.0,
     ) -> None:
-        if not isinstance(cache, _WriteBuffer) or not all(
+        if not all(
             callable(getattr(cache, name, None)) for name in ("append", "read_batch", "ack")
         ):
             raise TypeError("cache must provide append, read_batch and ack")
         if not callable(write_batch):
             raise TypeError("write_batch must be callable")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if (
+            isinstance(flush_interval, bool) or not isinstance(flush_interval, (int, float))
+            or not math.isfinite(flush_interval) or flush_interval <= 0
+        ):
+            raise ValueError("flush_interval must be finite and positive")
+        self._schedule: _BatchWriteSchedule | None = None
         self._cache = cache
         self._scope = uuid4().hex
         self._write_batch = write_batch
-        self._batch_size = _BATCH_SIZE
-        self._flush_interval = _FLUSH_INTERVAL_SECONDS
+        self._batch_size = batch_size
+        self._flush_interval = float(flush_interval)
         self._accepting = True
         self._stop_requested = False
         self._accepted = 0
@@ -216,6 +301,8 @@ class BatchWriteScope:
                             self._writer = asyncio.create_task(self._run(), name="linktools-write-cache")
                             self._writer.add_done_callback(self._writer_finished)
                         self._batch_ready.set()
+                        if self._schedule is not None:
+                            self._schedule.changed()
                     else:
                         self._reject("write cache capacity exhausted", "QUEUE_FULL")
                     if cancelled:
@@ -243,6 +330,9 @@ class BatchWriteScope:
 
     def _stop_accepting(self) -> None:
         self._accepting = False
+        if self._schedule is not None:
+            schedule, self._schedule = self._schedule, None
+            schedule.remove(self)
         for operation in tuple(self._admissions):
             if not operation.done() and operation not in self._cancelled_admissions:
                 self._closed_admissions.add(operation)
@@ -262,9 +352,14 @@ class BatchWriteScope:
         if self._backend_failure is not None:
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from self._backend_failure
 
-    async def _wait_resolved(self, target: int) -> None:
+    def _request_flush(self, target: int, *, notify: bool = True) -> None:
         self._flush_target = max(self._flush_target, target)
         self._batch_ready.set()
+        if notify and self._schedule is not None:
+            self._schedule.changed()
+
+    async def _wait_resolved(self, target: int) -> None:
+        self._request_flush(target)
         while self._resolved < target:
             self._raise_backend_failure()
             self._resolution_event.clear()
@@ -283,8 +378,7 @@ class BatchWriteScope:
         if self._resolved >= self._accepted:
             self._raise_backend_failure()
             return BatchWriteFlushResult(True, self.status())
-        self._flush_target = max(self._flush_target, self._accepted)
-        self._batch_ready.set()
+        self._request_flush(self._accepted)
         try:
             await asyncio.wait_for(self._wait_resolved(self._accepted), float(timeout_seconds))
         except asyncio.TimeoutError:
@@ -364,6 +458,9 @@ class BatchWriteScope:
                 await self._batch_ready.wait()
                 continue
             self._batch_ready.clear()
+            if self._schedule is not None and self._resolved >= self._flush_target:
+                await self._batch_ready.wait()
+                continue
             accepted_at = monotonic() if self._first_pending_at is None else self._first_pending_at
             remaining = accepted_at + self._flush_interval - monotonic()
             if (
@@ -377,13 +474,16 @@ class BatchWriteScope:
                 continue
             # An append may already have published its tail while its reply is
             # still pending. Only the confirmed admission prefix may be consumed.
+            limit = min(pending, self._batch_size)
+            if self._schedule is not None:
+                limit = min(limit, self._flush_target - self._resolved)
             try:
-                batch = await self._cache.read_batch(self._scope, limit=min(pending, self._batch_size))
+                batch = await self._cache.read_batch(self._scope, limit=limit)
             except asyncio.CancelledError as error:
                 if not self._stop_requested:
                     self._backend_failed(error)
                 raise
-            if not batch or len(batch) > min(pending, self._batch_size):
+            if not batch or len(batch) > limit:
                 raise ValueError("cache lost or exceeded the admitted buffer prefix")
             if self._stop_requested:
                 return
@@ -391,9 +491,11 @@ class BatchWriteScope:
             # Source success is never replayed because acknowledgement failed.
             await self._ack(batch)
             self._settled += len(batch)
+            if self._schedule is not None:
+                self._schedule.changed()
             self._resolution_event.set()
 
-    async def _ack(self, batch: tuple[_Entry, ...]) -> None:
+    async def _ack(self, batch: tuple[WriteBufferEntry, ...]) -> None:
         ids = tuple(entry[0] for entry in batch)
         deadline = monotonic() + _WRITE_TIMEOUT_SECONDS
         while True:
@@ -424,7 +526,7 @@ class BatchWriteScope:
                 continue
             return
 
-    async def _write(self, batch: tuple[_Entry, ...]) -> None:
+    async def _write(self, batch: tuple[WriteBufferEntry, ...]) -> None:
         try:
             # Retain callback ownership until its actual completion, so
             # cancellation cannot hide the final result or leave live I/O.
@@ -527,14 +629,14 @@ class StorageReadCache:
     later put or invalidation prevents that snapshot from being published.
     """
 
-    def __init__(self, cache: object | None, *, max_age_seconds: float = 3.0) -> None:
+    def __init__(self, cache: CacheBackend | None, *, max_age_seconds: float = 3.0) -> None:
         if (
             isinstance(max_age_seconds, bool)
             or not isinstance(max_age_seconds, (int, float))
             or not math.isfinite(max_age_seconds) or max_age_seconds <= 0
         ):
             raise ValueError("max_age_seconds must be finite and positive")
-        self._cache: CacheBackend | None = cache if all(
+        self._cache: CacheBackend | None = cache if isinstance(cache, CacheBackend) and all(
             callable(getattr(cache, name, None)) for name in ("get", "put", "delete")
         ) else None
         self._max_age = float(max_age_seconds)
@@ -696,7 +798,7 @@ class StorageBuffer(Generic[_Key, _Info]):
         store: _BufferStore[_Key, _Info],
         *,
         read_pending: bool = False,
-        cache: object | None = None,
+        cache: CacheBackend | WriteBufferBackend | None = None,
     ) -> None:
         if not isinstance(store, _BufferStore):
             raise TypeError("store must provide get and apply_batch")
@@ -707,10 +809,13 @@ class StorageBuffer(Generic[_Key, _Info]):
             raise TypeError("cache must provide the complete append/read_batch/ack capability")
         self._store = store
         self._read_pending = read_pending
-        self._hot = StorageReadCache(cache)
+        self._hot = StorageReadCache(cache if isinstance(cache, CacheBackend) else None)
         self._hot_scope = uuid4().hex
         self._hot_keys: OrderedDict[_Key, str] = OrderedDict()
-        self._scope = BatchWriteScope(cache, self._consume_batch) if all(methods) else None
+        self._scope = BatchWriteScope(
+            cache, self._consume_batch, batch_size=_BATCH_SIZE,
+            flush_interval=_FLUSH_INTERVAL_SECONDS,
+        ) if isinstance(cache, WriteBufferBackend) and all(methods) else None
         self._direct_active = 0
         self._direct_done = asyncio.Event()
         self._direct_done.set()
@@ -863,7 +968,7 @@ class StorageBuffer(Generic[_Key, _Info]):
             await self._hot.close()
         self._check_settlement()
 
-    async def _consume_batch(self, batch: tuple[_Entry, ...]) -> None:
+    async def _consume_batch(self, batch: tuple[WriteBufferEntry, ...]) -> None:
         latest: dict[_Key, _BufferedChange[_Key]] = {}
         for id, key, value in batch:
             change = _BufferedChange(key, value, id)

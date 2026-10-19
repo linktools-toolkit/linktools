@@ -65,7 +65,8 @@ class Command(BaseCommand):
                         history = await stack.enter_async_context(RuntimeHistory.open("default", storage=_local_runtime_storage(workspace)))
                 else:
                     from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
-                    from linktools.ai.runtime import Runtime, ConversationCapability, MetricsCapability
+                    from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+                    from linktools.ai.runtime import Runtime
 
                     assets = _local_runtime_assets(workspace)
                     await assets.initialize()
@@ -74,15 +75,16 @@ class Command(BaseCommand):
                     features.capability(AssetCapability(assets))
                     features.capability(WorkspaceCapability(workspace))
                     features.capability(ConversationCapability())
+                    features.capability(CheckpointCapability())
+                    features.capability(TraceCapability())
                     metrics = await _local_metrics(workspace)
-                    features.capability(MetricsCapability(metrics=metrics))
                     capture = await features.capture()
                     declarations = [{"kind": item.kind, "id": item.id, "revision": item.revision} for item in capture.contributions]
                     if not any(item["kind"] == "agent" and item["id"] == "default" for item in declarations):
                         declarations.insert(0, {"kind": "agent", "id": "default", "revision": 1})
                     runtime = await stack.enter_async_context(Runtime.open(
                         "default", storage=_local_runtime_storage(workspace),
-                        models=models, features=capture,
+                        models=models, features=capture, metrics=metrics,
                     ))
                 status = {
                     "namespace": "default", "workspace": str(workspace.root), "asset_root": str(workspace.storage_root),

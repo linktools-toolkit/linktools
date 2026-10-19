@@ -20,7 +20,8 @@ from linktools.ai.evaluation import (
     EvaluationSpec, GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
     TaskCaseInput,
 )
-from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, TraceCapability, Runtime, RuntimeStorage
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from linktools.ai.workspace import Workspace
 

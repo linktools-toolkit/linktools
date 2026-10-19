@@ -15,10 +15,8 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.runtime import (
-    CheckpointCapability, ConversationCapability, MetricsCapability,
-    Runtime, RuntimeHistory, RuntimeStorage, TraceCapability,
-)
+from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.web import create_app
 from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
 
@@ -103,9 +101,8 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
     features = RuntimeFeatures("web-test")
     features.capability(ConversationCapability(), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
-    features.capability(MetricsCapability(metrics=metrics), scope="runtime")
     async with Runtime.open(
-        "web-test", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
+        "web-test", metrics=metrics, models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
         features=features,
     ) as runtime:
         async with client(create_app(runtime=runtime, metrics=metrics)) as http:
@@ -577,11 +574,13 @@ def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyP
     assert not (config_dir / "runtime").exists()
 
 
-def test_web_read_only_rejects_legacy_input_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_web_read_only_rejects_invalid_input_types(tmp_path: Path) -> None:
     from linktools.commands.ai.web import command
     from linktools.cli import CommandError
 
-    monkeypatch.setenv("OPENAI_VISION", "false")
+    config = tmp_path / ".linktools" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("input_types: image/png\n")
     args = command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
     with pytest.raises(CommandError, match="input_types"):
         command.run(args)

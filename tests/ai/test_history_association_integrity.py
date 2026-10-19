@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """History indexes preserve captured cuts and reject incomplete coverage."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ async def _discard_locators(archive, run_id: str, keep_sequence: int | None) -> 
 async def test_trace_indexes_keep_cursor_cut(
     tmp_path: Path,
 ) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "trace.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "trace.db"))
     try:
         archive, run_id = await _seed_trace(storage, 4)
         timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -67,7 +68,7 @@ async def test_trace_indexes_keep_cursor_cut(
 async def test_associations_find_response_request_and_tools_at_captured_cut(
     tmp_path: Path,
 ) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "associations.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "associations.db"))
     try:
         archive, run_id = await _seed_trace(storage, 0)
         run = await storage.run_store.get_agent_run(agent_run_id=run_id)
@@ -103,7 +104,7 @@ async def test_associations_find_response_request_and_tools_at_captured_cut(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target", ("trace", "association", "coverage"))
 async def test_malformed_present_locator_is_rejected(tmp_path: Path, target: str) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "invalid.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "invalid.db"))
     try:
         archive, run_id = await _seed_trace(storage, 2)
         family, identity = {
@@ -136,7 +137,7 @@ async def test_malformed_present_locator_is_rejected(tmp_path: Path, target: str
 @pytest.mark.asyncio
 @pytest.mark.parametrize("partial", (False, True))
 async def test_incomplete_event_index_coverage_rejects_reads_and_append(tmp_path: Path, partial: bool) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "incomplete.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "incomplete.db"))
     try:
         archive, run_id = await _seed_trace(storage, 2)
         await _discard_locators(archive, run_id, 2 if partial else None)
@@ -163,7 +164,7 @@ async def test_incomplete_event_index_coverage_rejects_reads_and_append(tmp_path
 
 @pytest.mark.asyncio
 async def test_empty_trace_does_not_require_index_coverage(tmp_path: Path) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "empty.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "empty.db"))
     try:
         archive, run_id = await _seed_trace(storage, 0)
         assert await archive.list_trace_events(
@@ -179,7 +180,7 @@ async def test_empty_trace_does_not_require_index_coverage(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_filtered_trace_rejects_missing_locator_under_complete_coverage(tmp_path: Path) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "missing.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "missing.db"))
     try:
         archive, run_id = await _seed_trace(storage, 2)
         await archive.state_store.mutate(lambda tx: tx.delete_record(

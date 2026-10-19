@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Coordinated session refresh captures fresh authority, admission, and timeline."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import aclosing
 from dataclasses import replace
@@ -14,20 +15,21 @@ from linktools.ai.core import (
     ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute, SessionDetail
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime import RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, SessionDetail
+from linktools.ai.storage import StorageRoute
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
-from .test_session_timeline import _execution, _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
 
 pytestmark = pytest.mark.asyncio
 _PRINCIPAL = Principal("owner", "tenant")
 
 
-def _service(state: RuntimeStorage, authorization=None) -> DefaultSessionService:
-    return DefaultSessionService(
+def _service(state: RuntimeState, authorization=None) -> RuntimeSessionService:
+    return RuntimeSessionService(
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("refresh", b"session-refresh-key"),
@@ -35,13 +37,17 @@ def _service(state: RuntimeStorage, authorization=None) -> DefaultSessionService
     )
 
 
-async def _admit(state, execution_id="active", status=ExecutionStatus.FAILED):
-    await state.execution.executions.create(replace(
-        _execution(execution_id, status=status, prompt=execution_id), result=None,
-    ))
-    return await state.conversation.sessions.admit_execution(
-        "session", tenant_id="tenant", execution_id=execution_id, expected=None,
+async def _admit(state, execution_id="active", status=ExecutionStatus.FAILED, *, expected=None):
+    await state.execution.executions.create(
+        _execution(execution_id, status=status, prompt=execution_id),
     )
+    admitted = await state.conversation.sessions.admit_execution(
+        "session", tenant_id="tenant", execution_id=execution_id, expected=expected,
+    )
+    if status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        execution = await state.execution.executions.get(execution_id, tenant_id="tenant")
+        await _commit_empty_turn(state, execution)
+    return admitted
 
 
 async def _release(state, execution_id):
@@ -56,12 +62,13 @@ async def test_refresh_reconciles_once_outside_metadata_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, status: ExecutionStatus,
 ) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
         await _admit(state, status=status)
         service = _service(state)
-        reconcile = service._reconcile_terminal_admission
+        reconcile = service.reconcile_admission
         calls = []
 
         async def checked(record):
@@ -69,7 +76,7 @@ async def test_refresh_reconciles_once_outside_metadata_scope(
             calls.append(record.active_execution_id)
             return await reconcile(record)
 
-        monkeypatch.setattr(service, "_reconcile_terminal_admission", checked)
+        monkeypatch.setattr(service, "reconcile_admission", checked)
         detail = await service.refresh("session", principal=_PRINCIPAL)
         assert isinstance(detail, SessionDetail)
         assert calls == ([] if status is ExecutionStatus.PENDING_START else ["active"])
@@ -86,6 +93,7 @@ async def test_refresh_uses_header_authority_and_fresh_record_after_authorizatio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     pending = None
     try:
@@ -133,6 +141,7 @@ async def test_refresh_uses_header_authority_and_fresh_record_after_authorizatio
 @pytest.mark.parametrize("principal", (Principal("other", "tenant"), Principal("owner", "other")))
 async def test_refresh_denied_authority_does_not_cleanup_admission(principal: Principal) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -155,6 +164,7 @@ async def test_refresh_cleans_admission_before_page_errors(
     monkeypatch: pytest.MonkeyPatch, fault: str, expected: ErrorCode,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -187,6 +197,7 @@ async def test_refresh_captures_concurrent_replacement_without_reconciling_twice
     monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -219,6 +230,7 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
     monkeypatch: pytest.MonkeyPatch, corruption: str | None,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -255,16 +267,17 @@ async def test_refresh_batches_and_validates_active_execution_outside_page(
             detail = await service.refresh("session", principal=_PRINCIPAL, limit=1, cursor=page.next_cursor)
             assert [turn.execution_id for turn in detail.timeline.items] == ["older"]
             assert detail.session.active_execution_id == "active"
-        assert seen == [("older", "active")]
+        assert seen == [("active",)]
     finally:
         await state.close()
 
 
 async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: Path) -> None:
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -282,6 +295,7 @@ async def test_refresh_keeps_split_database_routes_and_domain_facade(tmp_path: P
 
 async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp_path: Path) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "refresh.db")
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -302,7 +316,7 @@ async def test_refresh_idle_has_one_authority_read_and_one_metadata_snapshot(tmp
             event.remove(engine.sync_engine, "begin", begin)
         assert detail.timeline.items[0].execution_id == "active"
         assert len(begins) == 2
-        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 6
+        assert sum(statement.lstrip().upper().startswith("SELECT") for statement in statements) == 5
     finally:
         await state.close()
 
@@ -312,6 +326,7 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
     monkeypatch: pytest.MonkeyPatch, cancel: bool,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     pending = None
     try:
@@ -319,10 +334,12 @@ async def test_refresh_bodies_leave_metadata_scope_and_hold_consumer(
         await _admit(state, "success", ExecutionStatus.SUCCEEDED)
         run_id, count = await _materialize_conversation(state, created.history_id)
         sessions = state.conversation.sessions
+        execution = await state.execution.executions.get("success", tenant_id="tenant")
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
                 start_message_index=0, end_message_index=count,
+                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="success",
@@ -377,6 +394,7 @@ async def test_timeline_retains_validation_authority_order_and_read_only_admissi
     principal: Principal, limit: int, cursor: str | None, expected: ErrorCode,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -405,6 +423,7 @@ async def test_refresh_cancellation_during_metadata_releases_scope_and_consumer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     pending = None
     try:
@@ -439,6 +458,7 @@ async def test_refresh_cancellation_during_metadata_releases_scope_and_consumer(
 
 async def test_refresh_live_admission_reuses_the_metadata_snapshot(tmp_path: Path) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "live-refresh.db")
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -473,6 +493,7 @@ async def test_refresh_validates_initial_admission_before_cleanup(
     monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus, corruption: str,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())

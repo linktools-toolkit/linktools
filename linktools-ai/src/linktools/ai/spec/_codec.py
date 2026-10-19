@@ -59,8 +59,6 @@ class AgentSpecCodec:
             "tool_retries": value.tool_retries,
             "output_retries": value.output_retries,
         }
-        if value.preload_skills:
-            payload["preload_skills"] = list(value.preload_skills)
         return payload
 
     def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
@@ -88,11 +86,6 @@ class AgentSpecCodec:
         output_retries = raw.get("output_retries")
         description = raw.get("description")
         metadata = raw.get("metadata", {})
-        preload_skills: object = raw.get("preload_skills", [])
-        if not isinstance(preload_skills, list) or any(
-            not isinstance(item, str) for item in preload_skills
-        ):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "preload_skills must be a string array")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
         if not isinstance(model, str) or not model.strip():
@@ -144,7 +137,6 @@ class AgentSpecCodec:
                 tool_retries=tool_retries,
                 output_retries=output_retries,
                 description=description,
-                preload_skills=tuple(preload_skills),
                 metadata=metadata,
                 revision=revision,
             )

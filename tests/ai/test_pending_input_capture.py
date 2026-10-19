@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Input capture requires authorized promotion and a fresh source record."""
 
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ _PRINCIPAL = Principal("principal", "tenant", "service")
 @asynccontextmanager
 async def _storage():
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="pending-capture", tenant_id="tenant")
     try:
         yield state
@@ -38,8 +40,13 @@ async def _storage():
 
 def _captures(state, *, prepare=None, authorization=None):
     return RuntimeInputCaptures(
-        "pending-capture", state, authorization or TenantAuthorizationPolicy("tenant"),
+        "pending-capture", authorization or TenantAuthorizationPolicy("tenant"),
         SimpleNamespace(), ExecutionInputMaterializer(None, PromptLimits()),
+        tenant_id=state.tenant_id,
+        execution_repositories=state.execution, task_repositories=state.task,
+        object_stores={domain: state.object_store(domain) for domain in RuntimeDomain},
+        execution_retention=state.plan.route(RuntimeDomain.EXECUTION).retention,
+        task_retention=state.plan.route(RuntimeDomain.TASK).retention,
         prepare_pending_capture=prepare,
     )
 

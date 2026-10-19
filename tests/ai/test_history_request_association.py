@@ -3,6 +3,7 @@
 """Raw history retains proven model-request origins across durable boundaries."""
 
 from __future__ import annotations
+from linktools.ai.runtime.state import RuntimeState
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 from functools import partial
 
 import pytest
+from linktools.ai.runtime._persistence_services import CheckpointService
 from pydantic_ai import Agent, ModelRequestNode, RunContext
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -41,7 +43,7 @@ from linktools.ai.core import (
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
@@ -54,7 +56,7 @@ from .test_history_projection_conformance import _record
 
 @dataclass
 class _History:
-    state: RuntimeStorage
+    state: RuntimeState
     reader: StepExecutionHistoryReader
     recorders: tuple[AgentRunRecorder, ...]
     journals: tuple[ModelRequestJournal, ...]
@@ -83,7 +85,7 @@ class _History:
 
 @asynccontextmanager
 async def _history(run_count: int = 1) -> AsyncIterator[_History]:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(
@@ -406,7 +408,7 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
     persistence = AgentRunCapture(
         recorder=recorder, agent_id="default", agent_run_id="run",
     )
-    agent = Agent(FunctionModel(model), capabilities=[observation, persistence, CheckpointCapability().bind(persistence), FailAfterResponse()])
+    agent = Agent(FunctionModel(model), capabilities=[observation, persistence, CheckpointCapability().bind(CheckpointService(persistence)), FailAfterResponse()])
     if fail_after_node:
         with pytest.raises(RuntimeError, match="after-node failure"):
             await agent.run("question")

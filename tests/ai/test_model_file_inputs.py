@@ -96,22 +96,21 @@ def test_nested_history_content_is_checked_without_mutation() -> None:
     assert validate_model_inputs(_binding("application/pdf"), messages) is None
 
 
-@pytest.mark.parametrize("vision", (False, True))
-def test_committed_vision_contract_keeps_original_image_policy(vision: bool) -> None:
+@pytest.mark.parametrize("metadata", ({"vision": True}, {"vision": False}, {"inputs": {}}, {"label": "custom"}))
+def test_current_mime_permissions_are_independent_of_extra_metadata(metadata: dict) -> None:
     class Binding:
         provider = "test"
         model_identity = "test:local"
-        contract = {"vision": vision}
-    assert validate_model_input(Binding(), "application/x-private") is None
-    if vision:
-        assert validate_model_input(Binding(), "image/png") is None
-    else:
-        with pytest.raises(AIError) as raised:
-            validate_model_input(Binding(), "image/png")
-        assert raised.value.safe_details == {"reason": "image_input_not_supported"}
+        contract = {**metadata, "input_mime_types": ["application/pdf"]}
+
+    assert validate_model_input(Binding(), "application/pdf") is None
+    with pytest.raises(AIError) as raised:
+        validate_model_input(Binding(), "image/png")
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.safe_details["reason"] == "model_input_not_supported"
 
 
-@pytest.mark.parametrize("contract", ({}, {"input_mime_types": None}, {"inputs": {}, "vision": True}))
+@pytest.mark.parametrize("contract", ({}, {"input_mime_types": None}, {"vision": False}, {"vision": True}, {"inputs": {}}))
 def test_malformed_or_unsupported_model_input_contract_fails_closed(contract: dict) -> None:
     class Binding:
         provider = "test"
@@ -196,41 +195,24 @@ def test_custom_mime_allowlist_can_use_provider_uploaded_file_encoding() -> None
 
 
 @pytest.mark.parametrize("vision", (False, True))
-def test_committed_openai_vision_payload_restores_only_matching_host_binding(vision: bool) -> None:
-    payload = {
-        "provider": "openai", "model_identity": "openai:gpt-file-test",
-        "vision": vision, "settings": {"max_tokens": 2048},
-    }
-
+def test_registered_old_contract_cannot_grant_file_permissions(vision: bool) -> None:
     class HostBinding:
         route_id = "default"
         provider = "openai"
         model_identity = "openai:gpt-file-test"
-        contract = payload
+        contract = {"provider": provider, "model_identity": model_identity, "vision": vision}
 
         def materialize(self) -> TestModel:
             return TestModel()
 
     registry = ModelRegistry()
     registry.register(HostBinding())
-    stored = json.loads(json.dumps(payload))
-    restored = registry.capture().restore(stored, route_id="default")
-    assert restored.contract == stored
-    assert validate_model_input(restored, "application/pdf") is None
-    if vision:
-        assert validate_model_input(restored, "image/png") is None
-    else:
+    restored = registry.capture().restore(dict(HostBinding.contract), route_id="default")
+    for mime_type in ("application/pdf", "image/png"):
         with pytest.raises(AIError) as raised:
-            validate_model_input(restored, "image/png")
-        assert raised.value.safe_details == {"reason": "image_input_not_supported"}
-
-    current = ModelRegistry.openai(
-        model="gpt-file-test", max_tokens=2048,
-        input_types=("mime:image/*",) if vision else (),
-    ).capture()
-    with pytest.raises(AIError) as raised:
-        current.restore(stored, route_id="default")
-    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+            validate_model_input(restored, mime_type)
+        assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+        assert raised.value.safe_details == {"reason": "model_input_contract_invalid"}
 
 
 @pytest.mark.parametrize("category,alias_name", (

@@ -59,22 +59,11 @@ def validate_model_input(
         raise ValueError("model input size must be a non-negative integer")
     contract = binding.contract
     try:
-        if "inputs" in contract:
-            raise ValueError("unsupported model input contract")
-        if "input_mime_types" in contract:
-            rules = normalize_input_mime_types(contract["input_mime_types"])
-        else:
-            historical_vision = contract.get("vision")
-            if type(historical_vision) is not bool:
-                raise ValueError("model input contract is missing")
-            if not historical_vision and (mime_type.startswith("image/") or input_kind == "image-url"):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False,
-                              safe_details={"reason": "image_input_not_supported"})
-            rules = None
-    except (TypeError, ValueError) as error:
+        rules = normalize_input_mime_types(contract["input_mime_types"])
+    except (KeyError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, retryable=False,
                       safe_details={"reason": "model_input_contract_invalid"}) from error
-    if rules is not None and mime_type not in rules and mime_type.split("/", 1)[0] + "/*" not in rules:
+    if mime_type not in rules and mime_type.split("/", 1)[0] + "/*" not in rules:
         _input_error(mime_type, input_kind, "model_input_not_supported")
     if binding.provider == "openai" and openai_input_transport(
         mime_type, input_kind, binding.model_identity.removeprefix("openai:")

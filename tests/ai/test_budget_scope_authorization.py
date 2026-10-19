@@ -8,10 +8,12 @@ from dataclasses import replace
 import pytest
 import pytest_asyncio
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, ExecutionRequest, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import _decode_enveloped_domain, encode_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._store import RecordQuery, StateTransaction
@@ -20,7 +22,7 @@ from linktools.ai.task import TaskBindingContract, TaskGraph
 from ._runtime_test_helpers import RuntimeUsageModels
 
 
-_BudgetRuntime = tuple[Runtime, RuntimeStorage, ExecutionRecord]
+_BudgetRuntime = tuple[Runtime, RuntimeState, ExecutionRecord]
 _TASK = TaskBindingContract("adapter.task", 1, "none", {}, None, 1, 0)
 
 
@@ -34,17 +36,17 @@ async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
                             storage=storage, features=group) as runtime:
         root = await runtime.agents.get().start("root", budget=RunBudget(model_requests=20))
         assert (await root.wait()).result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(root.execution_id, tenant_id="default")
+        record = await runtime._state.execution.executions.get(root.execution_id, tenant_id="default")
         assert record is not None
         graph = await runtime.tasks.bind().start(
             TaskGraph("owned", ()), idempotency_key="graph", budget=RunBudget(model_requests=20),
         )
         await graph.wait()
         await runtime.agents.get().create_session("session", principal=Principal("stranger", "default"))
-        yield runtime, storage, record
+        yield runtime, runtime._state, record
 
 
-async def _records(storage: RuntimeStorage) -> tuple[object, ...]:
+async def _records(storage: RuntimeState) -> tuple[object, ...]:
     result = []
     for repository in (storage.execution.executions, storage.task.admissions, storage.conversation.sessions):
         result.append(await repository.state_store.read(lambda transaction: transaction.scan_records()))

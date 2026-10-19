@@ -8,7 +8,8 @@ from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, ConversationCapability, TraceCapability
+from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime._message import encode_model_messages
 

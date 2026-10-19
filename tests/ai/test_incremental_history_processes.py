@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Independent readers observe committed model and tool boundaries."""
 
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 import asyncio
 import multiprocessing
 import traceback

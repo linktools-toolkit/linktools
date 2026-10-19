@@ -29,7 +29,7 @@ from ._attachment import (
     is_binary_attachment_text,
 )
 from .state._plan import RuntimeDomain
-from ._input_contract import (
+from ..model import (
     CanonicalUserInput,
     MaterializedUserContent,
     UserPromptInput,

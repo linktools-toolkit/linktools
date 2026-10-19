@@ -113,7 +113,7 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
                     nonlocal advanced
                     if not advanced:
                         advanced = True
-                        await storage.execution.executions.acquire_dependency_hold(
+                        await runtime._state.execution.executions.acquire_dependency_hold(
                             identity, tenant_id=tenant, hold_id="concurrent-reader",
                         )
                     return await commit_cancel(commit, expected_status=expected_status)
@@ -127,16 +127,16 @@ async def test_web_recovery_requires_explicit_control_after_process_exit(
                 assert conflict.json()["code"] == "STORAGE_CONFLICT"
                 assert (await _get(http, f"/api/executions/{identity}"))["status"] == "STARTED"
                 assert (await asyncio.to_thread(owner.request, "snapshot"))["status"] == "STARTED"
-                events = await storage.execution.events.list(identity, tenant_id=tenant, after_event_seq=0, limit=100)
+                events = await runtime._state.execution.events.list(identity, tenant_id=tenant, after_event_seq=0, limit=100)
                 assert not any(item.event_type == "CANCEL_REQUESTED" for item in events.items)
-                await storage.execution.executions.release_dependency_hold(
+                await runtime._state.execution.executions.release_dependency_hold(
                     identity, tenant_id=tenant, hold_id="concurrent-reader",
                 )
                 for _ in range(2):
                     cancelled = await http.post(path, json=request, headers=_HEADERS)
                     assert cancelled.status_code == 200, cancelled.text
                     assert cancelled.json()["cancelled"] is False
-                events = await storage.execution.events.list(identity, tenant_id=tenant, after_event_seq=0, limit=100)
+                events = await runtime._state.execution.events.list(identity, tenant_id=tenant, after_event_seq=0, limit=100)
                 assert sum(item.event_type == "CANCEL_REQUESTED" for item in events.items) == 1
                 await asyncio.to_thread(owner.crash)
             for _ in range(2):

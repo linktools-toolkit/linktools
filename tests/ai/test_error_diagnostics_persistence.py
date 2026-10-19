@@ -21,6 +21,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
@@ -159,19 +160,19 @@ def _failed_terminal(
 async def _durable_state(
     tmp_path: Path,
     backend: str,
-) -> tuple[RuntimeStorage, Path]:
+) -> tuple[RuntimeState, Path]:
     path = tmp_path / f"runtime-{backend}"
     if backend == "filesystem":
-        return RuntimeStorage.filesystem(path), path
+        return RuntimeState(RuntimeStorage.filesystem(path)), path
     database = path.with_suffix(".db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
     return (
-        RuntimeStorage.sqlite(
+        RuntimeState(RuntimeStorage.sqlite(
             database,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
-        ),
+        )),
         database,
     )
 
@@ -228,50 +229,47 @@ async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
     )
-    try:
-        async with Runtime.open(
-            "default",
-            models=_DiagnosticModels(),  # type: ignore[arg-type]
-            storage=reopened,
-        ) as runtime:
-            result = await runtime.executions.result(
+    async with Runtime.open(
+        "default",
+        models=_DiagnosticModels(),  # type: ignore[arg-type]
+        storage=reopened,
+    ) as runtime:
+        result = await runtime.executions.result(
+            started.execution_id,
+            principal=runtime.default_principal,
+        )
+        events = await runtime.events.list(
+            started.execution_id,
+            principal=runtime.default_principal,
+            limit=100,
+        )
+        terminal = next(
+            event
+            for event in events.items
+            if event.event_type == commit.terminal_event_type
+        )
+        assert result.status is status
+        assert result.error_code == commit.execution.error_code
+        assert result.safe_error_details == commit.execution.safe_error_details
+        assert result.error_diagnostics == commit.execution.error_diagnostics
+        assert result.output == ({"answer": "ok"} if status is ExecutionStatus.SUCCEEDED else None)
+        assert await runtime.history.result(
+            started.execution_id,
+            principal=runtime.default_principal,
+        ) == result
+        if status is ExecutionStatus.FAILED:
+            summary = await runtime.history.inspect_execution(
                 started.execution_id,
                 principal=runtime.default_principal,
             )
-            events = await runtime.events.list(
-                started.execution_id,
-                principal=runtime.default_principal,
-                limit=100,
-            )
-            terminal = next(
-                event
-                for event in events.items
-                if event.event_type == commit.terminal_event_type
-            )
-            assert result.status is status
-            assert result.error_code == commit.execution.error_code
-            assert result.safe_error_details == commit.execution.safe_error_details
-            assert result.error_diagnostics == commit.execution.error_diagnostics
-            assert result.output == ({"answer": "ok"} if status is ExecutionStatus.SUCCEEDED else None)
-            assert await runtime.history.result(
-                started.execution_id,
-                principal=runtime.default_principal,
-            ) == result
-            if status is ExecutionStatus.FAILED:
-                summary = await runtime.history.inspect_execution(
-                    started.execution_id,
-                    principal=runtime.default_principal,
-                )
-                assert summary.error_diagnostics is None
-                assert terminal.payload["error_code"] == result.error_code
-                assert terminal.payload["safe_error_details"] == dict(result.safe_error_details)
-                assert terminal.payload["error_diagnostics"] == {
-                    "exception_type": diagnostics.exception_type,
-                    "exception_message": diagnostics.exception_message,
-                    "cause_digest": diagnostics.cause_digest,
-                }
-    finally:
-        await reopened.close()
+            assert summary.error_diagnostics is None
+            assert terminal.payload["error_code"] == result.error_code
+            assert terminal.payload["safe_error_details"] == dict(result.safe_error_details)
+            assert terminal.payload["error_diagnostics"] == {
+                "exception_type": diagnostics.exception_type,
+                "exception_message": diagnostics.exception_message,
+                "cause_digest": diagnostics.cause_digest,
+            }
 
     history_storage = (
         RuntimeStorage.filesystem(durable_path)

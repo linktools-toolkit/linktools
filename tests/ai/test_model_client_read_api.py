@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authorized original client bodies load independently of SDK projections."""
 
+from linktools.ai.runtime.state import RuntimeState
 import hashlib
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,8 @@ from linktools.ai.core import (
     ExecutionStatus, HmacCursorSigner, Page, Principal, TenantAuthorizationPolicy, agent_conversation_id, agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeExecutions, RuntimeHistory, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import RuntimeExecutions, RuntimeHistory, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, build_context_projection
 from linktools.ai.runtime._transient_history import TransientExecutionHistoryStore
@@ -35,7 +37,7 @@ from .test_runtime_history_public import _Executions
 async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         await storage.execution.executions.create_with_history_head(_record(ExecutionStatus.STARTED, 1))
@@ -230,7 +232,7 @@ async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload(
     finally:
         await archive.close()
 
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
+    storage = RuntimeState(RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient())))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         staged = replace(

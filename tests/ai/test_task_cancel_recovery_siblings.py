@@ -104,7 +104,7 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
                 with pytest.raises(AIError) as raised:
                     await execution.wait(timeout_seconds=10)
                 assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-                operations = await storage.recovery.tools.list_by_execution(
+                operations = await runtime._state.recovery.tools.list_by_execution(
                     execution.execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
@@ -115,4 +115,4 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
             assert effects == ["unknown-write"]
     finally:
         release.set()
-        await storage.close()
+        await runtime._state.close()

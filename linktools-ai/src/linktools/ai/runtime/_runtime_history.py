@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Read-only Runtime composition for persisted execution history."""
 
+from ..storage import StorageRetentionMode
+
 import json
 import heapq
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -43,11 +45,11 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
-from ._persistence_configuration import persistence_storage_configuration
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
 from .state._object_router import runtime_object_source_reads
 from ._event import project_event_payload
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService, _read_model_interaction_updates
 from ._runtime_identity import token_seed
@@ -76,7 +78,7 @@ from .service_api import (
     UsageReadCutoff,
     UsageSummary,
 )
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from .state import RuntimeDomain, RuntimeStorage, RuntimeState
 from .state._execution_repositories import ExecutionRepositoryImpl
 from .state._step_archive import StagingAgentRunStore
 from .state._contracts import (
@@ -317,6 +319,14 @@ class RuntimeHistory:
                   await executions.get_result(execution_id, tenant_id=principal.tenant_id))
         if stored is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not record.retention_closed and record.conversation and record.session_id is not None:
+            sessions, _ = self._require_session_reader()
+            await sessions.state_store.read(
+                lambda transaction: sessions.pending_turn_commit_in_transaction(
+                    transaction, session_id=record.session_id, execution_id=record.execution_id,
+                    allow_unadmitted=record.started_at is None,
+                )
+            )
 
         if record.status is not ExecutionStatus.SUCCEEDED:
             if stored.output is not None:
@@ -1161,41 +1171,45 @@ async def _open_runtime_history(
     capabilities = () if captured is None else tuple(
         item.value for item in captured.contributions if item.scope == "runtime"
     )
-    module_routes, module_caches = persistence_storage_configuration(capabilities)
-    selected_storage = storage
+    module_routes = persistence_storage_configuration(capabilities)
+    capability_routes = capability_storage_configuration(
+        () if captured is None else tuple((item.id, item.value) for item in captured.contributions if item.scope == "runtime"),
+        default_route=storage.plan.route(RuntimeDomain.EXECUTION),
+    )
+    selected_state = RuntimeState(storage)
     initialized = False
     body_error: BaseException | None = None
     try:
-        await selected_storage.initialize(
+        await selected_state.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
             read_only=True,
             module_routes=module_routes,
-            module_caches=module_caches,
+            capability_routes=capability_routes,
         )
         initialized = True
         if captured is not None:
             await captured.verify_source_revision()
         if (
-            selected_storage.namespace != resolved_namespace
-            or selected_storage.tenant_id != effective_tenant_id
+            selected_state.namespace != resolved_namespace
+            or selected_state.tenant_id != effective_tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        history_store = selected_storage.run_store.read_store(RuntimeDomain.TRACE)
-        if selected_storage.plan.route(RuntimeDomain.TRACE).retention is RuntimeRetentionMode.TRANSIENT:
+        history_store = selected_state.run_store.read_store(RuntimeDomain.TRACE)
+        if selected_state.plan.route(RuntimeDomain.TRACE).retention is StorageRetentionMode.TRANSIENT:
             if not isinstance(history_store, StagingAgentRunStore):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            history_store = TransientExecutionHistoryStore(history_store, selected_storage.run_store)
+            history_store = TransientExecutionHistoryStore(history_store, selected_state.run_store)
         reader = StepExecutionHistoryReader(
             namespace=resolved_namespace,
-            executions=selected_storage.execution.executions,
+            executions=selected_state.execution.executions,
             store=history_store,
             cursor_signer=HmacCursorSigner(
                 "execution-history",
                 token_seed(resolved_namespace),
             ),
-            tool_operations=selected_storage.recovery.tools,
-            durable_history_available=selected_storage.run_store.model_interaction_history_available,
+            tool_operations=selected_state.recovery.tools,
+            durable_history_available=selected_state.run_store.model_interaction_history_available,
         )
         effective_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)
@@ -1203,13 +1217,13 @@ async def _open_runtime_history(
             else authorization
         )
         service = DefaultExecutionHistoryService(
-            selected_storage.execution.executions,
+            selected_state.execution.executions,
             effective_authorization,
             reader,
             cursor_signer=HmacCursorSigner("execution", token_seed(resolved_namespace)),
         )
         artifacts = DefaultArtifactService(
-            selected_storage.artifact,
+            selected_state.artifact,
             effective_authorization,
             token_seed=token_seed(resolved_namespace),
             cursor_signer=HmacCursorSigner("artifact", token_seed(resolved_namespace)),
@@ -1217,22 +1231,22 @@ async def _open_runtime_history(
         yield RuntimeHistory(
             service,
             tenant_id=effective_tenant_id,
-            executions=selected_storage.execution.executions,
-            events=selected_storage.execution.events,
-            sessions=selected_storage.conversation.sessions,
-            tasks=selected_storage.task.tasks,
+            executions=selected_state.execution.executions,
+            events=selected_state.execution.events,
+            sessions=selected_state.conversation.sessions,
+            tasks=selected_state.task.tasks,
             authorization=effective_authorization,
             namespace=resolved_namespace,
-            execution_objects=selected_storage.object_store(RuntimeDomain.EXECUTION),
-            task_objects=selected_storage.object_store(RuntimeDomain.TASK),
-            object_reader=selected_storage.read_object,
+            execution_objects=selected_state.object_store(RuntimeDomain.EXECUTION),
+            task_objects=selected_state.object_store(RuntimeDomain.TASK),
+            object_reader=selected_state.read_object,
             artifacts=artifacts,
             cursor_signer=HmacCursorSigner(
                 "runtime-history",
                 token_seed(resolved_namespace),
             ),
-            conversation=selected_storage.conversation,
-            session_transcript_store=selected_storage.run_store.conversation_persistence,
+            conversation=selected_state.conversation,
+            session_transcript_store=selected_state.run_store.conversation_persistence,
         )
     except BaseException as error:
         body_error = error
@@ -1240,7 +1254,7 @@ async def _open_runtime_history(
     finally:
         if initialized:
             try:
-                await selected_storage.close()
+                await selected_state.close()
             except BaseException as error:
                 if body_error is None:
                     raise

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Opt-in execution observations retain independent cursors and finite coverage."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import time
 from dataclasses import replace
@@ -12,7 +13,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import ExecutionObservationEvent, ExecutionTreeEvent, TaskModelProjection
-from linktools.ai.runtime import _cursor as runtime_cursor
+from linktools.ai.core import _signed_cursor as runtime_cursor
 from linktools.ai.runtime._watch_cursor import (
     decode_execution_observation_cursor, decode_execution_watch_cursor,
     encode_execution_observation_cursor,
@@ -258,9 +259,9 @@ async def test_facade_forwards_metadata_mode() -> None:
 async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.capability import RuntimeFeatures
-    from linktools.ai.runtime import (
-        TraceCapability, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
-    )
+    from linktools.ai.capability import TraceCapability
+    from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+    from linktools.ai.storage import StorageRoute
     from .test_live_history_readback_integration import _Models
     from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -273,7 +274,7 @@ async def test_real_execution_metadata_live_and_final_handoff(backend, durable_t
         "memory": lambda: RuntimeStorage.in_memory(),
         "filesystem": lambda: RuntimeStorage.filesystem(tmp_path / "state"),
         "sqlite": lambda: RuntimeStorage.sqlite(tmp_path / "state.db"),
-        "transient": lambda: RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient())),
+        "transient": lambda: RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient())),
     }[backend]()
     group = RuntimeFeatures[None]("execution-observation")
     if durable_trace:
@@ -578,12 +579,14 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
     from .test_step_projection import _execution
 
     state = _storage("memory", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace=namespace, tenant_id="tenant")
     other = None
     try:
         await state.execution.executions.create_with_history_head(replace(_execution(), durable_trace=durable_trace))
         if separate_owner:
             other = _storage("memory", tmp_path)
+            other = RuntimeState(other)
             await other.initialize(namespace=namespace, tenant_id="tenant")
             await other.execution.executions.create_with_history_head(_execution())
         reader = _reader(state if other is None else other)
@@ -622,7 +625,8 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import TaskStatus
-    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan
+    from linktools.ai.storage import StorageRoute
     from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import _UsageFunctionModel
     from .test_live_history_readback_integration import _Models
@@ -635,7 +639,7 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
 
     group = RuntimeFeatures[None]("transient-task-observation")
     group.agent("default", model="default", allow_tools=())
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
+    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
     async with Runtime.open(
         "transient-task-observation", models=_Models(_UsageFunctionModel(model)),
         storage=storage, features=group,

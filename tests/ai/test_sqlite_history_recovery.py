@@ -15,7 +15,9 @@ from pydantic_ai.models.function import AgentInfo
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
-from linktools.ai.runtime import ConversationCapability, Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
+from linktools.ai.runtime.state import RuntimeState
 
 from . import _runtime_test_helpers as helpers
 
@@ -185,7 +187,7 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
         timeline = await history.session_timeline("session", principal=principal)
         execution_id = timeline.items[0].execution_id
         evidence = await _execution_evidence(history, execution_id, principal)
-    state = RuntimeStorage.sqlite(path)
+    state = RuntimeState(RuntimeStorage.sqlite(path))
     await state.initialize(namespace="legacy-history", tenant_id="default", read_only=True)
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
@@ -194,7 +196,7 @@ async def test_sqlite_history_survives_snapshot_restore(tmp_path: Path) -> None:
     finally:
         await state.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(
+    await RuntimeState.restore_snapshot(
         snapshot, object_store=objects, root=restored_root, limits=limits,
     )
     application = RuntimeFeatures("application")

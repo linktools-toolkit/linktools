@@ -6,10 +6,12 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from linktools.core import environ
-from ...core import OperationKind, OperationLedgerInput, Page, ResourceKind, SessionStatus, canonical_sha256, validate_agent_id
+from ...core import ExecutionStatus, JsonValue, OperationKind, OperationLedgerInput, Page, ResourceKind, SessionStatus, canonical_sha256, validate_agent_id
 from ...errors import AIError, ErrorCode
-from ._codec import _decode_enveloped_domain
-from ._contracts import ConversationCursor, ConversationHistoryIndexNodeRecord, ConversationHistoryRecord, HistoryQuality, SessionRecord, SessionTurnCommitRef, SessionTurnRef, TranscriptHeadRecord, TranscriptOwnerDomain
+from ...model import StoredUserInput
+from ...storage import StoredPayload
+from ._codec import _decode_enveloped_domain, encode_session_turn_commit, decode_session_turn_commit
+from ._contracts import ConversationCursor, ConversationHistoryIndexNodeRecord, ConversationHistoryRecord, HistoryQuality, SessionRecord, SessionTurnCommit, SessionTurnRef, TranscriptHeadRecord, TranscriptOwnerDomain
 from ._history_index import build_fork_index_node_from_roots
 from ._plan import RuntimeDomain
 from ._store import FactQuery, RecordQuery, StateStore, StateTransaction, StoredFact, StoredRecord, sequence_key, sortable_identity, stream_digest, subject_digest
@@ -447,7 +449,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return self._key("session_turn_commit", [session_id, turn_seq])
 
     def _stored_timeline_commit(
-        self, value: SessionTurnCommitRef
+        self, value: SessionTurnCommit
     ) -> StoredRecord:
         identity = [value.session_id, value.turn_seq]
         return StoredRecord(
@@ -461,14 +463,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             None,
             0,
             None,
-            {
-                "version": 1,
-                "session_id": value.session_id,
-                "turn_seq": value.turn_seq,
-                "execution_id": value.execution_id,
-                "start_message_index": value.start_message_index,
-                "end_message_index": value.end_message_index,
-            },
+            encode_session_turn_commit(value),
         )
 
     @staticmethod
@@ -493,7 +488,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     def _decode_timeline_commit(
         self, session_id: str, turn_seq: int, record: StoredRecord
-    ) -> SessionTurnCommitRef:
+    ) -> SessionTurnCommit:
         if (
             record.key_digest != self._timeline_commit_key(session_id, turn_seq)
             or record.scope_digest
@@ -502,37 +497,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or record.kind != "session_turn_commit"
             or record.sort_key != sortable_identity([session_id, turn_seq])
             or record.state is not None
-            or set(record.data)
-            != {
-                "version",
-                "session_id",
-                "turn_seq",
-                "execution_id",
-                "start_message_index",
-                "end_message_index",
-            }
-            or record.data.get("version") != 1
-            or record.data.get("session_id") != session_id
-            or record.data.get("turn_seq") != turn_seq
-            or not isinstance(record.data.get("execution_id"), str)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution_id = str(record.data["execution_id"])
-        start = record.data.get("start_message_index")
-        end = record.data.get("end_message_index")
-        if (
-            isinstance(start, bool)
-            or not isinstance(start, int)
-            or isinstance(end, bool)
-            or not isinstance(end, int)
-        ):
+        value = decode_session_turn_commit(record.data)
+        if value.session_id != session_id or value.turn_seq != turn_seq:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            return SessionTurnCommitRef(
-                session_id, turn_seq, execution_id, start, end
-            )
-        except ValueError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        return value
 
     def _list_generation_key(self, owner_principal_id: str | None = None) -> bytes:
         return sequence_key(
@@ -688,7 +658,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             source = await self._decode(source_stored, SessionRecord)
             if source.revision != expected_source_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if source.history_id is None:
+            if source.history_id is None or source.history_quality == "unavailable":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if (
                 await transaction.guard_record(
@@ -988,7 +958,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         tenant_id: str,
         start_turn_seq: int,
         end_turn_seq: int,
-    ) -> tuple[SessionTurnCommitRef, ...]:
+    ) -> tuple[SessionTurnCommit, ...]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         if start_turn_seq < 1 or end_turn_seq < start_turn_seq:
             raise ValueError("session timeline range is invalid")
@@ -999,9 +969,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             self._timeline_commit_key(session_id, sequence)
             for sequence in sequences
         )
-        records = await self._store.read(
-            lambda transaction: transaction.get_records(keys)
-        )
+        records = await self._store.read_records(keys)
         return tuple(
             self._decode_timeline_commit(session_id, sequence, records[key])
             for sequence, key in zip(sequences, keys)
@@ -1017,7 +985,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         start_message_index: int,
         end_message_index: int,
-    ) -> SessionTurnCommitRef:
+        stored_user_input: StoredUserInput,
+        output: StoredPayload | None,
+        status: ExecutionStatus,
+        created_at: datetime,
+        updated_at: datetime,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        allow_unadmitted: bool = False,
+    ) -> SessionTurnCommit | None:
         _require_repository_tenant(tenant_id, self._tenant_id)
         subject = self._timeline_subject(execution_id)
         turns = await transaction.list_facts(
@@ -1026,6 +1002,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 subject_digest=subject,
             )
         )
+        if not turns and allow_unadmitted:
+            return None
         if len(turns) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         turn = self._decode_timeline_turn(session_id, turns[0])
@@ -1042,17 +1020,25 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if (
                 committed.end_message_index != end_message_index
                 or committed.start_message_index != start_message_index
+                or committed.stored_user_input != stored_user_input
+                or committed.output != output
+                or committed.status != status
+                or committed.created_at != created_at
+                or committed.updated_at != updated_at
+                or committed.error_code != error_code
+                or committed.safe_error_details != safe_error_details
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return committed
-        if start_message_index < 0 or end_message_index <= start_message_index:
+        if start_message_index < 0 or end_message_index < start_message_index:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        committed = SessionTurnCommitRef(
+        committed = SessionTurnCommit(
             session_id,
             turn.turn_seq,
             execution_id,
             start_message_index,
             end_message_index,
+            stored_user_input, output, status, created_at, updated_at, error_code, safe_error_details,
         )
         await transaction.insert_record(self._stored_timeline_commit(committed))
         return committed
@@ -1257,7 +1243,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
     async def release_execution(
-        self, session_id: str, *, tenant_id: str, execution_id: str
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        history_unavailable: bool = False,
+        require_turn_commit: bool = False,
     ) -> SessionRecord:
         return await self._admission(
             session_id,
@@ -1265,6 +1257,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             execution_id=execution_id,
             expected=None,
             release=True,
+            history_unavailable=history_unavailable,
+            require_turn_commit=require_turn_commit,
         )
 
     async def release_execution_in_transaction(
@@ -1274,6 +1268,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         *,
         tenant_id: str,
         execution_id: str,
+        history_unavailable: bool = False,
+        require_turn_commit: bool = False,
     ) -> SessionRecord:
         return await self._admission(
             session_id,
@@ -1281,6 +1277,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             execution_id=execution_id,
             expected=None,
             release=True,
+            history_unavailable=history_unavailable,
+            require_turn_commit=require_turn_commit,
             transaction=transaction,
         )
 
@@ -1292,6 +1290,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         expected: ConversationCursor | None,
         release: bool,
+        history_unavailable: bool = False,
+        require_turn_commit: bool = False,
         transaction: StateTransaction | None = None,
     ) -> SessionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -1302,12 +1302,28 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             value = await self._decode(current, SessionRecord)
             if release:
+                if require_turn_commit:
+                    await self.pending_turn_commit_in_transaction(
+                        transaction, session_id=session_id, execution_id=execution_id,
+                        allow_unadmitted=True,
+                    )
                 if value.active_execution_id is None:
                     return value
                 if value.active_execution_id != execution_id:
                     return value
-                next_value = replace(value, active_execution_id=None)
+                next_value = replace(
+                    value, active_execution_id=None,
+                    history_quality="unavailable" if history_unavailable else value.history_quality,
+                )
+                if history_unavailable and value.history_quality != "unavailable":
+                    next_value = replace(
+                        next_value,
+                        revision=value.revision + 1,
+                        updated_at=await transaction.now(),
+                    )
             else:
+                if value.history_quality == "unavailable":
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 if (
                     value.active_execution_id == execution_id
                     and value.continuation == expected
@@ -1323,6 +1339,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
             await _replace_checked(transaction, candidate, current.storage_revision)
+            if release and next_value.history_quality != value.history_quality:
+                await self._bump_list_generation(transaction, value.owner_principal_id)
             if not release:
                 sequence = await transaction.next_sequence(
                     self._timeline_sequence_key(session_id)
@@ -1438,16 +1456,21 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     async def pending_turn_commit_in_transaction(
         self, transaction: StateTransaction, *, session_id: str, execution_id: str,
-    ) -> SessionTurnCommitRef:
+        allow_unadmitted: bool = False,
+    ) -> SessionTurnCommit | None:
         turns = await transaction.list_facts(FactQuery(
             self._timeline_stream(session_id), subject_digest=self._timeline_subject(execution_id),
         ))
+        if not turns and allow_unadmitted:
+            return None
         if len(turns) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         turn = self._decode_timeline_turn(session_id, turns[0])
         record = await transaction.get_record(self._timeline_commit_key(session_id, turn.turn_seq))
-        if turn.execution_id != execution_id or record is None:
+        if turn.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         committed = self._decode_timeline_commit(session_id, turn.turn_seq, record)
         if committed.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1457,6 +1480,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         self, transaction: StateTransaction, *, expected: SessionRecord,
         execution_id: str, next_cursor: ConversationCursor,
         start_message_index: int, end_message_index: int,
+        stored_user_input: StoredUserInput,
+        output: StoredPayload | None,
+        status: ExecutionStatus,
+        created_at: datetime,
+        updated_at: datetime,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
     ) -> SessionRecord:
         _require_tenant(expected, self._tenant_id)
         record = await transaction.get_record(self._key("session", expected.session_id))
@@ -1479,8 +1509,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             self._timeline_stream(current.session_id), sequence, record.key_digest, "session_turn",
             self._timeline_subject(execution_id), None, {"version": 1, "execution_id": execution_id},
         ))
-        await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommitRef(
+        await transaction.insert_record(self._stored_timeline_commit(SessionTurnCommit(
             current.session_id, sequence, execution_id, start_message_index, end_message_index,
+            stored_user_input, output, status, created_at, updated_at, error_code, safe_error_details,
         )))
         return final
 

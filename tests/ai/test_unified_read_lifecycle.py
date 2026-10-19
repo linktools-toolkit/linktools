@@ -239,7 +239,7 @@ def test_unified_read_complete_response_consumes_files_but_preserves_text_and_hi
 
 
 async def _compact(
-    messages: list[ModelMessage], *, policy: str = "workspace_file_read_v2",
+    messages: list[ModelMessage], *, policy: str = "workspace_file_read_v1",
     target: int | None = None, limits: PromptLimits | None = None,
 ) -> list[ModelMessage]:
     model = TestModel()
@@ -274,12 +274,17 @@ def _reads(*results: object) -> list[ModelMessage]:
 
 
 @pytest.mark.asyncio
-async def test_legacy_dedupe_never_erases_structured_read_results() -> None:
-    result = _result().return_value
-    messages = _reads(result, result, "legacy text")
+async def test_dedupe_rejects_unsupported_policy_version() -> None:
+    with pytest.raises(AIError) as raised:
+        await _compact(_reads(_result().return_value), policy="workspace_file_read_v2")
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.asyncio
+async def test_dedupe_preserves_unstructured_results() -> None:
+    messages = _reads("first text", "second text")
     original = deepcopy(messages)
-    projected = await _compact(messages, policy="workspace_file_read_v1")
-    assert projected == original
+    assert await _compact(messages) == original
     assert messages == original
 
 
@@ -391,7 +396,7 @@ async def test_unified_read_sdk_loop_consumes_media_after_one_interaction() -> N
         capabilities=[CompactionCapability(
             None, limits=PromptLimits(),
             policy=CompactionPolicy(context_dedupe_by_tool={
-                "read_file": "workspace_file_read_v2",
+                "read_file": "workspace_file_read_v1",
             }),
         )],
     )

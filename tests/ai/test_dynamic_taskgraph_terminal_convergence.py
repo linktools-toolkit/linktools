@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Terminal convergence contracts for dynamic TaskGraph execution."""
 
+from linktools.ai.runtime.state import RuntimeState
 import pytest
 
 from ._task_test_helpers import admit_graph
@@ -14,6 +15,7 @@ from linktools.ai.task import TaskExpanderRef, TaskGraph, TaskNode
 @pytest.mark.asyncio
 async def test_failure_does_not_terminalize_graph_before_independent_expansion_settles() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-terminal-convergence", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -106,6 +108,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
 @pytest.mark.asyncio
 async def test_waiting_node_keeps_graph_running_without_task_lease() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-waiting-aggregate", tenant_id="tenant")
     try:
         repository = state.task.tasks

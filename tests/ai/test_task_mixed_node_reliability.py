@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
 
+from linktools.ai.runtime.state import RuntimeState
 from ._runtime_test_helpers import workspace_features
 
 import asyncio
@@ -33,7 +34,7 @@ from ._task_test_helpers import (
     task_result,
 )
 from linktools.ai.agent import restore_output
-from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 from linktools.ai.core import (
     JsonValue,
     OperationKind,
@@ -238,7 +239,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         source.unlink()
         repeated = await start_task_graph(runtime, graph, idempotency_key="attachment-1")
         assert repeated.graph_id == run.graph_id
-        snapshot = await state.task.tasks.scheduler_state(
+        snapshot = await runtime._state.task.tasks.scheduler_state(
             run.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -249,7 +250,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         stored = decode_domain(stored_prompt.get("value"), StoredUserInput)
         assert stored.payload.ref is not None
         frozen_bytes = await read_object(
-            state.object_store(RuntimeDomain.TASK),
+            runtime._state.object_store(RuntimeDomain.TASK),
             stored.payload.ref.key,
             expected_digest=stored.payload.ref.digest,
             expected_size=stored.payload.ref.size,
@@ -280,7 +281,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         assert completed.wait_status is TaskStatus.SUCCEEDED
         consumer = next(n for n in completed.node_states if n.node_id == "consumer")
         assert consumer.status is TaskStatus.SUCCEEDED
-        record = await state.execution.executions.get(
+        record = await runtime._state.execution.executions.get(
             consumer.execution_id, tenant_id=runtime.tenant_id,
         )
         assert record.stored_user_input.view["attachments"] == stored.view["attachments"]
@@ -288,6 +289,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
     archive = InMemoryObjectStore("archive")
     read_state = RuntimeStorage.filesystem(storage_root)
+    read_state = RuntimeState(read_state)
     await read_state.initialize(
         namespace="attachment-test", tenant_id="default", read_only=True
     )
@@ -299,10 +301,11 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     finally:
         await read_state.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(
+    await RuntimeState.restore_snapshot(
         reference, object_store=archive, root=restored_root, limits=limits
     )
     restored = RuntimeStorage.from_root(restored_root)
+    restored = RuntimeState(restored)
     await restored.initialize(
         namespace="attachment-test", tenant_id="default", read_only=True
     )
@@ -701,7 +704,7 @@ async def test_execution_cancel_winning_during_output_store_projects_cancelled_n
             runner.execution_id,
             principal=runtime.default_principal,
         )
-        graph_state = await state.task.tasks.graph_state(
+        graph_state = await runtime._state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -757,7 +760,7 @@ async def test_function_task_cancel_winning_during_output_store_projects_cancell
         )
         try:
             await asyncio.wait_for(store_entered.wait(), 3)
-            graph_state = await state.task.tasks.graph_state(
+            graph_state = await runtime._state.task.tasks.graph_state(
                 graph.graph_id,
                 tenant_id=runtime.tenant_id,
             )
@@ -777,7 +780,7 @@ async def test_function_task_cancel_winning_during_output_store_projects_cancell
             execution_id,
             principal=runtime.default_principal,
         )
-        graph_state = await state.task.tasks.graph_state(
+        graph_state = await runtime._state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -887,7 +890,7 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
         assert target_execution.status.value == "CANCELLED"
         assert cancelled_target.status is TaskStatus.CANCELLED
         assert still_running_sibling.status is TaskStatus.RUNNING
-        pending_cancel = await storage.task.operations.get(
+        pending_cancel = await runtime._state.task.operations.get(
             idempotency_key_digest("node-cancel-recovery-cancel-0001"),
             tenant_id=runtime.tenant_id,
         )
@@ -905,7 +908,7 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
         )
         assert after_recovery_sibling.status is TaskStatus.RUNNING
         assert sibling_calls == 1
-        settled_cancel = await storage.task.operations.get(
+        settled_cancel = await runtime._state.task.operations.get(
             idempotency_key_digest("node-cancel-recovery-cancel-0001"),
             tenant_id=runtime.tenant_id,
         )
@@ -955,7 +958,7 @@ async def test_terminal_node_cancel_recovery_settles_and_replays_same_receipt(
         target = initial_state.node_states[0]
         assert target.execution_id is not None
 
-        original_cancel_node = storage.task.tasks.cancel_node
+        original_cancel_node = runtime._state.task.tasks.cancel_node
         interrupted_projection = False
 
         async def fail_confirmed_projection(
@@ -981,7 +984,7 @@ async def test_terminal_node_cancel_recovery_settles_and_replays_same_receipt(
             )
 
         monkeypatch.setattr(
-            storage.task.tasks,
+            runtime._state.task.tasks,
             "cancel_node",
             fail_confirmed_projection,
         )
@@ -1025,11 +1028,11 @@ async def test_terminal_node_cancel_recovery_settles_and_replays_same_receipt(
 
         recovery_key = "terminal-node-cancel-recovery-recover-0001"
         recovered = await graph_run.recover(idempotency_key=recovery_key)
-        cancel_receipt = await storage.task.operations.get(
+        cancel_receipt = await runtime._state.task.operations.get(
             idempotency_key_digest("terminal-node-cancel-recovery-cancel-0001"),
             tenant_id=runtime.tenant_id,
         )
-        recovery_receipt = await storage.task.operations.get(
+        recovery_receipt = await runtime._state.task.operations.get(
             idempotency_key_digest(recovery_key),
             tenant_id=runtime.tenant_id,
         )
@@ -1269,7 +1272,7 @@ async def test_task_execution_cancel_persists_node_intent_before_execution_io(
             *,
             principal: Principal,
         ):
-            graph_state = await state.task.tasks.graph_state(
+            graph_state = await runtime._state.task.tasks.graph_state(
                 "task-execution-cancel-order",
                 tenant_id=principal.tenant_id,
             )
@@ -2026,7 +2029,7 @@ async def test_task_results_page_reads_only_page_states_and_preserves_null(
         completed = (await run.wait(timeout_seconds=10)).result
         assert completed.wait_status is TaskStatus.SUCCEEDED
 
-        repository = state.task.tasks
+        repository = runtime._state.task.tasks
         original_get_node_states = repository.get_node_states
         page_reads: list[tuple[str, ...]] = []
 
@@ -2115,7 +2118,7 @@ async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -
         for node_id, expected in (("explicit-false", False), ("default-thinking", "high")):
             node_result = next(item for item in result.node_states if item.node_id == node_id)
             assert node_result.execution_id is not None
-            execution = await state.execution.executions.get(
+            execution = await runtime._state.execution.executions.get(
                 node_result.execution_id,
                 tenant_id=runtime.tenant_id,
             )
@@ -3256,6 +3259,7 @@ async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
 @pytest.mark.asyncio
 async def test_task_result_commit_preserves_early_execution_binding() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-result-regression", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -3349,7 +3353,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
         assert isinstance(last_output, dict)
         assert last_output["upstream"] == agent_output
         assert isinstance(last_output["execution_id"], str)
-        persisted = await state.task.tasks.get_results(
+        persisted = await runtime._state.task.tasks.get_results(
             graph.graph_id,
             ("custom-first", "agent", "custom-last"),
             tenant_id="default",
@@ -3414,7 +3418,7 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
 
         assert result.wait_status is TaskStatus.SUCCEEDED, result.node_states
         assert calls == ["consumer"]
-        prepared = await state.task.tasks.get_prepared_input(
+        prepared = await runtime._state.task.tasks.get_prepared_input(
             graph.graph_id,
             "consumer",
             tenant_id=runtime.tenant_id,
@@ -3423,7 +3427,7 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
         assert len(prepared.source_refs) == 1
         source_name, source_ref = prepared.source_refs[0]
         assert source_name == "source"
-        source_record = await state.task.tasks.get_results(
+        source_record = await runtime._state.task.tasks.get_results(
             graph.graph_id,
             ("source",),
             tenant_id=runtime.tenant_id,
@@ -3432,11 +3436,11 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
         consumer_result = next(
             node for node in result.node_states if node.node_id == "consumer"
         )
-        execution = await state.execution.executions.get(
+        execution = await runtime._state.execution.executions.get(
             consumer_result.execution_id,
             tenant_id=runtime.tenant_id,
         )
-        persisted_graph = await state.task.tasks.graph_state(
+        persisted_graph = await runtime._state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -3654,7 +3658,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
             wait_id,
             principal=runtime.default_principal,
         )
-        initial = await state.task.tasks.graph_state(
+        initial = await runtime._state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -3714,7 +3718,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
         result_ref = await resumed.result_ref("runner")
         assert result_ref.result_digest == canonical_sha256({"value": "accepted"})
 
-        recovered_state = await recovered_storage.task.tasks.graph_state(
+        recovered_state = await runtime._state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -3820,7 +3824,7 @@ async def test_projected_workers_issue_distinct_requests_and_persist_history(
         assert result.wait_status is TaskStatus.SUCCEEDED, result.node_states
 
         source_record = (
-            await state.task.tasks.get_results(
+            await runtime._state.task.tasks.get_results(
                 graph.graph_id,
                 ("source",),
                 tenant_id=runtime.tenant_id,
@@ -3831,7 +3835,7 @@ async def test_projected_workers_issue_distinct_requests_and_persist_history(
             ("left", "Harbor-ALPHA"),
             ("right", "Queue-BETA"),
         ):
-            prepared = await state.task.tasks.get_prepared_input(
+            prepared = await runtime._state.task.tasks.get_prepared_input(
                 graph.graph_id,
                 node_id,
                 tenant_id=runtime.tenant_id,
@@ -3956,7 +3960,7 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
                 idempotency_key="projected-file-recovery-run-0001",
             )
             await asyncio.wait_for(entered_start.wait(), 10)
-            prepared = await state.task.tasks.get_prepared_input(
+            prepared = await runtime._state.task.tasks.get_prepared_input(
                 graph.graph_id,
                 "consumer",
                 tenant_id=runtime.tenant_id,
@@ -4122,7 +4126,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             principal=runtime.default_principal,
         )
         assert child_execution.session_id == "expander-session"
-        persisted = await state.task.tasks.graph_state(
+        persisted = await runtime._state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.default_principal.tenant_id,
         )
@@ -4146,7 +4150,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             "upstream": await task_result(runtime, graph.graph_id, "child-a"),
             "execution_id": child_a_state.execution_id,
         }
-        events = await state.task.tasks.list_events(
+        events = await runtime._state.task.tasks.list_events(
             graph.graph_id,
             tenant_id="default",
             after_event_seq=0,
@@ -4381,7 +4385,7 @@ async def test_public_graph_start_canonicalizes_registered_task_semantics() -> N
             "task-public-start-0001",
         )
         await start_task_request(runtime, request)
-        graph_state = await state.task.tasks.graph_state(
+        graph_state = await runtime._state.task.tasks.graph_state(
             "task-public-start",
             tenant_id=runtime.default_principal.tenant_id,
         )
@@ -4617,7 +4621,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
             principal=runtime.default_principal,
         )
         assert execution.status.value == "SUCCEEDED"
-        events = await state.execution.events.list(
+        events = await runtime._state.execution.events.list(
             node_state.execution_id,
             tenant_id="default",
             after_event_seq=0,
@@ -5184,6 +5188,7 @@ class _BindingRunner:
 @pytest.mark.asyncio
 async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-observation-regression", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -5233,6 +5238,7 @@ async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal()
 @pytest.mark.asyncio
 async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-waiting-hold", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     calls: list[str] = []
@@ -5360,6 +5366,7 @@ async def test_bound_wait_outcome_preserves_its_waiting_classification(
     outcome: str,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace=f"bound-wait-{outcome}", tenant_id="tenant")
     principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
     graph = TaskGraph(f"bound-wait-{outcome}", (TaskNode("node"),))
@@ -5688,6 +5695,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     assert cancelled.is_set()
     probe = RuntimeStorage.filesystem(storage_root)
+    probe = RuntimeState(probe)
     await probe.initialize(namespace="default", tenant_id="default")
     try:
         snapshot = await probe.task.tasks.graph_state(

@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import pytest
+from linktools.ai.runtime._persistence_services import CheckpointService
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.exceptions import ApprovalRequired
@@ -20,7 +21,7 @@ from linktools.ai.runtime.state._steps import (
 
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     BoundaryToolset,
@@ -139,7 +140,7 @@ async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
     result = await agent.run(
         "finish",
         run_id=agent_run_id,
-        capabilities=(persistence, CheckpointCapability().bind(persistence)),
+        capabilities=(persistence, CheckpointCapability().bind(CheckpointService(persistence))),
     )
 
     assert result.output == "ok"

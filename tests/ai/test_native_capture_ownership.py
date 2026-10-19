@@ -8,16 +8,18 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.runtime import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._run_hooks import AgentRunCapture
+from linktools.ai.runtime._conversation_service import ConversationService
+from linktools.ai.runtime._persistence_services import CheckpointService, TraceService
 from linktools.ai.runtime._journal import DURATION_NS_METADATA_KEY
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 
 
 @pytest.mark.asyncio
 async def test_reused_trace_declaration_keeps_interleaved_tool_durations_per_run(monkeypatch) -> None:
-    from linktools.ai.runtime import _persistence_capabilities
+    from linktools.ai.runtime import _persistence_services
 
     store = StagingAgentRunStore()
     await store.initialize()
@@ -27,11 +29,11 @@ async def test_reused_trace_declaration_keeps_interleaved_tool_durations_per_run
         recorder = AgentRunRecorder(store, execution_id=identity, agent_run_id=identity)
         capture = AgentRunCapture(recorder=recorder, agent_id="agent", agent_run_id=identity)
         ctx = SimpleNamespace(messages=[], conversation_id=identity, run_step=1)
-        bound = declaration.bind(capture)
+        bound = declaration.bind(TraceService(capture))
         await bound.before_run(ctx)
         contexts.append((recorder, ctx, bound))
     clock = iter((10, 20, 30, 50))
-    monkeypatch.setattr(_persistence_capabilities, "monotonic_ns", lambda: next(clock))
+    monkeypatch.setattr(_persistence_services, "monotonic_ns", lambda: next(clock))
     call = ToolCallPart("tool", {}, tool_call_id="same-provider-id")
     tool = ToolDefinition(name="tool")
     for recorder, ctx, bound in contexts:
@@ -62,11 +64,11 @@ async def test_reused_conversation_and_checkpoint_declarations_keep_context_per_
         ctx = SimpleNamespace(messages=[user], conversation_id=identity, run_step=1)
         await capture.before_run(ctx)
         await capture.before_model_request(ctx, SimpleNamespace())
-        await checkpoint.bind(capture).before_model_request(ctx, SimpleNamespace())
+        await checkpoint.bind(CheckpointService(capture)).before_model_request(ctx, SimpleNamespace())
         recorder.append_transcript_message(response)
         ctx.messages.append(response)
         result = SimpleNamespace(all_messages=lambda: ctx.messages, output="done")
-        await conversation.bind(capture).after_run(ctx, result=result)
+        await conversation.bind(ConversationService(capture)).after_run(ctx, result=result)
         saved = await store.latest_checkpoint(agent_run_id=identity)
         assert saved.context_messages == [user, response]
         assert saved.messages == [user, response]

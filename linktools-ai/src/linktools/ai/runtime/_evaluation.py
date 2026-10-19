@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Dataset publication and persisted evaluation plans over native Task graphs."""
 
+from ..storage import ObjectStore, StorageRetentionMode
+
 import asyncio
 import json
 import sys
@@ -61,7 +63,8 @@ from ._observation import (
 from ._watch_cursor import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
 )
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, SnapshotExclusiveGuard
+from .state import (RuntimeDomain, RuntimeStoragePlan, EvaluationRepositories, TaskRepositories,
+                    RuntimeSnapshotOperations, SnapshotExclusiveGuard)
 from .state._contracts import IdempotencyRecord
 from .state._evaluation_records import (
     EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
@@ -110,25 +113,34 @@ class RuntimeEvaluations:
     """Own immutable evaluation plans; delegate all execution to TaskEngine."""
 
     def __init__(
-        self, namespace: str, storage: RuntimeStorage, authorization: AuthorizationPolicy,
+        self, namespace: str, authorization: AuthorizationPolicy,
         execution: ExecutionService, graph: TaskGraphService,
         captures: "RuntimeInputCaptures", history: "RuntimeHistory", *,
+        tenant_id: str, plan: RuntimeStoragePlan,
+        evaluation_repositories: EvaluationRepositories, task_repositories: TaskRepositories,
+        object_stores: Mapping[RuntimeDomain, ObjectStore], maintenance: RuntimeSnapshotOperations,
         cursor_signer: CursorSigner, asset_readers: tuple[AssetStoreReader, ...] = (),
     ) -> None:
         self._namespace = namespace
-        self._storage = storage
-        self._state = storage.evaluation.records
+        self._tenant_id = tenant_id
+        self._plan = plan
+        self._evaluation_repositories = evaluation_repositories
+        self._task_repositories = task_repositories
+        self._object_stores = object_stores
+        self._state = evaluation_repositories.records
         self._authorization = authorization
         self._execution = execution
         self._graph = graph
         self._history = history
         self._captures = captures
         self._compiler = EvaluationCompiler(captures, namespace)
-        self._objects = storage.object_store(RuntimeDomain.EVALUATION)
+        self._objects = object_stores[RuntimeDomain.EVALUATION]
         self._object_keys = RuntimeObjectKeyFactory(namespace)
         self._cursor_signer = cursor_signer
         self._asset_readers = asset_readers
-        self._retention = EvaluationRetention(storage, authorization, self._cancel_submission, captures,
+        self._retention = EvaluationRetention(authorization, self._cancel_submission, captures,
+                                             tenant_id=tenant_id, repository=evaluation_repositories.records,
+                                             task_objects=object_stores[RuntimeDomain.TASK], maintenance=maintenance,
                                              release_scopes=self._close_trial_scopes)
         self._watchers: dict[str, asyncio.Task[None]] = {}
         self._trial_scopes: dict[tuple[str, str], _EnteredTrialScope] = {}
@@ -173,7 +185,7 @@ class RuntimeEvaluations:
         *, owner: str | None = None,
     ) -> None:
         await self._authorization.authorize(principal, action, ResourceRef(
-            ResourceKind.EVALUATION, identity, self._storage.tenant_id, owner))
+            ResourceKind.EVALUATION, identity, self._tenant_id, owner))
 
     async def _record(
         self, experiment_id: str, principal: Principal,
@@ -285,9 +297,9 @@ class RuntimeEvaluations:
         domains = (RuntimeDomain.EVALUATION, RuntimeDomain.TASK, RuntimeDomain.EXECUTION,
                    RuntimeDomain.RECOVERY, RuntimeDomain.ARTIFACT)
         for domain in domains:
-            retention = self._storage.plan.route(domain).retention
-            if retention is RuntimeRetentionMode.TRANSIENT or (
-                    retention is RuntimeRetentionMode.VOLATILE and not policy.allow_volatile):
+            retention = self._plan.route(domain).retention
+            if retention is StorageRetentionMode.TRANSIENT or (
+                    retention is StorageRetentionMode.VOLATILE and not policy.allow_volatile):
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "evaluation evidence requires retained storage")
 
     async def start(
@@ -320,7 +332,7 @@ class RuntimeEvaluations:
         spec, principal = request.spec, request.principal
         identity = idempotency_key_digest(request.idempotency_key)
         await self._authorize(principal, AuthorizationAction.EVALUATION_RUN, identity)
-        previous = await self._storage.evaluation.idempotency.get(
+        previous = await self._evaluation_repositories.idempotency.get(
             "evaluation.run", identity, tenant_id=principal.tenant_id)
         existing = None
         if previous is not None:
@@ -486,13 +498,13 @@ class RuntimeEvaluations:
                 runtime = selected.runtime
                 other = runtime.evaluations
                 if (other is self or runtime.namespace != self._namespace
-                        or runtime.tenant_id != self._storage.tenant_id
-                        or other._storage is self._storage or other._storage.plan != self._storage.plan):
+                        or runtime.tenant_id != self._tenant_id
+                        or other._state is self._state or other._plan != self._plan):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires independent Runtime ownership over shared storage")
                 for domain in (RuntimeDomain.EVALUATION, RuntimeDomain.TASK, RuntimeDomain.EXECUTION,
                                RuntimeDomain.RECOVERY, RuntimeDomain.ARTIFACT):
-                    if (other._storage.plan.route(domain).retention is not RuntimeRetentionMode.DURABLE
-                            or other._storage.object_store(domain).store_id != self._storage.object_store(domain).store_id):
+                    if (other._plan.route(domain).retention is not StorageRetentionMode.DURABLE
+                            or other._object_stores[domain].store_id != self._object_stores[domain].store_id):
                         raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial scope requires shared retained evidence stores")
                 await self._validate_definitions(record.manifest, selected)
                 yield selected if intent.scorer_slot_id is None else selected.with_definitions(self._recorder)
@@ -588,7 +600,7 @@ class RuntimeEvaluations:
         self, evidence_ref: EvidenceRef, *, principal: Principal,
         source_records: dict[str, EvaluationRecord] | None = None,
     ) -> EvidenceBundle:
-        if evidence_ref.namespace != self._namespace or evidence_ref.tenant_id != self._storage.tenant_id:
+        if evidence_ref.namespace != self._namespace or evidence_ref.tenant_id != self._tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorize(principal, AuthorizationAction.EVALUATION_EVIDENCE_READ, evidence_ref.evidence_id)
         bundle = await self._state.read_evidence(evidence_ref)
@@ -1617,7 +1629,7 @@ class RuntimeEvaluations:
             "evidence": evidence.ref.to_mapping(), "score": request.score.to_mapping()})
         decision = EvaluationHumanDecision(intent.slot_id, uuid.uuid4().hex, principal, _now(), digest,
                                            idempotency_key_digest(request.idempotency_key), request.score)
-        header = await self._storage.task.tasks.get_header(
+        header = await self._task_repositories.tasks.get_header(
             intent.submission.graph.graph_id, tenant_id=principal.tenant_id)
         native = (None if header is None else
                   await self._graph.state(intent.submission.graph.graph_id, principal=principal))

@@ -11,7 +11,8 @@ from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, StartEvaluationRequest,
 )
-from linktools.ai.runtime import ConversationCapability, AgentTaskInput, CaptureInputRequest, TraceCapability, ExecutionInputContext, Runtime, RuntimeStorage
+from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode
 
 from .test_evaluation_consumers import (

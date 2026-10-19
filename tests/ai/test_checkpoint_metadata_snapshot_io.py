@@ -12,6 +12,7 @@ from sqlalchemy import event
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._sql import _SqlTransaction
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.runtime.state._store import active_state_scope
@@ -34,7 +35,7 @@ def _checkpoint(count: int) -> AgentRunCheckpoint:
 async def test_checkpoint_metadata_batches_reads_without_changing_prepared_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -98,7 +99,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
 async def test_checkpoint_relocation_keeps_integrity_failures(
     tmp_path: Path, backend: str, failure: str, composed: bool,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -135,7 +136,7 @@ async def test_checkpoint_relocation_keeps_integrity_failures(
 async def test_checkpoint_preparation_rereads_after_body_io_and_commit_rejects_stale_append(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, composed: bool,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-metadata", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -182,7 +183,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
     for baseline in (True, False):
         path = tmp_path / str(baseline)
         path.mkdir()
-        state = _storage("sqlite", path)
+        state = RuntimeState(_storage("sqlite", path))
         await state.initialize(namespace="checkpoint-commit", tenant_id="tenant")
         domain = (RuntimeDomain.CONVERSATION if case == "conversation" else
                   RuntimeDomain.TRACE if case == "execution" else RuntimeDomain.CHECKPOINT)
@@ -251,7 +252,7 @@ async def test_checkpoint_commit_reuses_projection_read_and_keeps_replay_read_on
 async def test_checkpoint_projection_stale_version_rolls_back_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-stale-projection", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -288,7 +289,7 @@ async def test_checkpoint_projection_stale_version_rolls_back_commit(
 async def test_run_admission_does_not_read_context_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="checkpoint-admission", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     projection_key = archive.transcript_repository.projection_key("run")

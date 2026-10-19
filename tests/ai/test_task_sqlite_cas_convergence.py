@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for TaskGraph optimistic CAS convergence."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import sqlite3
 from collections.abc import AsyncIterator
@@ -172,6 +173,7 @@ async def test_sqlite_state_group_serializes_mutation_callbacks(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
+    state = RuntimeState(state)
     await state.initialize(namespace="sqlite-serialize", tenant_id="default")
     store = state.task.tasks.state_store
     first_entered = asyncio.Event()
@@ -248,8 +250,8 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
             models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=state,
         ) as runtime:
-            repository = state.task.tasks
-            await state.task.admissions.admit(
+            repository = runtime._state.task.tasks
+            await runtime._state.task.admissions.admit(
                 TaskGraphAdmission.from_request(request),
                 graph,
             )
@@ -371,7 +373,7 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
             final_state = await run.state(include_content=True)
             assert assert_coherent(final_state) == 14
 
-            state_store = state.task.tasks.state_store
+            state_store = runtime._state.task.tasks.state_store
             child_state_key = repository._state_key(graph.graph_id, "child")
 
             async def remove_child_state(transaction) -> None:
@@ -383,7 +385,7 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         continue_read.set()
-        await state.close()
+        await runtime._state.close()
 
 
 @pytest.mark.asyncio
@@ -851,6 +853,7 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
+    state = RuntimeState(state)
     await state.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
         await state.task.admissions.admit(admission, request.graph)
@@ -879,6 +882,7 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
+    reopened = RuntimeState(reopened)
     await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
         view = await reopened.task.tasks.scheduler_state(
@@ -986,8 +990,9 @@ async def test_task_inspect_and_wait_are_read_only() -> None:
 
 async def _admitted_state(
     graph: TaskGraph,
-) -> tuple[RuntimeStorage, TaskGraphRequest]:
+) -> tuple[RuntimeState, TaskGraphRequest]:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-cas", tenant_id="tenant")
     request = TaskGraphRequest(
         graph,

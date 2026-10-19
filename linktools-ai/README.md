@@ -84,7 +84,7 @@ keeps its immutable Asset reference and borrowed reader. `Runtime.open` has no
 separate authorization, prompt-limit, or tool-response arguments.
 
 With no callback, existing selection behavior is unchanged. Wildcard selectors
-expand the remaining candidates; explicit unavailable selections and preloads fail.
+expand the remaining candidates; explicit unavailable selections fail.
 Callback exceptions propagate and non-boolean results are rejected. Use a pure,
 deterministic callback over the captured declarations and stable application inputs.
 This is applicability filtering, not an authorization or OS isolation boundary.
@@ -127,12 +127,18 @@ state and request/usage metadata. See [Runtime-wide capabilities](docs/runtime-c
 for a runnable RPM/TPM example, streaming/cancellation behavior, quota accounting
 and provider retry boundaries.
 
-Conversation, interrupted-run recovery, detailed trace and automatic Agent metrics
-are explicit, independent Runtime-scoped capabilities: `ConversationCapability`,
-`CheckpointCapability`, `TraceCapability`, and `MetricsCapability`. Durable storage
-alone enables none of them. `MetricsCapability(metrics=dataset)` supplies the shared
-recording dataset for automatic Agent, Task and Evaluation observations. Task, Evaluation and Artifact remain
-services and need no capability wrappers. See [feature guarantees and commit
+Conversation, interrupted-run recovery and detailed trace are explicit,
+independent Runtime-scoped capabilities: `ConversationCapability`,
+`CheckpointCapability`, and `TraceCapability`. Durable storage alone enables none
+of them. `Runtime.open(..., metrics=dataset)` independently enables automatic
+Agent and Task observations, including evaluation work in that Runtime. The
+shared dataset remains caller-owned. Task, Evaluation and Artifact remain
+services and need no capability wrappers. Session metadata and display history
+are enabled by the default `SessionCapability`; use `SessionCapability(enabled=False)`
+to disable them explicitly. Conversation adds retained model context for future turns
+and execution forks. Execution commit timing belongs to
+`ExecutionCapability(commit=CommitPolicy.sync())`, using `CommitPolicy` from
+`linktools.ai.core`. See [feature guarantees and commit
 boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
 ## Evaluation
@@ -679,7 +685,7 @@ upstream tool names. For example, `security/audit` and `scan:file` become
 `mcp:security%2Faudit:scan%3Afile`. The `mcp__` prefix is reserved for
 model-visible transport names and is not an authoring selector.
 
-Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog/preloads, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
+Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
 
 The fixed prefix is not appended as a new conversation message on each model call. Lazy Skill bodies/resources, Memory contents, the current-plan reminder, user input, tool and Subagent results, attachments, and retry/error feedback remain dynamic request or conversation context. Memory guidance is fixed only for an Execution that enables Memory; Memory contents stay pull-based through the Memory tools, so updates from another Execution are observed when the Agent reads/searches Memory again rather than being pushed into the standing prompt. Workspace instruction text describes stable usage constraints only; authorization and approval remain Runtime-enforced behavior. Recorded requests may therefore contain the same fixed instruction parts repeatedly without representing repeated historical messages.
 
@@ -719,11 +725,13 @@ The binding contract does not persist Python output import paths or duplicate id
 
 ## 6. Sessions and executions
 
-This example requires `ConversationCapability()` registered at Runtime scope
-on the same declaration before opening the Runtime:
+Session metadata and a first turn are available through the default Session capability.
+An unretained completed turn makes its Session context unavailable for later
+resume or fork. To retain model context across resumed turns, register `ConversationCapability()` at Runtime scope before
+opening the Runtime:
 
 ```python
-from linktools.ai.runtime import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 
 application.capability(ConversationCapability())
 # Open with Runtime.open(..., features=application) after registration.
@@ -805,14 +813,9 @@ SDK encoding restrictions and existing resource limits still apply. Transport
 selection is internal; no extra status, transport, passthrough, or per-MIME
 byte-limit configuration is needed.
 
-The old `vision` API argument and `--vision` flag have been removed.
-Remove `OPENAI_VISION` / `LINKTOOLS_OPENAI_VISION` from the environment and
-persisted configuration, and remove workspace `vision` settings; their presence
-is a migration error, even when false or empty. There is no implicit mapping to
-`input_types`. Recovering a historical execution requires an explicitly
-registered binding matching its persisted historical contract. Historical input
-semantics are retained only at that restore boundary; a new binding with omitted
-declarations cannot recover them or replace them with its empty allowlist contract.
+Configure attachment permissions with `input_types`. Captured model contracts
+must contain the resolved `input_mime_types` list; missing permissions do not
+implicitly allow attachments. Restored bindings must match their captured contract.
 
 Execution file input uses the same durable boundary:
 

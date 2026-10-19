@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from linktools.ai.runtime.state import RuntimeState
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 
@@ -494,6 +496,7 @@ async def test_metric_cancellation_preserves_cancel_ledger_and_dependency_handof
     via_submission: bool,
 ) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="task-metric-cancel", tenant_id="tenant")
     recorder = _BlockingRecorder()
     dependencies = _DependencyRelease()
@@ -560,6 +563,7 @@ async def test_detached_cancel_cleanup_does_not_take_over_metric_delivery() -> N
             await super().release_graph_dependencies(state, tenant_id=tenant_id)
 
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="task-metric-detached", tenant_id="tenant")
     recorder = _BlockingRecorder()
     dependencies = BlockedDependencies()
@@ -603,6 +607,7 @@ async def test_detached_cancel_cleanup_does_not_take_over_metric_delivery() -> N
 
 async def test_terminal_wait_deadline_excludes_metric_io_and_cancellation_preserves_truth() -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="task-metric-wait", tenant_id="tenant")
     recorder = _BlockingRecorder()
     dependencies = _DependencyRelease()

@@ -18,8 +18,8 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
-from ._cursor import decode_cursor as decode_runtime_cursor
-from ._cursor import encode_cursor as encode_runtime_cursor
+from ..core import decode_cursor as decode_runtime_cursor
+from ..core import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader, _model_interaction_update_ranges
 from .service_api import (
     AttachmentFact,

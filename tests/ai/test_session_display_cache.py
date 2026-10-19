@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Opt-in whole display snapshots retain fresh authority and bounded staleness."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
@@ -12,15 +13,17 @@ from sqlalchemy import event
 import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.capability import ConversationCapability
+from linktools.ai.runtime import RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.state._contracts import ConversationCursor
 from linktools.ai.runtime.state._store import active_state_scope
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 
 from .test_incremental_projection_boundaries import _storage
 from .test_session_refresh import _admit
-from .test_session_timeline import _materialize_conversation, _session
+from .test_session_timeline import _commit_empty_turn, _commit_fields, _execution, _materialize_conversation, _session
 from .test_runtime_content_cache_integration import WriteOnlyCache
 
 pytestmark = pytest.mark.asyncio
@@ -51,7 +54,7 @@ class _Cache(InMemoryCacheBackend):
 
 
 def _service(state, cache, authorization=None):
-    return DefaultSessionService(
+    return RuntimeSessionService(
         state.conversation, state.execution.executions,
         authorization or TenantAuthorizationPolicy(), object(),
         HmacCursorSigner("display", b"display-test-key"), history_reader=object(),
@@ -72,18 +75,20 @@ def _fixed_display_clock(monkeypatch):
 
 async def _prepare(state, *, body=False, namespace="display"):
     await state.initialize(
-        namespace=namespace, tenant_id="tenant", module_caches={RuntimeDomain.CONVERSATION: state.cache},
+        namespace=namespace, tenant_id="tenant",
     )
     record = await state.conversation.sessions.create(replace(_session(), metadata={"nested": {"value": "old"}}))
     await _admit(state, status=ExecutionStatus.SUCCEEDED if body else ExecutionStatus.PENDING_START)
     if body:
         run_id, count = await _materialize_conversation(state, record.history_id)
         sessions = state.conversation.sessions
+        execution = await state.execution.executions.get("active", tenant_id="tenant")
 
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="active",
                 start_message_index=0, end_message_index=count,
+                **_commit_fields(execution),
             )
             await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="active", expected=None,
@@ -103,11 +108,11 @@ async def _change_metadata(state, value):
     )
 
 
-async def _change_execution_display(state, value):
+async def _change_execution_display(state, value, execution_id="active"):
     executions = state.execution.executions
-    record = await executions.get("active", tenant_id="tenant")
+    record = await executions.get(execution_id, tenant_id="tenant")
     return await executions.compare_and_swap(
-        "active", tenant_id="tenant", expected_revision=record.revision,
+        execution_id, tenant_id="tenant", expected_revision=record.revision,
         next_record=replace(record, revision=record.revision + 1, safe_error_details={"value": value}),
     )
 
@@ -116,6 +121,7 @@ async def _change_execution_display(state, value):
 async def test_display_cache_returns_whole_old_page_until_fixed_expiry(tmp_path, monkeypatch, backend):
     clock = _clock(monkeypatch)
     state, cache = _storage(backend, tmp_path), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -142,6 +148,7 @@ async def test_display_cache_returns_whole_old_page_until_fixed_expiry(tmp_path,
 @pytest.mark.parametrize("body", (False, True))
 async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp_path, body):
     state, cache = _storage("sqlite", tmp_path), _Cache()
+    state = RuntimeState(state)
     await _prepare(state, body=body)
     engine = state.conversation.sessions.state_store.storage_group.context.engine
     statements = []
@@ -157,7 +164,7 @@ async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp
         cold_count = len(statements)
         statements.clear()
         assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == cold
-        assert len(statements) == 4
+        assert len(statements) == (4 if body else 3)
         assert cold_count > len(statements)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -166,6 +173,7 @@ async def test_display_cache_saves_body_sql_and_keeps_fresh_dependency_reads(tmp
 
 async def test_display_cache_rechecks_policy_and_deletion_after_authorization(monkeypatch):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     calls = []
     mode = ["allow"]
@@ -202,6 +210,7 @@ async def test_display_cache_does_not_share_sources_or_mutable_results():
     cache = _Cache()
     states = [RuntimeStorage.in_memory(), RuntimeStorage.in_memory()]
     for index, state in enumerate(states):
+        state = states[index] = RuntimeState(state)
         await _prepare(state, body=True, namespace=f"display-source-{index}")
     try:
         first = _service(states[0], cache)
@@ -223,6 +232,7 @@ async def test_display_cache_does_not_share_sources_or_mutable_results():
 @pytest.mark.parametrize("value", (-1, float("nan"), float("inf"), True, "3"))
 async def test_display_cache_age_is_finite_non_negative(value):
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         with pytest.raises(ValueError, match="max_age"):
@@ -234,6 +244,7 @@ async def test_display_cache_age_is_finite_non_negative(value):
 @pytest.mark.parametrize("failure", ("io", "corrupt"))
 async def test_display_cache_failures_return_origin(failure):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -253,11 +264,14 @@ async def test_display_cache_failures_return_origin(failure):
 async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase):
     clock = _clock(monkeypatch)
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state, body=True)
+    session = await state.conversation.sessions.get("session", tenant_id="tenant")
+    await _admit(state, "second", ExecutionStatus.PENDING_START, expected=session.continuation)
     try:
         service = _service(state, cache)
         await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-        await _change_execution_display(state, "new")
+        await _change_execution_display(state, "new", "second")
         if phase in {"get", "dependency"}:
             owner = cache if phase == "get" else state.execution.executions
             name = "get" if phase == "get" else "get_many"
@@ -268,7 +282,7 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
                 clock.now += 3
                 return value
             monkeypatch.setattr(owner, name, slow)
-            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[0].safe_error_details == {"value": "new"}
+            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[-1].safe_error_details == {"value": "new"}
         else:
             clock.now += 3
             if phase == "body":
@@ -287,14 +301,15 @@ async def test_display_cache_slow_io_never_renews_capture_age(monkeypatch, phase
                     await put(*args)
                 monkeypatch.setattr(cache, "put", slow_put)
             await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-            await _change_execution_display(state, "latest")
-            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[0].safe_error_details == {"value": "latest"}
+            await _change_execution_display(state, "latest", "second")
+            assert (await service.refresh("session", principal=_PRINCIPAL, max_age=3)).timeline.items[-1].safe_error_details == {"value": "latest"}
     finally:
         await state.close()
 
 
 async def test_display_cache_cancellation_is_request_owned(monkeypatch):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     entered, blocked, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -319,6 +334,7 @@ async def test_display_cache_cancellation_is_request_owned(monkeypatch):
 
 async def test_display_cache_outer_transaction_never_reads_or_publishes_cache():
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     service = _service(state, cache)
     try:
@@ -353,10 +369,11 @@ async def test_display_cache_facade_passes_max_age_to_custom_service():
 
 async def test_display_cache_split_routes_keep_strong_fallback(tmp_path):
     state = RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
-        conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
+        execution=StorageRoute.sqlite(tmp_path / "execution.db"),
+        conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
     cache = _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -374,6 +391,7 @@ async def test_display_cache_malformed_typed_json_falls_back(corruption):
     from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state, body=True)
     try:
         service = _service(state, cache)
@@ -401,6 +419,7 @@ async def test_display_cache_malformed_typed_json_falls_back(corruption):
 async def test_display_cache_execution_changes_without_session_revision_remain_whole(monkeypatch):
     clock = _clock(monkeypatch)
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -429,6 +448,7 @@ async def test_display_cache_execution_changes_without_session_revision_remain_w
 ))
 async def test_display_cache_terminal_active_refreshes_complete_page(status, released):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     session = await _prepare(state)
     try:
         service = _service(state, cache)
@@ -438,31 +458,39 @@ async def test_display_cache_terminal_active_refreshes_complete_page(status, rel
         record = await executions.get("active", tenant_id="tenant")
         await executions.compare_and_swap(
             "active", tenant_id="tenant", expected_revision=record.revision,
-            next_record=replace(record, revision=record.revision + 1, status=status, safe_error_details={"finished": True}),
+            next_record=replace(record, revision=record.revision + 1, status=status,
+                result=_execution("active", status=status, prompt="active").result,
+                safe_error_details={"finished": True}),
         )
         if status is ExecutionStatus.SUCCEEDED:
             run_id, count = await _materialize_conversation(state, session.history_id)
             sessions = state.conversation.sessions
+            execution = await executions.get("active", tenant_id="tenant")
 
             async def commit(transaction):
                 await sessions.commit_timeline_turn_in_transaction(
                     transaction, "session", tenant_id="tenant", execution_id="active",
                     start_message_index=0, end_message_index=count,
+                    **_commit_fields(execution),
                 )
                 await sessions.advance_continuation_in_transaction(
                     transaction, "session", tenant_id="tenant", execution_id="active", expected=None,
                     next_cursor=ConversationCursor(run_id, history_id=session.history_id, message_count=count),
                 )
             await sessions.state_store.mutate(commit)
+        else:
+            await _commit_empty_turn(state, await executions.get("active", tenant_id="tenant"))
         if released:
             await state.conversation.sessions.release_execution("session", tenant_id="tenant", execution_id="active")
         fresh = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         assert fresh.session.active_execution_id is None
         assert fresh.timeline.items[0].status is status
         assert fresh.timeline.items[0].safe_error_details == {"finished": True}
+        assert fresh.timeline.items[0].conversation_committed
         if status is ExecutionStatus.SUCCEEDED:
-            assert fresh.timeline.items[0].conversation_committed
             assert fresh.timeline.items[0].items
+        else:
+            assert fresh.timeline.items[0].items == ()
         assert (await state.conversation.sessions.get("session", tenant_id="tenant")).active_execution_id is None
         assert fresh == await service.refresh("session", principal=_PRINCIPAL)
         assert cache.writes == 2
@@ -475,6 +503,7 @@ async def test_display_cache_terminal_active_refreshes_complete_page(status, rel
 @pytest.mark.parametrize("had_active,next_active", ((True, None), (True, "second"), (False, "second")))
 async def test_display_cache_active_binding_change_refreshes_complete_page(had_active, next_active):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         if not had_active:
@@ -498,6 +527,7 @@ async def test_display_cache_active_binding_change_refreshes_complete_page(had_a
 
 async def test_display_cache_idle_completion_observes_continuation_revision():
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     session = await _prepare(state)
     sessions = state.conversation.sessions
     try:
@@ -507,11 +537,13 @@ async def test_display_cache_idle_completion_observes_continuation_revision():
         assert first.session.active_execution_id is None
         await _admit(state, "second", ExecutionStatus.SUCCEEDED)
         run_id, count = await _materialize_conversation(state, session.history_id)
+        execution = await state.execution.executions.get("second", tenant_id="tenant")
 
         async def commit(transaction):
             await sessions.commit_timeline_turn_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="second",
                 start_message_index=0, end_message_index=count,
+                **_commit_fields(execution),
             )
             return await sessions.advance_continuation_in_transaction(
                 transaction, "session", tenant_id="tenant", execution_id="second", expected=None,
@@ -533,22 +565,27 @@ async def test_display_cache_idle_completion_observes_continuation_revision():
         await state.close()
 
 
-@pytest.mark.parametrize("kind,code", (("execution", ErrorCode.STORAGE_INTEGRITY_ERROR), ("conversation_history", ErrorCode.SESSION_HISTORY_UNAVAILABLE)))
+@pytest.mark.parametrize("kind,code", (("execution", None), ("conversation_history", ErrorCode.SESSION_HISTORY_UNAVAILABLE)))
 async def test_display_cache_rechecks_dependency_existence(kind, code):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state, body=True)
     try:
         service = _service(state, cache)
-        await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+        before = await service.refresh("session", principal=_PRINCIPAL, max_age=3)
         store = state.execution.executions.state_store if kind == "execution" else state.conversation.sessions.state_store
 
         async def remove(transaction):
             records = await transaction.scan_records()
             await transaction.delete_records(tuple(record.key_digest for record in records if record.kind == kind))
         await store.mutate(remove)
-        with pytest.raises(AIError) as error:
-            await service.refresh("session", principal=_PRINCIPAL, max_age=3)
-        assert error.value.code is code
+        if kind == "execution":
+            assert await service.refresh("session", principal=_PRINCIPAL, max_age=3) == before
+            assert await service.refresh("session", principal=_PRINCIPAL) == before
+        else:
+            with pytest.raises(AIError) as error:
+                await service.refresh("session", principal=_PRINCIPAL, max_age=3)
+            assert error.value.code is code
     finally:
         await state.close()
 
@@ -559,6 +596,7 @@ async def test_display_cache_independent_body_removal_is_bounded_by_max_age(monk
 
     clock = _clock(monkeypatch)
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     session = await _prepare(state, body=True)
     try:
         service = _service(state, cache)
@@ -587,6 +625,7 @@ async def test_display_cache_input_cursor_expiry_is_not_extended(monkeypatch):
     from .test_session_refresh import _release
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         await _release(state, "active")
@@ -611,6 +650,7 @@ async def test_display_cache_forks_and_ancestor_cursor_preserve_fresh_deletion()
     from .test_session_refresh import _release
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         await _release(state, "active")
@@ -647,6 +687,7 @@ async def test_display_cache_valid_json_byte_corruption_is_a_miss():
     from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state, body=True)
     try:
         service = _service(state, cache)
@@ -667,6 +708,7 @@ async def test_display_cache_principal_and_page_shapes_do_not_share_entries():
     from .test_session_refresh import _release
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         await _release(state, "active")
@@ -694,6 +736,7 @@ async def test_display_cache_same_id_recreation_does_not_reuse_old_page():
     from linktools.ai.runtime.state._store import record_key_digest
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     record = await _prepare(state)
     try:
         service = _service(state, cache)
@@ -718,6 +761,7 @@ async def test_display_cache_same_id_recreation_does_not_reuse_old_page():
 async def test_display_cache_concurrent_misses_keep_original_capture_deadline(monkeypatch):
     clock = _clock(monkeypatch)
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     entered, proceed = asyncio.Event(), asyncio.Event()
     put = cache.put
@@ -749,8 +793,10 @@ async def test_display_cache_concurrent_misses_keep_original_capture_deadline(mo
 async def test_storage_exposes_borrowed_cache_without_closing_it():
     cache = _Cache()
     state = RuntimeStorage.in_memory(cache=cache)
-    assert state.cache is cache
-    await state.close()
+    assert state.plan.route(RuntimeDomain.CONVERSATION).cache is cache
+    owner = RuntimeState(state)
+    await owner.initialize(namespace="borrowed-cache", tenant_id="tenant")
+    await owner.close()
     await cache.put("still-borrowed", b"content")
     assert await cache.get("still-borrowed") == b"content"
 
@@ -768,18 +814,18 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     elif retention == "volatile":
         storage = RuntimeStorage.in_memory(cache=cache)
     else:
-        storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()), cache=cache)
+        storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=StorageRoute.transient(cache=cache)))
     group = RuntimeFeatures[None]("display")
-    group.capability(ConversationCapability(cache=cache), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
         "display", storage=storage, models=_Models(TestModel()), features=group,
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
-        await storage.conversation.sessions.create(_session())
-        await _admit(storage, status=ExecutionStatus.PENDING_START)
+        await runtime._state.conversation.sessions.create(_session())
+        await _admit(runtime._state, status=ExecutionStatus.PENDING_START)
         first = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
-        await _change_execution_display(storage, "changed")
+        await _change_execution_display(runtime._state, "changed")
         second = await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
         if retention == "durable":
             assert second == first
@@ -800,11 +846,12 @@ async def test_display_cache_custom_repository_keeps_original_read_path():
         pass
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         sessions = state.conversation.sessions
         custom = CustomSessions(sessions.state_store, namespace=sessions.namespace, tenant_id=sessions.tenant_id)
-        service = DefaultSessionService(
+        service = RuntimeSessionService(
             replace(state.conversation, sessions=custom), state.execution.executions,
             TenantAuthorizationPolicy(), object(), HmacCursorSigner("display", b"display-test-key"),
             history_reader=object(), transcript_store=state.run_store.conversation_persistence, cache=cache,
@@ -825,6 +872,7 @@ async def test_display_cache_rejects_execution_dependencies_outside_authorized_t
     from .test_session_timeline import _execution
 
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -866,7 +914,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
     cache = _Cache()
     storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache=cache)
     group = RuntimeFeatures[None]("display")
-    group.capability(ConversationCapability(cache=cache), scope="runtime")
+    group.capability(ConversationCapability(), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)
@@ -882,7 +930,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
         "display", storage=storage, models=_Models(TestModel()), features=group,
         context=RuntimeContext(None, tenant_id="tenant"),
     ) as runtime:
-        await storage.conversation.sessions.create(_session())
+        await runtime._state.conversation.sessions.create(_session())
         monkeypatch.setattr(cache, phase, blocked)
         read = asyncio.create_task(runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3))
         await asyncio.wait_for(entered.wait(), 5)
@@ -890,7 +938,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(close), 0.02)
         assert not read.done()
-        assert storage.ready
+        assert runtime._state.ready
         with pytest.raises(AIError):
             await runtime.sessions.refresh("session", principal=_PRINCIPAL, max_age=3)
         close.cancel()
@@ -908,7 +956,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
             assert (await read).session.session_id == "session"
         await asyncio.wait_for(again, 5)
         assert exited.is_set()
-        assert not storage.ready
+        assert not runtime._state.ready
         monkeypatch.setattr(cache, phase, method)
     await cache.put("after-close", b"host-owned")
     assert await cache.get("after-close") == b"host-owned"
@@ -916,6 +964,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
 
 async def test_session_display_drain_rejects_new_reads_and_preserves_original_error(monkeypatch):
     state, cache = RuntimeStorage.in_memory(), _Cache()
+    state = RuntimeState(state)
     await _prepare(state)
     service = _service(state, cache)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -946,7 +995,10 @@ async def test_session_display_drain_rejects_new_reads_and_preserves_original_er
 
 @pytest.mark.parametrize("cache", (WriteOnlyCache(), InMemoryStreamBackend(max_bytes=1024)))
 async def test_display_refresh_without_key_value_cache_keeps_fresh_source(cache: object) -> None:
-    state = RuntimeStorage.in_memory(cache=cache)
+    with pytest.raises(TypeError, match="cache must provide get, put and delete"):
+        RuntimeStorage.in_memory(cache=cache)
+    state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await _prepare(state)
     try:
         service = _service(state, cache)
@@ -965,11 +1017,13 @@ async def test_display_cache_is_shared_across_readers_without_renewing_capture(
     clock = _clock(monkeypatch)
     cache = _Cache()
     first_state = _storage(backend, tmp_path)
+    first_state = RuntimeState(first_state)
     await _prepare(first_state, body=True)
     first = _service(first_state, cache)
     detail = await first.refresh("session", principal=_PRINCIPAL, max_age=3)
     await first_state.close()
     second_state = _storage(backend, tmp_path)
+    second_state = RuntimeState(second_state)
     await second_state.initialize(namespace="display", tenant_id="tenant")
     try:
         second = _service(second_state, cache)
@@ -1006,6 +1060,7 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
     monkeypatch.setattr(_history, "PAYLOAD_COMPRESS_MINIMUM", 0)
     cache = _Cache()
     state = RuntimeStorage.sqlite(tmp_path / "display.db", cache=cache)
+    state = RuntimeState(state)
     session = await _prepare(state, body=True)
     try:
         service = _service(state, cache)

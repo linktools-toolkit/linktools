@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Runtime AgentRunStore orchestration over durable archives."""
 
+from ...storage import StorageRetentionMode
+
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
@@ -37,8 +39,8 @@ from ._contracts import (
     TranscriptSpanRef,
 )
 from ._execution_repositories import ExecutionRepositoryImpl
-from ._durability import CommitObservation, DurableCommitState, _await_owned_task, run_durable_commit
-from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._durability import CommitObservation, DurableCommitState, await_owned_task, run_durable_commit
+from ._plan import RuntimeDomain
 from ._step_archive import (
     CapturedExecutionProjection,
     ExecutionProjectionBatch,
@@ -65,6 +67,7 @@ from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, Agen
 from ._store import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
+    from .._capability_writes import RuntimeCapabilityWrites
     from ..service_api import ModelInteractionSubscription
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
@@ -115,13 +118,15 @@ class RuntimeAgentRunStore(AgentRunStore):
         conversation_archive: AgentRunStore,
         execution_archive: AgentRunStore | None,
         recovery_archive: AgentRunStore | None,
-        conversation_retention: RuntimeRetentionMode,
-        execution_retention: RuntimeRetentionMode,
-        recovery_retention: RuntimeRetentionMode,
+        conversation_retention: StorageRetentionMode,
+        execution_retention: StorageRetentionMode,
+        recovery_retention: StorageRetentionMode,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
     ) -> None:
         del conversation_retention, execution_retention, recovery_retention
+        self.capability_writes: RuntimeCapabilityWrites | None = None
+        self.capability_revisions: dict[str, int] = {}
         self._staging = staging
         self.conversation_persistence = ConversationPersistence(conversation_archive)
         self.checkpoint_persistence = CheckpointPersistence(staging, recovery_archive, execution_archive)
@@ -147,7 +152,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             ensure_ready=self._ensure_business,
             require_mutable=self._ensure_run_mutable,
             has_flight=lambda run_id: run_id in self._durability_flights,
-            flush=self._flush_execution_projection,
+            flush=self._commit_execution_projection,
             flush_boundary=self.flush_execution_projection,
             background_tasks=self._background_tasks,
         )
@@ -197,6 +202,17 @@ class RuntimeAgentRunStore(AgentRunStore):
         if producer[0] != execution_id:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return producer[1]
+
+    def require_active_capability_run(self, agent_run_id: str, execution_id: str) -> None:
+        """Require a locally owned active run before binding optional writers."""
+        producer = self._execution_producers.get(agent_run_id)
+        if producer is None or producer[0] != execution_id:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._ensure_run_mutable(agent_run_id)
+
+    def has_active_execution_producer(self, execution_id: str) -> bool:
+        """Whether an execution still owns any local run producer."""
+        return any(owner == execution_id for owner, _ in self._execution_producers.values())
 
     async def require_active_producer(self, agent_run_id: str) -> None:
         """Fence model admission against the run's current execution authority."""
@@ -317,6 +333,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                 for event in events:
                     self._staging.append_event_local(event)
                 if offset is not None:
+                    configured = self.trace_persistence.offsets.get(record.agent_run_id)
+                    if configured is not None:
+                        offset.observation_batch_size = configured.observation_batch_size
+                        offset.observation_flush_interval = configured.observation_flush_interval
                     self.trace_persistence.offsets[record.agent_run_id] = offset
                 if offset is None or restored is not None and offset.checkpoints == 0:
                     self.trace_persistence.dirty.add(record.agent_run_id)
@@ -1852,6 +1872,16 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             return
         await self.trace_persistence.stop(agent_run_id)
+        await self._commit_execution_projection(
+            agent_run_id, execution_id=execution_id,
+            producer_generation=producer_generation,
+        )
+
+    async def _commit_execution_projection(
+        self, agent_run_id: str, *, execution_id: str,
+        producer_generation: int | None = None,
+    ) -> None:
+        """Publish a captured projection after scheduling ownership is settled."""
         captured = await self.capture_execution_projection(
             agent_run_id,
         )
@@ -1880,7 +1910,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         async def run() -> _BoundaryResult:
             return await operation
 
-        value, error, cancelled = await _await_owned_task(
+        value, error, cancelled = await await_owned_task(
             asyncio.create_task(run()), self._background_tasks,
         )
         if error is not None:
@@ -1982,9 +2012,12 @@ class RuntimeAgentRunStore(AgentRunStore):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
-                        self._execution_producers.pop(agent_run_id, None)
+                        producer = self._execution_producers.pop(agent_run_id, None)
+                        if producer is not None and self.capability_writes is not None:
+                            self.capability_writes.release_run(agent_run_id, producer[0])
                         self._execution_persistence.pop(agent_run_id, None)
                         self.trace_persistence.offsets.pop(agent_run_id, None)
+                        self.trace_persistence.release(agent_run_id)
                         self.trace_persistence.dirty.discard(agent_run_id)
                         for archive in self._archives.values():
                             if isinstance(archive, StateStepArchive):
@@ -2039,6 +2072,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     if runtime_domain is RuntimeDomain.TRACE:
                         self._ensure_run_mutable(agent_run_id)
                     self.trace_persistence.offsets.pop(agent_run_id, None)
+                    self.trace_persistence.release(agent_run_id)
                     self.trace_persistence.dirty.discard(agent_run_id)
                     flight = self._install_durability_flight_locked(
                         agent_run_id,
@@ -2199,9 +2233,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         await self._settle_observation_boundary(self._preflight_close())
 
     async def _preflight_close(self) -> None:
+        if self.capability_writes is not None:
+            await self.capability_writes.close()
         for agent_run_id in tuple(self.trace_persistence.offsets):
             await self.trace_persistence.stop(agent_run_id)
-        await self.trace_persistence.settle_scheduler()
+        await self.trace_persistence.settle_buffers()
         for agent_run_id in tuple(self.trace_persistence.dirty):
             offset = self.trace_persistence.offsets.get(agent_run_id)
             if offset is not None and offset.observation_execution_id is not None:

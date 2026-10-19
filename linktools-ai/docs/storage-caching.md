@@ -3,7 +3,9 @@
 Caching accelerates reads; the source storage still owns durable facts. The
 storage package separates content, revision discovery, and metadata projection.
 
-`RuntimeStorage` composes resources and owns their acquired lifetimes. Stores
+`RuntimeStorage` declares reusable resource routes and an optional object store.
+Each Runtime binding acquires and closes its own operational scope; borrowed
+backends remain host-owned. Stores
 such as `AssetStore`, `ObjectStore`, and `MetricStore` expose their respective
 data contracts; repositories own domain records and state transitions. Backends
 provide replaceable source or transport capabilities. These roles are not
@@ -12,7 +14,7 @@ store does not necessarily imply durable retention.
 
 | Interface | Responsibility | Host integration |
 | --- | --- | --- |
-| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage(..., cache=...)` |
+| `CacheBackend` | Store discardable immutable bytes | Supply it to a domain content cache or `RuntimeStorage.sqlite(path, cache=...)` |
 | `ContentCache[KeyT, ValueT, InfoT]` | Bind a borrowed backend to domain keys and value encoding | Supply `StorageOverlay(content_cache=...)` |
 | `RevisionSource` | Observe and publish the source's current revision | Supply `StorageOverlay(revision_source=...)` |
 | `StorageOverlay` | Merge layers, bind values to metadata, share content loads and refresh metadata | Keep reads through the owning store |
@@ -55,19 +57,20 @@ miss; it consumes at least one byte of the built-in capacity budget. These
 capacity limits do not define domain retention or promise TTL expiration; the
 owning domain remains responsible for its retention rules.
 
-## One cache instance, optional method groups
+## Read resources and write policies
 
-Pass one `cache` to `RuntimeStorage`, `Metrics`, or `StorageBuffer`. An adapter
-provides only the complete method groups it needs: `get`/`put`/`delete` for hot
-content, `append`/`read_batch`/`ack` for pending writes, and
-`open_stream`/`read_stream` for live previews. Each consumer checks the groups it uses. A missing group leaves it on its
-existing source/local path; a partial required group is a configuration error. No new all-capabilities wrapper or inheritance is required.
+`StorageRoute(..., cache=...)` and the RuntimeStorage factories borrow a
+`CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` borrows
+an independent `WriteBufferBackend` for pending writes. The same implementation
+may provide both capabilities, but each use is explicitly configured.
+`ExecutionCapability(coordination=...)` separately supplies turn ownership and
+live streams, including the non-authoritative pending-turn view.
 
-`CacheBackend` names only the hot-content protocol, not an interface requiring
-all three groups. A stream-only or pending-only adapter can therefore be a valid
-`cache` without implementing `CacheBackend`. Pending bytes await settlement;
-they must not inherit hot-entry eviction rules. Preview streams have their own
-gap and retention semantics and do not replace durable execution history.
+Adapters implement complete method groups: `get`/`put`/`delete` for hot content,
+`append`/`read_batch`/`ack` for pending writes, and `open_stream`/`read_stream`
+for previews. A write-only adapter is valid as a policy buffer, not as a
+StorageRoute cache. Pending bytes must not inherit hot-entry eviction rules;
+preview streams do not replace durable execution history.
 
 `InMemoryCacheBackend(max_bytes=..., max_size=...)` provides hot content and
 buffered writes with one shared capacity budget, including in-flight writes.
@@ -98,10 +101,14 @@ silently redirected into a local queue.
 
 ```python
 from linktools.ai.observe import Metrics
+from linktools.ai.core import CommitPolicy
 from linktools.ai.storage import InMemoryCacheBackend
 
 cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
-metrics = Metrics.sqlite("metrics.sqlite3", cache=cache)
+metrics = Metrics.sqlite(
+    "metrics.sqlite3",
+    commit=CommitPolicy.batch(buffer=cache, batch_size=64, flush_interval=15.0),
+)
 recorder = metrics.recorder()
 try:
     accepted = await recorder.try_record(observation)
@@ -110,12 +117,19 @@ finally:
     await recorder.close()
 ```
 
-Automatic Agent, Task and Evaluation observations require Runtime-scoped
-`MetricsCapability(metrics=dataset)`. The capability owns one per-Runtime recorder;
+Automatic Agent and Task observations, including evaluation work in a Runtime,
+require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
-All Metrics constructors and factories accept `cache`. Only automatic recorders
-use its complete buffer group; otherwise they await the source in the caller,
+All Metrics constructors and factories accept `commit`, defaulting
+to `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
+`CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
+policies. A Metrics batch policy requires an integer `batch_size`
+from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are
+invalid for both.
+These settings are validated when creating the dataset and inherited by each
+fresh recorder, including those owned by separate Runtimes. Only automatic recorders
+use `commit.buffer`; without a buffer they await the source in the caller,
 without a hidden local queue. `record`, `record_observations`, and queries keep
 their strong source semantics. Queries never add pending observations.
 
@@ -136,8 +150,9 @@ with `unconfirmed` preserving failed or unknown source outcomes.
 `StorageBuffer` separately provides final-value reads and writes over a source;
 it reuses the same scheduler rather than defining another pending queue.
 
-Automatic batches flush at 128 entries or 60 seconds after the first admission,
-whichever comes first; explicit flush and close wake partial batches. These
+Automatic batches flush at the configured entry threshold or interval after
+the first pending admission, whichever comes first (defaults: 128 entries and
+60 seconds); explicit flush and close wake partial batches. These
 are batching defaults, not query TTLs. The cache contains the encoded pending
 bytes using the existing Observation codec. Independent recorders own separate
 scopes and close only their own work; shared cache capacity remains shared.
@@ -270,13 +285,40 @@ require a new per-call cache option or a different Runtime profile.
 
 ## Runtime observation publication
 
-Metrics uses the cache's pending-write group with its 60-second/128-entry
-scheduler. Runtime retains its existing archive-owned publication scheduler,
-coalescing public observations for up to three seconds or 128 boundaries.
-Recovery checkpoints and final conversation/result commits keep their own
-reliable transaction boundaries; terminal completion and close drain publication.
-The Runtime scheduler remains local whether or not a cache is supplied. It does
-not enqueue empty markers or claim that its payloads live in a shared cache queue.
+Metrics uses `commit.buffer` with its configurable scheduler (defaults: 60
+seconds or 128 entries). Trace uses the same owner-scoped buffering primitive
+through its own `commit.buffer` (defaults: three seconds or 128 observation
+boundaries). Without a buffer, each observation boundary awaits the existing
+guarded projection commit. The route's hot cache never enables write batching.
+
+The policy borrows its buffer; equality and hashing compare timing values only.
+Within one Runtime, owners using the same buffer object and equal batch size
+and interval share automatic flush scheduling. Their accepted, undispatched
+entries contribute to one threshold; the earliest pending entry sets the
+next deadline, which later admission cannot postpone. A trigger dispatches each
+owner's currently accepted prefix. Entries count queue records: a Trace marker
+is one observation-boundary flush request, not one SQL row.
+
+Each owner keeps its queue, callback, acknowledgement and domain failure
+semantics, including unknown-result readback. Source transactions remain
+separate, even when storage points to the same database. Explicit flush and
+close affect only that owner; they do not wait for unrelated Metrics delivery.
+The last departing owner cancels the shared timer. Different Runtime instances,
+buffers or timing values retain separate schedules. Standalone recorders remain
+independent. Sharing a buffer does not imply cross-process claiming.
+
+A Trace queue entry is a flush request, not the sole copy of trace evidence.
+The run's existing staging owner retains facts until atomic publication and
+readback confirm them. Queue acknowledgement is not a durability receipt and
+this owner-local queue does not provide cross-process recovery of pending trace.
+Capacity rejection or cache failure settles owned callbacks before direct
+publication; a source integrity error or unresolved commit remains authoritative.
+
+Required flushes, checkpoints, effect fences and terminal publication retain
+their existing boundaries. Before terminal capture or revoked-producer discard,
+queued requests are quiesced without independently committing the dirty tail.
+Already-running publication settles first. Closing a run drains its owned work
+without closing the borrowed cache.
 
 ## Runtime content
 
@@ -324,7 +366,7 @@ namespace or a separate cache namespace/instance. Store IDs alone do not
 identify physical sources. Keys also isolate tenant, domain, and the complete
 immutable ObjectRef. A host-provided cache is a trusted byte transport, not an
 authorization service.
-`RuntimeStorage.read_object(domain, reference)` is the storage-level read
+`RuntimeState.read_object(domain, reference)` is the composition-level read
 operation used by SDK composition; applications normally keep using their
 existing domain/history APIs.
 
@@ -381,10 +423,10 @@ remain in use.
 
 ## Ordered live streams
 
-`RuntimeStorage(..., cache=cache)` uses the optional `open_stream`/`read_stream`
+`ExecutionCapability(coordination=cache)` uses the optional `open_stream`/`read_stream`
 methods on that same borrowed instance for ordered, disposable live previews.
-`object_store` still owns authoritative payloads; `get`/`put`/`delete` on the
-cache instance, when available, cache reproducible content. A live preview
+`object_store` still owns authoritative payloads; the separately configured
+StorageRoute cache holds reproducible content. A live preview
 is not a successful durable commit. Configure shared authoritative execution
 storage as well as a shared stream backend to observe another Runtime's live
 output. Execution routes must have `DURABLE` retention; temporary execution
@@ -462,7 +504,7 @@ A shorter later maximum is respected, and a longer one never extends an existing
 entry's original expiry. The default zero does not read or publish display cache
 entries. Custom `SessionService` implementations accept the same `max_age` argument.
 
-The Runtime borrows its existing `RuntimeStorage.cache`; no extra cache
+The Runtime borrows the effective Conversation route’s cache; no extra cache
 configuration or backend lifecycle is introduced. Standard assembly enables
 this optimization only when conversation and execution retention are both
 `DURABLE`. Entries are isolated by Runtime namespace, principal/tenant/kind,

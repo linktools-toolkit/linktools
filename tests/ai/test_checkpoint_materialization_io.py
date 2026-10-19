@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Checkpoint materialization keeps replay and optimistic ownership checks."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import getpass
 from pathlib import Path
@@ -25,7 +26,7 @@ async def test_checkpoint_materialization_skips_fresh_fact_read_and_verifies_rep
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="checkpoint-io", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -66,7 +67,7 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
         query={"host": command[command.index("-h") + 1]},
     ), isolation_level="READ COMMITTED")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="checkpoint-race", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -112,7 +113,7 @@ async def test_checkpoint_owner_fences_commit_after_absent_fact_read(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replay", (False, True))
 async def test_recovery_preparation_bounds_metadata_read_transactions(tmp_path: Path, replay: bool) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "preparation.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "preparation.db"))
     await state.initialize(namespace="checkpoint-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -149,7 +150,7 @@ async def test_checkpoint_relocation_scopes_metadata_without_holding_body_reads(
     from linktools.ai.runtime.state._store import active_state_scope
     from .test_incremental_projection_boundaries import _storage
 
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-relocation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -194,7 +195,7 @@ async def test_recovery_metadata_cancellation_releases_scope(
     from linktools.ai.runtime.state._store import active_state_scope
     from .test_incremental_projection_boundaries import _storage
 
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="checkpoint-cancel", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")

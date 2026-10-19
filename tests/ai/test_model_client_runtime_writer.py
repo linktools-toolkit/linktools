@@ -24,7 +24,7 @@ from linktools.ai.runtime import Execution, ExecutionInputContext, Runtime, Runt
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from .test_model_client_request_capture import _agents, _model, _registry, _response
 from .test_model_client_response_capture import _DONE, _EVENT, _Stream, _invoke
@@ -178,10 +178,10 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
                 namespace="default", tenant_id="default", execution_id=execution.execution_id,
                 agent_run_seq=1,
             )
-            staged = await storage.run_store.list_model_interactions(agent_run_id=run_id)
+            staged = await runtime._state.run_store.list_model_interactions(agent_run_id=run_id)
             assert len(staged) == 1 and staged[0].status == "RUNNING"
             assert staged[0].client_requests is None
-            archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert all(record.client_requests is None for record in records)
             await execution.cancel()

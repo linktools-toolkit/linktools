@@ -12,19 +12,22 @@ from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..core import PromptLimits
+from ..core import PromptLimits, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
+from .persistence import CapabilityPersistence
 from ._agent_run_recorder import AgentRunRecorder
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
-from ._conversation_capability import ConversationCapability
+from linktools.ai.capability import ConversationCapability
 from ._harness import HarnessPlanStoreAdapter
 from ._harness_memory import build_harness_memory, select_harness_memory_tools
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
-from ._persistence_capabilities import CheckpointCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, TraceCapability
 from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
+from ._conversation_service import ConversationService
+from ._persistence_services import CheckpointService, TraceService
 from .state._step_contracts import AgentRunStore
 from .state._steps import RuntimeAgentRunStore
 
@@ -115,21 +118,38 @@ async def compose_platform_capabilities(
             rebound = copy(capability)
             rebound.wrapped = wrapped
             return rebound
-        for enabled, feature in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability)):
+        if isinstance(capability, CapabilityPersistence):
+            if not isinstance(run_store, RuntimeAgentRunStore) or run_store.capability_writes is None or execution_id is None or capability.id is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            bound = run_store.capability_writes.bind(
+                capability.id, agent_run_id, execution_id, capability,
+                revision=run_store.capability_revisions[capability.id],
+            )
+            if not isinstance(bound, AbstractCapability):
+                raise TypeError("bind_persistence must preserve the SDK capability type")
+            return bound
+        for enabled, feature, service in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability), (ConversationService, CheckpointService, TraceService)):
             if isinstance(capability, feature):
                 if not enabled:
                     return None
                 bound_types.add(feature)
-                return capability.bind(persistence)
+                if isinstance(capability, TraceCapability) and isinstance(run_store, RuntimeAgentRunStore):
+                    run_store.trace_persistence.configure(
+                        agent_run_id, buffer=capability.commit.buffer,
+                        terminal=capability.commit.mode == "terminal",
+                        batch_size=capability.commit.batch_size or DEFAULT_TRACE_BATCH_SIZE,
+                        flush_interval=capability.commit.flush_interval or DEFAULT_TRACE_FLUSH_INTERVAL,
+                    )
+                return capability.bind(service(persistence))
         return capability
 
     for template in runtime_capabilities:
         bound = template.visit_and_replace(bind)
         if bound is not None:
             capabilities.append(bound)
-    for enabled, feature in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability)):
+    for enabled, feature, service in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability), (ConversationService, CheckpointService, TraceService)):
         if enabled and feature not in bound_types:
-            capabilities.append(feature().bind(persistence))
+            capabilities.append(feature().bind(service(persistence)))
     selected_memory = select_harness_memory_tools(tool_policy)
     if memory_scope is not None and selected_memory:
         if memory_store is None:

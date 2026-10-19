@@ -51,7 +51,7 @@ class _ObservedCache(InMemoryCacheBackend):
 
 
 def _helper(cache: object, *, namespace: str = "namespace", tenant_id: str = "tenant") -> _PendingTurnCoordination:
-    return _PendingTurnCoordination(cache, namespace=namespace, tenant_id=tenant_id)
+    return _PendingTurnCoordination(cache, cache, namespace=namespace, tenant_id=tenant_id)
 
 
 async def _claim(helper: _PendingTurnCoordination, *, execution_id: str = "execution", owner_id: str = "owner") -> TurnCoordination:

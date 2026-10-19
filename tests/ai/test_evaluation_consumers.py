@@ -44,7 +44,7 @@ class FixtureModels:
     route_id = "default"
     provider = "test"
     model_identity = "test:evaluation-consumers"
-    contract: dict[str, JsonValue] = {"provider": "test", "model": "evaluation-consumers", "vision": False}
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "evaluation-consumers", "input_mime_types": ["application/*", "audio/*", "text/*", "video/*"]}
 
     def __init__(self) -> None:
         self.prompts: list[str] = []

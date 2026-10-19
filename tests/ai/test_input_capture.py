@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
+
 from linktools.ai.core import JsonValue, Principal, TaskStatus, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, CaptureGraphRequest, Runtime, RuntimeStorage
@@ -40,7 +42,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
         assert result.status is TaskStatus.SUCCEEDED
         execution = await source_run.execution("target")
         if extra_invocation_fields:
-            objects = storage.object_store(RuntimeDomain.TASK)
+            objects = runtime._state.object_store(RuntimeDomain.TASK)
             key = input_capture_key("input-capture", principal.tenant_id, "invocation", execution.execution_id)
             stat = await objects.stat(key)
             payload = json.loads(b"".join([chunk async for chunk in objects.open(key)]))
@@ -250,7 +252,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
             principal=principal, idempotency_key="snapshot-captured-0001")
         assert ((await second.wait()).result).status is TaskStatus.SUCCEEDED
     archive = InMemoryObjectStore("capture-archive")
-    storage = RuntimeStorage.filesystem(root)
+    storage = RuntimeState(RuntimeStorage.filesystem(root))
     await storage.initialize(namespace="snapshot-capture", tenant_id="default", read_only=True)
     limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
     try:
@@ -258,7 +260,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
     finally:
         await storage.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
+    await RuntimeState.restore_snapshot(snapshot, object_store=archive, root=restored_root, limits=limits)
     async with Runtime.open("snapshot-capture", models=_TaskTestModels(), storage=RuntimeStorage.from_root(restored_root)) as runtime:
         replay = await runtime.tasks.bind(use).start(TaskGraph("fresh", (TaskNode("use", task=use, input_capture=capture),)),
             principal=principal, idempotency_key="snapshot-fresh-0001")
@@ -275,7 +277,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
 
     await archive.put("damaged", damaged_chunks(), expected_size=len(data), expected_digest=digest)
     with pytest.raises(AIError) as raised:
-        await RuntimeStorage.restore_snapshot(ObjectRef(archive.store_id, "damaged", digest, len(data)), object_store=archive,
+        await RuntimeState.restore_snapshot(ObjectRef(archive.store_id, "damaged", digest, len(data)), object_store=archive,
                                               root=tmp_path / "damaged", limits=limits)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 

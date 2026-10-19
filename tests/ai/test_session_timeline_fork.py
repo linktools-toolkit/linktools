@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session timeline fork regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timezone
 
 import pytest
@@ -16,7 +17,7 @@ from linktools.ai.core import (
     SessionStatus,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime._session import RuntimeSessionService
 from linktools.ai.runtime.service_api import ForkSessionRequest
 from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
@@ -25,6 +26,8 @@ from linktools.ai.runtime.state._contracts import (
     StoredUserInput,
 )
 from linktools.ai.storage import StoredPayload
+
+from .test_session_timeline import _commit_empty_turn
 
 
 def _binding() -> AgentBindingContract:
@@ -117,6 +120,7 @@ class _ExecutionService:
 @pytest.mark.asyncio
 async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session("source"))
@@ -153,14 +157,14 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
             },
             state.execution.executions.state_store,
         )
-        service = DefaultSessionService(
+        await _commit_empty_turn(state, executions.values["stable"])
+        service = RuntimeSessionService(
             state.conversation,
             executions,  # type: ignore[arg-type]
             TenantAuthorizationPolicy(),
             _ExecutionService(),  # type: ignore[arg-type]
             HmacCursorSigner("session", b"session-timeline-key"),
             history_reader=object(),  # type: ignore[arg-type]
-            conversation_enabled=True,
             transcript_store=object(),  # type: ignore[arg-type]
         )
         principal = Principal("owner", "tenant")

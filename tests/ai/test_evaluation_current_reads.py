@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Current evaluation reads select manifest members before native hydration."""
 
+from linktools.ai.runtime.state import RuntimeState
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -38,7 +39,7 @@ from .test_evaluation_retention import Offline
 
 
 @contextmanager
-def _sql_writes(storage: RuntimeStorage) -> Iterator[list[str]]:
+def _sql_writes(storage: RuntimeState) -> Iterator[list[str]]:
     statements: list[str] = []
 
     def capture(_connection, _cursor, sql, _parameters, _context, _many) -> None:
@@ -53,7 +54,7 @@ def _sql_writes(storage: RuntimeStorage) -> Iterator[list[str]]:
         event.remove(engine, "before_cursor_execute", capture)
 
 
-async def _add_attachment(storage: RuntimeStorage, experiment_id: str, index: int) -> ObjectRef:
+async def _add_attachment(storage: RuntimeState, experiment_id: str, index: int) -> ObjectRef:
     repository = storage.evaluation.records
     record = await repository.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
     trial_id = record.manifest.trials[index].trial_id
@@ -478,7 +479,7 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
             principal=PRINCIPAL, idempotency_key="dataset")
         await runtime.evaluations.close()
         policy.calls.clear()
-        repository = storage.evaluation.records
+        repository = runtime._state.evaluation.records
         principal = PRINCIPAL
         if fault == "owner":
             principal = service_principal(PRINCIPAL.tenant_id, "another-owner")
@@ -499,7 +500,7 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
                               storage_revision=row.storage_revision + 1)
             assert await repository.state_store.mutate(lambda tx: tx.replace_record(
                 expired, expected_storage_revision=row.storage_revision))
-        with _sql_writes(storage) as writes:
+        with _sql_writes(runtime._state) as writes:
             with pytest.raises(AIError) as caught:
                 await runtime.evaluations.get_case(ref, principal=principal)
         expected = {"owner": ErrorCode.AUTHORIZATION_DENIED, "anonymous_input": ErrorCode.AUTHORIZATION_DENIED,
@@ -507,7 +508,7 @@ async def test_get_case_preserves_owner_expiry_and_missing_boundaries(tmp_path: 
         assert caught.value.code is expected[fault]
         if fault == "anonymous_input":
             assert any(action is AuthorizationAction.EVALUATION_DATASET_READ for action, _ in policy.calls)
-        assert not writes and await report_count(storage) == 0
+        assert not writes and await report_count(runtime._state) == 0
 
 
 @pytest.mark.asyncio
@@ -549,7 +550,7 @@ async def test_reused_case_keeps_earlier_expiry_in_current_reads(
             engine=runtime.tasks.bind(target, scorer))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         await owner.close()
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.content_expires_at == early
         assert (await owner.get_case(case.ref, principal=PRINCIPAL)).ref == case.ref
         assert len((await run.current_trials()).items) == 1
@@ -567,7 +568,7 @@ async def test_reused_case_keeps_earlier_expiry_in_current_reads(
             with pytest.raises(AIError) as caught:
                 await read()
             assert caught.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
-        assert await report_count(storage) == 0
+        assert await report_count(runtime._state) == 0
 
 
 @pytest.mark.asyncio
@@ -601,13 +602,13 @@ async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_p
         assert len(purged) == 2
         remaining = []
         for run in runs:
-            record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             if record.content_deleted_at is None:
                 remaining.append(run)
         assert len(remaining) == 1 and remaining[0].experiment_id not in purged
         run = remaining[0]
-        assert await report_count(storage) == 0
-        with _sql_writes(storage) as writes:
+        assert await report_count(runtime._state) == 0
+        with _sql_writes(runtime._state) as writes:
             page = await run.current_trials(limit=1)
             assert len(page.items) == 1 and page.next_cursor is None
             trial = page.items[0]
@@ -617,4 +618,4 @@ async def test_current_state_survives_bounded_purge_of_shared_case_content(tmp_p
                 with pytest.raises(AIError) as caught:
                     await read()
                 assert caught.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
-        assert not writes and await report_count(storage) == 0
+        assert not writes and await report_count(runtime._state) == 0

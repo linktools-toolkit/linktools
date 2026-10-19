@@ -32,14 +32,18 @@ from ..storage import (
     InMemoryObjectStore,
     ObjectRef,
     ObjectStore,
+    StorageRetentionMode,
     read_object,
 )
 from ._runtime_history import RuntimeHistory
-from ._persistence_configuration import persistence_storage_configuration
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
 from .state import (
     SnapshotExclusiveGuard,
     RuntimeStorage,
+    RuntimeState,
     SnapshotLimits,
+    RuntimeDomain,
+    reject_filesystem_capability_partitions,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
@@ -111,33 +115,39 @@ class RuntimeSnapshot:
         if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
             raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
         async def publish() -> ObjectRef:
+            state = RuntimeState(storage)
             captured = await features.capture() if isinstance(features, RuntimeFeatures) else features
             if captured is not None:
                 await captured.verify_source_revision()
             capabilities = () if captured is None else tuple(
                 item.value for item in captured.contributions if item.scope == "runtime"
             )
-            module_routes, module_caches = persistence_storage_configuration(capabilities)
+            capability_routes = capability_storage_configuration(
+                () if captured is None else tuple((item.id, item.value) for item in captured.contributions if item.scope == "runtime"),
+                default_route=storage.plan.route(RuntimeDomain.EXECUTION),
+            )
+            if any(route.retention is StorageRetentionMode.DURABLE for route in capability_routes.values()):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
+            await asyncio.to_thread(reject_filesystem_capability_partitions, tuple(storage.plan.route(domain) for domain in RuntimeDomain), resolved_namespace, resolved_tenant)
+            module_routes = persistence_storage_configuration(capabilities)
             initialized = False
             try:
-                if storage.ready:
-                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                await storage.initialize(
+                await state.initialize(
                     namespace=resolved_namespace,
                     tenant_id=resolved_tenant,
                     read_only=True,
                     module_routes=module_routes,
-                    module_caches=module_caches,
+                    capability_routes=capability_routes,
                 )
                 initialized = True
                 if captured is not None:
                     await captured.verify_source_revision()
                 if (
-                    storage.namespace != resolved_namespace
-                    or storage.tenant_id != resolved_tenant
+                    state.namespace != resolved_namespace
+                    or state.tenant_id != resolved_tenant
                 ):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                storage_ref = await storage.export_snapshot(
+                storage_ref = await state.export_snapshot(
                     object_store=object_store,
                     limits=limits,
                 )
@@ -155,7 +165,7 @@ class RuntimeSnapshot:
                 )
                 workspace_entries = await _capture_workspace(
                     workspace,
-                    storage=storage,
+                    storage=state,
                     object_store=object_store,
                     limits=limits,
                 )
@@ -192,7 +202,7 @@ class RuntimeSnapshot:
                 return ObjectRef(object_store.store_id, key, digest, len(payload))
             finally:
                 if initialized:
-                    await storage.close()
+                    await state.close()
 
         async with exclusive.offline_exclusivity():
             return await publish()
@@ -374,7 +384,7 @@ class RuntimeSnapshot:
                 )
                 storage_root = staging / "storage"
                 logical_storage_ref = _object_ref_from_payload(manifest["storage"])
-                await RuntimeStorage.restore_snapshot(
+                await RuntimeState.restore_snapshot(
                     ObjectRef(
                         object_store.store_id,
                         logical_storage_ref.key,
@@ -564,7 +574,7 @@ class RuntimeSnapshot:
 async def _capture_workspace(
     workspace: "Workspace | None",
     *,
-    storage: "RuntimeStorage",
+    storage: "RuntimeState",
     object_store: ObjectStore,
     limits: SnapshotLimits,
 ) -> dict[str, JsonValue]:
@@ -921,15 +931,15 @@ async def _verify_restored_generation(
     tenant_id = manifest.get("tenant_id")
     if not isinstance(namespace, str) or not isinstance(tenant_id, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    restored_storage = RuntimeStorage.from_root(storage_root)
+    restored_state = RuntimeState(RuntimeStorage.from_root(storage_root))
     probe_store = InMemoryObjectStore("snapshot-freshness")
     try:
-        await restored_storage.initialize(
+        await restored_state.initialize(
             namespace=namespace,
             tenant_id=tenant_id,
             read_only=True,
         )
-        actual_ref = await restored_storage.export_snapshot(
+        actual_ref = await restored_state.export_snapshot(
             object_store=probe_store,
             limits=limits,
         )
@@ -957,8 +967,8 @@ async def _verify_restored_generation(
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
         raise
     finally:
-        if restored_storage.ready:
-            await restored_storage.close()
+        if restored_state.ready:
+            await restored_state.close()
 
     workspace_root = root / "workspace"
     workspace = manifest.get("workspace")

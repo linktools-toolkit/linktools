@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Run checkpoint preparation reuses only metadata preceding body I/O."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -25,7 +26,7 @@ pytestmark = pytest.mark.asyncio
 async def test_run_preparation_reduces_empty_prefix_reads_without_changing_values(
     tmp_path: Path, existing: str,
 ) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -70,7 +71,7 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
 async def test_run_preparation_preserves_custom_relocation_and_preparation(
     tmp_path: Path, override: str,
 ) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
     original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -106,7 +107,7 @@ async def test_run_preparation_preserves_custom_relocation_and_preparation(
 async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, fault: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
@@ -159,7 +160,7 @@ async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled
 async def test_run_preparation_rejects_corrupt_head_without_run(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")

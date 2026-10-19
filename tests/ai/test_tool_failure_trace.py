@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from linktools.ai.capability import AgentContext, RuntimeFeatures, ToolCallFailed, ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime import TraceCapability
+from linktools.ai.capability import TraceCapability
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models
@@ -109,7 +109,7 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
             "failure": ExecutionStatus.FAILED,
             "cancel": ExecutionStatus.CANCELLED,
         }[outcome]
-        head = await storage.execution.executions.get_history_head(
+        head = await runtime._state.execution.executions.get_history_head(
             execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
         )
         history = await execution.history(include_content=True)
@@ -125,7 +125,7 @@ async def test_terminal_seal_and_retention_release_outlast_pending_observation_f
         # The deferred observation deadline must not resurrect released staging
         # or mutate a sealed execution after its terminal result was handed off.
         await asyncio.sleep(1.1)
-        assert await storage.execution.executions.get_history_head(
+        assert await runtime._state.execution.executions.get_history_head(
             execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
         ) == head
         assert (await execution.history(include_content=True)).items == history.items
@@ -180,7 +180,7 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
             expected = ExecutionStatus.WAITING_DEFERRED if handoff == "deferred" else ExecutionStatus.RECOVERY_REQUIRED
             async def wait_paused():
                 while True:
-                    record = await storage.execution.executions.get(paused.execution_id, tenant_id=runtime.tenant_id)
+                    record = await runtime._state.execution.executions.get(paused.execution_id, tenant_id=runtime.tenant_id)
                     if record is not None and record.status is expected:
                         return
                     await asyncio.sleep(0.01)
@@ -193,12 +193,12 @@ async def test_pause_handoff_drains_only_its_execution_while_another_run_is_live
             assert [item.content for item in paused_history.items if item.item_kind == "user"] == ["pause this run"]
             await asyncio.sleep(1.1)
             assert (await paused.history(include_content=True)).items == paused_history.items
-            held_record = await storage.execution.executions.get(held.execution_id, tenant_id=runtime.tenant_id)
+            held_record = await runtime._state.execution.executions.get(held.execution_id, tenant_id=runtime.tenant_id)
             assert held_record is not None and held_record.status is ExecutionStatus.STARTED
-            checkpoint = await storage.recovery.checkpoints.get(held.execution_id, tenant_id=runtime.tenant_id)
-            head = await storage.execution.executions.get_history_head(held.execution_id, tenant_id=runtime.tenant_id)
+            checkpoint = await runtime._state.recovery.checkpoints.get(held.execution_id, tenant_id=runtime.tenant_id)
+            head = await runtime._state.execution.executions.get_history_head(held.execution_id, tenant_id=runtime.tenant_id)
             assert checkpoint is not None and checkpoint.agent_run_id is not None and head is not None
-            await storage.run_store.flush_execution_projection(
+            await runtime._state.run_store.flush_execution_projection(
                 checkpoint.agent_run_id, execution_id=held.execution_id, producer_generation=head.producer_generation,
             )
             held_history = await held.history(include_content=True)

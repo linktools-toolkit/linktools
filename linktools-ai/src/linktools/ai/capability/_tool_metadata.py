@@ -24,7 +24,7 @@ ToolClass = Literal[
     "shell",
     "mcp",
 ]
-ToolContextDedupe = Literal["workspace_file_read_v1", "workspace_file_read_v2"]
+ToolContextDedupe = Literal["workspace_file_read_v1"]
 
 _TOOL_EFFECTS = frozenset(get_args(ToolEffectPolicy))
 _TOOL_CLASSES = frozenset(get_args(ToolClass))

@@ -708,6 +708,31 @@ class TranscriptRepository:
             ObjectRef("runtime", key, stat.digest, stat.size)
         )
 
+    async def retain_payload(
+        self, payload: StoredPayload, *, source_domain: RuntimeDomain,
+    ) -> StoredPayload:
+        """Copy a payload into this archive before publishing its retained reference."""
+        if payload.ref is None:
+            return payload
+        if self._object_reader is None or self._object_store is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = await self._object_reader(source_domain, payload.ref)
+        if len(value) != payload.size or hashlib.sha256(value).hexdigest() != payload.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = runtime_object_key(
+            namespace_digest=self._namespace_digest,
+            tenant_digest=self._tenant_digest,
+            stored_digest=payload.digest,
+        )
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield value
+
+        stat = await self._object_store.put(
+            key, chunks(), expected_size=payload.size, expected_digest=payload.digest,
+        )
+        return StoredPayload.object(ObjectRef("runtime", key, stat.digest, stat.size))
+
     def checkpoint_record_keys(
         self,
         owner_id: str,

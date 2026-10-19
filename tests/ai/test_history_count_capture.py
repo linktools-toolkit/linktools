@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """History counts capture the standard descriptor and local head together."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from linktools.ai.runtime.state._history import TranscriptRepository
 
 @pytest.mark.asyncio
 async def test_history_count_uses_one_physical_select_and_refreshes_each_call(tmp_path: Path) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "count.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "count.db"))
     await storage.initialize(namespace="count", tenant_id="tenant")
     statements = []
 
@@ -58,7 +59,7 @@ async def test_history_count_uses_one_physical_select_and_refreshes_each_call(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ("missing", "wrong_tenant", "missing_head"))
 async def test_history_count_retains_missing_and_tenant_errors(tmp_path: Path, case: str) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "invalid.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "invalid.db"))
     await storage.initialize(namespace="count", tenant_id="tenant")
     try:
         histories = storage.conversation.histories
@@ -77,7 +78,7 @@ async def test_history_count_retains_missing_and_tenant_errors(tmp_path: Path, c
 
 @pytest.mark.asyncio
 async def test_custom_history_subclass_keeps_scalar_get_semantics(tmp_path: Path) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "custom.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "custom.db"))
     await storage.initialize(namespace="count", tenant_id="tenant")
     calls = []
 

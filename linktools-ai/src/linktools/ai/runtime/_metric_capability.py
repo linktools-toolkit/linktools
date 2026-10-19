@@ -39,7 +39,7 @@ from ..model import ModelClientRequest, ModelClientRequestRecorder, model_bindin
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
-from ._metrics import (
+from ._metrics_service import (
     _bind_metric_execution_context,
     _metric_correlation,
 )

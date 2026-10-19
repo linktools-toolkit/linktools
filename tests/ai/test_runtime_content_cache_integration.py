@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 from linktools.ai.asset import AssetContentCache, AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.storage import ContentCache, InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StorageOverlay, InMemoryStreamBackend
 
@@ -38,9 +39,9 @@ async def test_shared_cache_reuses_body_across_storage_lifetimes(tmp_path) -> No
     objects = CountingObjects()
     ref = await _put(objects, b"persisted body")
     for _ in range(2):
-        storage = RuntimeStorage.sqlite(
+        storage = RuntimeState(RuntimeStorage.sqlite(
             tmp_path / "runtime.db", object_store=objects, cache=cache,
-        )
+        ))
         await storage.initialize(namespace="runtime", tenant_id="tenant")
         try:
             assert await storage.read_object(RuntimeDomain.EXECUTION, ref) == b"persisted body"
@@ -59,9 +60,9 @@ async def test_distinct_source_namespaces_do_not_share_membership(tmp_path) -> N
     absent = CountingObjects()
     ref = await _put(present, b"persisted body")
     for source in (present, absent):
-        storage = RuntimeStorage.sqlite(
+        storage = RuntimeState(RuntimeStorage.sqlite(
             tmp_path / "runtime.db", object_store=source, cache=cache,
-        )
+        ))
         await storage.initialize(namespace="present" if source is present else "absent", tenant_id="tenant")
         try:
             if source is present:
@@ -93,9 +94,9 @@ async def test_domain_content_cache_and_runtime_borrow_same_backend(tmp_path) ->
     ))
     objects = CountingObjects()
     ref = await _put(objects, b"runtime body")
-    storage = RuntimeStorage.sqlite(
+    storage = RuntimeState(RuntimeStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects, cache=cache_backend,
-    )
+    ))
     await asset_store.initialize()
     await storage.initialize(namespace="runtime", tenant_id="tenant")
     try:
@@ -131,7 +132,9 @@ class WriteOnlyCache:
 async def test_cache_without_key_value_capabilities_reads_objects_from_source(tmp_path, cache) -> None:
     objects = CountingObjects()
     reference = await _put(objects, b"source body")
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache)
+    with pytest.raises(TypeError, match="cache must provide get, put and delete"):
+        RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache)
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects))
     await storage.initialize(namespace="runtime", tenant_id="tenant")
     try:
         for _ in range(2):

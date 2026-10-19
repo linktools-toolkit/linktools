@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused regressions for durable composition and close ownership."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -36,7 +37,8 @@ from linktools.ai.runtime.state._durability import (
     run_durable_commit,
 )
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
-from linktools.ai.runtime.state._plan import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._plan import RuntimeDomain
+from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
@@ -249,9 +251,9 @@ def _run_store_for_preflight() -> RuntimeAgentRunStore:
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
-        conversation_retention=RuntimeRetentionMode.VOLATILE,
-        execution_retention=RuntimeRetentionMode.VOLATILE,
-        recovery_retention=RuntimeRetentionMode.VOLATILE,
+        conversation_retention=StorageRetentionMode.VOLATILE,
+        execution_retention=StorageRetentionMode.VOLATILE,
+        recovery_retention=StorageRetentionMode.VOLATILE,
     )
 
 
@@ -334,7 +336,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
 
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
-        return SimpleNamespace(session_id=None, agent_run_seq=0)
+        return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True)
 
     async def release_staging_many(
         *,
@@ -361,6 +363,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     await controller.release_execution_handoff("execution", tenant_id="tenant")
 
     assert calls == [
+        "execution:execution:tenant",
         "retention:execution:tenant",
         "execution:execution:tenant",
         "staging:execution:()",
@@ -525,6 +528,7 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence(after_wait:
             await super().authorize(principal, action, resource)
 
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     record = await _seed_result(state)
     authorization = Authorization()

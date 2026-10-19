@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Model-boundary observations share one bounded execution/head snapshot."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -22,11 +23,11 @@ from .test_step_projection import _execution
 @asynccontextmanager
 async def _state(backend: str, path: Path, cache=None):
     if backend == "memory":
-        state = RuntimeStorage.in_memory(cache=cache)
+        state = RuntimeState(RuntimeStorage.in_memory(cache=cache))
     elif backend == "filesystem":
-        state = RuntimeStorage.filesystem(path, cache=cache)
+        state = RuntimeState(RuntimeStorage.filesystem(path, cache=cache))
     else:
-        state = RuntimeStorage.sqlite(path / "state.db", cache=cache)
+        state = RuntimeState(RuntimeStorage.sqlite(path / "state.db", cache=cache))
     await state.initialize(namespace="model-control", tenant_id="tenant")
     try:
         yield state
@@ -338,12 +339,12 @@ async def test_task_owned_model_boundaries_do_not_use_bounded_observation(
 async def test_transient_route_uses_frozen_restart_guarantee(
     restart: bool, trace: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime import RuntimeStoragePlan, RuntimeStorageRoute
+    from linktools.ai.runtime import RuntimeStoragePlan
+    from linktools.ai.storage import StorageRoute
 
-    state = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()),
-        cache=InMemoryCacheBackend(max_bytes=1000000),
-    )
+    state = RuntimeState(RuntimeStorage.from_plan(
+        RuntimeStoragePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
+    ))
     await state.initialize(namespace="model-control", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -384,7 +385,8 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
     from linktools.ai.capability import RuntimeFeatures
     from linktools.ai.core import TaskStatus
-    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStoragePlan, RuntimeStorageRoute
+    from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStoragePlan
+    from linktools.ai.storage import StorageRoute
     from linktools.ai.task import TaskGraph, TaskNode
     from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -404,8 +406,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",) if delegated else ())
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = RuntimeStorage.from_plan(
-        RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()),
-        cache=InMemoryCacheBackend(max_bytes=1000000),
+        RuntimeStoragePlan(execution=StorageRoute.transient(cache=InMemoryCacheBackend(max_bytes=1000000))),
     )
     async with Runtime.open(
         "transient-task-control", models=_Models(_UsageFunctionModel(model)),

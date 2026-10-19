@@ -12,6 +12,7 @@ import pytest
 from linktools.ai.core import ApprovalStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._plan import RuntimePlanStore
 from linktools.ai.runtime import RuntimeStorage
@@ -380,7 +381,7 @@ async def test_message_spans_keep_the_observed_head_without_reading_a_new_head(
 ) -> None:
     from .test_session_history_projection import _materialize, _session
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="observed-span-head", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())

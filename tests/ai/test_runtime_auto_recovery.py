@@ -14,7 +14,7 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import ExecutionRequest
 from linktools.ai.runtime.state._contracts import ExecutionRecord
@@ -49,7 +49,7 @@ async def _admit_without_worker(
         with monkeypatch.context() as fault:
             fault.setattr(runtime._execution_service.runtime_backend(), "launch", interrupted_launch)
             run = await runtime.agents.get().start("recover this admission", idempotency_key="admission")
-        record = await storage.execution.executions.get(run.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(run.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.status is ExecutionStatus.STARTED
         return record
 
@@ -80,7 +80,7 @@ async def test_startup_recovery_defaults_to_enabled(
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "recovered admission"}
     assert calls == ["recovered"]
-    assert not storage.ready
+    assert not runtime._state.ready
 
 
 @pytest.mark.asyncio
@@ -100,7 +100,7 @@ async def test_disabled_startup_preserves_admission_until_explicit_execution_rec
     async with Runtime.open(
         _NAMESPACE, models=models, storage=storage, features=_capabilities(), auto_recover=False,
     ) as runtime:
-        assert await storage.execution.executions.get(
+        assert await runtime._state.execution.executions.get(
             before.execution_id, tenant_id=runtime.tenant_id,
         ) == before
         assert calls == []
@@ -116,7 +116,7 @@ async def test_disabled_startup_preserves_admission_until_explicit_execution_rec
             before.execution_id, principal=runtime.default_principal, idempotency_key="explicit-recovery",
         )
     assert calls == ["recovered"]
-    assert not storage.ready
+    assert not runtime._state.ready
 
 
 @pytest.mark.asyncio
@@ -162,11 +162,11 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
         try:
             owner_run = await owner.agents.get().start("keep running", idempotency_key="owner")
             await asyncio.wait_for(owner_entered.wait(), 10)
-            before = await owner_storage.execution.executions.get(owner_run.execution_id, tenant_id=owner.tenant_id)
-            head = await owner_storage.execution.executions.get_history_head(
+            before = await owner._state.execution.executions.get(owner_run.execution_id, tenant_id=owner.tenant_id)
+            head = await owner._state.execution.executions.get_history_head(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
-            checkpoint = await owner_storage.recovery.checkpoints.get(
+            checkpoint = await owner._state.recovery.checkpoints.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
             async with Runtime.open(
@@ -175,31 +175,31 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             ) as other:
                 assert other.namespace == owner.namespace
                 assert owned_calls == []
-                assert await other_storage.execution.executions.get(
+                assert await other._state.execution.executions.get(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 ) == before
-                observed_head = await other_storage.execution.executions.get_history_head(
+                observed_head = await other._state.execution.executions.get_history_head(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 )
                 assert head is not None and observed_head is not None
                 assert observed_head.producer_generation == head.producer_generation
                 assert observed_head.producer_claim_id == head.producer_claim_id
-                assert await other_storage.recovery.checkpoints.get(
+                assert await other._state.recovery.checkpoints.get(
                     owner_run.execution_id, tenant_id=other.tenant_id,
                 ) == checkpoint
                 owned_run = await other.agents.get().start("close only this worker", idempotency_key="owned")
                 await asyncio.wait_for(owned_entered.wait(), 10)
-            assert not other_storage.ready
-            assert owner_storage.ready
+            assert not other._state.ready
+            assert owner._state.ready
             assert owned_stopped.is_set()
             assert not owner_stopped.is_set()
             assert owned_calls == ["owned"]
-            owned = await owner_storage.execution.executions.get(owned_run.execution_id, tenant_id=owner.tenant_id)
+            owned = await owner._state.execution.executions.get(owned_run.execution_id, tenant_id=owner.tenant_id)
             assert owned is not None and owned.status is ExecutionStatus.CANCELLED
-            assert await owner_storage.execution.executions.get(
+            assert await owner._state.execution.executions.get(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             ) == before
-            after_close_head = await owner_storage.execution.executions.get_history_head(
+            after_close_head = await owner._state.execution.executions.get_history_head(
                 owner_run.execution_id, tenant_id=owner.tenant_id,
             )
             assert after_close_head is not None
@@ -210,7 +210,7 @@ async def test_disabled_startup_and_close_preserve_other_runtime_owned_execution
             assert owner_calls == ["owner"]
         finally:
             release_owner.set()
-    assert not owner_storage.ready
+    assert not owner._state.ready
 
 
 @pytest.mark.asyncio
@@ -226,11 +226,11 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
     storage = RuntimeStorage.filesystem(tmp_path / "state")
     async with Runtime.open(_NAMESPACE, models=ModelRegistry(), storage=storage) as runtime:
         submission = await runtime.tasks.bind(task).prepare_submission(graph, idempotency_key="graph-admission")
-        await storage.task.admissions.admit_prepared(submission)
-        lease = await storage.task.tasks.claim(
+        await runtime._state.task.admissions.admit_prepared(submission)
+        lease = await runtime._state.task.tasks.claim(
             graph.graph_id, "node", tenant_id=runtime.tenant_id, owner="interrupted-worker", lease_seconds=30,
         )
-        await storage.task.tasks.mark_recovery_required(
+        await runtime._state.task.tasks.mark_recovery_required(
             lease, tenant_id=runtime.tenant_id, error_code=ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
             error_digest=canonical_sha256({"phase": "worker-interrupted"}),
         )
@@ -244,7 +244,7 @@ async def test_explicit_graph_recovery_remains_available_when_startup_disabled(t
         await run.recover(idempotency_key="explicit-graph-recovery")
         assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
         assert calls == [graph.graph_id]
-    assert not storage.ready
+    assert not runtime._state.ready
 
 
 def test_startup_recovery_option_requires_a_boolean() -> None:

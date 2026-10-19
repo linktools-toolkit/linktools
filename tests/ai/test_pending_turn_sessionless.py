@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._contracts import ExecutionTerminalCommitResult, RecoveryCheckpointState, RuntimeDomain, RuntimePayloadRef
@@ -191,7 +192,7 @@ async def test_sessionless_pending_independent_connections_obey_request_identity
     tmp_path: Path, monkeypatch, identity: str,
 ):
     async with _turn_state("sqlite", tmp_path) as first:
-        other = _storage("sqlite", tmp_path)
+        other = RuntimeState(_storage("sqlite", tmp_path))
         await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(other, _runtime_commands(other, _NAMESPACE), first.session)

@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+from linktools.ai.runtime.state import RuntimeState
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -32,7 +34,7 @@ async def test_cleanup_shared_source_io_does_not_scale_with_domain_aliases(
     await provision_database(engine)
     objects = (InMemoryObjectStore() if backend == "memory" else
                FilesystemObjectStore(tmp_path / "objects") if backend == "filesystem" else SqlObjectStore(engine))
-    storage = RuntimeStorage.sql(engine, object_store=objects)
+    storage = RuntimeState(RuntimeStorage.sql(engine, object_store=objects))
     await storage.initialize(namespace="evaluation-retention", tenant_id="tenant")
     try:
         shared = await put(objects, "shared", {"content": "another owner"})
@@ -150,7 +152,7 @@ async def test_cleanup_shared_manifest_still_validates_each_reference_size() -> 
         "kind": "asset-snapshot", "format_version": 1, "entries": [],
     })
     orphan = await put(objects, "orphan", "unreferenced")
-    first, second = RuntimeStorage.in_memory(), RuntimeStorage.in_memory()
+    first, second = RuntimeState(RuntimeStorage.in_memory()), RuntimeState(RuntimeStorage.in_memory())
     await first.initialize(namespace="cleanup", tenant_id="tenant")
     await second.initialize(namespace="cleanup", tenant_id="tenant")
     try:
@@ -183,7 +185,7 @@ async def test_cleanup_reuses_capture_metadata_only_within_exclusive_operation(
     await provision_database(engine)
     objects = (InMemoryObjectStore() if backend == "memory" else
                FilesystemObjectStore(tmp_path / "objects") if backend == "filesystem" else SqlObjectStore(engine))
-    storage = RuntimeStorage.sql(engine, object_store=objects)
+    storage = RuntimeState(RuntimeStorage.sql(engine, object_store=objects))
     await storage.initialize(namespace="cleanup", tenant_id="tenant")
     try:
         target = await put(objects, "target", {"content": "retained"})

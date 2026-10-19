@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.capability import RuntimeFeatures, ToolResponsesCapability
+from linktools.ai.capability import ConversationCapability, RuntimeFeatures, ToolResponseFixture, ToolResponsesCapability
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ConversationCapability, CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage, ToolResponseFixture
+from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.runtime._input import input_intent
 from linktools.ai.runtime.state._codec import _decode_enveloped_domain, decode_domain, encode_domain
@@ -110,7 +110,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         execution = await runtime.agents.get().start("first", idempotency_key="first", principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record.tool_response_ref == first
         assert record.context_imported is False
         for policy in ("clean", "captured"):
@@ -144,7 +144,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
         original = await runtime.executions.get(execution.execution_id, principal=principal)
         for derived in (await original.retry("retry"), await original.fork("fork")):
             assert (await derived.wait()).result.status is ExecutionStatus.SUCCEEDED
-            accepted = await storage.execution.executions.get(derived.execution_id, tenant_id=runtime.tenant_id)
+            accepted = await runtime._state.execution.executions.get(derived.execution_id, tenant_id=runtime.tenant_id)
             assert accepted.tool_response_ref == first
         request = ExecutionRequest("child", principal, "child", None, "run", False, False,
                                    tool_response_ref=second)
@@ -153,7 +153,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
             parent_invocation_id="child-call", binding_contract=record.binding)
         child = await runtime.executions.get(handle.execution_id, principal=principal)
         assert (await child.wait()).result.status is ExecutionStatus.SUCCEEDED
-        accepted = await storage.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
+        accepted = await runtime._state.execution.executions.get(child.execution_id, tenant_id=runtime.tenant_id)
         assert accepted.tool_response_ref == first
         assert accepted.context_imported is False
         restored = await runtime._execution_service._request_for_execution(request, record)
@@ -178,10 +178,10 @@ async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path)
             await runtime.agents.get().start("question", session_id="session")
         assert rejected.value.code is ErrorCode.BINDING_CONFLICT
         assert rejected.value.safe_details["reason"] == "tool_response_fixture_session_unsupported"
-        session = await storage.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
+        session = await runtime._state.conversation.sessions.get("session", tenant_id=runtime.tenant_id)
         assert session.active_execution_id is None
-        assert await storage.conversation.sessions.timeline_head("session", tenant_id=runtime.tenant_id) == 0
-        assert await storage.execution.executions.list_by_session("session", tenant_id=runtime.tenant_id) == ()
+        assert await runtime._state.conversation.sessions.timeline_head("session", tenant_id=runtime.tenant_id) == 0
+        assert await runtime._state.execution.executions.list_by_session("session", tenant_id=runtime.tenant_id) == ()
     await assets.close()
 
 
@@ -206,7 +206,7 @@ async def test_derived_fixture_mode_mismatch_fails_before_execution_reservation(
         async def unexpected_reservation(value: ExecutionStartReservation) -> None:
             raise AssertionError("fixture mismatch must fail before execution admission")
 
-        monkeypatch.setattr(storage.execution.executions, "reserve_start", unexpected_reservation)
+        monkeypatch.setattr(runtime._state.execution.executions, "reserve_start", unexpected_reservation)
         original = await runtime.executions.get(fixture.execution_id)
         with pytest.raises(AIError) as missing:
             await original.fork("retain fixture mode")
@@ -237,7 +237,7 @@ async def test_fixture_asset_preflight_is_authorized_and_precedes_admission(auth
     features = RuntimeFeatures("fixture-preflight", authorization=Authorization())
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     async with Runtime.open("fixture-preflight", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
-        monkeypatch.setattr(storage.execution.executions, "reserve_start", unexpected_reservation)
+        monkeypatch.setattr(runtime._state.execution.executions, "reserve_start", unexpected_reservation)
         with pytest.raises(AIError) as rejected:
             await runtime.agents.get().start("question")
         assert rejected.value.code is (ErrorCode.ASSET_VERSION_NOT_FOUND if authorized else ErrorCode.AUTHORIZATION_DENIED)
@@ -383,7 +383,7 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
     features = _persistence_capabilities(restart=True)
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     async with Runtime.open("fixture-repair", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
-        reserve = storage.execution.executions.reserve_start
+        reserve = runtime._state.execution.executions.reserve_start
 
         async def remove_after_admission(value: ExecutionStartReservation) -> object:
             nonlocal unavailable
@@ -392,18 +392,18 @@ async def test_fixture_disappearing_after_admission_preserves_execution_for_repa
             return admitted
 
         with monkeypatch.context() as patch:
-            patch.setattr(storage.execution.executions, "reserve_start", remove_after_admission)
+            patch.setattr(runtime._state.execution.executions, "reserve_start", remove_after_admission)
             execution = await runtime.agents.get().start("repair the same accepted execution")
         with pytest.raises(AIError) as missing:
             await execution.wait(timeout_seconds=10)
         assert missing.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
-        saved = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        saved = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert saved.status is ExecutionStatus.STARTED
         assert saved.tool_response_ref == first and saved.result is None
         unavailable = False
         recovered = await execution.recover(idempotency_key="repair-fixture")
         assert recovered.execution_id == execution.execution_id
         assert (await recovered.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
-        terminal = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        terminal = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert terminal.tool_response_ref == first
     await assets.close()

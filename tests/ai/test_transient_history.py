@@ -11,7 +11,8 @@ from pydantic_ai.models.function import AgentInfo
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 
 from ._runtime_test_helpers import _UsageFunctionModel
 from .test_live_history_readback_integration import _Models
@@ -45,7 +46,7 @@ async def test_transient_execution_reads_live_owner_and_releases_after_handoff(o
     capabilities = RuntimeFeatures("transient-history")
     capabilities.tool(echo, effect_policy="replay_safe")
     capabilities.agent("default", model="default", allow_tools=("echo",))
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=RuntimeStorageRoute.transient()))
+    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
     async with Runtime.open(
         "transient-history", models=_Models(_UsageFunctionModel(model)),
         storage=storage, features=capabilities,

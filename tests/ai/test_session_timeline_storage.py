@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Session timeline storage invariants."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.core import SessionStatus
+from linktools.ai.core import ExecutionStatus, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._runtime_commands import _timeline_turn_message_range
@@ -17,6 +18,8 @@ from linktools.ai.runtime.state._contracts import (
     SessionRecord,
 )
 from linktools.ai.runtime.state._store import StoredFact
+
+from .test_session_timeline import _commit_fields, _execution
 
 
 def _session() -> SessionRecord:
@@ -39,6 +42,7 @@ def _session() -> SessionRecord:
 @pytest.mark.asyncio
 async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-storage", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -71,6 +75,7 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
                 execution_id="success",
                 start_message_index=0,
                 end_message_index=2,
+                **_commit_fields(_execution("success", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         await state.conversation.sessions.state_store.mutate(commit)
@@ -126,6 +131,7 @@ def test_timeline_range_allows_root_recovery_after_transcript_materialization() 
 @pytest.mark.asyncio
 async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-duplicate", tenant_id="tenant")
     try:
         repository = state.conversation.sessions
@@ -170,6 +176,7 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
                 execution_id="duplicate",
                 start_message_index=0,
                 end_message_index=2,
+                **_commit_fields(_execution("duplicate", status=ExecutionStatus.SUCCEEDED, prompt="original input")),
             )
 
         with pytest.raises(AIError) as captured:

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Materialize Runtime step archives from state routes."""
 
+from ...storage import StorageRetentionMode
+
 from collections.abc import Mapping
 
 from ._contracts import ExecutionRepository
@@ -9,7 +11,7 @@ from ._model_interaction_store import (
     ModelInteractionStateStepArchive,
 )
 from ._object_router import _RuntimeObjectRouter
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStoragePlan
+from ._plan import RuntimeDomain, RuntimeStoragePlan
 from ._step_archive import StagingAgentRunStore, StateStepArchive
 from ._steps import RuntimeAgentRunStore
 
@@ -34,7 +36,7 @@ def build_runtime_agent_run_store(
     for domain in _STEP_DOMAINS:
         route = plan.route(domain)
         if (
-            route.retention is RuntimeRetentionMode.TRANSIENT
+            route.retention is StorageRetentionMode.TRANSIENT
             and domain is not RuntimeDomain.CONVERSATION
         ):
             continue

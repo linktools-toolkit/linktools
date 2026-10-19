@@ -650,6 +650,8 @@ class _Checkpoints:
 class _Sessions:
     def __init__(self) -> None:
         self.releases: list[tuple[str, str, str]] = []
+        self.history_unavailable: list[bool] = []
+        self.require_turn_commit: list[bool] = []
 
     async def release_execution(
         self,
@@ -657,8 +659,12 @@ class _Sessions:
         *,
         tenant_id: str,
         execution_id: str,
+        history_unavailable: bool = False,
+        require_turn_commit: bool = False,
     ) -> object:
         self.releases.append((session_id, tenant_id, execution_id))
+        self.history_unavailable.append(history_unavailable)
+        self.require_turn_commit.append(require_turn_commit)
         return SimpleNamespace(active_execution_id=None)
 
 
@@ -741,6 +747,8 @@ async def test_abort_start_releases_its_session_when_admission_checkpoint_is_abs
 
     assert checkpoints.reads == 1
     assert sessions.releases == [("session", "tenant", "execution")]
+    assert sessions.history_unavailable == [False]
+    assert sessions.require_turn_commit == [current.conversation]
 
 
 @pytest.mark.asyncio

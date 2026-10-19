@@ -181,12 +181,15 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
         options = shlex.split(check["pytest-args"])
         assert options[:2] == ["-n", "4"]
         assert "--dist=loadfile" in options
+        assert "--capture=fd" in options
         assert "--test-group=" + check["group"] in options
-        assert "-rs" in options
+        assert "-vv" not in options
+        assert ("--durations=50" in options) == (check["group"] != "all")
         if check["group"] == "runtime":
-            assert options[-4:] == ["-vv", "--tb=short", "-o", "faulthandler_timeout=90"]
+            assert "-ra" in options
+            assert options[-5:] == ["--tb=long", "-o", "verbosity_assertions=2", "-o", "faulthandler_timeout=90"]
         else:
-            assert "-vv" not in options
+            assert "-rs" in options
             assert not any(option.startswith("faulthandler_timeout=") for option in options)
         assert "--showlocals" not in options
     workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
@@ -194,6 +197,58 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"
     assert jobs["python"]["strategy"]["fail-fast"] is False
     assert jobs["coverage"]["name"] == "Python checks passed"
+
+
+def test_runtime_ci_output_keeps_failures_without_per_case_progress(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
+    pytester.makeini((root / "pytest.ini").read_text(encoding="utf-8"))
+    check = manage.load_project_checks("linktools-ai", str(root / "linktools-ai"))["pytest"]
+    check["paths"] = [str(pytester.path)]
+    monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
+    row = next(row for row in package_checks(("linktools-ai",)) if row["group"] == "runtime")
+    monkeypatch.setenv("PYTEST_ADDOPTS", row["pytest-args"])
+    pytester.makepyfile(test_runtime_output='''
+import warnings
+import pytest
+
+@pytest.mark.parametrize("value", range(20))
+def test_pass(value):
+    print("passing-captured-output")
+    if value == 0:
+        warnings.warn("visible-runtime-warning", UserWarning)
+
+def assert_contents():
+    actual = list(range(30))
+    actual[15] = 999
+    assert actual == list(range(30))
+
+def test_fail():
+    print("failing-captured-output")
+    assert_contents()
+
+def test_skip():
+    pytest.skip("visible-runtime-skip")
+''')
+    result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider", "--test-tier", "daily")
+    result.assert_outcomes(passed=20, failed=1, skipped=1, warnings=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    output = result.stdout.str()
+    progress, failures = output.split(" FAILURES ", 1)
+    assert "test_pass" not in progress
+    assert "[gw" not in progress
+    assert "passing-captured-output" not in output
+    assert "failing-captured-output" in failures
+    assert "assert_contents()" in failures
+    assert "Full diff:" in failures
+    assert "Full output truncated" not in failures
+    assert "999" in failures
+    assert "visible-runtime-warning" in failures
+    assert "visible-runtime-skip" in failures
+    assert "FAILED test_runtime_output.py::test_fail" in failures
+    assert "slowest 50 durations" in failures
 
 
 def test_ci_pip_cache_distinguishes_installation_sets(tmp_path: Path) -> None:

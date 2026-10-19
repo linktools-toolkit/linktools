@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Retention removes owned bytes while preserving native fences and shared refs."""
 
+from linktools.ai.runtime.state import RuntimeState
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, tzinfo
@@ -12,7 +13,8 @@ import pytest
 from linktools.ai.core import AuthorizationAction, JsonValue, Principal, ResourceRef, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.runtime.state import input_capture_key, ArtifactRecord, RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.runtime.state import input_capture_key, ArtifactRecord, RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._codec import encode_domain
 from linktools.ai.runtime.state._object_cleanup import purge_unreferenced_objects
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
@@ -66,10 +68,10 @@ def storage_for(kind: str, path: Path, objects: InMemoryObjectStore) -> RuntimeS
     if kind == "sqlite":
         return RuntimeStorage.sqlite(path / "state.sqlite", object_store=objects)
     return RuntimeStorage.from_plan(RuntimeStoragePlan(
-        execution=RuntimeStorageRoute.sqlite(path / "execution.sqlite"),
-        task=RuntimeStorageRoute.filesystem(path / "task"),
-        evaluation=RuntimeStorageRoute.sqlite(path / "evaluation.sqlite"),
-        artifact=RuntimeStorageRoute.filesystem(path / "artifact"),
+        execution=StorageRoute.sqlite(path / "execution.sqlite"),
+        task=StorageRoute.filesystem(path / "task"),
+        evaluation=StorageRoute.sqlite(path / "evaluation.sqlite"),
+        artifact=StorageRoute.filesystem(path / "artifact"),
     ), object_store=objects)
 
 
@@ -79,6 +81,7 @@ async def test_object_cleanup_scans_all_domains_and_independent_capture_closures
     guard = Offline()
     objects = CheckedObjects(guard)
     storage = storage_for(backend, tmp_path, objects)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="evaluation-retention", tenant_id="tenant")
     try:
         shared = await put(objects, "shared-body", {"private": "referenced by another owner"})
@@ -115,6 +118,7 @@ async def test_object_cleanup_bounds_deletions_and_rejects_changed_bytes(tmp_pat
     guard = Offline()
     objects = CheckedObjects(guard)
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="evaluation-retention", tenant_id="tenant")
     try:
         refs = tuple([await put(objects, name, name) for name in ("first", "second")])
@@ -183,14 +187,14 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         report = await run.create_report()
         trial = (await run.trials()).items[0]
         evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=principal)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id="tenant")
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id="tenant")
         factory = RuntimeObjectKeyFactory("evaluation-retention")
-        own = await put_runtime_object(storage.object_store(RuntimeDomain.EVALUATION), factory,
+        own = await put_runtime_object(runtime._state.object_store(RuntimeDomain.EVALUATION), factory,
             RuntimeDomain.EVALUATION, "tenant", b"private raw attachment")
         copied = replace(evidence, ref=replace(evidence.ref, evidence_id="retention-private-attachment"),
                          attachments=(EvidenceAttachmentRef("private", "application/octet-stream", own),))
         copied = replace(copied, ref=replace(copied.ref, digest=copied.digest))
-        await storage.evaluation.records.publish_evidence(copied)
+        await runtime._state.evaluation.records.publish_evidence(copied)
         assert await runtime.evaluations.read_evidence_attachment(copied.ref, "private", principal=principal) == b"private raw attachment"
         future = (dataset_deadline or record.content_expires_at) + timedelta(seconds=1)
 
@@ -223,8 +227,8 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         result = await runtime.evaluations.purge_expired(principal=principal, now=future, exclusive=guard)
         assert run.experiment_id in result.evaluations
-        assert await storage.object_store(RuntimeDomain.EVALUATION).stat(own.key) is None
-        content_rows = await storage._stores[RuntimeDomain.EVALUATION].read(lambda tx: tx.scan_records())
+        assert await runtime._state.object_store(RuntimeDomain.EVALUATION).stat(own.key) is None
+        content_rows = await runtime._state._stores[RuntimeDomain.EVALUATION].read(lambda tx: tx.scan_records())
         content_state = repr(tuple(row.data for row in content_rows))
         assert "private score rationale" not in content_state
         assert "private NA explanation" not in content_state
@@ -242,7 +246,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         await runtime.evaluations.purge_expired(principal=principal,
             now=record.metadata_expires_at + timedelta(seconds=1), exclusive=guard)
-        rows = await storage._stores[RuntimeDomain.EVALUATION].read(lambda tx: tx.scan_records())
+        rows = await runtime._state._stores[RuntimeDomain.EVALUATION].read(lambda tx: tx.scan_records())
         persisted = repr(tuple(row.data for row in rows))
         assert "private score rationale" not in persisted
         assert "private rubric" not in persisted
@@ -293,13 +297,13 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
             (CandidateSpec("target", graph_template=GraphTargetSpec(template=template, outputs={"answer": "target"})),),
             (ScorerSpec("score", tasks[1].ref, dimensions=(DimensionContract("quality", "number", "higher"),)),),
             policy=EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60)), principal, "start"), engine=engine)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id="tenant")
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id="tenant")
         declared = TaskGraph("unadmitted", (
             TaskNode("target", task=tasks[0], input={"secret": "unadmitted private prepared payload"}),
         ))
         submission = await engine.prepare_submission(declared, principal=principal, idempotency_key="prepared")
         trial = TargetTrialRef(run.experiment_id, record.manifest.trials[0].trial_id)
-        await storage.evaluation.records.register_launch_intent(run.experiment_id,
+        await runtime._state.evaluation.records.register_launch_intent(run.experiment_id,
             EvaluationLaunchIntent("target:" + trial.trial_id, trial, None, submission, None), capacity=1)
         result = await runtime.evaluations.purge_expired(principal=principal,
             now=record.content_expires_at + timedelta(seconds=1), exclusive=Offline())
@@ -309,9 +313,9 @@ async def test_expired_prepared_payload_is_fenced_before_deletion_and_cannot_res
         repeated = await engine.prepare_submission(declared, principal=principal, idempotency_key="prepared")
         assert not (await engine.start_prepared(repeated)).admitted
         assert called == []
-        task_rows = await storage._stores[RuntimeDomain.TASK].read(lambda tx: tx.scan_records())
+        task_rows = await runtime._state._stores[RuntimeDomain.TASK].read(lambda tx: tx.scan_records())
         assert "unadmitted private prepared payload" not in repr(tuple(row.data for row in task_rows))
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         async for stat in objects.list_objects():
             data = b"".join([chunk async for chunk in objects.open(stat.key)])
             assert b"unadmitted private prepared payload" not in data
@@ -344,7 +348,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
         dataset = await runtime.evaluations.publish_dataset(spec, principal=principal,
             idempotency_key="expired", content_expires_at=deadline)
         owned = (await runtime.evaluations.list_cases(dataset, principal=principal)).items[0].input
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         owned_key, _ = input_capture_object_dependency(owned)
         borrowed_key, _ = input_capture_object_dependency(borrowed)
         assert await objects.stat(owned_key) is not None
@@ -391,6 +395,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
     snapshot = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=10000, max_bytes=10 * 1024 * 1024)
     readonly = RuntimeStorage.filesystem(tmp_path)
+    readonly = RuntimeState(readonly)
     await readonly.initialize(namespace="evaluation-retention", tenant_id="tenant", read_only=True)
     try:
         snapshot_ref = await readonly.export_snapshot(object_store=snapshot, limits=limits)
@@ -399,7 +404,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
     async for stat in snapshot.list_objects():
         assert b"private literal copy" not in b"".join([chunk async for chunk in snapshot.open(stat.key)])
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(snapshot_ref, object_store=snapshot, root=restored_root, limits=limits)
+    await RuntimeState.restore_snapshot(snapshot_ref, object_store=snapshot, root=restored_root, limits=limits)
     async with Runtime.open("evaluation-retention", storage=RuntimeStorage.from_root(restored_root),
                             models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         with pytest.raises(AIError) as unavailable:
@@ -435,6 +440,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
     guard = Offline()
     objects = CheckedObjects(guard)
     storage = RuntimeStorage.filesystem(tmp_path, object_store=objects)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     record = replace(experiment(), content_expires_at=now + timedelta(seconds=60), metadata_expires_at=now + timedelta(seconds=60))
@@ -447,7 +453,9 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
             attachments=(EvidenceAttachmentRef("raw", "text/plain", reference),))
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
         await storage.evaluation.records.publish_evidence(bundle)
-        retention = EvaluationRetention(storage, Authorization(), cancel_submission, Captures())
+        retention = EvaluationRetention(Authorization(), cancel_submission, Captures(),
+            tenant_id=storage.tenant_id, repository=storage.evaluation.records,
+            task_objects=storage.object_store(RuntimeDomain.TASK), maintenance=storage.snapshot_operations())
         original_delete = objects.delete_object
 
         async def fail_delete(key: str, *, expected_digest: str) -> bool:
@@ -466,9 +474,12 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
     finally:
         await storage.close()
     reopened = RuntimeStorage.filesystem(tmp_path, object_store=objects)
+    reopened = RuntimeState(reopened)
     await reopened.initialize(namespace="evaluation", tenant_id="tenant")
     try:
-        result = await EvaluationRetention(reopened, Authorization(), cancel_submission, Captures()).purge_expired(
+        result = await EvaluationRetention(Authorization(), cancel_submission, Captures(),
+            tenant_id=reopened.tenant_id, repository=reopened.evaluation.records,
+            task_objects=reopened.object_store(RuntimeDomain.TASK), maintenance=reopened.snapshot_operations()).purge_expired(
             principal=service_principal("tenant", "owner"), now=now + timedelta(seconds=120), exclusive=guard)
         assert result.objects_deleted == 1
         assert await objects.stat(reference.key) is None
