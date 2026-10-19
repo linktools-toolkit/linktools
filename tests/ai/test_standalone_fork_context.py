@@ -109,12 +109,13 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
             return ModelResponse(parts=[ToolCallPart("lookup", {}, tool_call_id="call")])
         return ModelResponse(parts=[TextPart("answer")])
 
+    cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
     group = RuntimeFeatures("one-fork-boundary")
-    group.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+    group.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", allow_tools=("lookup",))
     group.capability(ConversationCapability(), scope="runtime")
-    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
+    state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
     async with Runtime.open("one-fork-boundary", storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         transactions = set()
 
@@ -218,11 +219,12 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
         return ModelResponse(parts=[TextPart("file read")])
 
     workspace = Workspace.load(tmp_path)
+    cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
     group = workspace_features("file-fork", workspace=workspace)
-    group.capability(ExecutionCapability(commit=CommitPolicy.terminal() if cached else CommitPolicy.sync()), scope="runtime")
+    group.capability(ExecutionCapability(commit=CommitPolicy.terminal() if cached else CommitPolicy.sync(), coordination=cache), scope="runtime")
     group.agent("default", model="default", allow_tools=("read_file",))
     group.capability(ConversationCapability(), scope="runtime")
-    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
+    async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         with capture_run_messages() as messages:
             source = await runtime.agents.get().start("read")
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED

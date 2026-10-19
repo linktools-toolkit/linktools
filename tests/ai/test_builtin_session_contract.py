@@ -156,8 +156,10 @@ class _ClaimCache(InMemoryCacheBackend):
 
 
 @pytest.mark.asyncio
-async def test_root_cache_does_not_opt_default_conversation_into_terminal_admission(tmp_path):
+async def test_coordination_does_not_opt_default_execution_into_terminal_admission(tmp_path):
     cache = _ClaimCache()
+    features = _features(retain=True)
+    features.capability(ExecutionCapability(coordination=cache), scope="runtime")
     storage = _storage(tmp_path, cache=cache)
     entered, finish = asyncio.Event(), asyncio.Event()
 
@@ -168,7 +170,7 @@ async def test_root_cache_does_not_opt_default_conversation_into_terminal_admiss
 
     async with Runtime.open('builtin-session', storage=storage,
                             models=_Models(_UsageFunctionModel(model)),
-                            features=_features(retain=True),
+                            features=features,
                             context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
         execution = await session.start('question')
@@ -354,15 +356,17 @@ async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publicat
         return ModelResponse(parts=[TextPart('answer')])
 
     terminal = RuntimeFeatures('builtin-session')
-    terminal.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+    terminal.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     terminal.agent('default', model='default', allow_tools=())
     terminal.capability(ConversationCapability(), scope='runtime')
+    sync = _features(retain=True)
+    sync.capability(ExecutionCapability(coordination=cache), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = _storage(tmp_path, cache=cache)
     async with Runtime.open('builtin-session', storage=storage, models=models,
                             features=terminal) as owner, Runtime.open(
             'builtin-session', storage=_storage(tmp_path, cache=cache), models=models,
-            features=_features(retain=True)) as peer:
+            features=sync) as peer:
         session = await owner.agents.get().create_session('session')
         remote = peer.agents.get().session('session')
         first = asyncio.create_task(session.start('question', idempotency_key='request'))

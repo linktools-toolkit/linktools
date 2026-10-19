@@ -995,7 +995,9 @@ async def test_session_display_drain_rejects_new_reads_and_preserves_original_er
 
 @pytest.mark.parametrize("cache", (WriteOnlyCache(), InMemoryStreamBackend(max_bytes=1024)))
 async def test_display_refresh_without_key_value_cache_keeps_fresh_source(cache: object) -> None:
-    state = RuntimeStorage.in_memory(cache=cache)
+    with pytest.raises(TypeError, match="cache must provide get, put and delete"):
+        RuntimeStorage.in_memory(cache=cache)
+    state = RuntimeStorage.in_memory()
     state = RuntimeState(state)
     await _prepare(state)
     try:

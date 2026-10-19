@@ -132,7 +132,9 @@ class WriteOnlyCache:
 async def test_cache_without_key_value_capabilities_reads_objects_from_source(tmp_path, cache) -> None:
     objects = CountingObjects()
     reference = await _put(objects, b"source body")
-    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache))
+    with pytest.raises(TypeError, match="cache must provide get, put and delete"):
+        RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects, cache=cache)
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", object_store=objects))
     await storage.initialize(namespace="runtime", tenant_id="tenant")
     try:
         for _ in range(2):

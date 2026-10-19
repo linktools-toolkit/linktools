@@ -318,10 +318,11 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
 ) -> None:
     output = {"canonical": "durably committed despite lost acknowledgement"}
     _canonical_output(monkeypatch, output)
+    cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
     features = _features()
-    features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     storage = RuntimeStorage.sqlite(
-        tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024),
+        tmp_path / "state.db", cache=cache,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(_NAMESPACE, storage=storage, features=features, models=_models()) as runtime:

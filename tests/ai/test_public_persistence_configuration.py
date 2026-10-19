@@ -184,11 +184,12 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
         await release.wait()
         yield "done"
 
-    state = RuntimeStorage.sqlite(tmp_path / "execution.db", cache=InMemoryCacheBackend(max_bytes=2**20))
+    cache = InMemoryCacheBackend(max_bytes=2**20)
+    state = RuntimeStorage.sqlite(tmp_path / "execution.db", cache=cache)
     route = StorageRoute.sqlite(tmp_path / "conversation.db")
     state = RuntimeStorage(replace(state.plan, conversation=route))
     features = _features(ConversationCapability())
-    features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     async with Runtime.open(
         "split-conversation", storage=state,
         models=_FeatureModels(FunctionModel(stream_function=model)), features=features,
