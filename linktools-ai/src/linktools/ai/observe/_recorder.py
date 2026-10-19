@@ -14,7 +14,7 @@ from linktools.core import environ
 
 from ..core import CommitPolicy, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import BatchWriteScope, WriteBufferEntry
+from ..storage import BatchWriteScope, BatchWriteScopeFactory, WriteBufferEntry
 from ._codec import decode_observation_envelope, observation_envelope
 from ._model import MetricRecorderStatus, MetricFlushResult, Observation
 
@@ -30,11 +30,13 @@ class MetricRecording:
     def __init__(
         self, metrics: Metrics, *,
         commit: CommitPolicy,
+        batch_scopes: BatchWriteScopeFactory | None = None,
     ) -> None:
         self._metrics = metrics
         self._scope = None
         if commit.buffer is not None and commit.mode == "batch":
-            self._scope = BatchWriteScope(
+            factory = BatchWriteScope if batch_scopes is None else batch_scopes
+            self._scope = factory(
                 commit.buffer, self._write_batch,
                 batch_size=commit.batch_size, flush_interval=commit.flush_interval,
             )

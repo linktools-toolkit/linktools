@@ -292,9 +292,20 @@ boundaries). Without a buffer, each observation boundary awaits the existing
 guarded projection commit. The route's hot cache never enables write batching.
 
 The policy borrows its buffer; equality and hashing compare timing values only.
-Equal policies or a shared buffer do not currently merge recorder timers or SQL
-transactions. Each Runtime/recorder owns its own work and retains its domain
-failure semantics. Sharing a cache does not imply cross-process claiming.
+Within one Runtime, owners using the same buffer object and equal batch size
+and interval share automatic flush scheduling. Their accepted, undispatched
+entries contribute to one threshold; the earliest pending entry sets the
+next deadline, which later admission cannot postpone. A trigger dispatches each
+owner's currently accepted prefix. Entries count queue records: a Trace marker
+is one observation-boundary flush request, not one SQL row.
+
+Each owner keeps its queue, callback, acknowledgement and domain failure
+semantics, including unknown-result readback. Source transactions remain
+separate, even when storage points to the same database. Explicit flush and
+close affect only that owner; they do not wait for unrelated Metrics delivery.
+The last departing owner cancels the shared timer. Different Runtime instances,
+buffers or timing values retain separate schedules. Standalone recorders remain
+independent. Sharing a buffer does not imply cross-process claiming.
 
 A Trace queue entry is a flush request, not the sole copy of trace evidence.
 The run's existing staging owner retains facts until atomic publication and

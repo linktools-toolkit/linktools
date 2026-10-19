@@ -405,3 +405,12 @@ Metrics recording independently accepts
 constructors. With `buffer=None`, automatic observations remain
 synchronous; timing options do not introduce an in-memory queue. These settings
 are resource scheduling policy, not model-visible execution binding identity.
+
+Inside one Runtime, equal batch size/interval and the same borrowed buffer
+share automatic threshold and earliest-pending-deadline scheduling. The default
+Trace 128/3 and Metrics 128/60 policies therefore remain separate. Explicitly
+matching both values combines their pending queue-entry count; Trace entries
+are observation markers, not SQL rows. Each owner still writes and settles
+independently in its own transactions. Explicit flush, close and safety
+boundaries remain owner-local, and separate Runtime instances do not share
+a scheduler.

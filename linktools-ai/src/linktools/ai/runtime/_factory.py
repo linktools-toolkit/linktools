@@ -46,7 +46,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
+from ..storage import BatchWriteScope, CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -641,7 +641,9 @@ async def _build_local_components(
         conversation = any(
             isinstance(value, ConversationCapability) for value in persistence_capabilities
         )
-        metric_buffer = None if metrics is None else MetricsService(metrics)
+        batch_scopes = BatchWriteScope.scoped_factory()
+        state.run_store.trace_persistence.bind_batch_scopes(batch_scopes)
+        metric_buffer = None if metrics is None else MetricsService(metrics, batch_scopes=batch_scopes)
         metric_source_namespace = None if metric_buffer is None else namespace
         if coordination is not None:
             runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(

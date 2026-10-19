@@ -12,7 +12,7 @@ from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.storage import BatchWriteScope, InMemoryCacheBackend
+from linktools.ai.storage import BatchWriteScopeFactory, BatchWriteScope, InMemoryCacheBackend
 from linktools.ai.core import CommitPolicy
 from linktools.ai.storage import _write_cache
 
@@ -119,8 +119,8 @@ async def test_shared_metrics_custom_batching_has_independent_runtime_flush_and_
     recorders: list[MetricRecorder] = []
 
     class RecordingMetrics(Metrics):
-        def recorder(self) -> MetricRecorder:
-            recorder = super().recorder()
+        def recorder(self, *, batch_scopes: BatchWriteScopeFactory | None = None) -> MetricRecorder:
+            recorder = super().recorder(batch_scopes=batch_scopes)
             recorders.append(recorder)
             return recorder
 

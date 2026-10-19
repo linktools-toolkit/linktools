@@ -10,7 +10,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ...core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
-from ...storage import BatchWriteScope, WriteBufferBackend, WriteBufferEntry
+from ...storage import BatchWriteScope, BatchWriteScopeFactory, WriteBufferBackend, WriteBufferEntry
 from ...errors import AIError, ErrorCode
 from ._durability import _await_owned_task
 from ._step_archive import _AgentRunHistoryLock, _ProjectionOffset
@@ -51,6 +51,7 @@ class TracePersistence:
         flush_boundary: _FlushProjection,
         background_tasks: set[asyncio.Task[object]],
     ) -> None:
+        self._batch_scopes: BatchWriteScopeFactory = BatchWriteScope
         self.archive = archive
         self.offsets: dict[str, _ProjectionOffset] = {}
         self.dirty: set[str] = set()
@@ -64,6 +65,12 @@ class TracePersistence:
         self._caches: dict[str, WriteBufferBackend | None] = {}
         self._buffers: dict[str, _ObservationBuffer] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def bind_batch_scopes(self, factory: BatchWriteScopeFactory) -> None:
+        """Borrow this Runtime's scheduling factory before any run is configured."""
+        if self._caches or self._buffers:
+            raise RuntimeError("batch scopes must be bound before run configuration")
+        self._batch_scopes = factory
 
     def configure(
         self, agent_run_id: str, *, buffer: WriteBufferBackend | None = None,
@@ -146,7 +153,7 @@ class TracePersistence:
                             raise
                         finally:
                             offset.observation_task = None
-                    buffer.scope = BatchWriteScope(
+                    buffer.scope = self._batch_scopes(
                         cache, write_batch,
                         batch_size=offset.observation_batch_size or DEFAULT_TRACE_BATCH_SIZE,
                         flush_interval=offset.observation_flush_interval or DEFAULT_TRACE_FLUSH_INTERVAL,

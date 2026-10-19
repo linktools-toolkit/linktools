@@ -12,6 +12,7 @@ from time import monotonic, monotonic_ns
 from linktools.core import environ
 
 from ..core import CorrelationData, UsageMetrics, normalize_correlation
+from ..storage import BatchWriteScopeFactory
 from ..errors import AIError, ErrorCode
 from ..observe import (
     MetricFlushResult,
@@ -65,10 +66,12 @@ class MetricsService:
     engine. Agent, Task and Evaluation producers share the same recording scope.
     """
 
-    def __init__(self, metrics: Metrics) -> None:
+    def __init__(
+        self, metrics: Metrics, *, batch_scopes: BatchWriteScopeFactory | None = None,
+    ) -> None:
         if not isinstance(metrics, Metrics):
             raise TypeError("metrics must be Metrics")
-        self._recorder = metrics.recorder()
+        self._recorder = metrics.recorder(batch_scopes=batch_scopes)
         self._execution_contexts: dict[str, CorrelationData] = {}
         self._runtime_dimensions: dict[str, str] = {}
         self._runtime_dimensions_configured = False

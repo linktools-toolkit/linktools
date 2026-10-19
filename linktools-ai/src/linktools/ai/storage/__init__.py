@@ -122,7 +122,7 @@ from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 from ._stream import InMemoryStreamBackend, StreamBackend, StreamBatch, StreamWriter
 from ._turn import TurnCoordination, TurnCoordinationBackend
 
-from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
+from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteScopeFactory, BatchWriteStatus
 
 __all__ = [
     "StorageRoute",
@@ -139,6 +139,7 @@ __all__ = [
     "StorageReadCache",
     "BatchWriteFlushResult",
     "BatchWriteScope",
+    "BatchWriteScopeFactory",
     "BatchWriteStatus",
     "TABLE_PREFIX",
     "AtomicBatchStorageWriter",

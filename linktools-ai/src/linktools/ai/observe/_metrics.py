@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..core import CommitPolicy, canonical_json_bytes, validate_persistence_namespace
+from ..storage import BatchWriteScopeFactory
 from ..errors import AIError, ErrorCode
 from ._codec import (
     same_definition_contract,
@@ -65,10 +66,10 @@ class Metrics:
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
 
-    def recorder(self) -> MetricRecorder:
+    def recorder(self, *, batch_scopes: BatchWriteScopeFactory | None = None) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
         return MetricRecording(
-            self, commit=self._commit,
+            self, commit=self._commit, batch_scopes=batch_scopes,
         )
 
     @property

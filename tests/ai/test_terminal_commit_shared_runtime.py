@@ -81,7 +81,19 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path) -> None:
+async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from linktools.ai.runtime._local import LocalExecutionBackend
+
+    owner_ready, release_owner = asyncio.Event(), asyncio.Event()
+    cancel = LocalExecutionBackend.cancel
+
+    async def held_owner_cancel(self, execution, *, force=False):
+        if execution.execution_id in self._tasks:
+            owner_ready.set()
+            await release_owner.wait()
+        return await cancel(self, execution, force=force)
+
+    monkeypatch.setattr(LocalExecutionBackend, 'cancel', held_owner_cancel)
     cache = InMemoryCacheBackend(max_bytes=2**20)
     entered, stopped = asyncio.Event(), asyncio.Event()
     async def model(messages, info):
@@ -97,10 +109,20 @@ async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path) 
         session = await owner.agents.get().create_session('session')
         execution = await session.start('question', idempotency_key='request')
         await asyncio.wait_for(entered.wait(), 5)
-        result = await asyncio.wait_for(reader.executions.cancel(execution.execution_id, CancelExecutionRequest(reader.default_principal, 'remote-cancel')), 8)
-        assert result.cancelled
-        assert stopped.is_set()
-        assert (await execution.wait()).result.status is ExecutionStatus.CANCELLED
+        request = CancelExecutionRequest(reader.default_principal, 'remote-cancel')
+        try:
+            result = await asyncio.wait_for(reader.executions.cancel(execution.execution_id, request), 8)
+            await asyncio.wait_for(owner_ready.wait(), 5)
+            assert not stopped.is_set()
+            assert result.cancelled is False
+            pending = await reader._state.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
+            assert pending.status is ExecutionStatus.CANCELLING
+        finally:
+            release_owner.set()
+        await asyncio.wait_for(stopped.wait(), 5)
+        assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.CANCELLED
+        result = await reader.executions.cancel(execution.execution_id, request)
+        assert result.cancelled is True
         record = await reader._state.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
         assert record.status is ExecutionStatus.CANCELLED
 

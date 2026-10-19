@@ -240,7 +240,7 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
     ))
     storage = RuntimeStorage.in_memory(cache=cache)
 
-Metrics 的工厂通过 commit.buffer 配置自动批写；Runtime 仍只接收 metrics，不另传指标缓存。RuntimeStorage 工厂的 cache 参数仅配置热点读取。相同 cache 可以在两组配置中显式复用；仅设置热点 cache 不启用批写。CommitPolicy 不拥有 buffer 生命周期，值相等与哈希不包括资源。各 Runtime/recorder 仍拥有独立队列、timer 和结算，不因共用实例自动合并 flush 或 SQL 事务，也不提供跨 Pod 消费 claim。
+Metrics 的工厂通过 commit.buffer 配置自动批写；Runtime 仍只接收 metrics，不另传指标缓存。RuntimeStorage 工厂的 cache 参数仅配置热点读取。相同 cache 可以在两组配置中显式复用；仅设置热点 cache 不启用批写。CommitPolicy 不拥有 buffer 生命周期，值相等与哈希不包括资源。同一 Runtime 内，显式复用同一 buffer 实例且 batch_size、flush_interval 均相同的 owner 共享自动 flush 调度：合计已接纳且未派发的条目达到阈值，或最早 pending 条目的期限到达时，分别唤醒各 owner 当前已接纳的前缀。Trace 的条目是观察边界标记，不是 SQL 行。后续入队不重置最早期限，在途前缀不重复计数。各 owner 仍拥有独立队列、回调、结算和 SQL 事务；显式 flush/close 仅影响自己，最后成员退出时清理 timer。不同 Runtime 即使共用 buffer 也不共享调度，不提供跨 Pod 消费 claim。本阶段不实现同一 SQL 事务合批，也不据此承诺数据库 IO 进一步下降。
 
 Metrics.record、record_observations 与 MetricStore.put_observations 保留确认写入合同；仅自动 recorder 走批写接纳。Metrics.query/get_observation 读取权威已提交数据，不混入 pending，不因注入缓存增加查询 TTL。
 
