@@ -447,7 +447,7 @@ Session identities travel in query parameters for detail/control requests, so
 opaque IDs containing slashes, Unicode, query delimiters or dot segments keep
 their exact Runtime meaning.
 
-The Web regression tests cover the local-origin boundary, remote-peer rejection,
+The Web regression tests cover the cross-site-fetch and mutation-header boundaries, remote-peer rejection,
 secret-safe diagnostics, real session/execution idempotency, history cursor
 paging and content opt-in, trace/model/result/metric parity, session revision
 conflicts, fork/close, read-only reopen without models, SSE cursor replay and
