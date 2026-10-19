@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 from ...core import validate_persistence_namespace
 from ...errors import AIError, ErrorCode
@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
     from ._steps import RuntimeAgentRunStore
+
+
+_ValueT = TypeVar("_ValueT")
 
 
 class RuntimeStorageStatus(TypedDict):
@@ -278,7 +281,7 @@ class RuntimeState:
                 "RuntimeState is not ready",
             )
 
-    def _require_materialized(self, value: object) -> object:
+    def _require_materialized(self, value: _ValueT | None) -> _ValueT:
         self._require_ready()
         if value is None:
             raise AIError(

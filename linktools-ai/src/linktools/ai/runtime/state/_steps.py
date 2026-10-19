@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 """Runtime AgentRunStore orchestration over durable archives."""
 
-from ...storage import StorageRetentionMode
-
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
@@ -118,13 +116,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         conversation_archive: AgentRunStore,
         execution_archive: AgentRunStore | None,
         recovery_archive: AgentRunStore | None,
-        conversation_retention: StorageRetentionMode,
-        execution_retention: StorageRetentionMode,
-        recovery_retention: StorageRetentionMode,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
     ) -> None:
-        del conversation_retention, execution_retention, recovery_retention
         self.capability_writes: RuntimeCapabilityWrites | None = None
         self.capability_revisions: dict[str, int] = {}
         self._staging = staging

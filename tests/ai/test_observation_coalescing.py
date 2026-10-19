@@ -253,16 +253,12 @@ async def test_ongoing_observations_do_not_reset_first_dirty_deadline(
 
 @pytest.mark.asyncio
 async def test_transient_observations_do_not_schedule_durability_tasks() -> None:
-    from linktools.ai.storage import StorageRetentionMode
     from linktools.ai.runtime.state._step_archive import InMemoryStepArchive, StagingAgentRunStore
 
     store = _steps.RuntimeAgentRunStore(
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None, recovery_archive=None,
-        conversation_retention=StorageRetentionMode.VOLATILE,
-        execution_retention=StorageRetentionMode.VOLATILE,
-        recovery_retention=StorageRetentionMode.VOLATILE,
     )
     await store.initialize()
     try:

@@ -37,11 +37,9 @@ from ._repositories import (
 from ._repository_common import (
     append_operation as _append_operation,
     operation_identity_matches as _same_operation_identity,
-    projected_record as _projected_record,
-    replace_checked as _replace_checked,
     validate_recovery_operation,
 )
-from ._store import StateGroupTransaction, StateStore, StateTransaction, StoredFact, stream_digest
+from ._store import StateGroupTransaction, StateStore, StateTransaction
 
 
 class RuntimeRecoveryCommands:
@@ -134,7 +132,6 @@ class RuntimeRecoveryCommands:
         ))
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        key = self._execution._key("execution", execution.execution_id)
 
         async def durable_operation() -> OperationLedgerRecord:
             async def mutate(group: StateGroupTransaction) -> OperationLedgerRecord:
@@ -155,27 +152,9 @@ class RuntimeRecoveryCommands:
                     operation, execution_id=execution.execution_id,
                     tenant_id=self._execution.tenant_id, producer=False,
                 )
-                stored = await execution_tx.get_record(key)
-                if stored is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                current = await self._execution._decode(stored, ExecutionRecord)
-                if (
-                    current.revision != execution.revision
-                    or current.event_seq != execution.event_seq
-                    or current.status is not execution.status
-                    or current.status not in {
-                        ExecutionStatus.PENDING_START,
-                        ExecutionStatus.STARTED,
-                        ExecutionStatus.RECOVERY_REQUIRED,
-                        ExecutionStatus.CANCELLING,
-                    }
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                guarded = await execution_tx.guard_record(
-                    key, expected_storage_revision=stored.storage_revision,
+                await self._execution.guard_recovery_in_transaction(
+                    execution_tx, execution,
                 )
-                if guarded is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return await self._execution_operations.append_in_transaction(
                     operation_tx, operation,
                 )
@@ -279,14 +258,6 @@ class RuntimeRecoveryCommands:
         )
         if any(store.storage_group is not stores[0].storage_group for store in stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        key = self._execution._key("execution", execution.execution_id)
-        stream = stream_digest(
-            self._execution._namespace,
-            self._execution.tenant_id,
-            self._execution._domain.value,
-            "execution",
-            execution.execution_id,
-        )
         replayed_operation: OperationLedgerRecord | None = None
 
         async def durable_operation() -> OperationLedgerRecord:
@@ -304,48 +275,18 @@ class RuntimeRecoveryCommands:
                         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                     replayed_operation = current_operation
                     return current_operation
-                stored = await execution_tx.get_record(key)
-                if stored is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                current = await self._execution._decode(stored, ExecutionRecord)
-                if (
-                    current.status is not ExecutionStatus.RECOVERY_REQUIRED
-                    or current.revision != execution.revision
-                    or current.event_seq != execution.event_seq
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                admitted, replayed = await _append_operation(
-                    operation_tx,
-                    self._execution_operations,
-                    operation,
-                )
-                if replayed:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                updated = replace(
-                    current,
-                    revision=current.revision + 1,
-                    event_seq=current.event_seq + 1,
-                    updated_at=await execution_tx.now(),
-                )
-                await _replace_checked(
-                    execution_tx,
-                    _projected_record(self._execution, stored, updated),
-                    stored.storage_revision,
-                )
-                await execution_tx.insert_facts(
-                    (
-                        StoredFact(
-                            stream,
-                            updated.event_seq,
-                            key,
-                            ExecutionEventType.CANCEL_REQUESTED.value,
-                            None,
-                            None,
-                            {"operation_id": operation.operation_id},
-                        ),
+                async def admit_operation() -> OperationLedgerRecord:
+                    admitted, replayed = await _append_operation(
+                        operation_tx, self._execution_operations, operation,
                     )
+                    if replayed:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return admitted
+
+                return await self._execution.record_recovery_cancel_in_transaction(
+                    execution_tx, execution, operation_id=operation.operation_id,
+                    admit_operation=admit_operation,
                 )
-                return admitted
 
             return await stores[0].storage_group.mutate(stores, mutate)
 
@@ -422,14 +363,6 @@ class RuntimeRecoveryCommands:
         target_revision = execution.revision + event_count
         target_sequence = execution.event_seq + event_count
         store = self._execution.state_store
-        key = self._execution._key("execution", execution.execution_id)
-        stream = stream_digest(
-            self._execution._namespace,
-            self._execution.tenant_id,
-            self._execution._domain.value,
-            "execution",
-            execution.execution_id,
-        )
 
         stores = _dedupe_stores((store, self._execution_operations.state_store))
         if recovery_operation is not None and any(
@@ -443,57 +376,16 @@ class RuntimeRecoveryCommands:
                     ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.STARTED,
                 }:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if producer_generation is not None:
-                    await self._execution.require_open_history_head_in_transaction(
-                        transaction, execution.execution_id,
-                        expected_producer_generation=producer_generation,
-                    )
-                stored = await transaction.get_record(key)
-                if stored is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                current = await self._execution._decode(stored, ExecutionRecord)
-                if (
-                    current.revision != execution.revision
-                    or current.event_seq != execution.event_seq
-                    or current.status is not execution.status
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                now = await transaction.now()
-                updated = replace(
-                    current,
-                    status=next_status,
-                    revision=target_revision,
-                    event_seq=target_sequence,
-                    error_code=next_error_code,
-                    safe_error_details=dict(next_safe_error_details),
-                    error_diagnostics=None,
-                    updated_at=now,
+                return await self._execution.transition_recovery_in_transaction(
+                    transaction, execution,
+                    next_status=next_status,
+                    event_type=event_type,
+                    event_payload=event_payload,
+                    next_error_code=next_error_code,
+                    next_safe_error_details=next_safe_error_details,
+                    audit_events=ordered_audit,
+                    producer_generation=producer_generation,
                 )
-                await _replace_checked(
-                    transaction,
-                    _projected_record(self._execution, stored, updated),
-                    stored.storage_revision,
-                )
-                if event_type is ExecutionEventType.EXECUTION_RESUMED:
-                    await self._execution.admit_history_producer_in_transaction(
-                        transaction, updated,
-                        producer_claim_id=event_payload["producer_claim_id"],
-                    )
-                await transaction.insert_facts(
-                    tuple(
-                        StoredFact(
-                            stream,
-                            execution.event_seq + index,
-                            key,
-                            event.event_type,
-                            None,
-                            None,
-                            event.payload,
-                        )
-                        for index, event in enumerate(events, 1)
-                    )
-                )
-                return updated
 
             if recovery_operation is None:
                 return await store.mutate(mutate)
@@ -674,16 +566,15 @@ class RuntimeRecoveryCommands:
                     operation.operation_id,
                     tenant_id=operation.tenant_id,
                 )
-                stored_tool = await tool_tx.get_record(
-                    self._tools._tool_key(operation.resource_id)
-                )
-                if stored_tool is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                current = await self._tools._decode(stored_tool, ToolOperationRecord)
-                if current.execution_id != operation.execution_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
                 if existing_operation is not None:
+                    current = await self._tools.get_operation_in_transaction(
+                        tool_tx, operation.resource_id,
+                        tenant_id=self._tools.tenant_id,
+                    )
+                    if current is None:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                    if current.execution_id != operation.execution_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if not _same_resolution_operation(existing_operation, operation):
                         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                     if not _resolved_tool_matches(
@@ -697,50 +588,22 @@ class RuntimeRecoveryCommands:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     return current
 
-                if (
-                    current.status is not ToolOperationStatus.EFFECT_UNKNOWN
-                    or current.fence != expected_fence
-                ):
-                    raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-                now = await tool_tx.now()
-                if target_status is ToolOperationStatus.COMPLETED:
-                    updated = replace(
-                        current,
-                        status=ToolOperationStatus.COMPLETED,
-                        result_payload=result_payload,
-                        error_code=None,
-                        error_payload=None,
-                        lease_expires_at=None,
-                        updated_at=now,
+                async def admit_operation() -> OperationLedgerRecord:
+                    admitted, _ = await _append_operation(
+                        operation_tx, self._operations, operation,
                     )
-                elif target_status is ToolOperationStatus.PENDING:
-                    updated = replace(
-                        current,
-                        status=ToolOperationStatus.PENDING,
-                        owner=None,
-                        lease_expires_at=None,
-                        error_code=None,
-                        error_payload=None,
-                        result_payload=None,
-                        updated_at=now,
-                    )
-                else:
-                    updated = replace(
-                        current,
-                        status=ToolOperationStatus.FAILED,
-                        result_payload=None,
-                        error_code=error_code,
-                        error_payload=error_payload,
-                        lease_expires_at=None,
-                        updated_at=now,
-                    )
-                await _append_operation(operation_tx, self._operations, operation)
-                await self._tools._replace_tool_in_transaction(
-                    tool_tx,
-                    stored_tool,
-                    updated,
+                    return admitted
+
+                return await self._tools.resolve_effect_in_transaction(
+                    tool_tx, operation.resource_id,
+                    execution_id=operation.execution_id,
+                    expected_fence=expected_fence,
+                    target_status=target_status,
+                    result_payload=result_payload,
+                    error_code=error_code,
+                    error_payload=error_payload,
+                    admit_operation=admit_operation,
                 )
-                return updated
 
             return await stores[0].storage_group.mutate(stores, mutate)
 

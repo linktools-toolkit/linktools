@@ -330,16 +330,6 @@ def _capture_storage_operation(
     )
 
 
-async def _record_execution_terminal(
-    recorder: MetricRecorder | None, *, source_namespace: str, tenant_id: str,
-    result: ExecutionTerminalCommitResult, session_id: str | None,
-) -> None:
-    await _record_metric_observation(recorder, _capture_execution_terminal(
-        recorder, source_namespace=source_namespace, tenant_id=tenant_id,
-        result=result, session_id=session_id,
-    ))
-
-
 async def _record_storage_operation(
     recorder: MetricRecorder | None, *, observation_id: str | None,
     started_at_ns: int | None, source_namespace: str, tenant_id: str,

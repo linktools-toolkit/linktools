@@ -671,17 +671,6 @@ class Runtime(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return compiled_agent
 
-    def _bind_agent(
-        self,
-        agent_id: str,
-        agent_revision: int,
-        *,
-        output: "type[BaseModel] | None" = None,
-        compiled_agent: "CompiledAgent | None" = None,
-    ) -> AgentBinding:
-        resolved = self._compiled_agent(agent_id, agent_revision, compiled_agent)
-        return self._compiler.bind(resolved, output=output)
-
     async def _resolve_agent_binding(self, binding: AgentBinding) -> AgentBinding:
         if self._binding_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

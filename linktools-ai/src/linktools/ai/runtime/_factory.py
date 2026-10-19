@@ -140,42 +140,20 @@ async def compose_runtime_components(
     resolved_namespace = validate_persistence_namespace(namespace)
     if not isinstance(storage, RuntimeStorage):
         raise TypeError("storage must be RuntimeStorage")
-    sources = () if features is None else (features,)
-    if any(
-        not isinstance(source, (RuntimeFeatures, RuntimeFeaturesCapture))
-        for source in sources
-    ):
-        raise TypeError(
-            "features must be RuntimeFeatures or RuntimeFeaturesCapture"
-        )
-    captures: list[RuntimeFeaturesCapture[AppT]] = []
-    for source in sources:
-        capture = (
-            await source.capture()
-            if isinstance(source, RuntimeFeatures)
-            else source
-        )
-        await capture.verify_source_revision()
-        captures.append(capture)
-    groups = tuple(captures)
-    selected_limits = PromptLimits() if not groups else groups[0].limits
-    authorization = None if not groups else groups[0].authorization
+    if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
+        raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
+    captured = await features.capture() if isinstance(features, RuntimeFeatures) else features
+    if captured is not None:
+        await captured.verify_source_revision()
+    selected_limits = PromptLimits() if captured is None else captured.limits
+    authorization = None if captured is None else captured.authorization
     execution_capability = ExecutionCapability()
     execution_declared = False
     session_capability = SessionCapability()
     session_declared = False
     tool_responses: ToolResponseFixture | None = None
-    group_ids = tuple(group.group_id for group in groups)
-    if len(group_ids) != len(set(group_ids)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    workspace_groups = tuple(group for group in groups if group.workspace is not None)
-    if len(workspace_groups) > 1:
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    sandbox_groups = tuple(group for group in groups if group.sandbox is not None)
-    if len(sandbox_groups) > 1:
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    workspace = None if not workspace_groups else workspace_groups[0].workspace
-    sandbox = sandbox_groups[0].sandbox if sandbox_groups else LocalSandbox()
+    workspace = None if captured is None else captured.workspace
+    sandbox = LocalSandbox() if captured is None or captured.sandbox is None else captured.sandbox
     if workspace is not None:
         workspace.policy.validate()
 
@@ -187,10 +165,10 @@ async def compose_runtime_components(
     try:
         candidates: list[CapabilityContribution[object]] = []
         asset_sources: dict[str, AssetStoreReader] = {}
-        for group in groups:
-            candidates.extend(group.contributions)
-            if group.asset_reader is not None:
-                asset_sources[group.group_id] = group.asset_reader
+        if captured is not None:
+            candidates.extend(captured.contributions)
+            if captured.asset_reader is not None:
+                asset_sources[captured.group_id] = captured.asset_reader
         _validate_candidate_uniqueness(candidates)
         def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
             if isinstance(capability, CapabilityPersistence):
@@ -304,18 +282,9 @@ async def compose_runtime_components(
         )
         candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
-            tuple(
-                AssetSkillSource(group.group_id, reader)
-                for group in groups
-                if (reader := group.asset_reader) is not None
-            )
+            tuple(AssetSkillSource(group_id, reader) for group_id, reader in asset_sources.items())
         )
-        instruction_documents = tuple(
-            document
-            for group in groups
-            for document in group.instructions.documents
-        )
-        rules = RepositoryInstructions(instruction_documents)
+        rules = RepositoryInstructions(() if captured is None else captured.instructions.documents)
         agents = {
             candidate.id: candidate.value
             for candidate in candidates
@@ -331,7 +300,7 @@ async def compose_runtime_components(
             else:
                 agents["default"] = AgentSpec("default")
         compiler = AgentCompiler(
-            defaults=(captures[0].defaults if captures else None),
+            defaults=None if captured is None else captured.defaults,
             model_resolver=resolver,
             candidates=tuple(
                 candidate
@@ -339,7 +308,7 @@ async def compose_runtime_components(
                 if candidate.kind != "agent"
             ),
             agents=agents,
-            capability_filter=captures[0].filter if captures else None,
+            capability_filter=None if captured is None else captured.filter,
         )
         root_agents = {
             agent_id: compiler.compile(agents[agent_id])
@@ -368,8 +337,8 @@ async def compose_runtime_components(
             )
         selected_state.run_store.capability_revisions = capability_revisions
         initialized = True
-        for group in groups:
-            await group.verify_source_revision()
+        if captured is not None:
+            await captured.verify_source_revision()
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = (
                 RuleInstructionResolver(rules)
@@ -449,15 +418,15 @@ async def compose_runtime_components(
             tool_responses=tool_responses,
         )
         try:
-            for capture in groups:
-                await capture.verify_source_revision()
+            if captured is not None:
+                await captured.verify_source_revision()
         except BaseException as primary_error:
             try:
                 await components.close_callback()
             except BaseException as cleanup_error:
                 raise primary_error from cleanup_error
             raise
-        _logger.info("runtime capability captures admitted: groups=%s", group_ids)
+        _logger.info("runtime capability capture admitted: group=%s", None if captured is None else captured.group_id)
         return components
     except BaseException:
         if not ownership_transferred:

@@ -68,7 +68,13 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
     """Confirm recovery context at model and tool safety boundaries.
 
     Register at Runtime scope. Runtime owns checkpoint transactions and producer
-    fencing; each run binds its own capture without modifying the declaration."""
+    fencing; each run binds its own capture without modifying the declaration.
+
+    ``storage=None`` inherits the execution route, including its hot-read cache.
+    An explicit route must share the execution StateStorageGroup; it cannot move
+    checkpoints to an independent transaction resource. Derive a route with
+    ``execution_route.with_cache(None)`` to disable only its hot-read cache.
+    """
 
     id = "runtime.checkpoint"
     _service: AbstractCapability[AgentContext[AppT]] | None = None
@@ -131,6 +137,12 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     A borrowed write buffer supports optional batch publication. Without one,
     batch observation boundaries await publication. Terminal mode retains observations
     until Runtime seals the final tail or a required safety boundary publishes them.
+
+    ``storage=None`` inherits the execution route, including its hot-read cache.
+    An explicit route must share the execution StateStorageGroup; it cannot move
+    traces to an independent transaction resource. Derive a route with
+    ``execution_route.with_cache(None)`` to disable only its hot-read cache.
+    Storage caches do not supply ``commit.buffer``; configure that separately.
     """
 
     id = "runtime.trace"

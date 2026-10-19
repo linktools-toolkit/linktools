@@ -66,6 +66,54 @@ may provide both capabilities, but each use is explicitly configured.
 `ExecutionCapability(coordination=...)` separately supplies turn ownership and
 live streams, including the non-authoritative pending-turn view.
 
+### Runtime archive routes and defaults
+
+`CheckpointCapability(storage=None)` and `TraceCapability(storage=None)` inherit
+Runtime's execution route, including its hot-read cache. Neither `None` disables
+the capability; registration enables it. An explicit archive route must remain
+in the same `StateStorageGroup` as Execution and Recovery, because their safety
+and terminal boundaries require atomic writes. Runtime validates this when it
+opens. Routes share a group when they use the same SQLite path, the same SQL
+engine instance, or the same filesystem transaction root; memory routes share
+one binding-local group. Separate SQL engine instances targeting the same database do not
+establish a shared SQL group.
+
+For a per-archive hot cache, derive the execution route rather than selecting
+an unrelated database. This current API example keeps Checkpoint's inherited
+cache while disabling Trace's hot cache:
+
+```python
+from linktools.ai.capability import (
+    CheckpointCapability, RuntimeFeatures, TraceCapability,
+)
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
+
+storage = RuntimeStorage.from_root("state", cache=hot_cache)
+execution_route = storage.plan.route(RuntimeDomain.EXECUTION)
+features = RuntimeFeatures("app")
+features.capability(CheckpointCapability())
+features.capability(TraceCapability(
+    storage=execution_route.with_cache(None),
+))
+async with Runtime.open(
+    "app", models=models, storage=storage, features=features,
+) as runtime:
+    ...
+```
+
+Here `hot_cache` is a host-provided `CacheBackend` and `models` is the configured
+`ModelRegistry`. `with_cache(None)` changes only the hot-read resource, preserving
+the route's transaction identity. It does not disable Trace publication or
+Checkpoint safety writes. To choose a different Trace hot cache, pass that
+backend to `with_cache` instead.
+
+Missing write buffers make batch policies await source publication without an
+implicit queue. `ExecutionCapability` is optional: when omitted, Runtime uses
+sync commit with no borrowed coordination resource. A terminal preference must
+be declared explicitly and remains subject to coordination and safety rules.
+Runtime drains its own work on close, but never closes borrowed hot caches,
+write buffers, coordination resources, SQL engines, or Metrics datasets.
+
 Adapters implement complete method groups: `get`/`put`/`delete` for hot content,
 `append`/`read_batch`/`ack` for pending writes, and `open_stream`/`read_stream`
 for previews. A write-only adapter is valid as a policy buffer, not as a

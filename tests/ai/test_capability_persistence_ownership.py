@@ -15,7 +15,6 @@ from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._checkpoint_persistence import CheckpointPersistence
 from linktools.ai.runtime.state._conversation_persistence import ConversationPersistence
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
@@ -279,9 +278,6 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
             StagingAgentRunStore(),
             conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
             execution_archive=None, recovery_archive=recovery if checkpoint_enabled else None,
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
             execution_repository=repository, tenant_id="tenant",
         )
         await store.initialize()

@@ -61,17 +61,11 @@ class _FilesystemCache:
         self._aliases_complete = False
         self._fact_streams_complete = False
         self._operations_complete = False
-        self._cache_hits = 0
-        self._cache_misses = 0
-        self._record_kind_scans = 0
-        self._business_files_read = 0
         self._record_index_complete = _record_index_marker_valid(root)
 
     def get_record(self, key: bytes) -> StoredRecord | None:
         if key in self._records:
-            self._cache_hits += 1
             return self._records[key]
-        self._cache_misses += 1
         value_hex = key.hex()
         matches: list[StoredRecord] = []
         for kind in self._record_kind_names():
@@ -81,7 +75,6 @@ class _FilesystemCache:
             value = decode_record(_read_json(path))
             if value.key_digest != key or value.kind != kind:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._business_files_read += 1
             matches.append(value)
         if len(matches) > 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -138,12 +131,10 @@ class _FilesystemCache:
 
     def _indexed_record(self, kind: str, key: bytes) -> StoredRecord:
         if key in self._records:
-            self._cache_hits += 1
             value = self._records[key]
             if not isinstance(value, StoredRecord) or value.kind != kind:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return value
-        self._cache_misses += 1
         key_hex = key.hex()
         path = self._root / "records" / kind / key_hex[:2] / f"{key_hex}.json"
         if not path.is_file():
@@ -151,15 +142,12 @@ class _FilesystemCache:
         value = decode_record(_read_json(path))
         if value.key_digest != key or value.kind != kind:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._business_files_read += 1
         self._records[key] = value
         return value
 
     def get_alias(self, alias: bytes) -> bytes | None:
         if alias in self._aliases:
-            self._cache_hits += 1
             return self._aliases[alias]
-        self._cache_misses += 1
         value = None
         path = self._root / _alias_path(self._root, alias)
         if path.is_file():
@@ -167,7 +155,6 @@ class _FilesystemCache:
             if decoded.alias_digest != alias:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value = decoded.record_key_digest
-            self._business_files_read += 1
         self._aliases[alias] = value
         return value
 
@@ -182,31 +169,25 @@ class _FilesystemCache:
         for path in (self._root / "aliases").glob("*/*.json"):
             value = decode_alias(_read_json(path))
             self._aliases[value.alias_digest] = value.record_key_digest
-            self._business_files_read += 1
             values.append((value.alias_digest, value.record_key_digest))
         self._aliases_complete = True
         return tuple(values)
 
     def get_sequence(self, key: bytes) -> int:
         if key in self._sequences:
-            self._cache_hits += 1
             return self._sequences[key]
-        self._cache_misses += 1
         value = 0
         path = self._root / _sequence_path(self._root, key)
         if path.is_file():
             stored_key, value = _read_sequence_metadata(path)
             if stored_key != key:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._business_files_read += 1
         self._sequences[key] = value
         return value
 
     def get_fact_stream(self, stream: bytes) -> _FactStreamInfo | None:
         if stream in self._fact_streams:
-            self._cache_hits += 1
             return self._fact_streams[stream]
-        self._cache_misses += 1
         path = self._root / _fact_meta_path(self._root, stream)
         if not path.is_file():
             self._fact_streams[stream] = None
@@ -217,7 +198,6 @@ class _FilesystemCache:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = _FactStreamInfo(stream, owner, last_sequence, {}, False)
         self._fact_streams[stream] = value
-        self._business_files_read += 1
         return value
 
     def load_fact_subjects(self, info: _FactStreamInfo) -> None:
@@ -240,7 +220,6 @@ class _FilesystemCache:
             if info.subjects.get(subject, 0) < sequence:
                 info.subjects[subject] = sequence
         info.subjects_loaded = True
-        self._business_files_read += len(subjects)
 
     def list_fact_streams(self) -> tuple[_FactStreamInfo, ...]:
         if self._fact_streams_complete:
@@ -258,9 +237,7 @@ class _FilesystemCache:
 
     def get_operation(self, key: bytes) -> StoredOperation | None:
         if key in self._operations:
-            self._cache_hits += 1
             return self._operations[key]
-        self._cache_misses += 1
         value = None
         key_hex = key.hex()
         path = self._root / "operations" / "by-key" / key_hex[:2] / f"{key_hex}.json"
@@ -268,7 +245,6 @@ class _FilesystemCache:
             value = decode_operation(_read_json(path))
             if value.key_digest != key:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._business_files_read += 1
         self._operations[key] = value
         return value
 
@@ -281,7 +257,6 @@ class _FilesystemCache:
         for path in (self._root / "operations/by-key").glob("*/*.json"):
             value = decode_operation(_read_json(path))
             self._operations[value.key_digest] = value
-            self._business_files_read += 1
             values.append(value)
         self._operations_complete = True
         return tuple(values)
@@ -370,7 +345,6 @@ class _FilesystemCache:
                     if value.kind != kind or value.key_digest != key:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     self._records[key] = value
-                    self._business_files_read += 1
                     values.append(value)
                     if len(values) == limit:
                         return tuple(values)
@@ -434,7 +408,6 @@ class _FilesystemCache:
                         value = batch[(info.stream_digest, sequence)]
                     except KeyError as error:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                    self._business_files_read += 1
                     values.append(value)
                     if len(values) == limit:
                         return tuple(values)
@@ -469,7 +442,6 @@ class _FilesystemCache:
                 if value.key_digest != key:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 self._operations[key] = value
-                self._business_files_read += 1
                 values.append(value)
                 if len(values) == limit:
                     return tuple(values)
@@ -483,14 +455,11 @@ class _FilesystemCache:
                 if root.is_dir()
                 else ()
             )
-            self._record_kind_scans += 1
         return self._record_kinds
 
     def _load_record_kind(self, kind: str) -> None:
         if kind in self._loaded_record_kinds:
-            self._cache_hits += 1
             return
-        self._cache_misses += 1
         root = self._root / "records" / kind
         for path in root.glob("*/*.json"):
             value = decode_record(_read_json(path))
@@ -501,10 +470,8 @@ class _FilesystemCache:
                 self._root,
                 f"records/{kind}/{value.key_digest.hex()[:2]}/{value.key_digest.hex()}.json",
             )
-            self._business_files_read += 1
             self._records[value.key_digest] = value
         self._loaded_record_kinds.add(kind)
-        self._record_kind_scans += 1
 
     @property
     def record_index_complete(self) -> bool:
@@ -535,18 +502,6 @@ class _FilesystemCache:
 
     def set_operation(self, key: bytes, value: StoredOperation | None) -> None:
         self._operations[key] = value
-
-    def _log_summary(self, event: str, value: int) -> None:
-        _logger.debug(
-            "filesystem cache summary: event=%s value=%s cache_hit=%s cache_miss=%s "
-            "record_kind_scan=%s business_files_read=%s",
-            event,
-            value,
-            self._cache_hits,
-            self._cache_misses,
-            self._record_kind_scans,
-            self._business_files_read,
-        )
 
 
 @dataclass(slots=True)

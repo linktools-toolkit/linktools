@@ -6,14 +6,16 @@ from ...storage import StorageRetentionMode
 
 from collections.abc import Mapping
 
-from ._contracts import ExecutionRepository
+from ._contracts import ConversationHistoryRepository, ExecutionRepository
 from ._model_interaction_store import (
     ModelInteractionStateStepArchive,
 )
 from ._object_router import _RuntimeObjectRouter
 from ._plan import RuntimeDomain, RuntimeStoragePlan
 from ._step_archive import StagingAgentRunStore, StateStepArchive
+from ._step_contracts import AgentRunStore
 from ._steps import RuntimeAgentRunStore
+from ._store import StateStore
 
 _STEP_DOMAINS = (
     RuntimeDomain.CONVERSATION,
@@ -24,15 +26,15 @@ _STEP_DOMAINS = (
 
 def build_runtime_agent_run_store(
     plan: RuntimeStoragePlan,
-    stores: Mapping[RuntimeDomain, object],
+    stores: Mapping[RuntimeDomain, StateStore],
     objects: _RuntimeObjectRouter,
-    history_repository: object,
+    history_repository: ConversationHistoryRepository,
     execution_repository: ExecutionRepository,
     *,
     namespace: str,
     tenant_id: str,
 ) -> RuntimeAgentRunStore:
-    archives: dict[RuntimeDomain, object] = {}
+    archives: dict[RuntimeDomain, AgentRunStore] = {}
     for domain in _STEP_DOMAINS:
         route = plan.route(domain)
         if (
@@ -68,9 +70,6 @@ def build_runtime_agent_run_store(
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
         execution_archive=archives.get(RuntimeDomain.TRACE),
         recovery_archive=archives.get(RuntimeDomain.CHECKPOINT),
-        conversation_retention=plan.route(RuntimeDomain.CONVERSATION).retention,
-        execution_retention=plan.route(RuntimeDomain.TRACE).retention,
-        recovery_retention=plan.route(RuntimeDomain.CHECKPOINT).retention,
     )
 
 

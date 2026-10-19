@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from linktools.core import environ
-from ...core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, JsonValue, Page, ResourceKind, ToolOperationStatus, validate_lease_owner, validate_lease_seconds
+from ...core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, JsonValue, OperationLedgerRecord, Page, ResourceKind, ToolOperationStatus, validate_lease_owner, validate_lease_seconds
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
 from ._contracts import ToolOperationRecord
@@ -659,6 +659,80 @@ class ToolRepositoryImpl(_RepositoryBase):
         return (
             None if record is None else await self._decode(record, ToolOperationRecord)
         )
+
+    async def get_operation_in_transaction(
+        self,
+        transaction: StateTransaction,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> ToolOperationRecord | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._tool_key(tool_operation_id))
+        return None if record is None else await self._decode(record, ToolOperationRecord)
+
+    async def resolve_effect_in_transaction(
+        self,
+        transaction: StateTransaction,
+        tool_operation_id: str,
+        *,
+        execution_id: str,
+        expected_fence: int,
+        target_status: ToolOperationStatus,
+        result_payload: StoredPayload | None,
+        error_code: str | None,
+        error_payload: StoredPayload | None,
+        admit_operation: Callable[[], Awaitable[OperationLedgerRecord]],
+    ) -> ToolOperationRecord:
+        """Resolve an unknown effect after admitting its receipt in this group transaction."""
+        stored = await transaction.get_record(self._tool_key(tool_operation_id))
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(stored, ToolOperationRecord)
+        if current.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            current.status is not ToolOperationStatus.EFFECT_UNKNOWN
+            or current.fence != expected_fence
+        ):
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        resolved_at = await transaction.now()
+        if target_status is ToolOperationStatus.COMPLETED:
+            updated = replace(
+                current,
+                status=ToolOperationStatus.COMPLETED,
+                result_payload=result_payload,
+                error_code=None,
+                error_payload=None,
+                lease_expires_at=None,
+                updated_at=resolved_at,
+            )
+        elif target_status is ToolOperationStatus.PENDING:
+            updated = replace(
+                current,
+                status=ToolOperationStatus.PENDING,
+                owner=None,
+                lease_expires_at=None,
+                error_code=None,
+                error_payload=None,
+                result_payload=None,
+                updated_at=resolved_at,
+            )
+        elif target_status is ToolOperationStatus.FAILED:
+            updated = replace(
+                current,
+                status=ToolOperationStatus.FAILED,
+                result_payload=None,
+                error_code=error_code,
+                error_payload=error_payload,
+                lease_expires_at=None,
+                updated_at=resolved_at,
+            )
+        else:
+            raise ValueError("unsupported tool effect resolution target")
+        await admit_operation()
+        await self._replace_tool_in_transaction(transaction, stored, updated)
+        return updated
 
     async def list_by_execution(
         self,

@@ -893,23 +893,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         return existing_target, True
 
-
-    async def _visible_history_count_in_transaction(
-        self,
-        transaction: StateTransaction,
-        record: ConversationHistoryRecord,
-    ) -> int:
-        histories = ConversationHistoryRepositoryImpl(
-            self._store,
-            namespace=self._namespace,
-            tenant_id=self._tenant_id,
-        )
-        local_messages = await histories.local_head_in_transaction(
-            transaction,
-            record.history_id,
-        )
-        return record.inherited_message_count + local_messages
-
     async def timeline_head(self, session_id: str, *, tenant_id: str) -> int:
         _require_repository_tenant(tenant_id, self._tenant_id)
         return await self._store.read(

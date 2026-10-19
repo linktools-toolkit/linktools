@@ -15,7 +15,7 @@ import json
 from ...session import SessionRepository as SessionRepositoryContract
 from ...session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -1381,6 +1381,32 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None: ...
+    async def guard_recovery_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+    ) -> None: ...
+    async def record_recovery_cancel_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+        *,
+        operation_id: str,
+        admit_operation: Callable[[], Awaitable[OperationLedgerRecord]],
+    ) -> OperationLedgerRecord: ...
+    async def transition_recovery_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+        *,
+        next_status: ExecutionStatus,
+        event_type: ExecutionEventType,
+        event_payload: Mapping[str, JsonValue],
+        next_error_code: str | None,
+        next_safe_error_details: Mapping[str, JsonValue],
+        audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
+    ) -> ExecutionRecord: ...
     async def get_start_idempotency(
         self, claim: ExecutionStartClaim
     ) -> IdempotencyRecord | None: ...

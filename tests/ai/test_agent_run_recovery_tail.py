@@ -20,7 +20,6 @@ from linktools.ai.runtime._persistence_services import CheckpointService
 from linktools.ai.runtime._run_hooks import AgentRunCapture
 from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore, StagingAgentRunStore
 
@@ -98,9 +97,6 @@ async def test_recovery_preserves_each_tool_result_once_with_its_original_positi
             conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=archive,
             recovery_archive=first.read_store(RuntimeDomain.CHECKPOINT),
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await second.initialize()
         second.bind_execution_producer("run", execution_id="execution", producer_generation=1)
@@ -245,9 +241,6 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
         second = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=state.run_store.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=archive, recovery_archive=state.run_store.read_store(RuntimeDomain.CHECKPOINT),
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await second.initialize()
         recorder = recorder_for(second)
@@ -319,9 +312,6 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
         old_producer = RuntimeAgentRunStore(
             StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=archive, recovery_archive=first.read_store(RuntimeDomain.CHECKPOINT),
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await old_producer.initialize()
         old_producer.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536))
