@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import math
 from copy import copy
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -22,6 +21,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from ..core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
+from ..storage import CommitPolicy
 from ._context import AgentContext
 
 if TYPE_CHECKING:
@@ -41,14 +41,16 @@ class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
     _service: AbstractCapability[AgentContext[AppT]] | None = None
 
     def __init__(
-        self, *, storage: RuntimeStorageRoute | None = None, cache: object | None = None
+        self, *, cache: object | None = None, commit: CommitPolicy = CommitPolicy.sync(),
     ) -> None:
-        self._storage = storage
+        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "terminal"}:
+            raise ValueError("Conversation requires sync or terminal commit")
+        self._commit = commit
         self._cache = cache
 
     @property
-    def storage(self) -> RuntimeStorageRoute | None:
-        return self._storage
+    def commit(self) -> CommitPolicy:
+        return self._commit
 
     @property
     def cache(self) -> object | None:
@@ -153,19 +155,16 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
 
     def __init__(
         self, *, storage: RuntimeStorageRoute | None = None, cache: object | None = None,
-        batch_size: int = DEFAULT_TRACE_BATCH_SIZE,
-        flush_interval: float = DEFAULT_TRACE_FLUSH_INTERVAL,
+        commit: CommitPolicy = CommitPolicy.batch(
+            batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
+        ),
     ) -> None:
-        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
-            raise ValueError("batch_size must be a positive integer")
-        if (isinstance(flush_interval, bool) or not isinstance(flush_interval, (int, float))
-                or not math.isfinite(flush_interval) or flush_interval <= 0):
-            raise ValueError("flush_interval must be finite and positive")
+        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "batch"}:
+            raise ValueError("Trace requires sync or batch commit")
         methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
         if any(method is not None for method in methods) and not all(callable(method) for method in methods):
             raise TypeError("cache must implement append, read_batch and ack together")
-        self._batch_size = batch_size
-        self._flush_interval = float(flush_interval)
+        self._commit = commit
         self._storage = storage
         self._cache = cache
 
@@ -178,12 +177,8 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
         return self._cache
 
     @property
-    def batch_size(self) -> int:
-        return self._batch_size
-
-    @property
-    def flush_interval(self) -> float:
-        return self._flush_interval
+    def commit(self) -> CommitPolicy:
+        return self._commit
 
     def bind(
         self, service: AbstractCapability[AgentContext[AppT]]

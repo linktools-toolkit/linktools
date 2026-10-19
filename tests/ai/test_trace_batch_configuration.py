@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from linktools.ai.capability import TraceCapability
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 from .test_observation_coalescing import _add_run, _observe, _setup
 from linktools.ai.runtime.state import RuntimeDomain
 
@@ -19,15 +19,15 @@ from linktools.ai.runtime.state import RuntimeDomain
 ])
 def test_trace_batch_configuration_rejects_invalid_values(options):
     with pytest.raises(ValueError):
-        TraceCapability(**options)
+        TraceCapability(commit=CommitPolicy.batch(**{"batch_size": 128, "flush_interval": 3.0, **options}))
 
 
 def test_trace_batch_configuration_keeps_defaults():
     feature = TraceCapability()
     from linktools.ai.core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 
-    assert feature.batch_size == DEFAULT_TRACE_BATCH_SIZE == 128
-    assert feature.flush_interval == DEFAULT_TRACE_FLUSH_INTERVAL == 3.0
+    assert feature.commit.batch_size == DEFAULT_TRACE_BATCH_SIZE == 128
+    assert feature.commit.flush_interval == DEFAULT_TRACE_FLUSH_INTERVAL == 3.0
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_runtime_binds_trace_batch_options_before_model_work():
         await release.wait()
         return ModelResponse(parts=[TextPart("done")])
 
-    feature = TraceCapability(batch_size=7, flush_interval=0.25)
+    feature = TraceCapability(commit=CommitPolicy.batch(batch_size=7, flush_interval=0.25))
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "trace-options", features=_features(feature), storage=storage,

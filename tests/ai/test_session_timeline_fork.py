@@ -160,7 +160,6 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
             _ExecutionService(),  # type: ignore[arg-type]
             HmacCursorSigner("session", b"session-timeline-key"),
             history_reader=object(),  # type: ignore[arg-type]
-            conversation_enabled=True,
             transcript_store=object(),  # type: ignore[arg-type]
         )
         principal = Principal("owner", "tenant")

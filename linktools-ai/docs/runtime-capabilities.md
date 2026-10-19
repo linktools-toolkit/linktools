@@ -68,7 +68,7 @@ from linktools.ai.capability import ConversationCapability, CheckpointCapability
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
 chat.capability(ConversationCapability())
-# Runtime.open(..., features=chat) supports Sessions and conversation forks.
+# Runtime.open(..., features=chat) retains model context and supports execution forks.
 
 persistent_work = RuntimeFeatures("persistent-work")
 persistent_work.agent("default", model="default")
@@ -77,10 +77,15 @@ persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
-`ConversationCapability()` retains committed conversation context and Session
-projections. Creating or continuing a Session, or forking conversation, requires
-this capability; missing support fails with `CAPABILITY_REQUIRED_MISSING` before
-side effects. Checkpoint or trace data alone does not grant conversation access.
+`ConversationCapability()` retains committed model context for future turns and
+execution forks. Session creation, listing, resume, metadata, and display history
+are built-in Runtime services, available without this capability. Resume still
+requires available committed context: an unretained completed turn makes Session
+history unavailable, and later resume or Session fork fails with
+`SESSION_HISTORY_UNAVAILABLE` rather than silently losing context. Enabling
+Conversation later cannot reconstruct that missing history. Execution forks
+require an admitted conversation guarantee; checkpoint or trace data alone does
+not grant it.
 `CheckpointCapability()` retains before-request and after-node recovery context.
 `TraceCapability()` retains execution transcript, step facts and model interactions;
 trace alone cannot resume an interrupted run. Register the combination required
@@ -115,25 +120,28 @@ Metrics retain their own batching; a conversation turn does not force a metrics 
 
 ### Module storage and cache configuration
 
-`ConversationCapability(storage=route, cache=cache)`,
+`ConversationCapability(cache=cache, commit=CommitPolicy.sync())` configures
+conversation content caching and write timing. Session metadata and the
+conversation route belong to the root `RuntimeStorage`: set
+`RuntimeStoragePlan(conversation=route, ...)` to customize that domain.
 `CheckpointCapability(storage=route)` and
-`TraceCapability(storage=route, cache=cache)` configure their own archives.
-Omitted storage inherits the corresponding Runtime base route; Trace and
-Checkpoint default to the execution route with separate logical partitions.
-Trace and Checkpoint routes must share the execution StateStorageGroup;
-incompatible routes fail during opening. Conversation may use a separate store:
-that configuration uses durable admission and the recoverable prepared terminal
-handoff protocol, rather than deferred single-transaction turns. Shared SQL engines and object stores
-remain borrowed resources, rather than one connection or close per capability.
+`TraceCapability(storage=route, cache=cache, commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))`
+configure their own archives. Omitted Trace and Checkpoint storage defaults to
+the execution route with separate logical partitions. Their routes must share
+the execution StateStorageGroup; incompatible routes fail during opening.
+Conversation may use a separate root route; that configuration uses durable
+admission and the recoverable prepared terminal handoff protocol rather than
+single-transaction deferred turns. Shared SQL engines and object stores remain
+borrowed resources.
 
-A module's `cache=None` disables its hot/read cache; it never inherits the root
-cache. Pass the same cache instance explicitly to share it. `RuntimeStorage.cache`
-still supplies core turn coordination, live streams and core record/object reads.
-Changing module caches cannot create a separate producer ownership namespace.
-Use the same features declaration or capture with `RuntimeHistory.open(features=...)`
-to read custom module routes without activating native hooks or Metrics recorders.
-Pass that same `features=` value to `RuntimeSnapshot.create()` so export captures
-all configured module archives; restored portable generations use their local routes.
+A module's `cache=None` disables its content/read cache; it never inherits the
+root cache. Pass the same instance explicitly to share it. `RuntimeStorage.cache`
+supplies Session metadata/display caching, core turn coordination, live streams,
+and core record/object reads. Changing module caches cannot create a separate
+producer ownership namespace. Reuse the root storage plan and the same features
+with `RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read
+and export all custom routes without activating hooks or Metrics recorders.
+Restored portable generations use their local routes and caches.
 
 Shared filesystem group manifests, locks and empty domain metadata are provisioned
 independently of selected features to preserve atomic recovery and historical reads.
@@ -196,21 +204,29 @@ existing confirmation outcome. It must not claim completion from force alone.
 
 ### Independent commit boundaries
 
-There is no public terminal-commit capability or global commit-mode option.
-Conversation commits its final context, Session cursor and corresponding
-Execution outcome at the turn boundary. Checkpoint commits recovery-critical
-context at its model/tool boundaries. Trace publishes completed observation
-batches and drains its queued records on completion or close. Metrics use their
-separate batching lifecycle. One module does not force unrelated modules to
-flush at every boundary.
+Import `CommitPolicy` from `linktools.ai.storage`. Its factories are
+`CommitPolicy.sync()`, `CommitPolicy.terminal()`, and
+`CommitPolicy.batch(batch_size=..., flush_interval=...)`. The policy selects
+write timing independently of storage routing and cache availability.
+Conversation supports sync and terminal; Trace and Metrics support sync and batch.
+Conversation defaults to `sync()`: its durable admission is immediate even with
+a coordination cache. Opt into `ConversationCapability(commit=CommitPolicy.terminal())`
+to defer eligible ordinary native turns until the terminal boundary. Deferred
+admission additionally requires an explicitly configured `RuntimeStorage.cache`
+with the required coordination groups and compatible storage routes.
 
-With Conversation enabled and an explicitly configured `RuntimeStorage.cache` supporting the
-required groups, eligible ordinary native execution can defer its initial state
-until the terminal boundary. Before side effects, Task ownership or another durable dependency
-requires state, Runtime establishes the necessary durable facts. Authorization,
-idempotency, producer fencing, tool-effect ownership and unknown-commit readback
-remain part of the execution core in every combination. A process crash cannot
-recover an uncommitted turn merely because conversation or trace was enabled.
+Conversation commits its final context, Session cursor, and corresponding
+Execution outcome at the turn boundary. Checkpoint retains its recovery-critical
+model/tool boundaries. Trace defaults to batch size 128 and a 3-second interval;
+Metrics defaults to batch size 128 and a 60-second interval. Explicit flush,
+completion, close, and required safety barriers remain authoritative. One module
+does not force unrelated modules to flush at every boundary.
+
+Before side effects, Task ownership, or another durable dependency requires
+state, Runtime establishes the necessary durable facts. Authorization,
+idempotency, producer fencing, tool-effect ownership, and unknown-commit readback
+remain part of the execution core. A process crash cannot recover an uncommitted
+turn merely because Conversation or Trace was enabled.
 
 Multiple Runtime instances need shared cache turn coordination for provisional
 live turns. Without an injected cache, or when its required groups are absent,
@@ -336,7 +352,7 @@ by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 
 ### Observation batch timing
 
-`TraceCapability(batch_size=128, flush_interval=3.0)` controls observation-only
+`TraceCapability(commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))` controls observation-only
 flush pressure (counted in observation boundaries) and maximum scheduled delay
 in seconds when `cache` supplies `append`, `read_batch` and `ack`. Each run owns
 an independent cache-backed recording scope. `cache=None` or a hot-content-only cache
@@ -347,7 +363,8 @@ Explicit flush, tool-effect, checkpoint and terminal safety boundaries can
 publish earlier and cannot be delayed by these options. Cache configuration does
 not weaken those boundaries.
 
-Metrics recording has independent `batch_size=128, flush_interval=60.0` options
-on its dataset constructors. With `cache=None`, automatic observations remain
+Metrics recording independently accepts
+`commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0)` on its dataset
+constructors. With `cache=None`, automatic observations remain
 synchronous; timing options do not introduce an in-memory queue. These settings
 are resource scheduling policy, not model-visible execution binding identity.

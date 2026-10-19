@@ -133,7 +133,10 @@ independent Runtime-scoped capabilities: `ConversationCapability`,
 of them. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent and Task observations, including evaluation work in that Runtime. The
 shared dataset remains caller-owned. Task, Evaluation and Artifact remain
-services and need no capability wrappers. See [feature guarantees and commit
+services and need no capability wrappers. Session metadata and display history
+are also built in; Conversation adds retained model context for future turns and
+execution forks. Its commit policy defaults to `CommitPolicy.sync()` from
+`linktools.ai.storage`. See [feature guarantees and commit
 boundaries](docs/runtime-capabilities.md#optional-execution-persistence).
 
 ## Evaluation
@@ -720,8 +723,10 @@ The binding contract does not persist Python output import paths or duplicate id
 
 ## 6. Sessions and executions
 
-This example requires `ConversationCapability()` registered at Runtime scope
-on the same declaration before opening the Runtime:
+Session metadata and a first turn are available without additional capabilities.
+An unretained completed turn makes its Session context unavailable for later
+resume or fork. To retain model context across resumed turns, register `ConversationCapability()` at Runtime scope before
+opening the Runtime:
 
 ```python
 from linktools.ai.capability import ConversationCapability

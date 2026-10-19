@@ -97,7 +97,7 @@ async def materialize_runtime_storage(
 ) -> _MaterializedRuntimeStorage:
     module_caches = dict(module_caches or {})
     def state_cache(domain: RuntimeDomain) -> object | None:
-        return module_caches.get(domain) if domain in {RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT} else cache
+        return module_caches.get(domain) if domain in {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT} else cache
 
     stores: dict[RuntimeDomain, StateStore] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}

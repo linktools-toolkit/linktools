@@ -1021,6 +1021,7 @@ class RuntimeStateCommands:
                             session_id,
                             tenant_id=self._tenant_id,
                             execution_id=owner.execution_id,
+                            history_unavailable=owner.invalidates_session_history,
                         )
                     await self._conversation.admit_execution_in_transaction(
                         session_transaction,
@@ -2338,6 +2339,7 @@ class RuntimeStateCommands:
                             session_id,
                             tenant_id=self._tenant_id,
                             execution_id=commit.execution.execution_id,
+                            history_unavailable=commit.execution.invalidates_session_history,
                         )
                     else:
                         if next_cursor is None or self._conversation_run_store is None:
@@ -2926,6 +2928,7 @@ class RuntimeStateCommands:
                         session_id,
                         tenant_id=self._tenant_id,
                         execution_id=commit.execution.execution_id,
+                        history_unavailable=commit.execution.invalidates_session_history,
                     )
                     break
                 except AIError as error:
@@ -3455,6 +3458,12 @@ class RuntimeStateCommands:
             )
             if session is None or require_session_release and session.active_execution_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                require_session_release
+                and commit.execution.invalidates_session_history
+                and session.history_quality != "unavailable"
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if conversation_agent_run is not None and (
                 next_cursor is None or session.continuation != next_cursor
             ):
@@ -3544,6 +3553,7 @@ class RuntimeStateCommands:
                 session_id,
                 tenant_id=tenant_id,
                 execution_id=owner.execution_id,
+                history_unavailable=owner.invalidates_session_history,
             )
         await self._conversation.admit_execution(
             session_id,

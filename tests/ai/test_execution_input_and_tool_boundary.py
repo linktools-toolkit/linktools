@@ -419,7 +419,6 @@ async def test_session_resume_preserves_explicit_execution_input_fields() -> Non
         storage.conversation, storage.execution.executions,
         TenantAuthorizationPolicy(), execution,
         HmacCursorSigner("session", b"session-key"), history_reader=object(),
-        conversation_enabled=True,
     )
     request = _file_request(ResumeSessionRequest, ["b.txt", "a.txt", "b.txt"])
     try:

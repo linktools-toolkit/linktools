@@ -138,8 +138,8 @@ class ConversationService(AbstractCapability[AgentContext[AppT]]):
         run_store: RuntimeAgentRunStore,
         conversation_archive: AgentRunStore,
     ) -> LoadedModelContext:
-        if not execution.conversation:
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+        if session is not None and session.history_quality == "unavailable":
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         if isinstance(conversation_archive, StateStepArchive):
             owner = history_id
         elif session is not None and session.continuation is not None:

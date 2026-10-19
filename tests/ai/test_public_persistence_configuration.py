@@ -4,6 +4,7 @@
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from linktools.ai.observe import Metrics
 from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeHistory, RuntimeSnapshot, RuntimeStorage, RuntimeStorageRoute
 from linktools.ai.runtime.state import SnapshotLimits
-from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend, InMemoryObjectStore, ObjectRef
 
 from linktools.ai.runtime._metrics_service import MetricsService
 
@@ -50,11 +51,14 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT, RuntimeDomain.TRACE)
     }
     features = await _features(
-        ConversationCapability(storage=routes[RuntimeDomain.CONVERSATION]),
+        ConversationCapability(),
         CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
         TraceCapability(storage=routes[RuntimeDomain.TRACE]),
     ).capture()
-    state = RuntimeStorage.filesystem(root)
+    def root_storage() -> RuntimeStorage:
+        return RuntimeStorage(replace(RuntimeStorage.filesystem(root).plan, conversation=routes[RuntimeDomain.CONVERSATION]))
+
+    state = root_storage()
     async with Runtime.open("module-routes", metrics=Metrics.in_memory(), storage=state, models=_FeatureModels(), features=features) as runtime:
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
@@ -77,7 +81,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
     monkeypatch.setattr(CheckpointCapability, "before_model_request", unexpected_hook)
     monkeypatch.setattr(MetricsService, "__init__", unexpected_recording)
     monkeypatch.setattr(_FeatureModels, "materialize", unexpected_recording)
-    reopened = RuntimeStorage.filesystem(root)
+    reopened = root_storage()
     async with RuntimeHistory.open("module-routes", storage=reopened, features=features) as history:
         assert (await history.result(execution_id, principal=principal)).output == {"text": "done"}
         interactions = (await history.model_interactions(execution_id, principal=principal)).items
@@ -91,7 +95,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
     targets = (InMemoryObjectStore("snapshot-first"), InMemoryObjectStore("snapshot-second"))
     snapshots = [await RuntimeSnapshot.create(
         "module-routes", tenant_id=principal.tenant_id,
-        storage=RuntimeStorage.filesystem(root), object_store=target, features=features,
+        storage=root_storage(), object_store=target, features=features,
         exclusive=_SnapshotGuard(), limits=limits,
     ) for target in targets]
     assert (snapshots[0].key, snapshots[0].digest, snapshots[0].size) == (
@@ -119,17 +123,14 @@ async def test_module_cache_is_explicit_and_does_not_inherit_root_cache(tmp_path
     )
     state = RuntimeStorage.filesystem(tmp_path / "state", cache=root_cache)
     async with Runtime.open("module-cache", storage=state, models=_FeatureModels(), features=features):
-        # Ordinary session reads use the Conversation cache, including cached misses.
+        # Built-in Session metadata uses the root cache, independently of Conversation.
         before_root = (root_cache.reads, root_cache.writes)
         before_module = (module_cache.reads, module_cache.writes)
         assert await state.conversation.sessions.get("missing", tenant_id="default") is None
         assert await state.conversation.sessions.get("missing", tenant_id="default") is None
-        assert (root_cache.reads, root_cache.writes) == before_root
-        if shared:
-            assert module_cache.reads > before_module[0]
-            assert module_cache.writes > before_module[1]
-        else:
-            assert (module_cache.reads, module_cache.writes) == before_module
+        assert root_cache.reads > before_root[0]
+        assert root_cache.writes > before_root[1]
+        assert (module_cache.reads, module_cache.writes) == before_module
         content = b"module cache body"
 
         async def chunks() -> AsyncIterator[bytes]:
@@ -179,7 +180,8 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
 
     state = RuntimeStorage.sqlite(tmp_path / "execution.db", cache=InMemoryCacheBackend(max_bytes=2**20))
     route = RuntimeStorageRoute.sqlite(tmp_path / "conversation.db")
-    features = _features(ConversationCapability(storage=route))
+    state = RuntimeStorage(replace(state.plan, conversation=route), cache=state.cache)
+    features = _features(ConversationCapability(commit=CommitPolicy.terminal()))
     async with Runtime.open(
         "split-conversation", storage=state,
         models=_FeatureModels(FunctionModel(stream_function=model)), features=features,

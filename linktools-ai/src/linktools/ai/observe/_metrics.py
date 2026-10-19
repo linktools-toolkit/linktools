@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import math
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
+from ..storage import CommitPolicy
 from ._codec import (
     same_definition_contract,
     observation_envelope,
@@ -44,6 +44,7 @@ _CANONICAL_QUERY_FIELDS = frozenset(
     {"source_namespace", "tenant_id", "status", "error_code"}
 )
 _RESERVED_PREFIX = "linktools."
+_DEFAULT_COMMIT = CommitPolicy.batch(batch_size=128, flush_interval=60.0)
 _MAX_RECORD_BATCH = 256
 _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 
@@ -51,19 +52,18 @@ _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 class Metrics:
     """Close-free dataset; each recorder owns its batching lifetime.
 
-    With a write-capable cache, automatic recordings flush at batch_size or
-    flush_interval seconds from the first pending observation, whichever comes
-    first. Explicit writes and cache-free recording still await persistence.
+    A batch commit policy uses a write-capable cache to flush at its threshold
+    or interval from the first pending observation, whichever comes first.
+    Sync policies, explicit writes and cache-free recording await persistence.
     """
 
     def __init__(
         self, store: MetricStore, *, namespace: str = "default",
         cache: object | None = None,
-        batch_size: int = 128, flush_interval: float = 60.0,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> None:
-        self._validate_batching(batch_size, flush_interval)
-        self._batch_size = batch_size
-        self._flush_interval = float(flush_interval)
+        self._validate_commit(commit)
+        self._commit = commit
         methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
         if any(method is not None for method in methods) and not all(callable(method) for method in methods):
             raise TypeError("cache must implement append, read_batch and ack together")
@@ -74,7 +74,7 @@ class Metrics:
     def recorder(self) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
         return MetricRecording(
-            self, self._cache, batch_size=self._batch_size, flush_interval=self._flush_interval,
+            self, self._cache, commit=self._commit,
         )
 
     @property
@@ -84,62 +84,58 @@ class Metrics:
     @classmethod
     def in_memory(
         cls, *, namespace: str = "default", cache: object | None = None,
-        batch_size: int = 128, flush_interval: float = 60.0,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         return cls(
             InMemoryMetricStore(), namespace=namespace, cache=cache,
-            batch_size=batch_size, flush_interval=flush_interval,
+            commit=commit,
         )
 
     @classmethod
     def sqlite(
         cls, path: str | Path, *, namespace: str = "default",
         cache: object | None = None,
-        batch_size: int = 128, flush_interval: float = 60.0,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
-        cls._validate_batching(batch_size, flush_interval)
+        cls._validate_commit(commit)
         return cls(
             SQLiteMetricStore(path), namespace=namespace, cache=cache,
-            batch_size=batch_size, flush_interval=flush_interval,
+            commit=commit,
         )
 
     @classmethod
     def sql(
         cls, engine: AsyncEngine, *, namespace: str = "default",
         cache: object | None = None,
-        batch_size: int = 128, flush_interval: float = 60.0,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         from ._sql import SqlMetricStore
 
-        cls._validate_batching(batch_size, flush_interval)
+        cls._validate_commit(commit)
         return cls(
             SqlMetricStore(engine), namespace=namespace, cache=cache,
-            batch_size=batch_size, flush_interval=flush_interval,
+            commit=commit,
         )
 
     @classmethod
     def from_store(
         cls, store: MetricStore, *, namespace: str = "default",
         cache: object | None = None,
-        batch_size: int = 128, flush_interval: float = 60.0,
+        commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         return cls(
             store, namespace=namespace, cache=cache,
-            batch_size=batch_size, flush_interval=flush_interval,
+            commit=commit,
         )
 
     @classmethod
-    def _validate_batching(cls, batch_size: int, flush_interval: float) -> None:
-        if (
-            isinstance(batch_size, bool) or not isinstance(batch_size, int)
-            or not 1 <= batch_size <= _MAX_RECORD_BATCH
-        ):
-            raise ValueError(f"batch_size must be an integer between 1 and {_MAX_RECORD_BATCH}")
-        if (
-            isinstance(flush_interval, bool) or not isinstance(flush_interval, (int, float))
-            or not math.isfinite(flush_interval) or flush_interval <= 0
-        ):
-            raise ValueError("flush_interval must be finite and positive")
+    def _validate_commit(cls, commit: CommitPolicy) -> None:
+        if not isinstance(commit, CommitPolicy):
+            raise TypeError("commit must be CommitPolicy")
+        if commit.mode == "terminal":
+            raise ValueError("Metrics does not support terminal commit policy")
+        if commit.mode == "batch" and commit.batch_size > _MAX_RECORD_BATCH:
+            raise ValueError(f"Metrics batch_size must not exceed {_MAX_RECORD_BATCH}")
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:
         if not isinstance(definition, MetricDefinition):

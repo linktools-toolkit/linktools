@@ -36,7 +36,7 @@ def persistence_storage_configuration(
             return
         if domain in caches:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT, "one persistence feature is allowed per module")
-        if feature.storage is not None:
+        if isinstance(feature, (CheckpointCapability, TraceCapability)) and feature.storage is not None:
             if not isinstance(feature.storage, RuntimeStorageRoute):
                 raise TypeError("storage must be RuntimeStorageRoute")
             routes[domain] = feature.storage

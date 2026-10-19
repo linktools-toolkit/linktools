@@ -20,7 +20,7 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 
 
@@ -72,16 +72,14 @@ def _features(*capabilities) -> RuntimeFeatures:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("split_storage", (False, True))
-async def test_minimal_runtime_rejects_conversation_but_runs_agent(tmp_path: Path, split_storage: bool):
+async def test_minimal_runtime_supports_sessions_without_retained_model_context(tmp_path: Path, split_storage: bool):
     storage = (RuntimeStorage(RuntimeStoragePlan(
         conversation=RuntimeStorageRoute.sqlite(tmp_path / "conversation.db"),
         execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
     )) if split_storage else RuntimeStorage.in_memory())
     async with Runtime.open("minimal", storage=storage, models=_FeatureModels(), features=_definitions()) as runtime:
-        with pytest.raises(AIError) as missing:
-            await runtime.agents.get().create_session("session")
-        assert missing.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
-        execution = await runtime.agents.get().start("question")
+        session = await runtime.agents.get().create_session("session")
+        execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
@@ -100,7 +98,7 @@ async def test_conversation_pending_requires_complete_cache(tmp_path, monkeypatc
         entered.set()
         await release.wait()
         return ModelResponse(parts=[TextPart("done")])
-    features = _features(ConversationCapability())
+    features = _features(ConversationCapability(commit=CommitPolicy.terminal()))
     if evidence != "none":
         features.capability(CheckpointCapability() if evidence == "checkpoint" else TraceCapability(), scope="runtime")
     cache = InMemoryCacheBackend(max_bytes=2**20) if cache_kind == "full" else object() if cache_kind == "unsupported" else None
@@ -198,7 +196,7 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
     group = RuntimeFeatures('tool-pending')
     group.tool(lookup, effect_policy=effect_policy)
     group.agent('default', model='default', allow_tools=('lookup',))
-    group.capability(ConversationCapability(), scope='runtime')
+    group.capability(ConversationCapability(commit=CommitPolicy.terminal()), scope='runtime')
     async with Runtime.open('pending-tool', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
         original = SqlStorageContext.run_mutation
@@ -233,7 +231,7 @@ async def test_reconstructed_test_pending_cancel_promotes_and_quiesces_before_ca
             stopped.set()
     group = RuntimeFeatures('cancel-pending')
     group.agent('default', model='default', allow_tools=())
-    group.capability(ConversationCapability(), scope='runtime')
+    group.capability(ConversationCapability(commit=CommitPolicy.terminal()), scope='runtime')
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=2**20))
     async with Runtime.open('pending-cancel', storage=state, models=_FeatureModels(_FeatureFunctionModel(model)), features=group) as runtime:
         session = await runtime.agents.get().create_session('session')
@@ -256,7 +254,7 @@ async def test_cached_lost_ack_reconciles_without_replay(tmp_path, monkeypatch):
     async def model(messages, info):
         calls.append(messages)
         return ModelResponse(parts=[TextPart("done")])
-    async with Runtime.open("lost-ack", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=_features(ConversationCapability())) as runtime:
+    async with Runtime.open("lost-ack", storage=storage, models=_FeatureModels(_FeatureFunctionModel(model)), features=_features(ConversationCapability(commit=CommitPolicy.terminal()))) as runtime:
         session = await runtime.agents.get().create_session("session")
         original = SqlStorageContext.run_mutation
         writes = []

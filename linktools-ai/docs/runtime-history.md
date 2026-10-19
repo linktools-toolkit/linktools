@@ -5,8 +5,12 @@ its recorded content. Live progress can arrive before its history is persisted.
 Detailed execution persistence requires `TraceCapability()` registered
 at Runtime scope; storage retention alone does not select it. Without this
 capability, the owning Runtime exposes its existing live staging content while
-retained locally. Final results follow execution retention; Session history
-requires `ConversationCapability()` and follows conversation retention. See
+retained locally. Final results follow execution retention. Session metadata and display history
+are built in; retained model context for subsequent turns requires
+`ConversationCapability()` and follows conversation retention. An unretained
+completed turn makes subsequent resume/fork fail with
+`SESSION_HISTORY_UNAVAILABLE`; it cannot be repaired by enabling Conversation
+later. See
 [optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
 
 For runs with restart checkpoints disabled, model-boundary control checks may
@@ -451,7 +455,8 @@ it does not retain the full intermediate trace or enable restart checkpoints.
 An execution without the admitted conversation guarantee cannot gain fork support
 from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
-For eligible terminal-only source turns, this context joins the existing final
+With explicit `ConversationCapability(commit=CommitPolicy.terminal())`, eligible
+terminal-only source turns retain this context in the existing final
 owner batch in one database write transaction. Object bodies still have their
 own I/O. Fork and retry executions retain their existing durable-path admission
 and do not inherit that one-write-transaction guarantee.

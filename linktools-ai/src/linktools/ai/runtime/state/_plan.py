@@ -238,7 +238,7 @@ class RuntimeStoragePlan:
         self, routes: Mapping[RuntimeDomain, RuntimeStorageRoute],
     ) -> "RuntimeStoragePlan":
         """Assemble module declarations without adding authoring route fields."""
-        allowed = {RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
+        allowed = {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         if not routes.keys() <= allowed:
             raise ValueError("module routes require persistence archive domains")
         effective = replace(self)

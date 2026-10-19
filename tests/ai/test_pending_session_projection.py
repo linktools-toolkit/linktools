@@ -18,7 +18,7 @@ from linktools.ai.capability import ConversationCapability
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest, ListSessionRequest
 from linktools.ai.runtime.state._store import active_state_scope, record_key_digest
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 from linktools.ai.storage._database import SqlStorageContext
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -42,7 +42,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
     def group():
         value = RuntimeFeatures("pending-session-display")
         value.agent("default", model="default", allow_tools=())
-        value.capability(ConversationCapability(cache=cache), scope="runtime")
+        value.capability(ConversationCapability(cache=cache, commit=CommitPolicy.terminal()), scope="runtime")
         return value
 
     def block_next():

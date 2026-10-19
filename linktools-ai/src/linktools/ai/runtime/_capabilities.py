@@ -12,7 +12,7 @@ from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..core import PromptLimits
+from ..core import PromptLimits, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
 from ._agent_run_recorder import AgentRunRecorder
 from ._budget import RunBudgetContext
@@ -124,8 +124,9 @@ async def compose_platform_capabilities(
                 bound_types.add(feature)
                 if isinstance(capability, TraceCapability) and isinstance(run_store, RuntimeAgentRunStore):
                     run_store.trace_persistence.configure(
-                        agent_run_id, cache=capability.cache, batch_size=capability.batch_size,
-                        flush_interval=capability.flush_interval,
+                        agent_run_id, cache=capability.cache if capability.commit.mode == "batch" else None,
+                        batch_size=capability.commit.batch_size or DEFAULT_TRACE_BATCH_SIZE,
+                        flush_interval=capability.commit.flush_interval or DEFAULT_TRACE_FLUSH_INTERVAL,
                     )
                 return capability.bind(service(persistence))
         return capability

@@ -3,7 +3,7 @@
 """Dataset batching settings preserve delivery and Runtime ownership."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from pathlib import Path
 
 import pytest
@@ -12,11 +12,11 @@ from linktools.ai.migrate import provision_metrics_sqlite
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.storage import BatchWriteScope, InMemoryCacheBackend
+from linktools.ai.storage import BatchWriteScope, CommitPolicy, InMemoryCacheBackend
 from linktools.ai.storage import _write_cache
 
 from .test_explicit_runtime_features import _FeatureModels
-from .test_metrics_recording import _observation
+from .test_metrics_recording import _ControlledStore, _observation
 
 
 class _Store(InMemoryMetricStore):
@@ -35,7 +35,7 @@ class _Store(InMemoryMetricStore):
 @pytest.mark.parametrize("size", [None, 2, 256])
 async def test_metrics_batch_threshold_flushes_without_explicit_flush(size: int | None) -> None:
     store = _Store()
-    options = {} if size is None else {"batch_size": size}
+    options = {} if size is None else {"commit": CommitPolicy.batch(batch_size=size, flush_interval=60.0)}
     metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20), **options)
     recorder = metrics.recorder()
     threshold = 128 if size is None else size
@@ -70,7 +70,7 @@ async def test_metrics_batch_interval_flushes_without_another_admission(monkeypa
     monkeypatch.setattr(_write_cache, "monotonic", lambda: clock[0])
     monkeypatch.setattr(_write_cache.asyncio, "wait_for", advancing_wait)
     store = _Store()
-    options = {} if interval is None else {"flush_interval": interval}
+    options = {} if interval is None else {"commit": CommitPolicy.batch(batch_size=128, flush_interval=interval)}
     recorder = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20), **options).recorder()
     try:
         assert await recorder.try_record(_observation("timed"))
@@ -89,17 +89,17 @@ async def test_metrics_batch_interval_flushes_without_another_admission(monkeypa
 def test_metrics_batch_settings_reject_invalid_values_before_sqlite_creation(tmp_path: Path, settings: dict[str, object]) -> None:
     path = tmp_path / "not-created.sqlite"
     with pytest.raises(ValueError):
-        Metrics.sqlite(path, **settings)
+        Metrics.sqlite(path, commit=CommitPolicy.batch(**(dict(batch_size=128, flush_interval=60.0) | settings)))
     assert not path.exists()
     with pytest.raises(ValueError):
-        Metrics.in_memory(**settings)
+        Metrics.in_memory(commit=CommitPolicy.batch(**(dict(batch_size=128, flush_interval=60.0) | settings)))
 
 
 @pytest.mark.asyncio
 async def test_metrics_batch_options_leave_direct_and_explicit_writes_synchronous(tmp_path: Path) -> None:
     await provision_metrics_sqlite(tmp_path / "direct.sqlite")
     await provision_metrics_sqlite(tmp_path / "cached.sqlite")
-    metrics = Metrics.sqlite(tmp_path / "direct.sqlite", batch_size=256, flush_interval=300)
+    metrics = Metrics.sqlite(tmp_path / "direct.sqlite", commit=CommitPolicy.batch(batch_size=256, flush_interval=300))
     recorder = metrics.recorder()
     try:
         assert await recorder.try_record(_observation("direct"))
@@ -107,7 +107,7 @@ async def test_metrics_batch_options_leave_direct_and_explicit_writes_synchronou
         assert recorder.status().pending == 0
     finally:
         await recorder.close()
-    cached = Metrics.sqlite(tmp_path / "cached.sqlite", cache=InMemoryCacheBackend(max_bytes=2**20), batch_size=256, flush_interval=300)
+    cached = Metrics.sqlite(tmp_path / "cached.sqlite", cache=InMemoryCacheBackend(max_bytes=2**20), commit=CommitPolicy.batch(batch_size=256, flush_interval=300))
     await cached.record_observations((_observation("explicit"),))
     assert await cached.get_observation("explicit") is not None
 
@@ -123,7 +123,7 @@ async def test_shared_metrics_custom_batching_has_independent_runtime_flush_and_
             recorders.append(recorder)
             return recorder
 
-    metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite", cache=InMemoryCacheBackend(max_bytes=2**20), batch_size=2, flush_interval=300)
+    metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite", cache=InMemoryCacheBackend(max_bytes=2**20), commit=CommitPolicy.batch(batch_size=2, flush_interval=300))
     async with Runtime.open("first", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=metrics) as first:
         async with Runtime.open("second", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=metrics) as second:
             assert await recorders[0].try_record(_observation("first"))
@@ -149,3 +149,71 @@ def test_batch_scope_validates_settings_without_starting_work(settings: dict[str
         raise AssertionError("not reached")
     with pytest.raises(ValueError):
         BatchWriteScope(InMemoryCacheBackend(max_bytes=1024), write, **settings)
+
+
+@pytest.mark.parametrize("factory", ["constructor", "from_store", "in_memory", "sqlite", "sql"])
+@pytest.mark.parametrize("commit", [None, CommitPolicy.terminal(), CommitPolicy.batch(batch_size=257, flush_interval=60.0)])
+def test_metrics_rejects_unsupported_commit_policy_before_opening_source(
+    tmp_path: Path, factory: str, commit: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.observe import _metrics, _sql
+
+    def unexpected_source(*args, **kwargs):
+        pytest.fail("invalid policy must be rejected before opening a source")
+
+    monkeypatch.setattr(_metrics, "SQLiteMetricStore", unexpected_source)
+    monkeypatch.setattr(_sql, "SqlMetricStore", unexpected_source)
+    with pytest.raises(TypeError if commit is None else ValueError):
+        if factory == "constructor":
+            Metrics(_Store(), commit=commit)
+        elif factory == "from_store":
+            Metrics.from_store(_Store(), commit=commit)
+        elif factory == "in_memory":
+            Metrics.in_memory(commit=commit)
+        elif factory == "sqlite":
+            Metrics.sqlite(tmp_path / "not-created.sqlite", commit=commit)
+        else:
+            Metrics.sql(object(), commit=commit)
+    assert not (tmp_path / "not-created.sqlite").exists()
+
+
+@pytest.mark.asyncio
+async def test_metrics_sync_policy_bypasses_borrowed_cache_and_owns_no_source_task() -> None:
+    class Cache(InMemoryCacheBackend):
+        async def append(
+            self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool,
+        ) -> bool:
+            pytest.fail("sync recording must not admit cache entries")
+
+        async def close(self) -> None:
+            pytest.fail("recording must not close its borrowed cache")
+
+    store = _ControlledStore()
+    metrics = Metrics.from_store(store, cache=Cache(max_bytes=65536), commit=CommitPolicy.sync())
+    recorder = metrics.recorder()
+    writing = asyncio.create_task(recorder.try_record(_observation("sync")))
+    closing = None
+    try:
+        await asyncio.wait_for(store.entered.wait(), 1)
+        assert store.task is writing
+        assert not writing.done()
+        assert recorder.status().queue_capacity == recorder.status().queue_size == 0
+        assert (await recorder.flush(timeout_seconds=0)).completed
+        closing = asyncio.create_task(recorder.close())
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert not store.cancelled
+        store.release.set()
+        assert await writing
+        await closing
+        assert await metrics.get_observation("sync") is not None
+        reused = metrics.recorder()
+        try:
+            assert await reused.try_record(_observation("reused-sync"))
+            assert await metrics.get_observation("reused-sync") is not None
+        finally:
+            await reused.close()
+    finally:
+        store.release.set()
+        await asyncio.gather(writing, *(() if closing is None else (closing,)), return_exceptions=True)
+        await recorder.close()

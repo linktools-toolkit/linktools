@@ -95,6 +95,7 @@ class RuntimeRetentionController:
                     execution.session_id,
                     tenant_id=tenant_id,
                     execution_id=execution_id,
+                    history_unavailable=execution.invalidates_session_history,
                 )
         if execution is not None:
             agent_run_ids = tuple(

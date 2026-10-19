@@ -12,7 +12,7 @@ from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ConversationCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 
@@ -314,7 +314,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
         return ModelResponse(parts=[ToolCallPart("tool", {}, tool_call_id="call")])
 
     group = RuntimeFeatures("projection-cancel-conflict")
-    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0), scope="runtime")
+    group.capability(TraceCapability(cache=InMemoryCacheBackend(max_bytes=65536), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0)), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")

@@ -98,11 +98,12 @@ silently redirected into a local queue.
 
 ```python
 from linktools.ai.observe import Metrics
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 
 cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
 metrics = Metrics.sqlite(
-    "metrics.sqlite3", cache=cache, batch_size=64, flush_interval=15.0,
+    "metrics.sqlite3", cache=cache,
+    commit=CommitPolicy.batch(batch_size=64, flush_interval=15.0),
 )
 recorder = metrics.recorder()
 try:
@@ -116,9 +117,12 @@ Automatic Agent and Task observations, including evaluation work in a Runtime,
 require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
-All Metrics constructors and factories accept `cache`, `batch_size=128`, and
-`flush_interval=60.0` (seconds). `batch_size` must be an integer from 1 to 256;
-`flush_interval` must be finite and positive. Booleans are invalid for both.
+All Metrics constructors and factories accept `cache` and `commit`, defaulting
+to `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
+`CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
+policies. A Metrics batch policy requires an integer `batch_size`
+from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are
+invalid for both.
 These settings are validated when creating the dataset and inherited by each
 fresh recorder, including those owned by separate Runtimes. Only automatic recorders
 use its complete buffer group; otherwise they await the source in the caller,

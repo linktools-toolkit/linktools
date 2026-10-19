@@ -393,14 +393,16 @@ class DefaultExecutionService:
         restart_checkpoints: bool = False,
         durable_trace: bool = False,
         conversation: bool = False,
+        terminal_conversation: bool = False,
     ) -> None:
         if any(not isinstance(value, bool) for value in (
-            restart_checkpoints, durable_trace, conversation,
+            restart_checkpoints, durable_trace, conversation, terminal_conversation,
         )):
             raise TypeError("execution persistence guarantees must be bool")
         self._restart_checkpoints = restart_checkpoints
         self._durable_trace = durable_trace
         self._conversation = conversation
+        self._terminal_conversation = terminal_conversation
         self._state = state
         self._object_store = object_store
         self._object_reader = object_reader
@@ -2003,8 +2005,6 @@ class DefaultExecutionService:
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
-        if not self._conversation and (session_id is not None or fork_base_execution_id is not None):
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         metric_delivery: _TerminalMetricDelivery | None = None
 
         def capture_metric(delivery: _TerminalMetricDelivery) -> None:
@@ -2127,6 +2127,8 @@ class DefaultExecutionService:
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
 
+            if session.history_quality == "unavailable":
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if session.agent_id != session_agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             if session.cwd is not None and (
@@ -2469,7 +2471,10 @@ class DefaultExecutionService:
     ) -> ExecutionHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        coordinator = self._runtime_bridge.pending_turns.coordination
+        coordinator = (
+            self._runtime_bridge.pending_turns.coordination
+            if self._terminal_conversation else None
+        )
         execution = proposed_reservation.execution
         identity = proposed_reservation.idempotency
 
@@ -3405,8 +3410,6 @@ class DefaultExecutionService:
     async def fork(
         self, execution_id: str, request: ForkExecutionRequest
     ) -> ExecutionHandle:
-        if not self._conversation:
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )

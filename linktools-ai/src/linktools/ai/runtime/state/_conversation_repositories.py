@@ -688,7 +688,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             source = await self._decode(source_stored, SessionRecord)
             if source.revision != expected_source_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if source.history_id is None:
+            if source.history_id is None or source.history_quality == "unavailable":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if (
                 await transaction.guard_record(
@@ -1257,7 +1257,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
     async def release_execution(
-        self, session_id: str, *, tenant_id: str, execution_id: str
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        history_unavailable: bool = False,
     ) -> SessionRecord:
         return await self._admission(
             session_id,
@@ -1265,6 +1270,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             execution_id=execution_id,
             expected=None,
             release=True,
+            history_unavailable=history_unavailable,
         )
 
     async def release_execution_in_transaction(
@@ -1274,6 +1280,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         *,
         tenant_id: str,
         execution_id: str,
+        history_unavailable: bool = False,
     ) -> SessionRecord:
         return await self._admission(
             session_id,
@@ -1281,6 +1288,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             execution_id=execution_id,
             expected=None,
             release=True,
+            history_unavailable=history_unavailable,
             transaction=transaction,
         )
 
@@ -1292,6 +1300,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         execution_id: str,
         expected: ConversationCursor | None,
         release: bool,
+        history_unavailable: bool = False,
         transaction: StateTransaction | None = None,
     ) -> SessionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -1306,8 +1315,19 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     return value
                 if value.active_execution_id != execution_id:
                     return value
-                next_value = replace(value, active_execution_id=None)
+                next_value = replace(
+                    value, active_execution_id=None,
+                    history_quality="unavailable" if history_unavailable else value.history_quality,
+                )
+                if history_unavailable and value.history_quality != "unavailable":
+                    next_value = replace(
+                        next_value,
+                        revision=value.revision + 1,
+                        updated_at=await transaction.now(),
+                    )
             else:
+                if value.history_quality == "unavailable":
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 if (
                     value.active_execution_id == execution_id
                     and value.continuation == expected
@@ -1323,6 +1343,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
             await _replace_checked(transaction, candidate, current.storage_revision)
+            if release and next_value.history_quality != value.history_quality:
+                await self._bump_list_generation(transaction, value.owner_principal_id)
             if not release:
                 sequence = await transaction.next_sequence(
                     self._timeline_sequence_key(session_id)

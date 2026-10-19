@@ -160,7 +160,6 @@ class DefaultSessionService:
         cursor_signer: CursorSigner,
         *,
         history_reader: SessionHistoryReader,
-        conversation_enabled: bool = False,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
         workspace_access: _InputFileSource | None = None,
@@ -168,9 +167,6 @@ class DefaultSessionService:
         pending_session_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
     ) -> None:
         self._conversation = conversation
-        if not isinstance(conversation_enabled, bool):
-            raise TypeError("conversation_enabled must be bool")
-        self._conversation_enabled = conversation_enabled
         self._executions = executions
         self._authorization = authorization
         self._execution = execution
@@ -186,8 +182,6 @@ class DefaultSessionService:
         self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
-        if not self._conversation_enabled:
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         try:
             agent_id = validate_agent_id(agent_id)
         except AIError:
@@ -457,7 +451,7 @@ class DefaultSessionService:
         for name in ("cwd", "active_execution_id"):
             text(session[name], optional=True)
         if (type(session["revision"]) is not int or session["revision"] < 0
-                or session["history_quality"] not in {"complete", "conservative"}
+                or session["history_quality"] not in {"complete", "conservative", "unavailable"}
                 or not isinstance(session["metadata"], dict)):
             raise ValueError("invalid session display")
         view = SessionView(**{
@@ -718,6 +712,8 @@ class DefaultSessionService:
             record = await self._authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
+            if record.history_quality == "unavailable":
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if self._transcript_store is None or record.continuation is None:
                 return ()
             history_id = record.continuation.history_id or record.history_id
@@ -779,8 +775,6 @@ class DefaultSessionService:
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
-        if not self._conversation_enabled:
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         return await self._resume(
             agent_id,
             binding_digest,
@@ -851,13 +845,13 @@ class DefaultSessionService:
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
     ) -> SessionView:
-        if not self._conversation_enabled:
-            raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
         async with self._session_consumer(session_id, request.principal.tenant_id):
             source = await self._authorized(
                 session_id, request.principal, AuthorizationAction.SESSION_READ
             )
             source = await self._reconcile_terminal_admission(source)
+            if source.history_quality == "unavailable":
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.SESSION_CREATE,
@@ -1519,12 +1513,16 @@ class DefaultSessionService:
         execution_id = record.active_execution_id
         if execution_id is None:
             return record
-        if await self._active_admitted_execution(record) is not None:
+        execution = await self._executions.get(
+            execution_id, tenant_id=self._conversation.sessions.tenant_id,
+        )
+        if self._validate_active_admitted_execution(record, execution) is not None:
             return record
         await self._conversation.sessions.release_execution(
             record.session_id,
             tenant_id=self._conversation.sessions.tenant_id,
             execution_id=execution_id,
+            history_unavailable=(execution is not None and execution.invalidates_session_history),
         )
         updated = await self._conversation.sessions.get(
             record.session_id,

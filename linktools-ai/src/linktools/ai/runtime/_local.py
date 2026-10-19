@@ -463,6 +463,7 @@ class LocalExecutionBackend:
             execution.session_id,
             tenant_id=self._tenant_id,
             execution_id=execution.execution_id,
+            history_unavailable=execution.invalidates_session_history,
         )
 
     async def _commit_start_recovery_checkpoint(
@@ -1280,6 +1281,7 @@ class LocalExecutionBackend:
                     execution.session_id,
                     tenant_id=self._tenant_id,
                     execution_id=owner_id,
+                    history_unavailable=owner.invalidates_session_history,
                 )
                 _logger.info(
                     "released terminal session owner: session=%s execution=%s",
@@ -1465,6 +1467,7 @@ class LocalExecutionBackend:
                 current.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
+                history_unavailable=current.invalidates_session_history,
             )
             if released.active_execution_id == current.execution_id:
                 raise AIError(
@@ -2352,7 +2355,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if checkpoint.handoff_phase is RecoveryHandoffPhase.PREPARED:
             if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
-                if execution.session_id is not None and handoff.conversation is None:
+                if execution.conversation and execution.session_id is not None and handoff.conversation is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if handoff.source_agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2429,6 +2432,7 @@ class LocalExecutionBackend:
                         execution.session_id,
                         tenant_id=self._tenant_id,
                         execution_id=execution.execution_id,
+                        history_unavailable=execution.invalidates_session_history,
                     )
                 await self._complete_handoff(checkpoint)
                 self._publish_terminal_event(
@@ -5326,7 +5330,8 @@ class LocalExecutionBackend:
                         source_domain = RuntimeDomain.RECOVERY
                 conversation = None
                 if (
-                    status is ExecutionStatus.SUCCEEDED
+                    current.conversation
+                    and status is ExecutionStatus.SUCCEEDED
                     and current.session_id is not None
                     and agent_run_id is not None
                 ):
@@ -5732,7 +5737,7 @@ class LocalExecutionBackend:
         conversation_agent_run = None
         conversation_checkpoint = None
         expected_cursor = None
-        if current.session_id is not None and status is ExecutionStatus.SUCCEEDED:
+        if current.conversation and current.session_id is not None and status is ExecutionStatus.SUCCEEDED:
             conversation_agent_run = await self._run_store.get_agent_run(agent_run_id=agent_run_id or "")
             conversation_checkpoint = await self._run_store.latest_checkpoint(
                 agent_run_id=agent_run_id or ""

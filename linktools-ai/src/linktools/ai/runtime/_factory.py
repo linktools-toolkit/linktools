@@ -666,6 +666,10 @@ async def _build_local_components(
             restart_checkpoints=restart_checkpoints,
             durable_trace=durable_trace,
             conversation=conversation,
+            terminal_conversation=any(
+                isinstance(value, ConversationCapability) and value.commit.mode == "terminal"
+                for value in persistence_capabilities
+            ),
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -789,14 +793,11 @@ async def _build_local_components(
             authorization,
             execution,
             HmacCursorSigner("session", runtime_token_seed),
-            conversation_enabled=conversation,
             history_reader=session_history_reader,
-            cache=(
-                next((feature.cache for feature in persistence_capabilities if isinstance(feature, ConversationCapability)), None)
-                if all(storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
-                       for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION))
-                else None
-            ),
+            cache=(storage.cache if all(
+                storage.plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+                for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION)
+            ) else None),
             transcript_store=storage.run_store.conversation_persistence,
             release_terminal=storage.retention.release_session,
             pending_session_execution=runtime_bridge.pending_turns.read_session_execution,

@@ -178,14 +178,17 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     source = tmp_path / 'source'
     routes = {domain: RuntimeStorageRoute.filesystem(source / 'modules' / domain.value, transaction_root=source)
               for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT, RuntimeDomain.TRACE)}
+    def source_storage() -> RuntimeStorage:
+        return RuntimeStorage(replace(RuntimeStorage.filesystem(source).plan, conversation=routes[RuntimeDomain.CONVERSATION]))
+
     cache = _Cache()
-    group = _features(ConversationCapability(storage=routes[RuntimeDomain.CONVERSATION], cache=cache),
+    group = _features(ConversationCapability(cache=cache),
                       CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
                       TraceCapability(storage=routes[RuntimeDomain.TRACE], cache=cache))
     policy = Policy()
     group._authorization = policy
     capture = await group.capture()
-    async with Runtime.open('restore-policy', models=_FeatureModels(), storage=RuntimeStorage.filesystem(source),
+    async with Runtime.open('restore-policy', models=_FeatureModels(), storage=source_storage(),
                             features=capture) as runtime:
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
@@ -195,7 +198,7 @@ async def test_restored_history_ignores_source_routes_and_cache(tmp_path, monkey
     objects = InMemoryObjectStore('snapshot')
     limits = SnapshotLimits(max_entries=10000, max_bytes=16 * 1024 * 1024)
     ref = await RuntimeSnapshot.create('restore-policy', tenant_id=principal.tenant_id,
-                                       storage=RuntimeStorage.filesystem(source), object_store=objects,
+                                       storage=source_storage(), object_store=objects,
                                        features=capture, exclusive=_SnapshotGuard(), limits=limits)
     restored = await RuntimeSnapshot.restore(ref, object_store=objects, target=tmp_path / 'restored',
                                             namespace='restore-policy', tenant_id=principal.tenant_id, limits=limits)

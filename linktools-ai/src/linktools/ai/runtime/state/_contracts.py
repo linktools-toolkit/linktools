@@ -829,7 +829,7 @@ class SessionRecord:
                 ) from error
             if normalized_cwd != self.cwd:
                 raise ValueError("session cwd must be canonical")
-        if self.history_quality not in {"complete", "conservative"}:
+        if self.history_quality not in {"complete", "conservative", "unavailable"}:
             raise ValueError("session history quality summary is invalid")
         if self.timeline_parent_session_id is None:
             if self.timeline_parent_turn_seq != 0:
@@ -993,6 +993,15 @@ class ExecutionRecord:
             and self.error_diagnostics is not None
         ):
             raise ValueError("only failed execution can carry error diagnostics")
+
+    @property
+    def invalidates_session_history(self) -> bool:
+        """A completed unretained turn supersedes any older session context."""
+        return (
+            self.session_id is not None
+            and not self.conversation
+            and self.status is ExecutionStatus.SUCCEEDED
+        )
 
     @property
     def binding_digest(self) -> str:
@@ -1807,6 +1816,7 @@ class SessionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         execution_id: str,
+        history_unavailable: bool = False,
     ) -> SessionRecord: ...
     async def transition_status(
         self,
