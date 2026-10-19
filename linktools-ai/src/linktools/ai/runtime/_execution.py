@@ -2471,10 +2471,8 @@ class DefaultExecutionService:
     ) -> ExecutionHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        coordinator = (
-            self._runtime_bridge.pending_turns.coordination
-            if self._terminal_conversation else None
-        )
+        # Source-first and deferred writers must observe the same admission owner.
+        coordinator = self._runtime_bridge.pending_turns.coordination
         execution = proposed_reservation.execution
         identity = proposed_reservation.idempotency
 
@@ -2502,7 +2500,8 @@ class DefaultExecutionService:
                     )
             transferred = False
             try:
-                if (execution.conversation and dependency_hold_id is None
+                if (self._terminal_conversation and execution.conversation
+                        and dependency_hold_id is None
                         and self._runtime_bridge.pending_start is not None):
                     pending_id = await ConversationService.prepare_turn(
                         request, proposed_reservation, session, coordination,

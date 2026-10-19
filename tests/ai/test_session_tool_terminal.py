@@ -484,12 +484,15 @@ async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
                 *,
                 tenant_id: str,
                 execution_id: str,
+                history_unavailable: bool = False,
             ) -> Any:
+                assert not history_unavailable
                 if release_committed:
                     await original_release(
                         session_id,
                         tenant_id=tenant_id,
                         execution_id=execution_id,
+                        history_unavailable=history_unavailable,
                     )
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 

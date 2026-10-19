@@ -22,7 +22,7 @@ from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import _decode_step, _encode_step
 from linktools.ai.workspace import Workspace
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 from linktools.ai.runtime._message import encode_model_messages
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
@@ -111,7 +111,7 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
     group = RuntimeFeatures("one-fork-boundary")
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", allow_tools=("lookup",))
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ConversationCapability(commit=CommitPolicy.terminal()), scope="runtime")
     state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     async with Runtime.open("one-fork-boundary", storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         transactions = set()
@@ -218,7 +218,7 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
     workspace = Workspace.load(tmp_path)
     group = workspace_features("file-fork", workspace=workspace)
     group.agent("default", model="default", allow_tools=("read_file",))
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ConversationCapability(commit=CommitPolicy.terminal() if cached else CommitPolicy.sync()), scope="runtime")
     async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         with capture_run_messages() as messages:
             source = await runtime.agents.get().start("read")

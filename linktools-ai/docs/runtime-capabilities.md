@@ -209,8 +209,10 @@ Import `CommitPolicy` from `linktools.ai.storage`. Its factories are
 `CommitPolicy.batch(batch_size=..., flush_interval=...)`. The policy selects
 write timing independently of storage routing and cache availability.
 Conversation supports sync and terminal; Trace and Metrics support sync and batch.
-Conversation defaults to `sync()`: its durable admission is immediate even with
-a coordination cache. Opt into `ConversationCapability(commit=CommitPolicy.terminal())`
+Conversation defaults to `sync()`: new turns use durable admission even with
+a coordination cache. Shared admission ownership and idempotency coordination
+remain active for every policy, including a sync caller joining an already
+admitted terminal-policy turn. Opt into `ConversationCapability(commit=CommitPolicy.terminal())`
 to defer eligible ordinary native turns until the terminal boundary. Deferred
 admission additionally requires an explicitly configured `RuntimeStorage.cache`
 with the required coordination groups and compatible storage routes.

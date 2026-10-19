@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.core import Page
 from linktools.ai.observe import MetricRecorder, Metrics, Observation
-from linktools.ai.storage import InMemoryCacheBackend, BatchWriteScope
+from linktools.ai.storage import InMemoryCacheBackend, BatchWriteScope, CommitPolicy
 from linktools.ai.storage import _write_cache as write_cache
 
 
@@ -187,7 +187,7 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="close-completion",  # type: ignore[arg-type]
-        batch_size=1,
+        commit=CommitPolicy.batch(batch_size=1, flush_interval=60.0),
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     assert await buffer.try_record(_observation("completing")) is True
@@ -282,7 +282,7 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
     store = _CancellingStore()
     buffer = Metrics.from_store(
         store, namespace="close-order",  # type: ignore[arg-type]
-        batch_size=1,
+        commit=CommitPolicy.batch(batch_size=1, flush_interval=60.0),
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     first = _observation("inflight")
@@ -419,7 +419,7 @@ async def test_metric_buffer_expired_queued_batch_does_not_start_another_window(
     store = _RecordingStore()
     buffer = Metrics.from_store(
         store, namespace="queued-window",  # type: ignore[arg-type]
-        batch_size=2,
+        commit=CommitPolicy.batch(batch_size=2, flush_interval=60.0),
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     try:
@@ -444,7 +444,7 @@ async def test_metric_buffer_flush_wakes_prefix_queued_behind_inflight_write(
     store = _RecordingStore()
     buffer = Metrics.from_store(
         store, namespace="inflight-flush",  # type: ignore[arg-type]
-        batch_size=2,
+        commit=CommitPolicy.batch(batch_size=2, flush_interval=60.0),
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     try:
@@ -471,7 +471,7 @@ async def test_metric_buffer_timer_writes_without_another_observation(
     store.release.set()
     buffer = Metrics.from_store(
         store, namespace="idle-window",  # type: ignore[arg-type]
-        flush_interval=0.01,
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=0.01),
         cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
     ).recorder()
     try:

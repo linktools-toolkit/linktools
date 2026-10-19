@@ -14,7 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     ListSessionRequest, Runtime, RuntimeContext, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute,
 )
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import CommitPolicy, InMemoryCacheBackend
 
 from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
@@ -158,16 +158,30 @@ class _ClaimCache(InMemoryCacheBackend):
 @pytest.mark.asyncio
 async def test_root_cache_does_not_opt_default_conversation_into_terminal_admission(tmp_path):
     cache = _ClaimCache()
+    storage = _storage(tmp_path, cache=cache)
+    entered, finish = asyncio.Event(), asyncio.Event()
 
     async def model(messages, info):
+        entered.set()
+        await finish.wait()
         return ModelResponse(parts=[TextPart('answer')])
 
-    async with _open(tmp_path, model, retain=True, cache=cache) as runtime:
+    async with Runtime.open('builtin-session', storage=storage,
+                            models=_Models(_UsageFunctionModel(model)),
+                            features=_features(retain=True),
+                            context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
         execution = await session.start('question')
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            record = await storage.execution.executions.get(execution.execution_id, tenant_id='tenant')
+            assert record is not None and record.status.value == 'STARTED'
+        finally:
+            finish.set()
         assert (await execution.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
         assert (await session.history()).items
-    assert cache.claims == 0
+    assert cache.claims >= 1
+
 
 
 @pytest.mark.asyncio
@@ -310,3 +324,69 @@ async def test_reconcile_terminal_before_split_session_release_preserves_unavail
             allow_release.set()
         assert (await execution.wait(timeout_seconds=5)).result.status.value == 'SUCCEEDED'
         assert (await runtime.sessions.reconcile('session', principal=_OWNER)).history_quality == 'unavailable'
+
+
+@pytest.mark.asyncio
+async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publication(tmp_path):
+    claimed, allow_owner, entered, finish = (asyncio.Event() for _ in range(4))
+
+    class HeldClaimCache(InMemoryCacheBackend):
+        held = False
+
+        async def claim_turn(self, *args, **kwargs):
+            result = await super().claim_turn(*args, **kwargs)
+            if not self.held:
+                self.held = True
+                claimed.set()
+                await allow_owner.wait()
+            return result
+
+    cache = HeldClaimCache(max_bytes=4_000_000)
+    calls = []
+
+    async def model(messages, info):
+        calls.append(messages)
+        entered.set()
+        await finish.wait()
+        return ModelResponse(parts=[TextPart('answer')])
+
+    terminal = RuntimeFeatures('builtin-session')
+    terminal.agent('default', model='default', allow_tools=())
+    terminal.capability(ConversationCapability(commit=CommitPolicy.terminal()), scope='runtime')
+    models = _Models(_UsageFunctionModel(model))
+    storage = _storage(tmp_path, cache=cache)
+    async with Runtime.open('builtin-session', storage=storage, models=models,
+                            features=terminal) as owner, Runtime.open(
+            'builtin-session', storage=_storage(tmp_path, cache=cache), models=models,
+            features=_features(retain=True)) as peer:
+        session = await owner.agents.get().create_session('session')
+        remote = peer.agents.get().session('session')
+        first = asyncio.create_task(session.start('question', idempotency_key='request'))
+        await asyncio.wait_for(claimed.wait(), 5)
+        duplicate = asyncio.create_task(remote.start('question', idempotency_key='request'))
+        try:
+            # A claimed but unpublished owner must prevent a sync peer from
+            # entering its model through an independent durable admission.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(entered.wait(), .15)
+            allow_owner.set()
+            execution = await asyncio.wait_for(first, 5)
+            same = await asyncio.wait_for(duplicate, 5)
+            await asyncio.wait_for(entered.wait(), 5)
+            assert same.execution_id == execution.execution_id
+            assert len(calls) == 1
+            assert await storage.execution.executions.get(
+                execution.execution_id, tenant_id=owner.tenant_id) is None
+            with pytest.raises(AIError) as conflict:
+                await remote.start('different', idempotency_key='request')
+            assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+            with pytest.raises(AIError) as busy:
+                await remote.start('next', idempotency_key='next')
+            assert busy.value.code is ErrorCode.SESSION_BUSY
+        finally:
+            allow_owner.set()
+            finish.set()
+            await asyncio.gather(first, duplicate, return_exceptions=True)
+        assert (await execution.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
+        assert (await same.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
+        assert len(calls) == 1

@@ -9,10 +9,9 @@ import pytest
 
 from linktools.ai.capability import (
     CheckpointCapability,
-    ConversationCapability,
     TraceCapability,
 )
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -47,7 +46,7 @@ def test_runtime_has_no_duplicate_capability_exports() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "capability", [ConversationCapability, CheckpointCapability, TraceCapability]
+    "capability", [CheckpointCapability, TraceCapability]
 )
 async def test_invalid_module_route_is_rejected_before_storage_initialization(
     capability, monkeypatch
@@ -69,3 +68,8 @@ async def test_invalid_module_route_is_rejected_before_storage_initialization(
             features=features,
         ):
             pytest.fail("invalid declaration must not activate Runtime")
+
+
+def test_invalid_session_route_is_rejected_by_root_storage_plan() -> None:
+    with pytest.raises(ValueError, match="RuntimeStoragePlan contains an invalid route"):
+        RuntimeStoragePlan(conversation=object())
