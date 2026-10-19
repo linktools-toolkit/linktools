@@ -335,7 +335,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
 
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
-        return SimpleNamespace(session_id=None, agent_run_seq=0)
+        return SimpleNamespace(session_id=None, agent_run_seq=0, retention_closed=True)
 
     async def release_staging_many(
         *,
@@ -362,6 +362,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     await controller.release_execution_handoff("execution", tenant_id="tenant")
 
     assert calls == [
+        "execution:execution:tenant",
         "retention:execution:tenant",
         "execution:execution:tenant",
         "staging:execution:()",

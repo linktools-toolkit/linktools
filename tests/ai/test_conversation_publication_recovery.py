@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 from tests.ai.test_conversation_output_retention import _NAMESPACE, _features, _models
+from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeHistory
 from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
@@ -162,7 +163,7 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_corrupt_retained_receipt_remains_integrity_error(tmp_path):
+async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it(tmp_path):
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
     async with Runtime.open(
         _NAMESPACE,
@@ -190,16 +191,19 @@ async def test_corrupt_retained_receipt_remains_integrity_error(tmp_path):
             )
 
         await sessions.state_store.mutate(corrupt)
-        with pytest.raises(AIError) as live_error:
-            await runtime.executions.result(execution.execution_id, principal=principal)
-        assert live_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        closed = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+        assert closed is not None and closed.retention_closed
+        result = await runtime.executions.result(execution.execution_id, principal=principal)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        with pytest.raises(AIError) as timeline_error:
+            await runtime.sessions.timeline("s", principal=principal)
+        assert timeline_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         async with RuntimeHistory.open(
             _NAMESPACE,
             storage=RuntimeStorage.sqlite(tmp_path / "state.db"),
         ) as history:
-            with pytest.raises(AIError) as history_error:
-                await history.result(execution.execution_id, principal=principal)
-            assert history_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            retained_result = await history.result(execution.execution_id, principal=principal)
+            assert retained_result.status is ExecutionStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

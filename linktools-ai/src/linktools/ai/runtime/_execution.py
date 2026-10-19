@@ -3214,7 +3214,8 @@ class DefaultExecutionService:
         return result
 
     async def _require_retained_turn(self, execution: ExecutionRecord) -> None:
-        if execution.conversation and execution.session_id is not None and self._sessions is not None:
+        if (not execution.retention_closed and execution.conversation
+                and execution.session_id is not None and self._sessions is not None):
             await self._sessions.state_store.read(
                 lambda transaction: self._sessions.pending_turn_commit_in_transaction(
                     transaction, session_id=execution.session_id,

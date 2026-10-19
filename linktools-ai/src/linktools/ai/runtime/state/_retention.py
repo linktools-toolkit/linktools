@@ -58,7 +58,17 @@ class RuntimeRetentionController:
     ) -> bool:
         repository = self._execution.executions
         retained = await repository.get(execution_id, tenant_id=tenant_id)
-        if retained is not None and retained.session_id is not None and retained.conversation:
+        if retained is None or not retained.retention_closed:
+            async def read_source(transaction: "StateTransaction") -> "ExecutionRecord | None":
+                return await repository.get_in_transaction(transaction, execution_id, tenant_id=tenant_id)
+
+            retained = await repository.state_store.read(read_source)
+            if retained is not None and retained.status not in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }:
+                return False
+        if (retained is not None and not retained.retention_closed and retained.session_id is not None
+                and retained.conversation):
             sessions = self._conversation.sessions
             await sessions.state_store.read(
                 lambda transaction: sessions.pending_turn_commit_in_transaction(
@@ -74,7 +84,11 @@ class RuntimeRetentionController:
             execution = await repository.get(execution_id, tenant_id=tenant_id) if released else None
             return released, execution
 
-        if type(repository) is ExecutionRepositoryImpl:
+        if retained is None:
+            # No source record remains to close; orphaned transient scopes still
+            # need cleanup, without a second lookup that could observe new work.
+            released, execution = True, None
+        elif type(repository) is ExecutionRepositoryImpl:
             async def read_closed(_transaction: "StateTransaction") -> "ExecutionRecord | None":
                 current = await repository.get(execution_id, tenant_id=tenant_id)
                 if (current is not None and current.conversation and current.retention_closed

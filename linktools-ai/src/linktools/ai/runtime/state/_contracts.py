@@ -1528,7 +1528,16 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> bool: ...
+    ) -> bool:
+        """Close a source-confirmed terminal execution after dependency publication.
+
+        The caller must verify retained Conversation publication or establish the
+        never-admitted exemption from source state before calling. Terminal
+        identity and admission provenance are immutable. Implementations must
+        preserve the monotonic publication meaning of retention_closed and CAS
+        against current dependency holds; an unknown outcome is not confirmation.
+        """
+        ...
     async def get_history_head(
         self,
         execution_id: str,

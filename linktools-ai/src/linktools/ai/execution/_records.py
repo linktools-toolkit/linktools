@@ -68,6 +68,9 @@ class ExecutionRecord:
     dependency_hold_ids: tuple[str, ...] = ()
     # Admission provenance persists even if invocation storage fails or holds are released.
     requires_task_invocation_capture: bool = False
+    # Monotonic publication proof: retained dependencies are confirmed, including
+    # the Conversation turn receipt when admitted with retention enabled.
+    # Never-admitted executions, disabled retention and sessionless runs are exempt.
     retention_closed: bool = False
     started_at: datetime | None = None
     budget_scope_id: str | None = None
