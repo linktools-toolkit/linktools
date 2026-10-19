@@ -64,6 +64,7 @@ class TracePersistence:
         self._background_tasks = background_tasks
         self._caches: dict[str, WriteBufferBackend | None] = {}
         self._buffers: dict[str, _ObservationBuffer] = {}
+        self._terminal_runs: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
 
     def bind_batch_scopes(self, factory: BatchWriteScopeFactory) -> None:
@@ -76,13 +77,20 @@ class TracePersistence:
         self, agent_run_id: str, *, buffer: WriteBufferBackend | None = None,
         batch_size: int = DEFAULT_TRACE_BATCH_SIZE,
         flush_interval: float = DEFAULT_TRACE_FLUSH_INTERVAL,
+        terminal: bool = False,
     ) -> None:
         """Bind this run's observation policy before admission."""
         if agent_run_id in self._buffers:
             raise RuntimeError("observation batching cannot change during an active run")
+        if terminal and buffer is not None:
+            raise ValueError("terminal observations do not use a write buffer")
         if buffer is not None and not isinstance(buffer, WriteBufferBackend):
             raise TypeError("buffer must implement append, read_batch and ack")
         self._caches[agent_run_id] = buffer
+        if terminal:
+            self._terminal_runs.add(agent_run_id)
+        else:
+            self._terminal_runs.discard(agent_run_id)
         offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
         offset.observation_batch_size = batch_size
         offset.observation_flush_interval = flush_interval
@@ -92,6 +100,7 @@ class TracePersistence:
         self.dirty.clear()
         self._caches.clear()
         self._buffers.clear()
+        self._terminal_runs.clear()
         self._locks.clear()
 
     async def settle_buffers(self) -> None:
@@ -103,6 +112,7 @@ class TracePersistence:
         if agent_run_id in self._buffers:
             raise RuntimeError("observation buffer is not quiescent")
         self._caches.pop(agent_run_id, None)
+        self._terminal_runs.discard(agent_run_id)
         self._locks.pop(agent_run_id, None)
 
     async def defer(
@@ -117,6 +127,11 @@ class TracePersistence:
             offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
             offset.observation_execution_id = execution_id
             offset.observation_producer_generation = producer_generation
+            if agent_run_id in self._terminal_runs:
+                # Facts stay in staging; guarded safety and terminal boundaries
+                # own capture, source commit and finalization. No queue receipt
+                # may stand in for a durable projection.
+                return
         accepted = False
         async with self._locks.setdefault(agent_run_id, asyncio.Lock()):
             cache = self._caches.get(agent_run_id)

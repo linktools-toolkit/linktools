@@ -17,8 +17,9 @@ class CommitPolicy:
 
     Batch borrows its write buffer without owning its lifetime. Buffer identity
     is separate from policy equality and must be included when grouping writers.
-    Missing buffers select synchronous writes rather than an implicit queue.
-    Terminal eligibility is determined by the owner's coordination resources.
+    Missing batch buffers select synchronous writes rather than an implicit queue.
+    Terminal defers optional publication to the owner's final boundary; execution
+    admission eligibility still depends on its coordination and safety rules.
     """
 
     mode: Literal["sync", "batch", "terminal"]
@@ -52,7 +53,7 @@ class CommitPolicy:
 
     @classmethod
     def terminal(cls) -> CommitPolicy:
-        """Prefer eligible turn publication at the final atomic boundary."""
+        """Prefer publication at the owner's final atomic boundary."""
         return cls("terminal")
 
     @classmethod

@@ -227,9 +227,12 @@ Import `CommitPolicy` from `linktools.ai.core`. Its factories are
 `CommitPolicy.sync()`, `CommitPolicy.terminal()`, and
 `CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...)`. The policy
 pairs write timing with its optional borrowed buffer, independently of read
-cache routing. Without a buffer, observation writes await the source. A buffer
+cache routing. In batch mode without a buffer, observation writes await the source. A buffer
 never becomes a hot-read cache and is never closed by the policy.
-Runtime execution supports sync and terminal; Trace and Metrics support sync and batch.
+Runtime execution supports sync and terminal. Trace supports sync, batch and terminal;
+Metrics supports sync and batch. Conversation has a fixed terminal boundary;
+Checkpoint has fixed model/tool safety boundaries. They do not accept timing
+preferences that would weaken those guarantees.
 `ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use durable admission even with
 a coordination cache. Shared admission ownership and idempotency coordination
 remain active for every policy, including a sync caller joining an already
@@ -251,6 +254,39 @@ features.capability(ExecutionCapability(
 ```
 
 `Runtime.open` does not take a separate execution commit policy.
+
+Use `TraceCapability(commit=CommitPolicy.terminal())` to retain optional trace
+observations in process-local staging until a required publication boundary. It
+needs no write buffer and does not make pending facts durable or hot-readable.
+When Trace, Conversation and Execution resolve to the same transaction resource,
+the existing terminal transaction includes the trace tail and final conversation
+state. Explicit flush and recovery/tool safety boundaries may publish earlier.
+
+Enabling durable Trace still requires durable admission and producer fencing,
+even with `ExecutionCapability(commit=CommitPolicy.terminal())`. The terminal
+transaction is shared; the entire traced turn is not promised to use only one
+transaction. This reduces intermediate optional projection transactions, not
+necessarily SQL statement count or network round trips. Trace and Checkpoint
+currently require the same transaction resource as Execution; incompatible
+routes are rejected during initialization. No distributed transaction is implied.
+
+```python
+from linktools.ai.capability import (
+    ConversationCapability, ExecutionCapability, RuntimeFeatures, TraceCapability,
+)
+from linktools.ai.core import CommitPolicy
+from linktools.ai.runtime import RuntimeStorage
+
+features = RuntimeFeatures("traced-chat")
+features.agent("default", model="default")
+features.capability(ConversationCapability())
+features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+features.capability(TraceCapability(commit=CommitPolicy.terminal()))
+storage = RuntimeStorage.sqlite("chat.db")
+# Pass storage and features to Runtime.open with your model configuration.
+# Required admission/fencing writes remain; the final trace tail shares the
+# conversation/execution terminal transaction.
+```
 
 Conversation commits its final context, Session cursor, and corresponding
 Execution outcome at the turn boundary. Checkpoint retains its recovery-critical

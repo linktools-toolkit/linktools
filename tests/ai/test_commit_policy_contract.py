@@ -42,8 +42,7 @@ def test_commit_policy_rejects_invalid_declarations(settings: dict[str, object])
 def test_persistence_owners_reject_unsupported_policy_modes_and_removed_arguments() -> None:
     with pytest.raises(ValueError):
         ExecutionCapability(commit=CommitPolicy.batch(batch_size=2, flush_interval=1))
-    with pytest.raises(ValueError):
-        TraceCapability(commit=CommitPolicy.terminal())
+    assert TraceCapability(commit=CommitPolicy.terminal()).commit == CommitPolicy.terminal()
     with pytest.raises(TypeError):
         ConversationCapability(commit=CommitPolicy.sync())
     with pytest.raises(TypeError):

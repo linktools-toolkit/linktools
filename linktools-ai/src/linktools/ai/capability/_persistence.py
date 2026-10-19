@@ -128,8 +128,9 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
 class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     """Retain model, transcript and tool evidence without enabling recovery.
 
-    A write-capable cache owns optional observation batching. Without one,
-    observation boundaries await publication. Runtime seals the final tail.
+    A borrowed write buffer supports optional batch publication. Without one,
+    batch observation boundaries await publication. Terminal mode retains observations
+    until Runtime seals the final tail or a required safety boundary publishes them.
     """
 
     id = "runtime.trace"
@@ -141,8 +142,8 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
             batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
         ),
     ) -> None:
-        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "batch"}:
-            raise ValueError("Trace requires sync or batch commit")
+        if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "batch", "terminal"}:
+            raise ValueError("Trace requires sync, batch or terminal commit")
         self._commit = commit
         self._storage = storage
 
