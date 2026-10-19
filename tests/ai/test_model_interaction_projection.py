@@ -34,7 +34,7 @@ from linktools.ai.runtime._attachment import (
     input_attachment_views,
 )
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
-from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.runtime._journal import MODEL_USAGE_OUTPUT_METADATA_KEY, ModelRequestJournal
 from linktools.ai.runtime._message import decode_model_messages
 from linktools.ai.runtime._model_interaction import (
     StagedContextInline,
@@ -486,10 +486,11 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
     )
     assert staged[0].response_context is not None  # type: ignore[union-attr]
     assert all(
-        isinstance(item, StagedContextInline)
+        isinstance(item, StagedContextSpan)
         for item in staged[0].response_context.items  # type: ignore[union-attr]
     )
-    assert len(store._payloads["run"]) == 2
+    assert staged[0].response_context.items == (StagedContextSpan(1, 2),)
+    assert len(store._payloads["run"]) == 1
 
 
 @pytest.mark.asyncio
@@ -529,8 +530,8 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
 async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> None:
     store = StagingAgentRunStore()
     await store.initialize()
-    await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
+    await capture.register_agent_run(AgentRunRecord("run"))
     business = {"timestamp": "before", "nested": {"value": 1}}
     request = ModelRequest(
         parts=[
@@ -575,6 +576,13 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
         usage=None,
     )
     response.parts = [TextPart("mutated response")]
+    response.usage.output_tokens = 99
+    await capture.record_model_event(
+        finished, phase="completed", response=response, include_observation=False,
+    )
+    event, = await store.list_events(agent_run_id="run")
+    assert event.metadata[MODEL_USAGE_OUTPUT_METADATA_KEY] == "0"
+    assert len(capture.transcript_messages()) == 2
 
     frozen_request = capture.transcript_messages()[0]
     assert isinstance(frozen_request, ModelRequest)
@@ -590,10 +598,8 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
     interaction = (await store.list_model_interactions(agent_run_id="run"))[0]
     assert interaction.response_context is not None  # type: ignore[union-attr]
     response_item = interaction.response_context.items[0]  # type: ignore[union-attr]
-    assert isinstance(response_item, StagedContextInline)
-    frozen_response = decode_model_messages(
-        store.staged_payload("run", response_item.payload_digest)
-    )
+    assert response_item == StagedContextSpan(1, 2)
+    frozen_response = capture.transcript_messages()[response_item.start:response_item.end]
     assert frozen_response[0].parts[0].content == "done"  # type: ignore[attr-defined]
 
 
@@ -666,7 +672,9 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             duration_ns=1,
             usage=None,
         )
-        capture.append_transcript_message(first_response)
+        await capture.record_model_event(
+            first_finished, phase="completed", response=first_response, include_observation=False,
+        )
 
         tool_result = ModelRequest(
             parts=[
@@ -713,7 +721,9 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             duration_ns=1,
             usage=None,
         )
-        capture.append_transcript_message(second_response)
+        await capture.record_model_event(
+            second_finished, phase="completed", response=second_response, include_observation=False,
+        )
         await capture.save_checkpoint(
             AgentRunCheckpoint(
                 agent_run_id="run",

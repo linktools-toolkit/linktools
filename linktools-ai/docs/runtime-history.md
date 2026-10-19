@@ -202,6 +202,15 @@ imply success or a completed model output. `INTERRUPTED` identifies an abandoned
 running record recovered without an observed completion, so it has no invented
 response, completion time, or usage.
 
+Agent response capture reuses the same archive's canonical transcript range
+for model-interaction content, including received interrupted responses. This
+avoids storing another response body while keeping metadata-only reads free of
+body loads. Compaction and responses rejected by tool-call integrity checks
+retain independent response evidence. Request settings and raw client
+request/response capture are unchanged. Archive relocation may materialize
+content again; Trace, Checkpoint, and Conversation retain their own lifecycle
+roots rather than depending on another capability's retained history.
+
 ## Request identity and step filters
 
 A model request is identified by `(execution_id, agent_run_seq,

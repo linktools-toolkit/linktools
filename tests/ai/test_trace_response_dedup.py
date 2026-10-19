@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Model responses share their canonical transcript without losing trace evidence."""
+
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.models.function import AgentInfo
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from linktools.ai.capability import RuntimeFeatures, TraceCapability
+from linktools.ai.core import agent_run_id, canonical_json_bytes
+from linktools.ai.migrate import provision_runtime_database
+from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._contracts import ModelInteractionRecord, TranscriptSpanRef
+from linktools.ai.runtime.state._store import RecordQuery, StateTransaction
+from linktools.ai.storage import ObjectStat
+
+from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels
+
+
+@asynccontextmanager
+async def _storage(backend: str, root: Path) -> AsyncIterator[RuntimeStorage]:
+    engine = None
+    if backend == "memory":
+        storage = RuntimeStorage.in_memory()
+    elif backend == "filesystem":
+        storage = RuntimeStorage.filesystem(root / "state")
+    elif backend == "sqlite":
+        storage = RuntimeStorage.sqlite(root / "state.db")
+    else:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'state.db'}")
+        await provision_runtime_database(engine)
+        storage = RuntimeStorage.sql(engine)
+    try:
+        yield storage
+    finally:
+        if engine is not None:
+            await engine.dispose()
+
+
+def _features() -> RuntimeFeatures:
+    features = RuntimeFeatures("response-dedup")
+    features.agent("default", model="default", allow_tools=())
+    features.capability(TraceCapability(), scope="runtime")
+    return features
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("size", (32, 65536), ids=("short", "long"))
+async def test_trace_response_payload_storage_and_metadata_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, size: int,
+) -> None:
+    content = ("response evidence 中文 " * (size // 21 + 1))[:size]
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(content)], timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    async with _storage(backend, tmp_path) as storage:
+        async with Runtime.open(
+            "response-dedup", storage=storage, features=_features(),
+            models=_FeatureModels(_FeatureFunctionModel(model)),
+        ) as runtime:
+            objects = runtime._state.object_store(RuntimeDomain.TRACE)
+            original_put = objects.put
+            puts: list[tuple[str, int]] = []
+
+            async def put(key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str) -> ObjectStat:
+                puts.append((key, expected_size))
+                return await original_put(key, chunks, expected_size=expected_size, expected_digest=expected_digest)
+
+            monkeypatch.setattr(objects, "put", put)
+            execution = await runtime.agents.get().start("question")
+            assert (await execution.wait(timeout_seconds=10)).result.status == "SUCCEEDED"
+            run_id = agent_run_id(
+                namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                execution_id=execution.execution_id, agent_run_seq=1,
+            )
+            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            records = await archive.list_model_interactions(agent_run_id=run_id)
+            assert len(records) == 1 and isinstance(records[0], ModelInteractionRecord)
+            assert records[0].response_context.items == (
+                TranscriptSpanRef(RuntimeDomain.TRACE, run_id, 1, 2),
+            )
+            persisted = await archive.state_store.read(
+                lambda transaction: transaction.list_records(RecordQuery(kind="model_interaction")),
+            )
+            stats = [item async for item in objects.list_objects()]
+            actual_bytes = 0
+            for item in stats:
+                actual_bytes += len(b"".join([chunk async for chunk in objects.open(item.key)]))
+            assert actual_bytes == sum(item.size for item in stats)
+            report = {
+                "backend": backend, "response_chars": size,
+                "interaction_metadata_bytes": sum(len(canonical_json_bytes(item.data)) for item in persisted),
+                "object_count": len(stats), "object_bytes": actual_bytes,
+                "object_puts": len(puts), "object_put_bytes": sum(size for _, size in puts),
+            }
+
+            async def reject_content(key: str) -> AsyncIterator[bytes]:
+                raise AssertionError("metadata read loaded object content")
+                yield b""
+
+            with monkeypatch.context() as patch:
+                patch.setattr(objects, "open", reject_content)
+
+                async def reject_projection(*args: object, **kwargs: object) -> None:
+                    raise AssertionError("metadata read resolved full model context")
+
+                patch.setattr(archive.transcript_repository, "load_projected_contexts", reject_projection)
+                patch.setattr(archive.transcript_repository, "load_projected_context", reject_projection)
+                page = await execution.model_interactions()
+                assert len(page.items) == 1
+                assert not page.items[0].content_included
+                assert page.items[0].request == {} and page.items[0].response is None
+                assert await archive.resolve_model_interactions(records, include_content=False) == [(None, None, None, None)]
+            opens: list[str] = []
+            original_open = objects.open
+
+            async def count_open(key: str) -> AsyncIterator[bytes]:
+                opens.append(key)
+                async for chunk in original_open(key):
+                    yield chunk
+
+            with monkeypatch.context() as patch:
+                patch.setattr(objects, "open", count_open)
+                public = await execution.model_interactions(include_content=True)
+                assert public.items[0].response is not None
+            report["full_content_object_opens"] = len(opens)
+            print("TRACE_RESPONSE_STORAGE " + json.dumps(report, sort_keys=True))
+            resolved = await archive.resolve_model_interactions(records)
+            assert resolved[0][1][0].parts[0].content == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+@pytest.mark.parametrize("outcome", ("FAILED", "CANCELLED"))
+async def test_unsuccessful_requests_without_response_preserve_no_response(
+    tmp_path: Path, backend: str, outcome: str,
+) -> None:
+    entered = asyncio.Event()
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        entered.set()
+        if outcome == "FAILED":
+            raise RuntimeError("controlled model failure")
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled request resumed")
+
+    async with _storage(backend, tmp_path) as storage:
+        async with Runtime.open(
+            "response-dedup", storage=storage, features=_features(),
+            models=_FeatureModels(_FeatureFunctionModel(model)),
+        ) as runtime:
+            execution = await runtime.agents.get().start("question")
+            if outcome == "CANCELLED":
+                await asyncio.wait_for(entered.wait(), 5)
+                await execution.cancel()
+            assert (await execution.wait(timeout_seconds=10)).result.status == outcome
+            page = await execution.model_interactions(include_content=True)
+            assert len(page.items) == 1
+            assert page.items[0].status == outcome
+            assert page.items[0].response is None
+            assert page.items[0].request["messages"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+async def test_compaction_response_retains_independent_evidence(
+    tmp_path: Path, backend: str,
+) -> None:
+    from linktools.ai.runtime import ExecutionInputContext
+    from linktools.ai.runtime.state._contracts import InlineContextBlock
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("retained summary")])
+
+    history: list[ModelMessage] = []
+    for index in range(20):
+        history.extend((
+            ModelRequest(parts=[UserPromptPart(f"user-{index} " + "x" * 240)]),
+            ModelResponse(parts=[TextPart(f"answer-{index} " + "y" * 240)]),
+        ))
+    async with _storage(backend, tmp_path) as storage:
+        async with Runtime.open(
+            "response-dedup", storage=storage, features=_features(),
+            models=_FeatureModels(_FeatureFunctionModel(model, profile={"context_window": 1000})),
+        ) as runtime:
+            execution = await runtime.agents.get().start(
+                "continue", input_context=ExecutionInputContext.from_messages(history),
+            )
+            assert (await execution.wait(timeout_seconds=10)).result.status == "SUCCEEDED"
+            run_id = agent_run_id(
+                namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                execution_id=execution.execution_id, agent_run_seq=1,
+            )
+            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            records = await archive.list_model_interactions(agent_run_id=run_id)
+            assert [record.purpose for record in records] == ["compaction", "agent"]
+            assert isinstance(records[0].response_context.items[0], InlineContextBlock)
+            assert isinstance(records[1].response_context.items[0], TranscriptSpanRef)
+            resolved = await archive.resolve_model_interactions(records)
+            assert [value[1][0].parts[0].content for value in resolved] == ["retained summary"] * 2
+            public = await execution.model_interactions(include_content=True)
+            assert all(item.response is not None for item in public.items)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
+async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_and_cleanup(
+    tmp_path: Path, backend: str,
+) -> None:
+    from pydantic_ai.models import ModelRequestParameters
+    from pydantic_ai.models.test import TestModel
+    from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
+    from linktools.ai.runtime._journal import ModelRequestJournal
+    from linktools.ai.runtime.state import RuntimeState
+    from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
+    from linktools.ai.storage import ObjectRef, ObjectStoreMaintenance
+    from .test_evaluation_retention import Offline
+
+    response = ModelResponse(
+        parts=[TextPart("identical response " * 4000)],
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    async with _storage(backend, tmp_path) as storage:
+        state = RuntimeState(storage)
+        await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
+        try:
+            capture = AgentRunRecorder(state.run_store, execution_id=None, agent_run_id="run")
+            await capture.register_agent_run(AgentRunRecord("run"))
+            journal = ModelRequestJournal(
+                source_namespace="response-checkpoint", tenant_id="tenant",
+                execution_id="execution", agent_run_id="run",
+            )
+            for sequence in (1, 2):
+                capture.append_transcript_message(ModelRequest(parts=[UserPromptPart(f"question-{sequence}")]))
+                messages = capture.transcript_messages()
+                fact = journal.begin(sequence)
+                capture.begin_model_interaction(fact, TestModel(), messages, None, ModelRequestParameters(), False)
+                capture.prepare_model_interaction(fact, TestModel(), messages, None, ModelRequestParameters(), False)
+                finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
+                capture.finish_model_interaction(
+                    finished, model=TestModel(), response=response, status="SUCCEEDED",
+                    error_code=None, duration_ns=1, usage=None,
+                )
+                await capture.record_model_event(
+                    finished, phase="completed", response=response, include_observation=True,
+                )
+                await capture.save_checkpoint(AgentRunCheckpoint(
+                    agent_run_id="run", step_index=sequence, messages=list(capture.transcript_messages()),
+                    state="complete", transcript_message_count_before=0,
+                ))
+                await state.run_store.checkpoint_persistence.materialize_recovery_checkpoint(
+                    agent_run_id="run", require_complete=True,
+                )
+            if backend != "memory":
+                await state.close()
+                state = RuntimeState(storage)
+                await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
+            archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+            records = await archive.list_model_interactions(agent_run_id="run")
+            assert [record.response_context.items for record in records] == [
+                (TranscriptSpanRef(RuntimeDomain.CHECKPOINT, "run", 1, 2),),
+                (TranscriptSpanRef(RuntimeDomain.CHECKPOINT, "run", 3, 4),),
+            ]
+            checkpoint = await archive.latest_checkpoint(agent_run_id="run")
+            assert len(checkpoint.messages) == 4
+            assert checkpoint.messages[1] == checkpoint.messages[3] == response
+            resolved = await archive.resolve_model_interactions(records)
+            assert [value[1] for value in resolved] == [(response,), (response,)]
+            objects = state.object_store(RuntimeDomain.CHECKPOINT)
+            candidates = tuple([(RuntimeDomain.CHECKPOINT, ObjectRef(
+                objects.store_id, item.key, item.digest, item.size,
+            )) async for item in objects.list_objects()])
+            assert candidates
+            protected = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
+            assert set(protected.retained) == set(candidates)
+            assert await archive.resolve_model_interactions(records) == resolved
+            await archive.release_agent_run("run")
+            retained = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
+            assert set(retained.retained) == set(candidates)
+            assert await archive.transcript_repository.load_messages("run") == tuple(checkpoint.messages)
+
+            # A retained transcript is a separate owner after the run is released.
+            # Remove this fixture's remaining metadata to exercise orphan reclamation.
+            async def remove_retained_history(transaction: StateTransaction) -> None:
+                remaining = await transaction.scan_records()
+                await transaction.delete_records(tuple(item.key_digest for item in remaining))
+
+            await archive.state_store.mutate(remove_retained_history)
+            deleted = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
+            if isinstance(objects, ObjectStoreMaintenance):
+                assert set(deleted.deleted) == set(candidates)
+            else:
+                assert set(deleted.blocked) == set(candidates)
+                assert all([await objects.stat(reference.key) is not None for _, reference in candidates])
+        finally:
+            await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("outcome", ("FAILED", "CANCELLED"))
+async def test_interrupted_partial_response_shares_retained_transcript(
+    tmp_path: Path, backend: str, outcome: str,
+) -> None:
+    from pydantic_ai.models.function import FunctionModel
+
+    entered = asyncio.Event()
+    content = "partial response " * 2048
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        yield content
+        entered.set()
+        if outcome == "FAILED":
+            raise RuntimeError("controlled partial stream failure")
+        await asyncio.Event().wait()
+
+    async with _storage(backend, tmp_path) as storage:
+        async with Runtime.open(
+            "response-dedup", storage=storage, features=_features(),
+            models=_FeatureModels(FunctionModel(stream_function=stream)),
+        ) as runtime:
+            execution = await runtime.agents.get().start("question")
+            if outcome == "CANCELLED":
+                await asyncio.wait_for(entered.wait(), 5)
+                await execution.cancel()
+            assert (await execution.wait(timeout_seconds=10)).result.status == outcome
+            run_id = agent_run_id(
+                namespace=runtime.namespace, tenant_id=runtime.tenant_id,
+                execution_id=execution.execution_id, agent_run_seq=1,
+            )
+            archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
+            record, = await archive.list_model_interactions(agent_run_id=run_id)
+            assert record.status == outcome
+            assert record.response_context.items == (TranscriptSpanRef(RuntimeDomain.TRACE, run_id, 1, 2),)
+            request, response, envelope, requests = await archive.resolve_model_interaction(record)
+            assert response[0].parts[0].content == content
+            assert response[0].state == "interrupted"
+            transcript = await archive.transcript_repository.load_messages(run_id)
+            assert transcript == (*request, *response)

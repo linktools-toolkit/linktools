@@ -19,8 +19,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeHistory
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime._message import decode_model_messages
-from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, StagedModelInteraction
+from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, StagedContextSpan, StagedModelInteraction
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
@@ -90,7 +89,8 @@ async def test_failed_replayed_request_keeps_every_received_raw_response_part() 
         interaction, = await store.list_model_interactions(agent_run_id="run")
         assert interaction.model_request_seq == second.model_request_seq
         payload, = interaction.response_context.items
-        response, = decode_model_messages(store.staged_payload("run", payload.payload_digest))
+        assert isinstance(payload, StagedContextSpan)
+        response, = resumed.transcript_messages()[payload.start:payload.end]
         assert response.state == "interrupted"
         assert response.parts == [call, TextPart("unfinished response")]
     finally:

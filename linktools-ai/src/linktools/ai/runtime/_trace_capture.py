@@ -18,7 +18,7 @@ from ._attachment import request_attachment_facts
 from ._journal import ModelRequestFact
 from ._message import freeze_model_messages
 from ._model_interaction import (
-    StagedContextProjection, StagedModelInteraction, build_context_projection,
+    StagedContextProjection, StagedContextSpan, StagedModelInteraction, build_context_projection,
     build_inline_context_projection, model_identity, request_envelope,
 )
 from ._run_context import RunContextProjection
@@ -186,6 +186,7 @@ class ModelInteractionCapture:
         duration_ns: int,
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
+        response_message_index: int | None = None,
     ) -> None:
         del model
         model_request_seq = fact.model_request_seq
@@ -199,14 +200,19 @@ class ModelInteractionCapture:
 
         response_projection = None
         if response is not None:
-            frozen_response = freeze_model_messages((response,))
-            response_projection = build_inline_context_projection(
-                frozen_response,
-                lambda payload: self._staging_store.intern_payload(
-                    self._agent_run_id,
-                    payload,
-                ),
-            )
+            if response_message_index is not None:
+                response_projection = StagedContextProjection((
+                    StagedContextSpan(response_message_index, response_message_index + 1),
+                ))
+            else:
+                frozen_response = freeze_model_messages((response,))
+                response_projection = build_inline_context_projection(
+                    frozen_response,
+                    lambda payload: self._staging_store.intern_payload(
+                        self._agent_run_id,
+                        payload,
+                    ),
+                )
         self._staging_store.stage_model_interaction(
             StagedModelInteraction(
                 agent_run_id=self._agent_run_id,
