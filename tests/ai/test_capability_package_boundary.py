@@ -12,6 +12,7 @@ from linktools.ai.capability import (
     TraceCapability,
 )
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime.state import RuntimeState
 
 from .test_explicit_runtime_features import _FeatureModels, _features
 
@@ -57,7 +58,7 @@ async def test_invalid_module_route_is_rejected_before_storage_initialization(
     def unexpected_model_capture(*args, **kwargs):
         pytest.fail("invalid declarations must fail before model resolution")
 
-    monkeypatch.setattr(RuntimeStorage, "initialize", unexpected_initialize)
+    monkeypatch.setattr(RuntimeState, "initialize", unexpected_initialize)
     monkeypatch.setattr(_FeatureModels, "capture", unexpected_model_capture)
     features = _features(capability(storage=object()))
     with pytest.raises(TypeError, match="storage must be StorageRoute"):

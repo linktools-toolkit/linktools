@@ -15,7 +15,7 @@ from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
@@ -27,7 +27,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
     backend: str,
     status: str,
 ) -> None:
-    storage = (
+    storage = RuntimeState(
         RuntimeStorage.in_memory()
         if backend == "memory"
         else RuntimeStorage.filesystem(tmp_path / "state")
