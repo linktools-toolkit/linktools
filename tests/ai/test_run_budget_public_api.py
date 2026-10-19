@@ -98,7 +98,7 @@ async def test_graph_budget_is_read_only_during_description_and_shared_by_mixed_
         assert submission.admission.budget == budget
         assert submission.admission.budget_scope_id == "graph:shared-graph"
         with pytest.raises(AIError) as absent:
-            await storage.execution.budgets.read("graph:shared-graph")
+            await runtime._state.execution.budgets.read("graph:shared-graph")
         assert absent.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         run = await engine.start(graph, idempotency_key="budget-graph", budget=budget)
         assert (await run.wait()).result.status is TaskStatus.SUCCEEDED
@@ -212,7 +212,7 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
             assert len(records) == 1
             assert await transaction.delete_record(records[0].key_digest)
 
-        await storage.execution.budgets.state_store.mutate(remove_scope)
+        await runtime._state.execution.budgets.state_store.mutate(remove_scope)
         with pytest.raises(AIError) as missing:
             await retried.retry("must not reset")
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

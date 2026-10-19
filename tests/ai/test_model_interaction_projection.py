@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Contract tests for model interaction projection primitives."""
 
+from linktools.ai.runtime.state import RuntimeState
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -598,7 +599,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
 
 @pytest.mark.asyncio
 async def test_parent_tool_result_round_trip_materializes_two_model_requests() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
     try:
         capture = AgentRunRecorder(

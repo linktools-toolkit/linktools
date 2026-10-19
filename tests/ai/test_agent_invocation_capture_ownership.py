@@ -70,7 +70,7 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
     async with Runtime.open("capture-ownership", models=models, storage=storage, features=_agents()) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
 
         async def fail_invocation(key: str, *args: object, **kwargs: object) -> object:
@@ -95,7 +95,7 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.CANCELLED
             await run.cancel(idempotency_key="cancel")
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.CANCELLED
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert record.dependency_hold_ids == ()
             with pytest.raises(AIError) as missing:
                 await runtime.executions.capture_input(execution.execution_id,
@@ -119,7 +119,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
     async with Runtime.open("capture-recovery", models=models, storage=storage, features=_agents()) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel
 
@@ -173,7 +173,7 @@ async def test_graph_cancel_during_invocation_capture_cancels_the_owned_model(
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
     async with Runtime.open("capture-cancel", models=models, storage=storage, features=_agents()) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         capture_started = asyncio.Event()
 
@@ -236,7 +236,7 @@ async def test_graph_cancel_waits_for_capture_failure_cleanup(
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
     async with Runtime.open("capture-cleanup", models=models, storage=storage, features=_agents()) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         original_cancel = runtime._execution_service.cancel
         cleanup_entered = asyncio.Event()
@@ -301,7 +301,7 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
     storage = RuntimeStorage.filesystem(tmp_path)
     principal = service_principal("default", "owner")
     async with Runtime.open("capture-hold", models=models, storage=storage, features=_agents()) as runtime:
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         capture_started = asyncio.Event()
         capture_release = asyncio.Event()
@@ -322,12 +322,12 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
             execution = await run.execution("agent")
             assert (await runtime.executions.wait(execution.execution_id, principal=principal)).result.status is ExecutionStatus.SUCCEEDED
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.SUCCEEDED
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert record.dependency_hold_ids
             capture_release.set()
             assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert await run.result("agent") == {"text": "completed"}
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert record.dependency_hold_ids == ()
         finally:
             capture_release.set()
@@ -364,7 +364,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
     async with Runtime.open("capture-ready", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime.tasks.bind(producer, task)
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         original_put = objects.put
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -496,7 +496,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
                     timeout_seconds=30)).result.status is ExecutionStatus.SUCCEEDED
             elif not reopened:
                 await runtime._execution_service.complete_task(execution_id, principal=principal, output="completed")
-            record = await storage.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+            record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
             assert record.requires_task_invocation_capture is True
             assert record.dependency_hold_ids == ()
             assert decode_domain(encode_domain(record), ExecutionRecord) == record

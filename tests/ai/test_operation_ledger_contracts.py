@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Operation CAS preserves durable identity across storage backends."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -37,8 +38,9 @@ def _storage(backend: str, root: Path) -> RuntimeStorage:
 async def storage(
     request: pytest.FixtureRequest,
     tmp_path: Path,
-) -> AsyncIterator[RuntimeStorage]:
+) -> AsyncIterator[RuntimeState]:
     state = _storage(request.param, tmp_path / "runtime")
+    state = RuntimeState(state)
     await state.initialize(namespace="operations", tenant_id="tenant")
     try:
         yield state
@@ -82,7 +84,7 @@ def _operation() -> OperationLedgerInput:
     ),
 )
 async def test_operation_cas_rejects_changed_immutable_identity(
-    storage: RuntimeStorage,
+    storage: RuntimeState,
     field: str,
     value: object,
 ) -> None:
@@ -116,7 +118,7 @@ async def test_operation_cas_rejects_changed_immutable_identity(
     "terminal", (OperationStatus.SUCCEEDED, OperationStatus.FAILED, OperationStatus.CANCELLED)
 )
 async def test_operation_cas_roundtrips_mutable_fields_and_keeps_terminal_status(
-    storage: RuntimeStorage,
+    storage: RuntimeState,
     terminal: OperationStatus,
 ) -> None:
     operations = storage.conversation.operations
@@ -163,7 +165,7 @@ async def test_operation_cas_roundtrips_mutable_fields_and_keeps_terminal_status
     ),
 )
 async def test_operation_cas_preserves_owner_and_status_conflicts(
-    storage: RuntimeStorage,
+    storage: RuntimeState,
     operation_id: str,
     tenant_id: str,
     candidate_tenant: str,
@@ -185,7 +187,7 @@ async def test_operation_cas_preserves_owner_and_status_conflicts(
 
 @pytest.mark.asyncio
 async def test_operation_cas_competing_transitions_have_one_durable_winner(
-    storage: RuntimeStorage,
+    storage: RuntimeState,
 ) -> None:
     operations = storage.conversation.operations
     current = await operations.append(_operation())
@@ -220,6 +222,7 @@ async def test_operation_cas_output_survives_snapshot_restore(
 ) -> None:
     root = tmp_path / "runtime"
     state = _storage(backend, root)
+    state = RuntimeState(state)
     await state.initialize(namespace="operations", tenant_id="tenant")
     try:
         current = await state.conversation.operations.append(_operation())
@@ -236,16 +239,18 @@ async def test_operation_cas_output_survives_snapshot_restore(
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
     reader = _storage(backend, root)
+    reader = RuntimeState(reader)
     await reader.initialize(namespace="operations", tenant_id="tenant", read_only=True)
     try:
         reference = await reader.export_snapshot(object_store=objects, limits=limits)
     finally:
         await reader.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(
+    await RuntimeState.restore_snapshot(
         reference, object_store=objects, root=restored_root, limits=limits
     )
     restored = RuntimeStorage.from_root(restored_root)
+    restored = RuntimeState(restored)
     await restored.initialize(namespace="operations", tenant_id="tenant")
     try:
         assert await restored.conversation.operations.get("operation", tenant_id="tenant") == candidate

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Result reads reuse authorized inline metadata without weakening handoff fences."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import hashlib
 from dataclasses import replace
@@ -61,6 +62,7 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, history: bool, method: str,
 ) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)
@@ -101,6 +103,7 @@ async def test_terminal_result_queries_use_one_authorized_result_record(
 ))
 async def test_result_metadata_is_read_after_awaited_authorization(history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)
@@ -129,6 +132,7 @@ async def test_result_metadata_is_read_after_awaited_authorization(history: bool
 ))
 async def test_custom_result_repository_remains_authoritative(adapter: str, history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)
@@ -164,6 +168,7 @@ async def test_result_body_wait_preserves_fresh_handoff_and_consumer_cleanup(
     monkeypatch: pytest.MonkeyPatch, change: str, method: str,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     entered, release = asyncio.Event(), asyncio.Event()
     body = b'{"answer":"canonical"}'
@@ -215,6 +220,7 @@ async def test_custom_result_wait_preserves_fresh_handoff_and_consumer_cleanup(
     monkeypatch: pytest.MonkeyPatch, change: str, method: str,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     entered, release = asyncio.Event(), asyncio.Event()
     callbacks = []
@@ -263,6 +269,7 @@ async def test_custom_result_wait_preserves_fresh_handoff_and_consumer_cleanup(
 @pytest.mark.parametrize("history,method", ((False, "result"), (False, "wait"), (True, "result")))
 async def test_denied_result_read_does_not_resolve_payload(history: bool, method: str) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         await _seed(state)
@@ -288,6 +295,7 @@ async def test_history_result_uses_fresh_terminal_state_after_authorization(
     monkeypatch: pytest.MonkeyPatch, status: ExecutionStatus, missing_result: bool,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     try:
         record = await _seed(state)

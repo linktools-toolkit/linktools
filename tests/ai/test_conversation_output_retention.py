@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Canonical conversation turns survive independent execution retention."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -50,7 +51,7 @@ def _storage(
     return RuntimeStorage.sqlite(path / "state.db", object_store=objects)
 
 
-async def _erase_domain(storage: RuntimeStorage, domain: RuntimeDomain) -> None:
+async def _erase_domain(storage: RuntimeState, domain: RuntimeDomain) -> None:
     """Physically prune records and facts, rather than fake a missing repository read."""
     async def erase(transaction: StateTransaction) -> None:
         records = await transaction.scan_records()
@@ -62,7 +63,7 @@ async def _erase_domain(storage: RuntimeStorage, domain: RuntimeDomain) -> None:
     await storage._stores[domain].mutate(erase)
 
 
-async def _erase_execution_owners(storage: RuntimeStorage) -> None:
+async def _erase_execution_owners(storage: RuntimeState) -> None:
     for domain in RuntimeDomain:
         if domain is not RuntimeDomain.CONVERSATION:
             await _erase_domain(storage, domain)
@@ -93,12 +94,13 @@ async def test_completed_output_is_canonical_after_actual_prune_and_reopen(
         assert len(live) == 1 and live[0].output == output
         assert live[0].user_input["prompt"]["text"] == "original user input"
         assert live[0].items and live[0].items[0].content != output
-        commits = await storage.conversation.sessions.list_timeline_commits(
+        commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )
         assert commits[0].output is not None
         assert commits[0].output.decode() == output
     storage = _storage(tmp_path, backend)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -131,14 +133,14 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
         result = (await session.run(("inspect original", BinaryContent(
             attachment, media_type="text/plain", identifier="retained-file",
         )), timeout_seconds=5)).result
-        record = await storage.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
         assert record.result.output.kind == "object"
         assert record.stored_user_input.payload.kind == "object"
         originals = tuple(set(iter_runtime_object_refs(
             _encode_persisted_domain(record), default_domain=RuntimeDomain.EXECUTION,
         )))
         live = (await session.timeline()).items
-        commits = await storage.conversation.sessions.list_timeline_commits(
+        commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )
         references = tuple(set(iter_runtime_object_refs(
@@ -148,6 +150,7 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     for _, ref in references:
         assert await objects.stat(ref.key) is not None
     storage = _storage(tmp_path, objects=objects)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -167,6 +170,7 @@ async def test_retained_payload_and_attachment_roots_survive_gc_then_release(
     async with RuntimeHistory.open(_NAMESPACE, storage=_storage(tmp_path, objects=objects)) as history:
         assert (await history.session_timeline("session", principal=principal)).items == live
     storage = _storage(tmp_path, objects=objects)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_domain(storage, RuntimeDomain.CONVERSATION)
@@ -201,6 +205,7 @@ async def test_fork_retains_only_selected_history_and_independent_turn_outputs(
         assert [item.output for item in live] == [{"turn": 1}, {"turn": 3}]
         assert [item.user_input["prompt"]["text"] for item in live] == ["first", "child only"]
     storage = _storage(tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -220,7 +225,7 @@ async def test_disabled_conversation_does_not_retain_new_chat_or_break_results(t
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
         result = (await session.run("not retained as chat", timeout_seconds=5)).result
-        commits = await storage.conversation.sessions.list_timeline_commits(
+        commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
         )
         assert commits == ()
@@ -257,12 +262,13 @@ async def test_zero_message_failure_keeps_input_and_never_reuses_prior_output(
         assert live[1].user_input["prompt"]["text"] == "failed original input"
         assert live[1].status is ExecutionStatus.FAILED and live[1].items == ()
         assert live[1].error_code == ErrorCode.MODEL_UNAVAILABLE.value
-        commits = await storage.conversation.sessions.list_timeline_commits(
+        commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=4,
         )
         assert len(commits) == 3 and commits[1].output is None
         assert commits[1].start_message_index == commits[1].end_message_index
     storage = _storage(tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -297,6 +303,7 @@ async def test_cancelled_turn_retains_original_input_without_completed_output(tm
         assert live[0].output is None
         assert live[0].user_input["prompt"]["text"] == "cancelled original input"
     storage = _storage(tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -320,7 +327,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
     async with Runtime.open(_NAMESPACE, storage=storage, features=features, models=_models()) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
-        group = storage.execution.executions.state_store.storage_group
+        group = runtime._state.execution.executions.state_store.storage_group
         original_mutate = type(group).mutate
         original_read = type(group).read_many
         committed = asyncio.Event()
@@ -361,6 +368,7 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
         monkeypatch.setattr(type(group), "mutate", original_mutate)
         monkeypatch.setattr(type(group), "read_many", original_read)
     storage = _storage(tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -384,7 +392,7 @@ async def test_completed_display_cache_uses_retained_envelope_after_execution_pr
         await session.run("retained cached input", timeout_seconds=5)
         cold = await runtime.sessions.refresh("session", principal=principal, max_age=60)
         assert cold.timeline.items[0].output == output
-        await _erase_domain(storage, RuntimeDomain.EXECUTION)
+        await _erase_domain(runtime._state, RuntimeDomain.EXECUTION)
 
         async def execution_read(*args, **kwargs):
             pytest.fail("completed display retention must not depend on an Execution row")
@@ -394,9 +402,9 @@ async def test_completed_display_cache_uses_retained_envelope_after_execution_pr
             yield
 
         with monkeypatch.context() as scoped:
-            scoped.setattr(storage.execution.executions, "get_many", execution_read)
-            scoped.setattr(storage.execution.executions, "get_many_fresh", execution_read)
-            scoped.setattr(storage.run_store.conversation_persistence, "iter_conversation_message_range", transcript_read)
+            scoped.setattr(runtime._state.execution.executions, "get_many", execution_read)
+            scoped.setattr(runtime._state.execution.executions, "get_many_fresh", execution_read)
+            scoped.setattr(runtime._state.run_store.conversation_persistence, "iter_conversation_message_range", transcript_read)
             warm = await runtime.sessions.refresh("session", principal=principal, max_age=60)
             assert warm == cold
 
@@ -416,9 +424,9 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
     async with Runtime.open(_NAMESPACE, storage=storage, features=_features(), models=_models()) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
-        executions = storage.execution.executions
+        executions = runtime._state.execution.executions
         original_terminal = executions.commit_terminal_in_transaction
-        sessions = storage.conversation.sessions
+        sessions = runtime._state.conversation.sessions
         original_mutate = sessions.state_store.mutate
         lost = 0
 
@@ -465,6 +473,7 @@ async def test_split_route_never_publishes_completed_output_before_execution_ter
         monkeypatch.setattr(executions, "commit_terminal_in_transaction", original_terminal)
         monkeypatch.setattr(sessions.state_store, "mutate", original_mutate)
     storage = RuntimeStorage.from_plan(plan)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -483,7 +492,7 @@ async def test_display_cache_five_refresh_measurement(tmp_path: Path) -> None:
     async with Runtime.open(_NAMESPACE, storage=storage, features=_features(), models=_models()) as runtime:
         session = await runtime.agents.get().create_session("session")
         await session.run("measure retained display", timeout_seconds=5)
-        engine = storage.conversation.sessions.state_store.storage_group.context.engine
+        engine = runtime._state.conversation.sessions.state_store.storage_group.context.engine
         statements = []
 
         def capture(_connection, _cursor, statement, *_args):
@@ -517,17 +526,18 @@ async def test_split_object_stores_copy_result_and_binary_input_before_source_de
     storage = RuntimeStorage.from_plan(plan)
     async with Runtime.open(_NAMESPACE, storage=storage, features=_features(), models=_models()) as runtime:
         principal = runtime.default_principal
-        assert storage.object_store(RuntimeDomain.EXECUTION) is not storage.object_store(RuntimeDomain.CONVERSATION)
+        assert runtime._state.object_store(RuntimeDomain.EXECUTION) is not runtime._state.object_store(RuntimeDomain.CONVERSATION)
         session = await runtime.agents.get().create_session("session")
         result = (await session.run(("keep binary", BinaryContent(
             attachment, media_type="text/plain", identifier="separate-store-file",
         )), timeout_seconds=5)).result
         assert result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(result.execution_id, tenant_id=principal.tenant_id)
         source_refs = (record.result.output.ref, record.stored_user_input.payload.ref)
         assert all(ref is not None for ref in source_refs)
         live = (await session.timeline()).items
     storage = RuntimeStorage.from_plan(plan)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
@@ -563,7 +573,7 @@ async def test_split_terminal_without_conversation_receipt_requires_recovery(
     async with Runtime.open(_NAMESPACE, storage=storage, features=_features(), models=_models()) as runtime:
         principal = runtime.default_principal
         session = await runtime.agents.get().create_session("session")
-        sessions = storage.conversation.sessions
+        sessions = runtime._state.conversation.sessions
         original_mutate = sessions.state_store.mutate
 
         async def pause_receipt(callback, *args, **kwargs):
@@ -576,7 +586,7 @@ async def test_split_terminal_without_conversation_receipt_requires_recovery(
         execution = await session.start("input awaiting retained receipt")
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            terminal = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            terminal = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert terminal.status is ExecutionStatus.SUCCEEDED
             assert await sessions.list_timeline_commits(
                 "session", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=2,
@@ -603,6 +613,7 @@ async def test_missing_terminal_receipt_never_fabricates_retained_history(
     from .test_session_timeline import _execution, _session
 
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())

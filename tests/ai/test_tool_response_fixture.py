@@ -434,7 +434,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
             assert result.status is ExecutionStatus.SUCCEEDED
             assert result.output == {"text": "Fixture consumed"}
             assert consumed == [expected]
-            operations = await storage.recovery.tools.list_by_execution(
+            operations = await runtime._state.recovery.tools.list_by_execution(
                 execution.execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
             assert len(operations) == 1

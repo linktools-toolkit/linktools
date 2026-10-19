@@ -188,8 +188,8 @@ async def test_shared_dataset_reopens_with_scoped_policy_and_operator_owned_expe
             assert summary.mean == 1.0
         else:
             assert models.prompts == ["approved system prompt"]
-        assert await storage.evaluation.records.dataset_owner(ref) == PUBLISHER.principal_id
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=TENANT)
+        assert await runtime._state.evaluation.records.dataset_owner(ref) == PUBLISHER.principal_id
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=TENANT)
         assert record is not None and record.manifest.principal == OPERATOR
         with pytest.raises(AIError) as denied:
             await runtime.evaluations.get(run.experiment_id, principal=PUBLISHER)

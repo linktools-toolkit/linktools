@@ -15,6 +15,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.migrate import provision_database
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._contracts import SessionRecord
 from sqlalchemy import event
@@ -101,13 +102,13 @@ async def _build_fork_state(
     source_history_id: str | None = None,
 ) -> tuple[
     AsyncEngine,
-    RuntimeStorage,
+    RuntimeState,
     SessionRecord,
     OperationLedgerInput,
 ]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'{namespace}.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace=namespace, tenant_id="tenant")
     now = datetime.now(timezone.utc)
     source = await state.conversation.sessions.create(
@@ -121,7 +122,7 @@ async def test_session_list_skips_generation_probe_but_page_keeps_it(
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'sessions.db'}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="io-session-list", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     await state.conversation.sessions.create(_session("session", now))

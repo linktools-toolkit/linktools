@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bounded History metadata reads and recorder-local invalidations."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -158,7 +159,7 @@ async def test_model_metadata_disabled_archive_does_not_certify_empty_remote_his
 async def test_model_metadata_subscription_preserves_capture_races_and_isolates_executions() -> None:
     from linktools.ai.runtime.state._contracts import ExecutionHistoryHeadRecord, ExecutionHistoryState
 
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     repository = storage.execution.executions
     await repository.state_store.mutate(lambda transaction: repository.insert_history_head_in_transaction(
@@ -214,7 +215,7 @@ async def test_model_metadata_subscription_preserves_capture_races_and_isolates_
 
 @pytest.mark.asyncio
 async def test_model_metadata_excludes_uncommitted_staging() -> None:
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="history", tenant_id="tenant")
     execution = _record("root")
     reader = StepExecutionHistoryReader(

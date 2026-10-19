@@ -306,14 +306,14 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
             features=application,
         ) as runtime:
             session = runtime.agents.get("default").session("session")
-            before_replay = await state.execution.executions.get(
+            before_replay = await runtime._state.execution.executions.get(
                 execution_id, tenant_id=runtime.default_principal.tenant_id,
             )
             assert before_replay is not None
             same = await session.start("inspect", idempotency_key="turn-1")
             assert same.execution_id == execution_id
             if before_replay.status is ExecutionStatus.STARTED:
-                assert await state.execution.executions.get(
+                assert await runtime._state.execution.executions.get(
                     execution_id, tenant_id=runtime.default_principal.tenant_id,
                 ) == before_replay
                 assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
@@ -372,6 +372,6 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
                     "assistant",
                 ]
     finally:
-        await state.close()
+        await runtime._state.close()
         if engine is not None:
             await engine.dispose()

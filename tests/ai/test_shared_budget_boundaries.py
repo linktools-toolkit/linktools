@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Shared budgets gate dispatched model and tool effects, including compaction."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 
@@ -28,6 +29,7 @@ from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 @pytest_asyncio.fixture
 async def budgets():
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-boundaries", tenant_id="tenant")
     try:
         yield storage.execution.budgets
@@ -253,6 +255,7 @@ async def test_standalone_graph_service_rejects_unowned_budget_before_admission(
     from .test_task_submission_fence import _Launcher
 
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="budget-owner", tenant_id="tenant")
     try:
         launcher = _Launcher()

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session admission ownership and status transition conformance."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -32,6 +33,7 @@ def _session() -> SessionRecord:
 
 
 async def _assert_admission_contract(state: RuntimeStorage) -> None:
+    state = RuntimeState(state)
     await state.initialize(namespace="admission", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())

@@ -84,7 +84,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
     async with Runtime.open("rescore-environment", models=FixtureModels(), storage=storage,
                             context=context, features=features) as runtime:
         run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
-        before = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        before = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         request = RescoreRequest((rule_scorer(scorer),), "rescore")
         engine = runtime.tasks.bind(scorer)
         rescored = await run.rescore(request, engine=engine)
@@ -92,7 +92,7 @@ async def test_rescore_reuses_targets_in_each_reopened_runtime_environment(
         assert len(received) == 1 and received[0].target_output == "yes"
         assert (await rescored.scores()).items[0].status == "valid"
         assert target_calls == ["yes"]
-        assert await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id) == before
+        assert await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id) == before
 
 
 @pytest.mark.asyncio
@@ -458,7 +458,7 @@ async def test_new_human_decision_rejects_native_cancellation_before_reconciliat
             await run.submit_human_score(HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
                 ScoreBundle(dimensions={"exact_match": 1.0}), "too-late"))
         assert raised.value.code is ErrorCode.TASK_NOT_READY
-        record = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert not record.human_decisions
 
 
@@ -576,7 +576,7 @@ async def test_budget_stops_new_scoring_without_cancelling_accepted_work(
 
         async def admission_stopped():
             while True:
-                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                 if record.gate == "closed_budget" and any(
                     item.disposition.reason_code == "closed_budget" for item in record.dispositions
                 ):
@@ -596,7 +596,7 @@ async def test_budget_stops_new_scoring_without_cancelling_accepted_work(
             else:
                 release.set()
             assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
-            record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             if finish == "result":
                 scores = (await run.scores()).items
                 assert [item.status for item in scores] == ["valid", "not_attempted"]
@@ -646,7 +646,7 @@ async def test_budget_allows_reserved_human_score_to_complete_and_pass_a_gate(
 
         async def closed_budget():
             while True:
-                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
                 if record.gate == "closed_budget":
                     return
                 await asyncio.sleep(0.01)

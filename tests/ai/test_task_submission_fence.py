@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Prepared TaskGraph cancellation fences survive admission races and reopen."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -80,7 +81,7 @@ def _request(graph_id: str = "trial") -> TaskGraphRequest:
     )
 
 
-def _service(state: RuntimeStorage, launcher: _Launcher) -> DefaultTaskGraphService:
+def _service(state: RuntimeState, launcher: _Launcher) -> DefaultTaskGraphService:
     return DefaultTaskGraphService(state.task, _Authorization(), launcher)
 
 
@@ -90,6 +91,7 @@ async def test_cancelled_preparation_never_admits_and_releases_sensitive_payload
     backend: str, tmp_path: Path,
 ) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="submission", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -114,6 +116,7 @@ async def test_cancelled_preparation_never_admits_and_releases_sensitive_payload
         if backend != "memory":
             await state.close()
             state = _storage(backend, tmp_path)
+            state = RuntimeState(state)
             await state.initialize(namespace="submission", tenant_id="tenant")
             service = _service(state, launcher)
 
@@ -139,6 +142,7 @@ async def test_submission_cancel_serializes_with_admission_and_blocks_node_claim
     backend: str, tmp_path: Path, admit_first: bool,
 ) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="submission-race", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -176,6 +180,7 @@ async def test_submission_cancel_serializes_with_admission_and_blocks_node_claim
 @pytest.mark.asyncio
 async def test_submission_identity_is_registered_and_cannot_be_reassigned() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="submission-identity", tenant_id="tenant")
     try:
         service = _service(state, _Launcher())
@@ -216,6 +221,7 @@ async def test_submission_commit_readback_resolves_lost_response(
     phase: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="submission-unknown", tenant_id="tenant")
     try:
         service = _service(state, _Launcher())
@@ -255,6 +261,7 @@ async def test_submission_commit_readback_resolves_lost_response(
 @pytest.mark.asyncio
 async def test_late_scheduler_arm_cannot_claim_after_submission_cancel() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="late-arm", tenant_id="tenant")
     arming = asyncio.Event()
     release = asyncio.Event()
@@ -291,6 +298,7 @@ async def test_late_scheduler_arm_cannot_claim_after_submission_cancel() -> None
 @pytest.mark.asyncio
 async def test_submission_cancellation_authorizes_registered_owner() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="submission-owner", tenant_id="tenant")
     try:
         service = DefaultTaskGraphService(state.task, TenantAuthorizationPolicy(), _Launcher())
@@ -345,6 +353,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
             await engine.cancel_submission(submission.ref, idempotency_key="cancel")
 
     state = RuntimeStorage.from_root(root)
+    state = RuntimeState(state)
     await state.initialize(namespace="submission-snapshot", tenant_id="default", read_only=True)
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(10000, 10 * 1024 * 1024)
@@ -353,7 +362,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
     finally:
         await state.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
+    await RuntimeState.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
     async with Runtime.open(
         "submission-snapshot", models=RuntimeUsageModels(),
         storage=RuntimeStorage.from_root(restored_root),
@@ -372,7 +381,9 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
 async def test_independent_task_owners_share_the_submission_fence(tmp_path: Path) -> None:
     first = _storage("sqlite", tmp_path)
     second = _storage("sqlite", tmp_path)
+    first = RuntimeState(first)
     await first.initialize(namespace="independent", tenant_id="tenant")
+    second = RuntimeState(second)
     await second.initialize(namespace="independent", tenant_id="tenant")
     try:
         service = _service(first, _Launcher())
@@ -400,7 +411,9 @@ async def test_prepare_disposition_has_one_creator_across_independent_sqlite_own
 ) -> None:
     first = _storage("sqlite", tmp_path)
     second = _storage("sqlite", tmp_path)
+    first = RuntimeState(first)
     await first.initialize(namespace="prepare-disposition", tenant_id="tenant")
+    second = RuntimeState(second)
     await second.initialize(namespace="prepare-disposition", tenant_id="tenant")
     try:
         launchers = (_Launcher(), _Launcher())
@@ -428,6 +441,7 @@ async def test_prepare_disposition_has_one_creator_across_independent_sqlite_own
 @pytest.mark.parametrize("phase", ("prepared", "admitted", "cancelled"))
 async def test_prepare_disposition_existing_submission_never_claims_creation(phase: str) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="existing-preparation", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -453,6 +467,7 @@ async def test_prepare_disposition_commit_readback_cannot_prove_creator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _storage("sqlite", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="unknown-preparation", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -481,6 +496,7 @@ async def test_prepare_disposition_commit_readback_cannot_prove_creator(
 @pytest.mark.asyncio
 async def test_prepare_disposition_preserves_single_authorization_and_capture() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="captured-preparation", tenant_id="tenant")
     events: list[str] = []
 
@@ -520,6 +536,7 @@ async def test_prepare_disposition_preserves_single_authorization_and_capture() 
 @pytest.mark.parametrize("guard", ("namespace", "authorization", "budget"))
 async def test_prepare_disposition_preserves_guards_before_persistence(guard: str) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="guarded-preparation", tenant_id="tenant")
 
     class Authorization(_Authorization):
@@ -561,6 +578,7 @@ async def test_prepare_disposition_preserves_guards_before_persistence(guard: st
 ))
 async def test_prepare_disposition_missing_head_never_recreates_existing_resources(remaining: str) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="broken-preparation", tenant_id="tenant")
     try:
         launcher = _Launcher()

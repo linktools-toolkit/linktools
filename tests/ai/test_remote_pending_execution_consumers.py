@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pending execution consumers defer terminal truth to the shared source."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -54,6 +55,7 @@ class _RemotePendingTurns(_PendingExecutionTurns):
 @asynccontextmanager
 async def _consumer(*, authorization=None):
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="remote-pending", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     coordination = _PendingTurnCoordination(cache, cache, namespace="remote-pending", tenant_id="tenant")

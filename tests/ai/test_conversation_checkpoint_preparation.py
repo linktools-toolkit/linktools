@@ -3,6 +3,7 @@
 
 """Conversation preparation reuses only one pre-body metadata capture."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,6 +27,7 @@ async def test_conversation_preparation_reuses_new_run_metadata(
     tmp_path: Path, existing: str,
 ) -> None:
     state = _storage("sqlite", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
     run = AgentRunRecord("run")
@@ -67,6 +69,7 @@ async def test_conversation_preparation_preserves_custom_owner_operations(
     tmp_path: Path, override: str,
 ) -> None:
     state = _storage("memory", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
     original = state.run_store.read_store(RuntimeDomain.CONVERSATION)
     run = AgentRunRecord("run")
@@ -100,6 +103,7 @@ async def test_conversation_preparation_keeps_fresh_commit_guard(
     tmp_path: Path, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="conversation-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
     run = AgentRunRecord("run")

@@ -101,7 +101,7 @@ async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path) 
         assert result.cancelled
         assert stopped.is_set()
         assert (await execution.wait()).result.status is ExecutionStatus.CANCELLED
-        record = await reader_storage.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
+        record = await reader._state.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id)
         assert record.status is ExecutionStatus.CANCELLED
 
 
@@ -180,7 +180,7 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
             await execution.wait(timeout_seconds=5)
         assert failed.value.code is ErrorCode.STORAGE_CONFLICT
         assert effects == []
-        assert await storage.execution.executions.state_store.read(lambda _: storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)) is None
+        assert await runtime._state.execution.executions.state_store.read(lambda _: runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)) is None
     finally:
         with pytest.raises(AIError) as close_error:
             await opened.__aexit__(None, None, None)
@@ -220,7 +220,7 @@ async def test_live_dependency_hold_promotes_before_acquisition(tmp_path: Path, 
         try:
             acquired = await asyncio.wait_for(service.acquire_dependency_hold(execution.execution_id, tenant_id=owner.tenant_id, hold_id='hold'), 8)
             assert acquired
-            stored = await reader_storage.execution.executions.state_store.read(lambda _: reader_storage.execution.executions.get(execution.execution_id, tenant_id=owner.tenant_id))
+            stored = await reader._state.execution.executions.state_store.read(lambda _: reader._state.execution.executions.get(execution.execution_id, tenant_id=owner.tenant_id))
             assert stored is not None and stored.status is ExecutionStatus.STARTED
             assert stored.retention_closed is False
         finally:
@@ -249,7 +249,7 @@ async def test_remote_public_capture_promotes_before_source_input_read(tmp_path:
         try:
             captured = await asyncio.wait_for(reader.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, 'capture')), 8)
             assert captured.source_execution_id == execution.execution_id
-            record = await reader_storage.execution.executions.state_store.read(lambda _: reader_storage.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id))
+            record = await reader._state.execution.executions.state_store.read(lambda _: reader._state.execution.executions.get(execution.execution_id, tenant_id=reader.tenant_id))
             assert record is not None and record.input_context is not None
         finally:
             finish.set()
@@ -310,7 +310,7 @@ async def test_lost_promotion_hint_does_not_claim_dependency(tmp_path: Path) -> 
             with pytest.raises(AIError) as unavailable:
                 await reader.executions._service.acquire_dependency_hold(execution.execution_id, tenant_id=owner.tenant_id, hold_id='hold')
             assert unavailable.value.code is ErrorCode.EXECUTION_NOT_READY
-            assert await reader_storage.execution.executions.state_store.read(lambda _: reader_storage.execution.executions.get(execution.execution_id, tenant_id=owner.tenant_id)) is None
+            assert await reader._state.execution.executions.state_store.read(lambda _: reader._state.execution.executions.get(execution.execution_id, tenant_id=owner.tenant_id)) is None
         finally:
             finish.set()
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED

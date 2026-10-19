@@ -144,9 +144,9 @@ uses durable admission and recoverable prepared terminal handoffs rather than
 single-transaction deferred turns. Shared SQL engines, caches, and object stores
 remain borrowed resources.
 
-`RuntimeStorage.cache` is the execution route cache and supplies Session
-metadata/display caching, turn coordination, live streams, and core record reads.
-Conversation content uses its route cache; shortcut storage factories share the
+The effective execution route cache supplies turn coordination, live streams,
+and execution record reads. Session metadata/display and Conversation content
+use the effective Conversation route cache; shortcut storage factories share the
 supplied cache across these routes. A module resource override cannot create a separate producer ownership
 namespace. Reuse the root storage plan and the same features with
 `RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read and
@@ -224,7 +224,7 @@ a coordination cache. Shared admission ownership and idempotency coordination
 remain active for every policy, including a sync caller joining an already
 admitted terminal-policy turn. Opt into `ExecutionCapability(commit=CommitPolicy.terminal())`
 to defer eligible ordinary native turns until the terminal boundary. Deferred
-admission additionally requires an explicitly configured `RuntimeStorage.cache`
+admission additionally requires an explicitly configured execution-route cache
 with the required coordination groups and compatible storage routes.
 Execution timing is independent of Conversation retention and Session activation.
 Execution is required and installed by default. Register one explicit

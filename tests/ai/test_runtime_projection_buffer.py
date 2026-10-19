@@ -11,6 +11,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
 
@@ -19,11 +20,11 @@ from .test_step_projection import _execution
 
 async def _setup(tmp_path: Path, backend: str, cache: object | None):
     if backend == "memory":
-        state = RuntimeStorage.in_memory(cache=cache)
+        state = RuntimeState(RuntimeStorage.in_memory(cache=cache))
     elif backend == "filesystem":
-        state = RuntimeStorage.filesystem(tmp_path / "state", cache=cache)
+        state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "state", cache=cache))
     else:
-        state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
+        state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache))
     await state.initialize(namespace="projection-buffer", tenant_id="tenant")
     execution = replace(_execution(), revision=1)
     repository = state.execution.executions

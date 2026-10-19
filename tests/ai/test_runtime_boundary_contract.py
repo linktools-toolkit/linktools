@@ -17,6 +17,7 @@ from linktools.ai.core import (
     ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._coordinator import _LocalRuntimeCoordinator
 from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
@@ -28,8 +29,8 @@ from linktools.ai.runtime.service_api import ExecutionStreamEvent
 
 
 @pytest_asyncio.fixture
-async def execution_storage() -> AsyncIterator[RuntimeStorage]:
-    storage = RuntimeStorage.in_memory()
+async def execution_storage() -> AsyncIterator[RuntimeState]:
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="boundary", tenant_id="tenant")
     try:
         yield storage
@@ -274,7 +275,7 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
 class _LaunchExecutions:
     tenant_id = "tenant"
 
-    def __init__(self, storage: RuntimeStorage) -> None:
+    def __init__(self, storage: RuntimeState) -> None:
         self.state_store = storage.execution.executions.state_store
 
     async def get(self, execution_id: str, *, tenant_id: str) -> object:
@@ -287,7 +288,7 @@ class _LaunchExecutions:
         )
 
 
-def _launch_service(backend: object, storage: RuntimeStorage) -> tuple[DefaultExecutionService, list[str], list[str]]:
+def _launch_service(backend: object, storage: RuntimeState) -> tuple[DefaultExecutionService, list[str], list[str]]:
     service = object.__new__(DefaultExecutionService)
     service._state = SimpleNamespace(executions=_LaunchExecutions(storage))
     bridge = _ExecutionRuntimeBridge()
@@ -308,7 +309,7 @@ def _launch_service(backend: object, storage: RuntimeStorage) -> tuple[DefaultEx
 
 
 @pytest.mark.asyncio
-async def test_launch_normal_return_without_worker_abandons_prepared_stream(execution_storage: RuntimeStorage) -> None:
+async def test_launch_normal_return_without_worker_abandons_prepared_stream(execution_storage: RuntimeState) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -330,7 +331,7 @@ async def test_launch_normal_return_without_worker_abandons_prepared_stream(exec
 
 
 @pytest.mark.asyncio
-async def test_existing_worker_skips_new_prepared_reservation(execution_storage: RuntimeStorage) -> None:
+async def test_existing_worker_skips_new_prepared_reservation(execution_storage: RuntimeState) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -352,7 +353,7 @@ async def test_existing_worker_skips_new_prepared_reservation(execution_storage:
 
 
 @pytest.mark.asyncio
-async def test_cancellation_before_worker_installation_abandons_reservation(execution_storage: RuntimeStorage) -> None:
+async def test_cancellation_before_worker_installation_abandons_reservation(execution_storage: RuntimeState) -> None:
     class Backend:
         async def launch(self, request: object, execution: object) -> None:
             del request, execution
@@ -376,7 +377,7 @@ async def test_cancellation_before_worker_installation_abandons_reservation(exec
 
 
 @pytest.mark.asyncio
-async def test_cancellation_after_worker_installation_retains_reservation(execution_storage: RuntimeStorage) -> None:
+async def test_cancellation_after_worker_installation_retains_reservation(execution_storage: RuntimeState) -> None:
     class Backend:
         def __init__(self) -> None:
             self.installed = False

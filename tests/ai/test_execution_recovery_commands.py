@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused durable recovery command regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -94,7 +95,7 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
     )
 
 
-def _commands(state: RuntimeStorage) -> RuntimeRecoveryCommands:
+def _commands(state: RuntimeState) -> RuntimeRecoveryCommands:
     return RuntimeRecoveryCommands(
         state.execution.executions,
         state.execution.events,
@@ -131,6 +132,7 @@ def _resolution_operation(
 @pytest.mark.asyncio
 async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="execution-recovery", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -170,6 +172,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
 @pytest.mark.asyncio
 async def test_recovery_cancel_intent_fences_stale_resume() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="recovery-cancel", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -234,6 +237,7 @@ async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="recovery-cancel-race", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -293,6 +297,7 @@ async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
 @pytest.mark.asyncio
 async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="tool-resolution", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
@@ -362,6 +367,7 @@ async def test_applied_and_failed_effect_resolutions_persist_tool_truth(
     error_payload: StoredPayload | None,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="tool-resolution-terminal", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
@@ -403,6 +409,7 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
     expected_error: ErrorCode,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="tool-resolution-conflict", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:
@@ -437,6 +444,7 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
 @pytest.mark.asyncio
 async def test_active_restart_admits_a_new_history_producer_and_fences_predecessor() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="restart-producer", tenant_id="tenant")
     execution = _execution(datetime.now(timezone.utc))
     try:
@@ -476,6 +484,7 @@ async def test_active_restart_admits_a_new_history_producer_and_fences_predecess
 @pytest.mark.parametrize("unrelated_update", (False, True))
 async def test_resume_recovers_its_own_lost_commit_acknowledgement(monkeypatch, unrelated_update) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="resume-ack", tenant_id="tenant")
     execution = _execution(datetime.now(timezone.utc))
     try:
@@ -517,6 +526,7 @@ async def test_producer_guard_batches_known_keys_and_reuses_transaction_records(
     from sqlalchemy import event
 
     state = RuntimeStorage.sqlite(tmp_path / "producer-guard.db")
+    state = RuntimeState(state)
     await state.initialize(namespace="producer-guard", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -580,6 +590,7 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
     from .test_incremental_projection_boundaries import _storage
 
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="producer-guard-failure", tenant_id="tenant")
     try:
         repository = state.execution.executions

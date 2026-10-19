@@ -76,7 +76,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 
 ## 5. 最小接入方式
 
-已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：RuntimeStorage.cache及内部读取路由。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
+已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：RuntimeStorage 快捷构造器的 cache 参数及内部读取路由（当前缓存由各 StorageRoute 持有）。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
 
 普通调用方只注入一个可选 cache 实例，不另外构造写策略、options、总管理器或全能力包装。实例按实际需要提供完整方法组：热点 get/put/delete，批写 append/read_batch/ack，流 open_stream/read_stream。contains_many 是可选热点批探测。所属消费方仅检查自身使用的方法组；该组全部缺失就沿用该场景的直接源或已有本地流路径，半组立即 TypeError，不静默换用内部队列。宿主无需继承新 Protocol，也无需给无用能力写空方法。
 

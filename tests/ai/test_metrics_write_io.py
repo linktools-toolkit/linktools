@@ -14,6 +14,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -28,8 +29,8 @@ from linktools.ai.runtime.state._store import RecordReplacement, StateTransactio
 async def _assert_writes(engine: AsyncEngine) -> None:
     await provision_database(engine)
     metrics = Metrics.sql(engine, namespace="write-io")
-    state = RuntimeStorage.sql(engine)
-    peer = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
+    peer = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="write-io", tenant_id="tenant")
     await peer.initialize(namespace="write-io", tenant_id="tenant")
     await metrics.get_observation("warmup")

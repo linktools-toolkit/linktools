@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Exact model-request selectors retain identity, authorization, and lazy bodies."""
 
+from linktools.ai.runtime.state import RuntimeState
 import hashlib
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -50,7 +51,7 @@ def _object_keys(value):
 
 @asynccontextmanager
 async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         root = _record(ExecutionStatus.STARTED, 2)

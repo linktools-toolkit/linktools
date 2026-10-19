@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authorized model metadata captures retain freshness with bounded read I/O."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -77,7 +78,7 @@ async def _seed(state):
 async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -126,7 +127,7 @@ async def test_capture_reads_fresh_metadata_in_one_post_authorization_scope(
 async def test_capture_preserves_header_authority_and_observes_post_authorization_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -168,7 +169,7 @@ async def test_capture_preserves_header_authority_and_observes_post_authorizatio
 
 @pytest.mark.parametrize("reader_kind", ("protocol", "subclass"))
 async def test_capture_preserves_injected_reader_protocol_and_overrides(reader_kind: str) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     expected = ModelInteractionReadBoundary((), (), False, False)
     calls = []
@@ -191,8 +192,8 @@ async def test_capture_preserves_injected_reader_protocol_and_overrides(reader_k
 async def test_capture_keeps_independent_storage_owners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatched_repository: bool,
 ) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "execution.db")
-    other = RuntimeStorage.sqlite(tmp_path / "history.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "execution.db"))
+    other = RuntimeState(RuntimeStorage.sqlite(tmp_path / "history.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
@@ -234,7 +235,7 @@ async def test_capture_keeps_independent_storage_owners(
 async def test_capture_releases_metadata_scope_after_observer_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -267,7 +268,7 @@ async def test_capture_releases_metadata_scope_after_observer_cancellation(
 
 
 async def test_terminal_capture_observes_late_flush_and_new_run() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -296,7 +297,7 @@ async def test_terminal_capture_observes_late_flush_and_new_run() -> None:
 
 
 async def test_capture_idle_sql_has_one_authority_read_and_one_metadata_snapshot(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "capture.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "capture.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -328,7 +329,7 @@ async def test_capture_idle_sql_has_one_authority_read_and_one_metadata_snapshot
 async def test_capture_rejects_failed_authority_before_reading_model_metadata(
     monkeypatch: pytest.MonkeyPatch, failure: str, custom_reader: bool,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -362,7 +363,7 @@ async def test_capture_rejects_failed_authority_before_reading_model_metadata(
 
 @pytest.mark.parametrize("custom_owner", ("repository", "archive"))
 async def test_capture_does_not_scope_custom_owner_io(custom_owner: str) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -394,7 +395,7 @@ async def test_capture_does_not_scope_custom_owner_io(custom_owner: str) -> None
 
 @pytest.mark.parametrize("same_repository", (False, True))
 async def test_capture_preserves_custom_repository_reader_authority(same_repository: bool) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -433,7 +434,7 @@ async def test_capture_preserves_custom_repository_reader_authority(same_reposit
 async def test_model_reads_keep_requested_execution_as_lookup_scope(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, custom_repository: bool, operation: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -490,7 +491,7 @@ async def _metadata(service, *, principal=_PRINCIPAL, agent_run_seq=1, through=1
 async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -530,7 +531,7 @@ async def test_metadata_rows_share_fresh_authorized_scope_without_body_io(
 
 
 async def test_metadata_sql_reuses_authorized_record_and_one_snapshot(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "metadata.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "metadata.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -557,7 +558,7 @@ async def test_metadata_sql_reuses_authorized_record_and_one_snapshot(tmp_path: 
 async def test_metadata_observes_authorization_time_admission_and_header_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -596,7 +597,7 @@ async def test_metadata_observes_authorization_time_admission_and_header_authori
 
 @pytest.mark.parametrize("same_repository", (False, True))
 async def test_metadata_preserves_custom_repository_reader_authority(same_repository: bool) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -631,7 +632,7 @@ async def test_metadata_preserves_custom_repository_reader_authority(same_reposi
 
 @pytest.mark.parametrize("reader_kind", ("protocol", "subclass"))
 async def test_metadata_preserves_injected_reader_protocol_and_overrides(reader_kind: str) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     expected, calls = (object(),), []
     try:
@@ -655,8 +656,8 @@ async def test_metadata_preserves_injected_reader_protocol_and_overrides(reader_
 async def test_metadata_preserves_independent_owner_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str,
 ) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "execution.db")
-    other = RuntimeStorage.sqlite(tmp_path / "history.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "execution.db"))
+    other = RuntimeState(RuntimeStorage.sqlite(tmp_path / "history.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     await other.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
@@ -708,7 +709,7 @@ async def test_metadata_preserves_independent_owner_reads(
 async def test_metadata_cancellation_releases_shared_read_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -757,7 +758,7 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, phase: str, limit: int, through: int,
     expected: ErrorCode,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -798,7 +799,7 @@ async def test_metadata_preserves_authority_validation_and_missing_record_order(
 
 
 async def test_metadata_batches_run_and_interaction_records_without_skipping_high_water(tmp_path: Path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "metadata-batch.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "metadata-batch.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
@@ -839,7 +840,7 @@ async def test_metadata_batches_run_and_interaction_records_without_skipping_hig
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 @pytest.mark.parametrize("missing", ("run", "interaction"))
 async def test_metadata_batch_rejects_missing_durable_rows(tmp_path: Path, backend: str, missing: str) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
@@ -859,7 +860,7 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
     from linktools.ai.runtime.state._store import StoredFact
     from linktools.ai.core import canonical_sha256
 
-    state = RuntimeStorage.sqlite(tmp_path / "missing-record-metadata.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "missing-record-metadata.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         run = await _seed(state)
@@ -888,7 +889,7 @@ async def test_metadata_batch_rejects_fact_in_place_of_authoritative_record(tmp_
 async def test_metadata_batch_preserves_custom_archive_overrides() -> None:
     from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)

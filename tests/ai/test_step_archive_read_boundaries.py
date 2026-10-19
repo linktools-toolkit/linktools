@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, _step_archive
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, _step_archive
 from linktools.ai.runtime.state._codec import decode_envelope, encode_envelope
 from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
 from linktools.ai.runtime.state._step_archive import PreparedExecutionProjection
@@ -22,7 +22,7 @@ from .test_step_projection import _execution
 
 @asynccontextmanager
 async def _archive(tmp_path: Path, backend: str = "memory"):
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="archive-boundaries", tenant_id="tenant")
     try:
         execution = replace(_execution(), revision=1)

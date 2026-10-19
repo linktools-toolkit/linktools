@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
+
 from linktools.ai.core import BudgetUsage, RunBudget, TaskStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -42,7 +44,7 @@ async def _create_source(
             graph, idempotency_key="snapshot", budget=budget,
         )
         with pytest.raises(AIError) as missing:
-            await storage.execution.budgets.read("graph:empty")
+            await runtime._state.execution.budgets.read("graph:empty")
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         if phase == "described":
             return submission, None
@@ -52,15 +54,15 @@ async def _create_source(
         if phase == "admitted":
             assert (await engine.start_prepared(submission)).admitted
             assert (await (await engine.get("empty")).wait()).result.status is TaskStatus.SUCCEEDED
-        records = await storage.execution.budgets.state_store.read(
+        records = await runtime._state.execution.budgets.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="execution")),
         )
         assert not records
-        return submission, await storage.execution.budgets.read("graph:empty")
+        return submission, await runtime._state.execution.budgets.read("graph:empty")
 
 
 async def _export_source(root: Path, objects: InMemoryObjectStore) -> ObjectRef:
-    storage = RuntimeStorage.from_root(root)
+    storage = RuntimeState(RuntimeStorage.from_root(root))
     await storage.initialize(namespace=_NAMESPACE, tenant_id="default", read_only=True)
     try:
         return await storage.export_snapshot(object_store=objects, limits=_LIMITS)
@@ -85,7 +87,7 @@ async def test_empty_graph_budget_snapshot_preserves_submission_phase(
     objects = InMemoryObjectStore("snapshot")
     reference = await _export_source(source, objects)
     restored = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(
+    await RuntimeState.restore_snapshot(
         reference, object_store=objects, root=restored, limits=_LIMITS,
     )
     storage = RuntimeStorage.from_root(restored)
@@ -94,12 +96,12 @@ async def test_empty_graph_budget_snapshot_preserves_submission_phase(
     ) as runtime:
         if phase == "described":
             with pytest.raises(AIError) as missing:
-                await storage.execution.budgets.read("graph:empty")
+                await runtime._state.execution.budgets.read("graph:empty")
             assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-            assert await storage.task.admissions.submission_status(submission.ref) is None
+            assert await runtime._state.task.admissions.submission_status(submission.ref) is None
         else:
-            assert await storage.execution.budgets.read("graph:empty") == expected_usage
-            assert await storage.task.admissions.submission_status(submission.ref) == phase
+            assert await runtime._state.execution.budgets.read("graph:empty") == expected_usage
+            assert await runtime._state.task.admissions.submission_status(submission.ref) == phase
             engine = runtime.tasks.bind()
             assert (await engine.start_prepared(submission)).admitted
             run = await engine.get("empty")
@@ -115,7 +117,7 @@ async def test_graph_budget_export_rejects_missing_or_changed_scope(
 ) -> None:
     source = tmp_path / "source"
     await _create_source(source, phase)
-    storage = RuntimeStorage.from_root(source)
+    storage = RuntimeState(RuntimeStorage.from_root(source))
     await storage.initialize(namespace=_NAMESPACE, tenant_id="default")
     try:
         async def corrupt(transaction: StateTransaction) -> None:
@@ -165,7 +167,7 @@ async def test_graph_budget_restore_rejects_missing_or_changed_scope_before_writ
     await objects.put(key, chunks(), expected_size=len(payload), expected_digest=digest)
     restored = tmp_path / "restored"
     with pytest.raises(AIError) as invalid:
-        await RuntimeStorage.restore_snapshot(
+        await RuntimeState.restore_snapshot(
             ObjectRef(objects.store_id, key, digest, len(payload)),
             object_store=objects, root=restored, limits=_LIMITS,
         )

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Trace observation batching is per run and never weakens explicit barriers."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 
 import pytest
@@ -98,7 +99,7 @@ async def test_runtime_binds_trace_batch_options_before_model_work():
         execution = await runtime.agents.get().start("question")
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            offsets = tuple(storage.run_store.trace_persistence.offsets.values())
+            offsets = tuple(runtime._state.run_store.trace_persistence.offsets.values())
             assert len(offsets) == 1
             assert offsets[0].observation_batch_size == 7
             assert offsets[0].observation_flush_interval == 0.25
@@ -119,6 +120,7 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
     await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
     await state.close()
     restored = _storage("sqlite", tmp_path)
+    restored = RuntimeState(restored)
     await restored.initialize(
         namespace="observation-batches", tenant_id="tenant",
         module_routes={RuntimeDomain.TRACE: restored.plan.route(RuntimeDomain.TRACE).with_cache(

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -210,7 +211,7 @@ async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
             )
             await asyncio.wait_for(entered.wait(), 10)
             tenant = winner_runtime.default_principal.tenant_id
-            winner_head = await winner_state.execution.executions.get_history_head(
+            winner_head = await winner_runtime._state.execution.executions.get_history_head(
                 execution_id, tenant_id=tenant,
             )
             release_stale.set()
@@ -222,7 +223,7 @@ async def test_explicit_recovery_does_not_adopt_a_newer_contender_revision(
                     execution_id, principal=winner_runtime.default_principal,
                 )
             assert active.value.code is ErrorCode.STORAGE_CONFLICT
-            current_head = await winner_state.execution.executions.get_history_head(
+            current_head = await winner_runtime._state.execution.executions.get_history_head(
                 execution_id, tenant_id=tenant,
             )
             assert current_head.producer_generation == winner_head.producer_generation
@@ -307,11 +308,11 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
             )
             await asyncio.wait_for(winner_entered.wait(), 10)
             tenant = owner.default_principal.tenant_id
-            claimed_head = await winner_state.execution.executions.get_history_head(
+            claimed_head = await winner._state.execution.executions.get_history_head(
                 execution.execution_id, tenant_id=tenant,
             )
             if cancel_through_original:
-                before_cancel = await winner_state.execution.executions.get(
+                before_cancel = await winner._state.execution.executions.get(
                     execution.execution_id, tenant_id=tenant,
                 )
                 cancelled = await owner.executions.cancel(
@@ -319,7 +320,7 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
                     CancelExecutionRequest(owner.default_principal, "cancel-through-superseded-runtime"),
                 )
                 assert cancelled.cancelled is False
-                cancel_tail = await winner_state.execution.events.list(
+                cancel_tail = await winner._state.execution.events.list(
                     execution.execution_id, tenant_id=tenant,
                     after_event_seq=before_cancel.event_seq, limit=100,
                 )
@@ -335,7 +336,7 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
             )
             expected_status = ExecutionStatus.CANCELLING if cancel_through_original else ExecutionStatus.STARTED
             assert current.status is expected_status
-            current_head = await winner_state.execution.executions.get_history_head(
+            current_head = await winner._state.execution.executions.get_history_head(
                 execution.execution_id, tenant_id=tenant,
             )
             assert current_head.producer_generation == claimed_head.producer_generation
@@ -345,10 +346,10 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
                 await watched
                 pytest.fail("Watch ended before the winning producer reached its boundary")
             assert not waited.done()
-            assert owner_state.run_store.trace_persistence.dirty == set()
-            assert owner_state.run_store._durability_flights == {}
-            assert owner_state.run_store._execution_producers == {}
-            assert owner_state.run_store._staging._runs == {}
+            assert owner._state.run_store.trace_persistence.dirty == set()
+            assert owner._state.run_store._durability_flights == {}
+            assert owner._state.run_store._execution_producers == {}
+            assert owner._state.run_store._staging._runs == {}
             release_winner.set()
             result = (await waited).result
             await asyncio.wait_for(watched, 10)
@@ -379,7 +380,7 @@ async def test_superseded_live_producer_hands_wait_and_watch_to_winner(
 async def test_recovery_required_transition_keeps_the_original_producer_fence(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "runtime.db")
+    state = RuntimeState(RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "runtime.db"))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         execution = _execution(datetime.now(timezone.utc))
@@ -429,15 +430,15 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
         execution = await original.agents.get("default").start("read a file")
         tenant = original.default_principal.tenant_id
         waiting = await _wait_for_committed(
-            lambda: original_state.execution.executions.get(execution.execution_id, tenant_id=tenant),
+            lambda: original._state.execution.executions.get(execution.execution_id, tenant_id=tenant),
             lambda record: record is not None and record.status is ExecutionStatus.WAITING_DEFERRED,
         )
         worker = original._execution_service.runtime_backend()._tasks.get(execution.execution_id)
         if worker is not None:
             await asyncio.wait_for(asyncio.shield(worker), 10)
-        approvals = await original_state.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
+        approvals = await original._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=tenant)
         assert len(approvals) == 1
-        await original_state.recovery.approvals.decide(
+        await original._state.recovery.approvals.decide(
             approvals[0].approval_id, tenant_id=tenant, expected_status=ApprovalStatus.PENDING,
             idempotency_key_digest="a" * 64, decision=ApprovalDecision.DENY,
             principal_id=original.default_principal.principal_id, decision_digest="b" * 64,
@@ -469,7 +470,7 @@ async def test_concurrent_sql_startup_converges_on_one_deferred_resume(
             execution.execution_id, principal=runtime.default_principal, timeout_seconds=10,
         )
         assert finished.result.status is ExecutionStatus.SUCCEEDED
-        current = await states[0].execution.executions.get(execution.execution_id, tenant_id=tenant)
+        current = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=tenant)
         assert current.agent_run_seq == waiting.agent_run_seq + 1
 
 

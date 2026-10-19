@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation read reuse remains subordinate to each canonical storage read."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import timedelta
@@ -22,6 +23,7 @@ from .test_evaluation_persistence import NOW, PRINCIPAL, experiment, storage_for
 
 async def _repository(path: Path, backend: str = "memory", record=None):
     state = storage_for(backend, path)
+    state = RuntimeState(state)
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     repository = state.evaluation.records
     await repository.reserve_experiment(experiment() if record is None else record)

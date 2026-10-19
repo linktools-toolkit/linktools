@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Original client attempts share the logical interaction's durable lifecycle."""
 
+from linktools.ai.runtime.state import RuntimeState
 import gzip
 import hashlib
 from dataclasses import replace
@@ -83,7 +84,7 @@ def _staged(requests: tuple[ModelClientRequest, ...] | None) -> StagedModelInter
 async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
     tmp_path: Path, backend: str, large: bool,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         run = AgentRunRecord("run")
@@ -125,7 +126,7 @@ async def test_original_attempts_round_trip_and_relocate_without_sdk_context(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("requests", (None, ()))
 async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests) -> None:
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -147,7 +148,7 @@ async def test_missing_capture_and_no_dispatch_remain_distinct_on_wire(requests)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("corruption", ("raw_digest", "raw_size", "compressed_bytes", "domain", "codec"))
 async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> None:
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -185,7 +186,7 @@ async def test_original_body_decoded_integrity_fails_closed(corruption: str) -> 
 async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
     tmp_path: Path, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     requests = _requests(large=True)
     try:
@@ -201,15 +202,15 @@ async def test_native_objects_survive_snapshot_and_follow_owner_cleanup(
 
     objects = InMemoryObjectStore("snapshot")
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
-    reader = _storage(backend, tmp_path)
+    reader = RuntimeState(_storage(backend, tmp_path))
     await reader.initialize(namespace="native-client", tenant_id="tenant", read_only=True)
     try:
         snapshot = await reader.export_snapshot(object_store=objects, limits=limits)
     finally:
         await reader.close()
     restored_root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
-    restored = RuntimeStorage.from_root(restored_root)
+    await RuntimeState.restore_snapshot(snapshot, object_store=objects, root=restored_root, limits=limits)
+    restored = RuntimeState(RuntimeStorage.from_root(restored_root))
     await restored.initialize(namespace="native-client", tenant_id="tenant")
     try:
         archive = restored.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -240,7 +241,7 @@ async def test_volatile_archive_and_staging_keep_original_attempt_views() -> Non
     finally:
         await archive.close()
 
-    storage = RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient()))
+    storage = RuntimeState(RuntimeStorage(RuntimeStoragePlan(execution=StorageRoute.transient())))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         staged = _staged(requests)
@@ -270,7 +271,7 @@ async def test_sdk_recovery_projection_and_native_bytes_remain_separate(
     from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
     from linktools.ai.runtime._model_interaction import build_context_projection
 
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
+    storage = RuntimeState(RuntimeStorage.filesystem(tmp_path / "state"))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     payloads: dict[str, bytes] = {}
 
@@ -330,7 +331,7 @@ async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
 ) -> None:
     import asyncio
 
-    storage = RuntimeStorage.filesystem(tmp_path / "state")
+    storage = RuntimeState(RuntimeStorage.filesystem(tmp_path / "state"))
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         objects = storage.object_store(RuntimeDomain.CHECKPOINT)
@@ -357,7 +358,7 @@ async def test_cancelled_preparation_leaves_no_owner_and_body_is_reclaimable(
 
 @pytest.mark.asyncio
 async def test_interrupted_record_preserves_observed_incomplete_response() -> None:
-    storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(RuntimeStorage.in_memory())
     await storage.initialize(namespace="native-client", tenant_id="tenant")
     try:
         requests = (_requests()[1],)

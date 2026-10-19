@@ -8,15 +8,14 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, Wra
 
 from ..errors import AIError, ErrorCode
 from ..capability import CheckpointCapability, ConversationCapability, TraceCapability
-from ..storage import CacheCapabilities, StorageRoute
+from ..storage import StorageRoute
 from .state import RuntimeDomain
 
 
 def persistence_storage_configuration(
     capabilities: Sequence[AbstractCapability[object]],
-) -> tuple[dict[RuntimeDomain, StorageRoute], dict[RuntimeDomain, CacheCapabilities | None]]:
+) -> dict[RuntimeDomain, StorageRoute]:
     routes: dict[RuntimeDomain, StorageRoute] = {}
-    caches: dict[RuntimeDomain, CacheCapabilities | None] = {}
     selected: set[RuntimeDomain] = set()
 
     def collect(feature: AbstractCapability[object]) -> None:
@@ -42,11 +41,10 @@ def persistence_storage_configuration(
             if not isinstance(feature.storage, StorageRoute):
                 raise TypeError("storage must be StorageRoute")
             routes[domain] = feature.storage
-            caches[domain] = feature.storage.cache
 
     for capability in capabilities:
         collect(capability)
-    return routes, caches
+    return routes
 
 
 __all__ = ["persistence_storage_configuration"]

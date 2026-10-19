@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Timeline metadata shares bounded reads without holding authorization or bodies."""
 
+from linktools.ai.runtime.state import RuntimeState
 from pathlib import Path
 from dataclasses import replace
 
@@ -27,7 +28,7 @@ class _Authorization(TenantAuthorizationPolicy):
         return await super().authorize(principal, action, resource)
 
 
-async def _seed(state: RuntimeStorage) -> None:
+async def _seed(state: RuntimeState) -> None:
     await state.conversation.sessions.create(_session())
     await state.execution.executions.create(replace(_execution(
         "failed", status=ExecutionStatus.FAILED, prompt="original prompt",
@@ -48,7 +49,7 @@ async def _seed(state: RuntimeStorage) -> None:
     )
 
 
-async def _timeline(state: RuntimeStorage, owner: str = "owner"):
+async def _timeline(state: RuntimeState, owner: str = "owner"):
     return await project_session_timeline(
         state.conversation, state.execution.executions, _Authorization(),
         HmacCursorSigner("timeline", b"timeline-read-scope"), state.run_store,
@@ -61,6 +62,7 @@ async def test_timeline_read_scope_preserves_turns_and_authority(
     tmp_path: Path, backend: str,
 ) -> None:
     state = _storage(backend, tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:
         await _seed(state)
@@ -83,6 +85,7 @@ async def test_timeline_read_scope_preserves_turns_and_authority(
 
 async def test_timeline_read_scope_uses_one_post_authorization_sql_snapshot(tmp_path: Path) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "timeline.db")
+    state = RuntimeState(state)
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:
         await _seed(state)
@@ -110,6 +113,7 @@ async def test_timeline_read_scope_keeps_separate_database_routes(tmp_path: Path
         execution=StorageRoute.sqlite(tmp_path / "execution.db"),
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     ))
+    state = RuntimeState(state)
     await state.initialize(namespace="timeline-scope", tenant_id="tenant")
     try:
         await _seed(state)

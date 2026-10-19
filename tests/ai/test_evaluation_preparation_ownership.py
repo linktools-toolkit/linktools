@@ -50,7 +50,7 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered, release = asyncio.Event(), asyncio.Event()
-        prepare = storage.task.admissions.prepare_with_disposition
+        prepare = runtime._state.task.admissions.prepare_with_disposition
         saved = []
 
         async def pause(submission: TaskGraphSubmission) -> tuple[TaskGraphSubmission, bool]:
@@ -62,7 +62,7 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
             await release.wait()
             return await prepare(submission) if prepared is None else prepared
 
-        storage.task.admissions.prepare_with_disposition = pause
+        runtime._state.task.admissions.prepare_with_disposition = pause
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), cases=(
             CaseSpec.task(CaseRef("dataset", "case", 1), input={"secret": "private target input"}),
         )), principal=owner, idempotency_key="publish")
@@ -77,20 +77,20 @@ async def test_cancelled_preparation_releases_payload_and_survives_reopen(
         finally:
             release.set()
         await asyncio.sleep(.1)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id="tenant")
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id="tenant")
         result = await runtime.evaluations.purge_expired(principal=owner,
             now=record.metadata_expires_at + timedelta(seconds=1), exclusive=Offline())
         assert result.evaluations == (run.experiment_id,)
-        rows = await storage.task.admissions.state_store.read(lambda tx: tx.scan_records())
+        rows = await runtime._state.task.admissions.state_store.read(lambda tx: tx.scan_records())
         assert not [row for row in rows if row.kind == "task_submission_payload"]
-        assert await storage.task.admissions.submission_status(saved[0].ref) == "cancelled"
+        assert await runtime._state.task.admissions.submission_status(saved[0].ref) == "cancelled"
         assert calls == []
         assert not (await engine.start_prepared(saved[0])).admitted
     if backend == "filesystem":
         reopened = RuntimeStorage.filesystem(tmp_path)
         async with Runtime.open("preparation", models=ModelRegistry(), storage=reopened,
-                                context=RuntimeContext(None, tenant_id="tenant")):
-            assert await reopened.task.admissions.submission_status(saved[0].ref) == "cancelled"
+                                context=RuntimeContext(None, tenant_id="tenant")) as reader:
+            assert await reader._state.task.admissions.submission_status(saved[0].ref) == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_purge_discovers_capture_written_before_offline_quiescence(tmp_pat
             policy=EvaluationPolicy(allow_volatile=True, content_retention_seconds=60,
                                     metadata_retention_seconds=60)), owner, "start"), engine=engine)
         await asyncio.wait_for(entered.wait(), 5)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id="tenant")
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id="tenant")
         assert len(record.intents) == 1
         submission = record.intents[0].submission.ref
 
@@ -143,12 +143,12 @@ async def test_purge_discovers_capture_written_before_offline_quiescence(tmp_pat
         result = await runtime.evaluations.purge_expired(principal=owner,
             now=record.metadata_expires_at + timedelta(seconds=1), exclusive=Quiesce())
         assert result.evaluations == (run.experiment_id,)
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
         assert await objects.stat(input_capture_key(submission.namespace, submission.tenant_id,
                                                    "declaration", submission.graph_id)) is None
         assert await objects.stat(task_graph_binding_capture_key(submission.namespace, submission.tenant_id,
             submission.graph_id, submission.request_digest)) is None
-        assert await storage.task.admissions.submission_status(submission) == "cancelled"
+        assert await runtime._state.task.admissions.submission_status(submission) == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
                             context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         engine = runtime.tasks.bind(*tasks)
         entered = asyncio.Event()
-        prepare = storage.task.admissions.prepare_with_disposition
+        prepare = runtime._state.task.admissions.prepare_with_disposition
         saved = []
 
         async def interrupt(submission: TaskGraphSubmission) -> tuple[TaskGraphSubmission, bool]:
@@ -185,7 +185,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
             await asyncio.Event().wait()
             return prepared
 
-        storage.task.admissions.prepare_with_disposition = interrupt
+        runtime._state.task.admissions.prepare_with_disposition = interrupt
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("dataset", 1), cases=(
             CaseSpec.task(CaseRef("dataset", "case", 1), input={"secret": "recoverable private input"}),
         )), principal=owner, idempotency_key="publish")
@@ -209,11 +209,11 @@ async def test_interrupted_preparation_has_recoverable_owner(
             assert calls == [{"secret": "recoverable private input"}]
         else:
             assert (await run.cancel(idempotency_key="cancel")).completion == "cancelled"
-            record = await reopened.evaluation.records.get(experiment_id, tenant_id="tenant")
+            record = await runtime._state.evaluation.records.get(experiment_id, tenant_id="tenant")
             result = await runtime.evaluations.purge_expired(principal=owner,
                 now=record.metadata_expires_at + timedelta(seconds=1), exclusive=Offline())
             assert result.evaluations == (experiment_id,)
-            assert await reopened.task.admissions.submission_status(saved[0].ref) == "cancelled"
-            rows = await reopened.task.admissions.state_store.read(lambda tx: tx.scan_records())
+            assert await runtime._state.task.admissions.submission_status(saved[0].ref) == "cancelled"
+            rows = await runtime._state.task.admissions.state_store.read(lambda tx: tx.scan_records())
             assert not [row for row in rows if row.kind == "task_submission_payload"]
             assert calls == []

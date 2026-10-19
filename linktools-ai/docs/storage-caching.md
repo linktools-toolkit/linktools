@@ -3,7 +3,9 @@
 Caching accelerates reads; the source storage still owns durable facts. The
 storage package separates content, revision discovery, and metadata projection.
 
-`RuntimeStorage` composes resources and owns their acquired lifetimes. Stores
+`RuntimeStorage` declares reusable resource routes and an optional object store.
+Each Runtime binding acquires and closes its own operational scope; borrowed
+backends remain host-owned. Stores
 such as `AssetStore`, `ObjectStore`, and `MetricStore` expose their respective
 data contracts; repositories own domain records and state transitions. Backends
 provide replaceable source or transport capabilities. These roles are not
@@ -348,7 +350,7 @@ namespace or a separate cache namespace/instance. Store IDs alone do not
 identify physical sources. Keys also isolate tenant, domain, and the complete
 immutable ObjectRef. A host-provided cache is a trusted byte transport, not an
 authorization service.
-`RuntimeStorage.read_object(domain, reference)` is the storage-level read
+`RuntimeState.read_object(domain, reference)` is the composition-level read
 operation used by SDK composition; applications normally keep using their
 existing domain/history APIs.
 
@@ -486,7 +488,7 @@ A shorter later maximum is respected, and a longer one never extends an existing
 entry's original expiry. The default zero does not read or publish display cache
 entries. Custom `SessionService` implementations accept the same `max_age` argument.
 
-The Runtime borrows its existing `RuntimeStorage.cache`; no extra cache
+The Runtime borrows the effective Conversation route’s cache; no extra cache
 configuration or backend lifecycle is introduced. Standard assembly enables
 this optimization only when conversation and execution retention are both
 `DURABLE`. Entries are isolated by Runtime namespace, principal/tenant/kind,

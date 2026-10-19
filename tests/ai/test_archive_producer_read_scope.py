@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Producer revocation is established from one authoritative metadata view."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from .test_step_projection import _execution
 async def test_revoked_producer_check_uses_one_sql_metadata_snapshot(
     tmp_path: Path, outcome: str, expected: ErrorCode | None,
 ) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "producer.db")
+    state = RuntimeState(RuntimeStorage.sqlite(tmp_path / "producer.db"))
     await state.initialize(namespace="producer-read", tenant_id="tenant")
     repository = state.execution.executions
     archive = state.run_store.read_store(RuntimeDomain.TRACE)

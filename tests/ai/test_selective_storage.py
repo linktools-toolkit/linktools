@@ -6,6 +6,7 @@ import json
 
 import pytest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.storage import StorageRoute
 
 
@@ -30,7 +31,7 @@ def test_runtime_storage_plan_routes_each_domain_explicitly(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeStorage.from_plan(
+    state = RuntimeState(RuntimeStorage.from_plan(
         RuntimeStoragePlan(
             conversation=StorageRoute.filesystem(
                 root / "conversation",
@@ -41,7 +42,7 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
                 transaction_root=root,
             ),
         )
-    )
+    ))
     await state.initialize(namespace="selective", tenant_id="tenant")
     try:
         manifests = list((root / "conversation").rglob("manifest.json"))

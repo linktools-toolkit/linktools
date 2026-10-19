@@ -15,6 +15,7 @@ from linktools.ai.core import ExecutionStatus, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
 from linktools.ai.task import TaskGraph, TaskNode
 
@@ -281,7 +282,7 @@ async def test_agent_node_recovery_keeps_first_start_deadline(
         write.close()
     # Read without a Runtime: startup reconciliation must not run before the
     # crash premise (including the real in-flight child) has been verified.
-    snapshot = RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path)
+    snapshot = RuntimeState(RuntimeStorage.sqlite(path) if backend == "sqlite" else RuntimeStorage.filesystem(path))
     await snapshot.initialize(namespace="deadline-recovery", tenant_id=tenant_id, read_only=True)
     try:
         original = await snapshot.execution.executions.get(execution_id, tenant_id=tenant_id)
@@ -378,7 +379,7 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
         "deadline-recovery", models=_Models(_UsageFunctionModel(model)),
         storage=storage, features=group,
     ) as runtime:
-        original_binding = (await storage.execution.executions.get(
+        original_binding = (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding
         task = runtime.tasks.from_agent("deadline.agent", runtime.agents.get())
@@ -392,6 +393,6 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
         assert current.started_at == started_at
         if subagent:
             assert (await run.wait(timeout_seconds=3)).result.status is TaskStatus.SUCCEEDED
-        assert (await storage.execution.executions.get(
+        assert (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding == original_binding

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session timeline storage invariants."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -41,6 +42,7 @@ def _session() -> SessionRecord:
 @pytest.mark.asyncio
 async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-storage", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -129,6 +131,7 @@ def test_timeline_range_allows_root_recovery_after_transcript_materialization() 
 @pytest.mark.asyncio
 async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-duplicate", tenant_id="tenant")
     try:
         repository = state.conversation.sessions

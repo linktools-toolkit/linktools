@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Run-local transcript identities and terminal boundary facts."""
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import TraceCapability
 from datetime import datetime, timezone
 from functools import partial
@@ -38,7 +39,7 @@ from .test_history_projection_conformance import _record
 async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
     outcome: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(

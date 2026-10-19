@@ -174,7 +174,7 @@ async def test_root_cache_does_not_opt_default_conversation_into_terminal_admiss
         execution = await session.start('question')
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id='tenant')
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id='tenant')
             assert record is not None and record.status.value == 'STARTED'
         finally:
             finish.set()
@@ -246,7 +246,7 @@ async def test_unavailable_guard_does_not_depend_on_retained_execution_header(tm
         async def no_execution_evidence(*args, **kwargs):
             raise AssertionError('missing-context authority must survive execution pruning')
 
-        monkeypatch.setattr(storage.execution.executions, 'get', no_execution_evidence)
+        monkeypatch.setattr(runtime._state.execution.executions, 'get', no_execution_evidence)
         for operation in (lambda: session.start('second'), lambda: session.fork('fork')):
             with pytest.raises(AIError) as missing:
                 await operation()
@@ -293,28 +293,28 @@ async def test_reconcile_terminal_before_split_session_release_preserves_unavail
                             models=_Models(_UsageFunctionModel(model)), features=_features(),
                             context=RuntimeContext(None, tenant_id='tenant')) as runtime:
         session = await runtime.agents.get().create_session('session', principal=_OWNER)
-        mutate = storage.conversation.sessions.state_store.mutate
+        mutate = runtime._state.conversation.sessions.state_store.mutate
         held = False
         execution = None
 
         async def hold_first_release(callback):
             nonlocal held
             if execution is not None and not held:
-                terminal = await storage.execution.executions.get(execution.execution_id, tenant_id='tenant')
+                terminal = await runtime._state.execution.executions.get(execution.execution_id, tenant_id='tenant')
                 if terminal.status.value == 'SUCCEEDED':
                     held = True
                     release_entered.set()
                     await allow_release.wait()
             return await mutate(callback)
 
-        monkeypatch.setattr(storage.conversation.sessions.state_store, 'mutate', hold_first_release)
+        monkeypatch.setattr(runtime._state.conversation.sessions.state_store, 'mutate', hold_first_release)
         execution = await session.start('first')
         finish_model.set()
         try:
             await asyncio.wait_for(release_entered.wait(), 5)
-            terminal = await storage.execution.executions.get(execution.execution_id, tenant_id='tenant')
+            terminal = await runtime._state.execution.executions.get(execution.execution_id, tenant_id='tenant')
             assert terminal.status.value == 'SUCCEEDED'
-            before = await storage.conversation.sessions.get('session', tenant_id='tenant')
+            before = await runtime._state.conversation.sessions.get('session', tenant_id='tenant')
             assert before.active_execution_id == execution.execution_id
             reconciled = await runtime.sessions.reconcile('session', principal=_OWNER)
             assert reconciled.active_execution_id is None
@@ -379,7 +379,7 @@ async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publicat
             await asyncio.wait_for(entered.wait(), 5)
             assert same.execution_id == execution.execution_id
             assert len(calls) == 1
-            assert await storage.execution.executions.get(
+            assert await owner._state.execution.executions.get(
                 execution.execution_id, tenant_id=owner.tenant_id) is None
             with pytest.raises(AIError) as conflict:
                 await remote.start('different', idempotency_key='request')

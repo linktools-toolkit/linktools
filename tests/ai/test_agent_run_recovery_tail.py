@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
@@ -32,7 +33,7 @@ from .test_step_projection import _execution
 async def test_recovery_preserves_each_tool_result_once_with_its_original_position(
     completed_partial: bool, conflicting_replay: bool,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="partial-recovery", tenant_id="tenant")
     try:
         execution = replace(_execution(), revision=1)
@@ -151,7 +152,7 @@ async def test_replayed_model_calls_reuse_effects_and_keep_new_raw_part_indexes(
     run_id = make_agent_run_id(
         namespace=namespace, tenant_id="tenant", execution_id="execution", agent_run_seq=1,
     )
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         execution = replace(_execution(), revision=1)
@@ -296,7 +297,7 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
 ) -> None:
     import asyncio
 
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="delayed-producer", tenant_id="tenant")
     try:
         execution = replace(_execution(), revision=1)
@@ -390,7 +391,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
 ) -> None:
     import asyncio
 
-    state = RuntimeStorage.in_memory(cache=InMemoryCacheBackend(max_bytes=65536))
+    state = RuntimeState(RuntimeStorage.in_memory(cache=InMemoryCacheBackend(max_bytes=65536)))
     await state.initialize(namespace="observation-checkpoint", tenant_id="tenant")
     release = asyncio.Event()
     checkpoint_task = None
@@ -471,7 +472,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
 
 @pytest.mark.asyncio
 async def test_terminal_producer_discard_preserves_unresolved_durability_flight() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="unresolved-producer", tenant_id="tenant")
     store = state.run_store
     store.bind_execution_producer("run", execution_id="execution", producer_generation=1)

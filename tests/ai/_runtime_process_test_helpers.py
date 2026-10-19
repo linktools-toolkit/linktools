@@ -75,8 +75,8 @@ def _runtime_process(
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
                 tenant = runtime.default_principal.tenant_id
-                execution = await state.execution.executions.get(execution_id, tenant_id=tenant)
-                head = await state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
+                execution = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
+                head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
                 assert execution is not None and head is not None
                 return {
                     "execution_id": execution_id, "status": execution.status.value,
@@ -98,7 +98,7 @@ def _runtime_process(
 
                     backend.launch = pause_launch
                 elif phase == "pending":
-                    original_claim = state.execution.executions.claim_start
+                    original_claim = runtime._state.execution.executions.claim_start
 
                     async def pause_claim(claim):
                         nonlocal execution_id
@@ -107,7 +107,7 @@ def _runtime_process(
                         await release_admission.wait()
                         return await original_claim(claim)
 
-                    state.execution.executions.claim_start = pause_claim
+                    runtime._state.execution.executions.claim_start = pause_claim
                 elif phase == "handoff":
                     original_handoff = backend._reconcile_handoff
 
@@ -166,7 +166,7 @@ def _runtime_process(
                     await asyncio.wait_for(entered.wait(), 10)
                     connection.send(await snapshot())
                 elif command == "cancel_events":
-                    events = await state.execution.events.list(
+                    events = await runtime._state.execution.events.list(
                         execution_id, tenant_id=runtime.default_principal.tenant_id,
                         after_event_seq=0, limit=100,
                     )
@@ -177,7 +177,7 @@ def _runtime_process(
                         ),
                     })
                 elif command == "flush_trace":
-                    await state.run_store.flush_dirty_execution_projections(
+                    await runtime._state.run_store.flush_dirty_execution_projections(
                         execution_id=execution_id,
                     )
                     connection.send(await snapshot())

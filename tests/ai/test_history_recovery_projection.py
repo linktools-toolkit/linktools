@@ -20,6 +20,7 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.core import HmacCursorSigner, agent_run_id, agent_conversation_id
 from linktools.ai.runtime import RuntimeDomain
@@ -57,7 +58,7 @@ async def test_public_response_ahead_then_distinct_sdk_response(
     conversation = agent_conversation_id(
         namespace=namespace, tenant_id="tenant", execution_id="execution"
     )
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -353,7 +354,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         execution_id="execution",
         agent_run_seq=1,
     )
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -578,7 +579,7 @@ async def test_restored_completed_tool_group_consumes_published_pending_results(
 ) -> None:
     from linktools.ai.runtime._transcript_staging import StagedTranscript
 
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="restored-tool-group", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -662,7 +663,7 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
     tmp_path: Path,
     backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="stale-recovery-checkpoint", tenant_id="tenant")
     try:
         repository = state.execution.executions

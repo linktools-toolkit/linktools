@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import (
     ExecutionStatus, OperationKind, OperationLedgerInput, OperationStatus,
     ResourceKind, SessionStatus, agent_conversation_id, idempotency_key_digest,
@@ -27,7 +28,7 @@ from ._runtime_process_test_helpers import _NAMESPACE, _RuntimeProcess, _capabil
 async def _recoverable(
     tmp_path: Path, *, phase: str = "active", model_error: bool = False,
     model_started: asyncio.Event | None = None,
-) -> AsyncIterator[tuple[Runtime, Runtime, RuntimeStorage, str, list[int], asyncio.Event]]:
+) -> AsyncIterator[tuple[Runtime, Runtime, RuntimeState, str, list[int], asyncio.Event]]:
     database = tmp_path / "runtime.db"
     owner = _RuntimeProcess(database, phase=phase)
     execution_id = owner.initial["execution_id"]
@@ -57,19 +58,19 @@ async def _recoverable(
             storage=other_state, features=_capabilities(),
         ) as other:
             try:
-                yield runtime, other, state, execution_id, calls, release
+                yield runtime, other, runtime._state, execution_id, calls, release
             finally:
                 release.set()
     finally:
         release.set()
 
 
-async def _head(state: RuntimeStorage, execution_id: str):
+async def _head(state: RuntimeState, execution_id: str):
     return await state.execution.executions.get_history_head(execution_id, tenant_id="default")
 
 
 async def _flush_started_model(
-    state: RuntimeStorage, execution_id: str, started: asyncio.Event,
+    state: RuntimeState, execution_id: str, started: asyncio.Event,
 ) -> None:
     # Receipt settlement only confirms launch. Freeze the blocked model's
     # registration projection before comparing heads across control replays.
@@ -82,7 +83,7 @@ async def _flush_started_model(
         await state.run_store.flush_execution_projection(run.agent_run_id, execution_id=execution_id)
 
 
-async def _receipt(state: RuntimeStorage, key: str):
+async def _receipt(state: RuntimeState, key: str):
     return await state.execution.operations.get(idempotency_key_digest(key), tenant_id="default")
 
 

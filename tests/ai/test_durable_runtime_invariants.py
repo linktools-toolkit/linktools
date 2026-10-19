@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused regressions for durable composition and close ownership."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -527,6 +528,7 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence(after_wait:
             await super().authorize(principal, action, resource)
 
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="result-read", tenant_id="tenant")
     record = await _seed_result(state)
     authorization = Authorization()

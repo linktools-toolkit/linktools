@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Web Session timeline projection regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -56,7 +57,7 @@ def _commit_fields(execution: ExecutionRecord) -> dict[str, object]:
     }
 
 
-async def _commit_empty_turn(state: RuntimeStorage, execution: ExecutionRecord) -> None:
+async def _commit_empty_turn(state: RuntimeState, execution: ExecutionRecord) -> None:
     """Publish a terminal turn with no model messages through the current writer."""
     sessions = state.conversation.sessions
 
@@ -174,7 +175,7 @@ class _ExecutionService:
 
 
 async def _materialize_conversation(
-    state: RuntimeStorage, history_id: str
+    state: RuntimeState, history_id: str
 ) -> tuple[str, int]:
     agent_run_id = "timeline-conversation-run"
     agent_conversation_id = make_agent_conversation_id(
@@ -233,6 +234,7 @@ async def _materialize_conversation(
 @pytest.mark.asyncio
 async def test_session_timeline_restores_original_prompt_without_runtime_instructions() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         created = await state.conversation.sessions.create(_session())

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Checkpoint progress captures batch sequence reads without weakening replay proofs."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.asyncio
 async def test_checkpoint_progress_keeps_repeated_checkpoint_position_and_fresh_high_water(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -44,7 +45,7 @@ async def test_checkpoint_progress_keeps_repeated_checkpoint_position_and_fresh_
 
 
 async def test_checkpoint_progress_batches_sequence_queries_in_one_snapshot(tmp_path: Path) -> None:
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -70,7 +71,7 @@ async def test_checkpoint_progress_batches_sequence_queries_in_one_snapshot(tmp_
 
 
 async def test_checkpoint_progress_custom_archive_preserves_its_count_and_proof_overrides(tmp_path: Path) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
         original = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -102,7 +103,7 @@ async def test_checkpoint_progress_rejects_history_lock_before_storage_read(
 ) -> None:
     from linktools.ai.runtime.state._steps import _AgentRunHistoryLock
     from linktools.ai.runtime.state._store import StateLockOrderError
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -122,7 +123,7 @@ async def test_checkpoint_progress_rejects_history_lock_before_storage_read(
 async def test_checkpoint_progress_keeps_checkpoint_proof_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace="progress-io", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)

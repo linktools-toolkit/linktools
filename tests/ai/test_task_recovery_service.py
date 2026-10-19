@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def _request(graph_id: str) -> TaskGraphRequest:
     )
 
 
-async def _recovery_graph(state: RuntimeStorage, graph_id: str) -> TaskGraphRequest:
+async def _recovery_graph(state: RuntimeState, graph_id: str) -> TaskGraphRequest:
     request = _request(graph_id)
     await state.task.admissions.admit(
         TaskGraphAdmission.from_request(request),
@@ -124,6 +125,7 @@ async def _recovery_graph(state: RuntimeStorage, graph_id: str) -> TaskGraphRequ
 @pytest.mark.asyncio
 async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "boundary")
@@ -157,6 +159,7 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
 @pytest.mark.asyncio
 async def test_explicit_recovery_rearms_original_graph() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "resume")
@@ -190,6 +193,7 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
 @pytest.mark.asyncio
 async def test_successful_recover_key_does_not_clear_a_later_recovery_boundary() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recover-replay", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "recover-replay")
@@ -240,6 +244,7 @@ async def test_successful_recover_key_does_not_clear_a_later_recovery_boundary()
 @pytest.mark.asyncio
 async def test_concurrent_recover_replay_keeps_stable_receipt_as_graph_advances() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recover-concurrent", tenant_id="tenant")
     release_first_starts = asyncio.Event()
     both_first_starts = asyncio.Event()
@@ -337,6 +342,7 @@ async def test_concurrent_recover_replay_keeps_stable_receipt_as_graph_advances(
 @pytest.mark.asyncio
 async def test_recovery_actor_does_not_replace_admitted_execution_principal() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "principal-recovery")
@@ -365,6 +371,7 @@ async def test_recovery_actor_does_not_replace_admitted_execution_principal() ->
 @pytest.mark.asyncio
 async def test_recovery_validation_fails_before_graph_state_transition() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "validate-before-recover")
@@ -406,6 +413,7 @@ async def test_recovery_validation_fails_before_graph_state_transition() -> None
 @pytest.mark.asyncio
 async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "cancel")
@@ -468,6 +476,7 @@ async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
 ) -> None:
     storage_root = tmp_path / "cancel-effect-unknown"
     state = RuntimeStorage.filesystem(storage_root)
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-cancel-reopen", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "cancel-reopen")
@@ -493,6 +502,7 @@ async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
         await state.close()
 
     reopened = RuntimeStorage.filesystem(storage_root)
+    reopened = RuntimeState(reopened)
     await reopened.initialize(namespace="task-service-cancel-reopen", tenant_id="tenant")
     try:
         launcher = _Launcher()
@@ -533,6 +543,7 @@ async def test_recover_settles_cancel_receipt_after_graph_is_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-terminal-cancel", tenant_id="tenant")
     try:
         request = _request("terminal-cancel-receipt")
@@ -608,6 +619,7 @@ async def test_recover_settles_cancel_receipt_when_business_success_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-cancel-success-race", tenant_id="tenant")
     release_cancel = asyncio.Event()
     cancel_entered = asyncio.Event()
@@ -708,6 +720,7 @@ async def test_recover_settles_cancel_receipt_when_business_success_wins(
 @pytest.mark.asyncio
 async def test_running_cancel_operation_replays_cancel_effect_after_owner_loss() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-cancel-owner-loss", tenant_id="tenant")
     try:
         request = _request("cancel-owner-loss")
@@ -762,6 +775,7 @@ async def test_running_cancel_operation_replays_cancel_effect_after_owner_loss()
 @pytest.mark.asyncio
 async def test_new_cancel_after_business_terminal_preserves_terminal_status() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-late-cancel", tenant_id="tenant")
     try:
         request = _request("late-cancel")
@@ -805,6 +819,7 @@ async def test_running_cancel_replay_reapplies_durable_graph_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-cancel-replay", tenant_id="tenant")
     try:
         request = _request("cancel-replay")
@@ -859,6 +874,7 @@ async def test_cancel_registration_wins_claim_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-cancel-claim-race", tenant_id="tenant")
     release_registration = asyncio.Event()
     registered = asyncio.Event()
@@ -914,6 +930,7 @@ async def test_cancel_intent_blocks_claim_after_not_applied_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-cancel-resolution-race", tenant_id="tenant")
     release_cancel = asyncio.Event()
     cancel_entered = asyncio.Event()
@@ -1009,6 +1026,7 @@ async def test_cancel_intent_blocks_claim_after_not_applied_resolution(
 @pytest.mark.asyncio
 async def test_successful_effect_resolution_replay_completes_missing_arm() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-effect-arm", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "effect-arm")
@@ -1082,6 +1100,7 @@ async def test_successful_effect_resolution_replay_completes_missing_arm() -> No
 @pytest.mark.asyncio
 async def test_successful_input_resume_replay_completes_missing_arm() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-input-arm", tenant_id="tenant")
     try:
         graph = TaskGraph(
@@ -1200,6 +1219,7 @@ async def test_successful_input_resume_replay_completes_missing_arm() -> None:
 @pytest.mark.asyncio
 async def test_node_cancel_requires_execution_confirmation_before_terminal_projection() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "node-cancel")
@@ -1264,6 +1284,7 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
 @pytest.mark.asyncio
 async def test_node_cancel_scope_and_execution_identity_are_preserved() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-service-node-cancel-scope", tenant_id="tenant")
     try:
         request = TaskGraphRequest(

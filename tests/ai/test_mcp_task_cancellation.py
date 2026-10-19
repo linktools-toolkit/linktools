@@ -80,7 +80,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 assert len(effects) == 1
                 assert effects[0].replay_safe is False
                 assert effects[0].error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
-                operations = await storage.recovery.tools.list_by_execution(
+                operations = await runtime._state.recovery.tools.list_by_execution(
                     execution_id, tenant_id=runtime.default_principal.tenant_id
                 )
                 assert len(operations) == 1
@@ -88,7 +88,7 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 assert remote.effects == ["committed"]
         finally:
             remote.release_call.set()
-            await storage.close()
+            await runtime._state.close()
 
         restored = RuntimeStorage.filesystem(state_path)
         try:
@@ -118,5 +118,5 @@ async def test_graph_cancel_closes_remote_client_and_preserves_unknown_effect_on
                 assert remote.effects == ["committed"]
                 assert remote.methods.count("tools/call") == 1
         finally:
-            await restored.close()
+            await runtime._state.close()
         await _wait_closed(remote)

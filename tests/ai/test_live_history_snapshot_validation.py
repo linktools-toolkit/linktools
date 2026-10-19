@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+from linktools.ai.runtime.state import RuntimeState
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.errors import AIError, ErrorCode
@@ -31,7 +33,7 @@ from linktools.ai.runtime.state._store import stream_digest
 async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
     tmp_path: Path, corruption: str | None,
 ) -> None:
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db"))
     await storage.initialize(namespace="pending-snapshot", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
@@ -114,7 +116,7 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
     from linktools.ai.runtime.state._contracts import StoredAgentRunCheckpoint
     from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint
 
-    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "state.db"))
     await storage.initialize(namespace="pending-snapshot", tenant_id="tenant")
     try:
         archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)

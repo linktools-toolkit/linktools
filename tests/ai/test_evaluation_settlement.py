@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Terminal evaluation reconciliation keeps facts while avoiding repeated settlement."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -89,6 +90,7 @@ async def test_repeated_settlement_keeps_release_revision_and_timestamp() -> Non
     from .test_evaluation_persistence import intent
 
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records

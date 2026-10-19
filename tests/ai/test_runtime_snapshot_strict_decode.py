@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
+
 from linktools.ai.core import (
     OperationKind,
     OperationLedgerInput,
@@ -22,7 +24,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeSnapshot, RuntimeStorage
 from linktools.ai.runtime import _snapshot as runtime_snapshot_module
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
-from linktools.ai.runtime.state import _root as runtime_storage_root_module
+from linktools.ai.runtime.state import _snapshot_operations as runtime_storage_snapshot_module
 from linktools.ai.runtime.state import _codec as runtime_storage_codec
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
@@ -82,7 +84,7 @@ class _SnapshotGuard:
     "decoder",
     (
         runtime_snapshot_module._object_ref_from_payload,
-        runtime_storage_root_module._object_ref_from_payload,
+        runtime_storage_snapshot_module._object_ref_from_payload,
     ),
 )
 def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
@@ -102,7 +104,7 @@ def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
     "decoder",
     (
         runtime_snapshot_module._object_ref_from_payload,
-        runtime_storage_root_module._object_ref_from_payload,
+        runtime_storage_snapshot_module._object_ref_from_payload,
     ),
 )
 def test_snapshot_manifest_refs_require_runtime_logical_owner(decoder) -> None:
@@ -127,7 +129,7 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
 
     with pytest.raises(AIError) as state_error:
-        await RuntimeStorage.restore_snapshot(
+        await RuntimeState.restore_snapshot(
             reference,
             object_store=store,
             root=tmp_path / "state",
@@ -277,11 +279,11 @@ async def test_runtime_storage_snapshot_identity_ignores_target_store(
     tmp_path,
 ) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeStorage.from_root(root)
+    writable = RuntimeState(RuntimeStorage.from_root(root))
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
 
-    state = RuntimeStorage.from_root(root)
+    state = RuntimeState(RuntimeStorage.from_root(root))
     await state.initialize(namespace="runtime", tenant_id="tenant", read_only=True)
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     first = InMemoryObjectStore("snapshot-a")
@@ -300,7 +302,7 @@ async def test_runtime_storage_snapshot_identity_ignores_target_store(
 @pytest.mark.asyncio
 async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeStorage.from_root(root)
+    writable = RuntimeState(RuntimeStorage.from_root(root))
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
     workspace_root = tmp_path / "workspace"
@@ -476,7 +478,7 @@ async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_bef
     target = tmp_path / "restored"
 
     with pytest.raises(AIError) as raised:
-        await RuntimeStorage.restore_snapshot(
+        await RuntimeState.restore_snapshot(
             ref,
             object_store=store,
             root=target,
@@ -693,7 +695,7 @@ def test_snapshot_rejects_truncated_execution_event_stream() -> None:
 
 @pytest.mark.parametrize(
     "codec",
-    (runtime_snapshot_module, runtime_storage_root_module),
+    (runtime_snapshot_module, runtime_storage_snapshot_module),
 )
 def test_snapshot_object_ref_round_trip_keeps_logical_owner(codec) -> None:
     physical = ObjectRef("physical", "snapshot/key", "a" * 64, 0)
@@ -706,7 +708,7 @@ def test_snapshot_object_ref_round_trip_keeps_logical_owner(codec) -> None:
     )
 
 
-@pytest.mark.parametrize("codec", (runtime_snapshot_module, runtime_storage_root_module))
+@pytest.mark.parametrize("codec", (runtime_snapshot_module, runtime_storage_snapshot_module))
 @pytest.mark.parametrize(
     "change",
     ({"extra": 1}, {"size": True}, {"size": -1}, {"size": 1.0},

@@ -9,6 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 from sqlalchemy import event
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain
 
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.asyncio
 async def test_observation_append_preserves_pending_facts_and_stale_fence(
     tmp_path: Path, backend: str, transition: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="observation-write-io", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.TRACE)
@@ -81,7 +82,7 @@ async def test_observation_append_preserves_pending_facts_and_stale_fence(
 async def test_observation_append_rollback_keeps_original_head_and_retry(
     tmp_path: Path, backend: str, failure: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="observation-rollback", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.TRACE)
@@ -116,7 +117,7 @@ async def test_observation_append_rollback_keeps_original_head_and_retry(
 async def test_empty_unchanged_observation_still_requires_head_guard(
     tmp_path: Path, backend: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="observation-guard", tenant_id="tenant")
     try:
         archive = state.run_store.read_store(RuntimeDomain.TRACE)

@@ -16,6 +16,7 @@ from linktools.ai.core import (
     canonical_sha256,
     idempotency_key_digest,
 )
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
@@ -142,7 +143,7 @@ def _approval(
     )
 
 
-def _commands(state: RuntimeStorage, namespace: str) -> RuntimeStateCommands:
+def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
     return RuntimeStateCommands(
         state.execution.executions,
         namespace=namespace,
@@ -164,13 +165,13 @@ def _commands(state: RuntimeStorage, namespace: str) -> RuntimeStateCommands:
 async def _enter_waiting(
     namespace: str,
 ) -> tuple[
-    RuntimeStorage,
+    RuntimeState,
     RuntimeStateCommands,
     ExecutionRecord,
     RecoveryCheckpoint,
     PendingToolContinuation,
 ]:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=namespace, tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation admission owns its private inputs before any capture materialization."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -42,7 +43,7 @@ async def score(context: TaskNodeContext[None]) -> JsonValue:
     return ScoreBundle(dimensions={"ok": 1}).to_mapping()
 
 
-async def task_objects(storage: RuntimeStorage) -> dict[str, str]:
+async def task_objects(storage: RuntimeState) -> dict[str, str]:
     return {item.key: item.digest async for item in storage.object_store(RuntimeDomain.TASK).list_objects()}
 
 
@@ -63,16 +64,16 @@ async def test_failed_admission_does_not_persist_private_templates(tmp_path: Pat
             template=TaskGraphTemplate((TaskNode("target", task=task, input={"private": "sensitive template"}),)),
             selector="terminal_sinks")),), (ScorerSpec("score", TaskRef("unbound", 1) if failure == "scorer" else scorer.ref, (DIMENSION,)),),
             policy=EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60))
-        before = await task_objects(storage)
+        before = await task_objects(runtime._state)
         if failure == "reservation":
             async def reject(self, record):
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            monkeypatch.setattr(type(storage.evaluation.records), "reserve_experiment", reject)
+            monkeypatch.setattr(type(runtime._state.evaluation.records), "reserve_experiment", reject)
         with pytest.raises(AIError):
             await runtime.evaluations.start(StartEvaluationRequest(spec, PRINCIPAL, "start"), engine=runtime.tasks.bind(task, scorer))
-        assert await task_objects(storage) == before
+        assert await task_objects(runtime._state) == before
         await runtime.evaluations.purge_expired(principal=PRINCIPAL, now=datetime.now(timezone.utc) + timedelta(days=30), exclusive=Offline())
-        assert await task_objects(storage) == before
+        assert await task_objects(runtime._state) == before
 
 
 @pytest.mark.asyncio
@@ -156,18 +157,18 @@ async def test_reserved_capture_is_owned_across_cancel_and_purge(tmp_path: Path,
             (CandidateSpec("candidate", task=task.ref),), (ScorerSpec("score", scorer.ref, (DIMENSION,)),),
             policy=EvaluationPolicy(content_retention_seconds=60, metadata_retention_seconds=60)), PRINCIPAL, "start"), engine=engine)
         await asyncio.wait_for(entered.wait(), 5)
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert len(record.owned_input_captures) == 1
         owned = record.owned_input_captures[0]
         key = input_capture_key(owned.namespace, owned.tenant_id, "task", owned.capture_id)
-        assert (await storage.object_store(RuntimeDomain.TASK).stat(key) is not None) == (boundary == "after")
+        assert (await runtime._state.object_store(RuntimeDomain.TASK).stat(key) is not None) == (boundary == "after")
         assert (await run.cancel(idempotency_key="cancel")).completion == "cancelled"
         release.set()
         await asyncio.wait_for(runtime.evaluations._watchers[run.experiment_id], 5)
         result = await runtime.evaluations.purge_expired(principal=PRINCIPAL,
             now=record.metadata_expires_at + timedelta(seconds=1), exclusive=Offline())
         assert result.evaluations == (run.experiment_id,)
-        assert await storage.object_store(RuntimeDomain.TASK).stat(key) is None
+        assert await runtime._state.object_store(RuntimeDomain.TASK).stat(key) is None
         assert invocations == [{"secret": "retained"}]
         assert await runtime.evaluations._captures.read_task(capture, principal=PRINCIPAL)
         with pytest.raises(AIError) as rejected:
@@ -203,28 +204,29 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
                 (CandidateSpec("candidate", task=task.ref),), (ScorerSpec("score", scorer.ref, (DIMENSION,)),)),
                 PRINCIPAL, "start"), engine=engine)
         experiment_id = run.experiment_id
-        record = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         owned = record.owned_input_captures[0]
         key = input_capture_key(owned.namespace, owned.tenant_id, "task", owned.capture_id)
-        assert await storage.object_store(RuntimeDomain.TASK).stat(key) is None
+        assert await runtime._state.object_store(RuntimeDomain.TASK).stat(key) is None
     snapshot = InMemoryObjectStore("snapshot-copy")
     limits = SnapshotLimits(max_entries=10000, max_bytes=20 * 1024 * 1024)
     readonly = RuntimeStorage.filesystem(root)
+    readonly = RuntimeState(readonly)
     await readonly.initialize(namespace="snapshot", tenant_id=PRINCIPAL.tenant_id, read_only=True)
     try:
         reference = await readonly.export_snapshot(object_store=snapshot, limits=limits)
     finally:
         await readonly.close()
     restored = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(reference, object_store=snapshot, root=restored, limits=limits)
+    await RuntimeState.restore_snapshot(reference, object_store=snapshot, root=restored, limits=limits)
     restored_storage = RuntimeStorage.from_root(restored)
     async with Runtime.open("snapshot", models=ModelRegistry(), storage=restored_storage, context=CONTEXT) as runtime:
         run = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(task, scorer),
             principal=PRINCIPAL, idempotency_key="resume")
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
-        record = await restored_storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.owned_input_captures == (owned,)
-        assert await restored_storage.object_store(RuntimeDomain.TASK).stat(key) is not None
+        assert await runtime._state.object_store(RuntimeDomain.TASK).stat(key) is not None
 
 
 @pytest.mark.asyncio
@@ -249,13 +251,13 @@ async def test_content_purge_redacts_inline_template_and_keeps_admission_identit
                     TaskNode("target", task=task, input={"private": "erase inline input"}),)), selector="terminal_sinks")),),
                 (ScorerSpec("score", scorer.ref, (DIMENSION,)),),
                 policy=EvaluationPolicy(content_retention_seconds=60)), PRINCIPAL, "start"), engine=runtime.tasks.bind(task, scorer))
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.manifest.digest == record.manifest_digest
         await run.cancel(idempotency_key="cancel")
         result = await runtime.evaluations.purge_expired(principal=PRINCIPAL,
             now=record.content_expires_at + timedelta(seconds=1), exclusive=Offline())
         assert result.evaluations == (run.experiment_id,)
-        deleted = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        deleted = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert deleted.manifest.candidates[0].graph_template.template is None
         assert deleted.manifest_digest == record.manifest_digest
         assert deleted.content_deleted_at is not None
@@ -292,17 +294,18 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
             policy=EvaluationPolicy(content_retention_seconds=60)), PRINCIPAL, "start"), engine=engine)
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         trial = (await run.trials()).items[0]
-        record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         owned = record.owned_input_captures[0]
         result = await runtime.evaluations.purge_expired(principal=PRINCIPAL,
             now=record.content_expires_at + timedelta(seconds=1), exclusive=Offline())
         assert result.objects_retained >= 1
         key = input_capture_key(owned.namespace, owned.tenant_id, "task", owned.capture_id)
-        assert await storage.object_store(RuntimeDomain.TASK).stat(key) is not None
+        assert await runtime._state.object_store(RuntimeDomain.TASK).stat(key) is not None
         retained = await runtime.executions.capture_input(trial.subject.execution_id, CaptureInputRequest(PRINCIPAL, "retained"))
         assert dict((await runtime.evaluations._captures.read_task(retained, principal=PRINCIPAL)).input) == {"kept": 1}
     snapshot = InMemoryObjectStore("native-snapshot")
     readonly = RuntimeStorage.filesystem(tmp_path)
+    readonly = RuntimeState(readonly)
     await readonly.initialize(namespace="native-owner", tenant_id=PRINCIPAL.tenant_id, read_only=True)
     try:
         assert await readonly.export_snapshot(object_store=snapshot, limits=SnapshotLimits(max_entries=10000, max_bytes=20 * 1024 * 1024))

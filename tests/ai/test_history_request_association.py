@@ -3,6 +3,7 @@
 """Raw history retains proven model-request origins across durable boundaries."""
 
 from __future__ import annotations
+from linktools.ai.runtime.state import RuntimeState
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -55,7 +56,7 @@ from .test_history_projection_conformance import _record
 
 @dataclass
 class _History:
-    state: RuntimeStorage
+    state: RuntimeState
     reader: StepExecutionHistoryReader
     recorders: tuple[AgentRunRecorder, ...]
     journals: tuple[ModelRequestJournal, ...]
@@ -84,7 +85,7 @@ class _History:
 
 @asynccontextmanager
 async def _history(run_count: int = 1) -> AsyncIterator[_History]:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(

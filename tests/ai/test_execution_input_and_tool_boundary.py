@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution input and final tool-boundary regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -411,6 +412,7 @@ async def test_materializer_rejects_invalid_files_before_workspace_access(files:
 @pytest.mark.asyncio
 async def test_session_resume_preserves_explicit_execution_input_fields() -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="resume-input", tenant_id="tenant")
     execution = SimpleNamespace(
         start_for_session=AsyncMock(return_value=ExecutionHandle("execution")),

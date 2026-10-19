@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime.state import RuntimeDomain
@@ -310,7 +311,7 @@ async def test_core_producer_fencing_does_not_require_trace_archive(checkpoint_e
 async def test_materialized_trace_partition_is_atomic_with_core_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    storage = _storage(backend, tmp_path)
+    storage = RuntimeState(_storage(backend, tmp_path))
     await storage.initialize(namespace="trace-partition", tenant_id="tenant")
     try:
         repository = storage.execution.executions

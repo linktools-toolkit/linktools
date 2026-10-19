@@ -35,11 +35,11 @@ async def test_task_artifact_publish_readback_and_idempotency() -> None:
         assert record.producer == f"task:{context.graph_id}:{context.node_id}"
         assert record.object_ref.digest == digest
         assert record.size == len(body)
-        stored = await storage.artifact.records.get_metadata(
+        stored = await runtime._state.artifact.records.get_metadata(
             record.artifact_id, tenant_id=context.principal.tenant_id,
         )
         assert stored == record
-        objects = storage.object_store(RuntimeDomain.ARTIFACT)
+        objects = runtime._state.object_store(RuntimeDomain.ARTIFACT)
         assert b"".join([chunk async for chunk in objects.open(record.object_ref.key)]) == body
         replay = await context.artifacts.publish(
             "report.txt", chunks(), mime_type="text/plain",
@@ -57,7 +57,7 @@ async def test_task_artifact_publish_readback_and_idempotency() -> None:
                     expected_size=size, expected_digest=expected_digest,
                 )
             assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-        assert await storage.artifact.records.get_metadata(
+        assert await runtime._state.artifact.records.get_metadata(
             record.artifact_id, tenant_id=context.principal.tenant_id,
         ) == record
         return record.artifact_id

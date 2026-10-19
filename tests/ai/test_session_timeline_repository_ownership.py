@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Injected timeline repositories retain their independent task and read ownership."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -101,7 +102,7 @@ class ParallelSessionSubclass(SessionRepositoryImpl):
 
 
 def _history(
-    state: RuntimeStorage, *, executions: ExecutionRepository | None = None,
+    state: RuntimeState, *, executions: ExecutionRepository | None = None,
     sessions: SessionRepository | None = None,
 ) -> RuntimeHistory:
     return RuntimeHistory(
@@ -114,7 +115,7 @@ def _history(
     )
 
 
-async def _populate(state: RuntimeStorage) -> None:
+async def _populate(state: RuntimeState) -> None:
     await state.initialize(namespace="timeline-owner", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
     await state.execution.executions.create(replace(
@@ -146,6 +147,7 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
         conversation=StorageRoute.sqlite(tmp_path / "conversation.db"),
     )) if split else RuntimeStorage.sqlite(tmp_path / "shared.db")
     try:
+        state = RuntimeState(state)
         await _populate(state)
         principal = Principal("owner", "tenant")
         expected = await _history(state).session_timeline("session", principal=principal)
@@ -173,6 +175,7 @@ async def test_public_history_accepts_parallel_injected_repository_reads(
 async def test_builtin_public_timeline_keeps_one_metadata_transaction(tmp_path: Path) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "builtin.db")
     try:
+        state = RuntimeState(state)
         await _populate(state)
         engine = state.conversation.sessions.state_store.storage_group.context.engine.sync_engine
         statements, begins = [], []

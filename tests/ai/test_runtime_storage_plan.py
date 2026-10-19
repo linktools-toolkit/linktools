@@ -5,6 +5,7 @@
 import pytest
 
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.storage import StorageRoute
 
 
@@ -43,7 +44,7 @@ async def test_filesystem_plan_rejects_effective_member_path_overlap(tmp_path) -
         execution=StorageRoute.filesystem(execution_root),
         memory=StorageRoute.filesystem(execution_root / "execution"),
     )
-    state = RuntimeStorage.from_plan(plan)
+    state = RuntimeState(RuntimeStorage.from_plan(plan))
 
     with pytest.raises(ValueError, match="member paths overlap"):
         await state.initialize(namespace="runtime", tenant_id="tenant")
@@ -53,7 +54,7 @@ async def test_filesystem_plan_rejects_effective_member_path_overlap(tmp_path) -
 
 @pytest.mark.asyncio
 async def test_filesystem_execution_and_recovery_share_object_store(tmp_path) -> None:
-    state = RuntimeStorage.filesystem(tmp_path / "runtime")
+    state = RuntimeState(RuntimeStorage.filesystem(tmp_path / "runtime"))
     await state.initialize(namespace="runtime", tenant_id="tenant")
     try:
         assert (

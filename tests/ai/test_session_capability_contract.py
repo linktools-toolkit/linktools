@@ -100,7 +100,7 @@ async def test_same_captured_declarations_bind_two_runtimes_without_owner_leakag
         assert (await one.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
         assert (await two.wait(timeout_seconds=5)).result.output == {'text': 'answer'}
         for storage, runtime, execution in ((first_storage, first, one), (second_storage, second, two)):
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert record is not None and not record.conversation
     assert session_policy.enabled is False
     assert execution_policy.commit == CommitPolicy.sync()

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session timeline recovery handoff regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -57,6 +58,7 @@ def _session() -> SessionRecord:
 @pytest.mark.asyncio
 async def test_recovery_handoff_commits_timeline_with_session_continuation() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-recovery", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())

@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from linktools.ai.runtime.state import RuntimeState
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.core import Principal, TenantAuthorizationPolicy, canonical_json_bytes, canonical_sha256
@@ -64,10 +66,10 @@ async def test_history_and_task_results_keep_execution_object_ownership(
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeStorage.sqlite(
+    storage = RuntimeState(RuntimeStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects,
         cache=InMemoryCacheBackend(max_bytes=1024),
-    )
+    ))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         executions = _ResultExecutions()
@@ -118,14 +120,13 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
     objects = _CountingObjects()
     cache = _RecordingCache()
     route = StorageRoute.sqlite(tmp_path / "runtime.db", cache=cache)
-    storage = RuntimeStorage.from_plan(
+    storage = RuntimeState(RuntimeStorage.from_plan(
         RuntimeStoragePlan(conversation=route, execution=route),
         object_store=objects,
-    )
+    ))
     await storage.initialize(
         namespace="history", tenant_id="tenant",
-        module_caches={RuntimeDomain.CONVERSATION: cache, RuntimeDomain.TRACE: cache},
-        module_routes={RuntimeDomain.CHECKPOINT: route.with_cache(None)},
+        module_routes={RuntimeDomain.TRACE: route, RuntimeDomain.CHECKPOINT: route.with_cache(None)},
     )
     try:
         archive = storage.run_store.read_store(domain)
@@ -185,10 +186,10 @@ async def test_live_result_reads_preserve_authorization_and_direct_construction(
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeStorage.sqlite(
+    storage = RuntimeState(RuntimeStorage.sqlite(
         tmp_path / "runtime.db", object_store=objects,
         cache=InMemoryCacheBackend(max_bytes=1024),
-    )
+    ))
     await storage.initialize(namespace="history", tenant_id="tenant")
     try:
         record = await _seed(storage, output=StoredPayload.object(reference))
@@ -243,13 +244,13 @@ async def test_borrowed_and_read_only_history_use_shared_result_cache(tmp_path: 
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache=cache)
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects, cache=cache))
     await storage.initialize(namespace="history", tenant_id="tenant")
     principal = Principal("principal", "tenant", "service")
     try:
         await _seed(storage, output=StoredPayload.object(reference))
         history = _borrowed_runtime_history(
-            SimpleNamespace(), tenant_id="tenant", storage=storage,
+            SimpleNamespace(), tenant_id="tenant", state=storage,
             authorization=TenantAuthorizationPolicy("tenant"), artifact=SimpleNamespace(),
         )
         assert (await history.result("execution", principal=principal)).output == {"result": "persisted output"}
@@ -279,13 +280,13 @@ async def test_history_result_confirms_source_membership_inside_body_cache_windo
 
     await objects.put("result", chunks(), expected_size=len(content), expected_digest=digest)
     reference = ObjectRef("runtime", "result", digest, len(content))
-    storage = RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects,
-                                    cache=InMemoryCacheBackend(max_bytes=100000))
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "runtime.db", object_store=objects,
+                                    cache=InMemoryCacheBackend(max_bytes=100000)))
     await storage.initialize(namespace="history", tenant_id="tenant")
     principal = Principal("principal", "tenant", "service")
     try:
         await _seed(storage, output=StoredPayload.object(reference))
-        history = _borrowed_runtime_history(SimpleNamespace(), tenant_id="tenant", storage=storage,
+        history = _borrowed_runtime_history(SimpleNamespace(), tenant_id="tenant", state=storage,
                                            authorization=TenantAuthorizationPolicy("tenant"), artifact=SimpleNamespace())
         assert (await history.result("execution", principal=principal)).output == {"text": "retained result"}
         await objects.delete_object(reference.key, expected_digest=reference.digest)
@@ -311,11 +312,10 @@ async def test_checkpoint_consumers_confirm_source_inside_body_cache_window(
     now = [1000.0]
     monkeypatch.setattr(_write_cache, "time", lambda: now[0])
     objects = _CountingObjects()
-    storage = RuntimeStorage.sqlite(tmp_path / "checkpoint.db", object_store=objects,
-                                    cache=InMemoryCacheBackend(max_bytes=100000))
+    storage = RuntimeState(RuntimeStorage.sqlite(tmp_path / "checkpoint.db", object_store=objects,
+                                    cache=InMemoryCacheBackend(max_bytes=100000)))
     await storage.initialize(
         namespace="checkpoint", tenant_id="tenant",
-        module_caches={RuntimeDomain.CONVERSATION: storage.cache},
     )
     try:
         archive = storage.run_store.read_store(domain)

@@ -63,7 +63,7 @@ async def test_admission_cancellation_fences_both_start_orderings(
         ), PRINCIPAL, "same-admission")
         engine = runtime.tasks.bind(target_task, scorer)
         entered, release = asyncio.Event(), asyncio.Event()
-        reserve = storage.evaluation.records.reserve_experiment
+        reserve = runtime._state.evaluation.records.reserve_experiment
         delayed_gate = "open" if winner == "cancel" else "closed_cancel"
 
         async def paused(record: EvaluationRecord) -> EvaluationRecord:
@@ -73,7 +73,7 @@ async def test_admission_cancellation_fences_both_start_orderings(
             return await reserve(record)
 
         with monkeypatch.context() as patch:
-            patch.setattr(storage.evaluation.records, "reserve_experiment", paused)
+            patch.setattr(runtime._state.evaluation.records, "reserve_experiment", paused)
             delayed = asyncio.create_task(
                 runtime.evaluations.start(request, engine=engine) if winner == "cancel" else
                 runtime.evaluations.cancel_admission(request, engine=engine)
@@ -95,7 +95,7 @@ async def test_admission_cancellation_fences_both_start_orderings(
                 await asyncio.gather(delayed, return_exceptions=True)
         assert first.experiment_id == second.experiment_id
         assert (await second.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
-        record = await storage.evaluation.records.get(first.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        record = await runtime._state.evaluation.records.get(first.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record is not None and record.gate == "closed_cancel"
         assert record.manifest.principal == PRINCIPAL
         assert calls == ([] if winner == "cancel" else ["target"])
@@ -143,7 +143,7 @@ async def test_admission_cancellation_preserves_authorization_and_request_identi
             with pytest.raises(AIError) as denied:
                 await runtime.evaluations.cancel_admission(request, engine=engine)
             assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
-            assert await storage.evaluation.idempotency.get(
+            assert await runtime._state.evaluation.idempotency.get(
                 "evaluation.run", idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id,
             ) is None
         authorization.denied = None

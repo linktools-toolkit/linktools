@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Opt-in execution observations retain independent cursors and finite coverage."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 import time
 from dataclasses import replace
@@ -578,12 +579,14 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
     from .test_step_projection import _execution
 
     state = _storage("memory", tmp_path)
+    state = RuntimeState(state)
     await state.initialize(namespace=namespace, tenant_id="tenant")
     other = None
     try:
         await state.execution.executions.create_with_history_head(replace(_execution(), durable_trace=durable_trace))
         if separate_owner:
             other = _storage("memory", tmp_path)
+            other = RuntimeState(other)
             await other.initialize(namespace=namespace, tenant_id="tenant")
             await other.execution.executions.create_with_history_head(_execution())
         reader = _reader(state if other is None else other)

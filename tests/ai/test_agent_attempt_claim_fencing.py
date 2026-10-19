@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Ambiguous admission acknowledgements retain exact producer ownership."""
 
+from linktools.ai.runtime.state import RuntimeState
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -31,6 +32,7 @@ async def test_admission_readback_requires_own_receipt(
 ) -> None:
     namespace = "attempt-claim"
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace=namespace, tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)

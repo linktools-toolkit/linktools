@@ -272,7 +272,7 @@ async def test_terminal_stream_allows_immediate_runtime_close(
                     terminal_events.append(event)
             assert len(terminal_events) == 1
     finally:
-        await state.close()
+        await runtime._state.close()
 
 
 @pytest.mark.asyncio
@@ -323,7 +323,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             with pytest.raises(asyncio.CancelledError):
                 await task
     finally:
-        await state.close()
+        await runtime._state.close()
 
     reopened = RuntimeStorage.sqlite(
         database,
@@ -335,10 +335,10 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             storage=reopened,
             features=features,
-        ):
+        ) as reopened_runtime:
             pass
     finally:
-        await reopened.close()
+        await reopened_runtime._state.close()
 
 
 @pytest.mark.asyncio
@@ -378,15 +378,15 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             )).result
             assert result.status is ExecutionStatus.SUCCEEDED
 
-            session_record = await state.conversation.sessions.get(
+            session_record = await runtime._state.conversation.sessions.get(
                 created.session_id,
                 tenant_id=runtime.tenant_id,
             )
-            execution = await state.execution.executions.get(
+            execution = await runtime._state.execution.executions.get(
                 result.execution_id,
                 tenant_id=runtime.tenant_id,
             )
-            persisted_result = await state.execution.executions.get_result(
+            persisted_result = await runtime._state.execution.executions.get_result(
                 result.execution_id,
                 tenant_id=runtime.tenant_id,
             )
@@ -425,4 +425,4 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             assert waited.status is ExecutionStatus.SUCCEEDED
             assert waited.output == persisted_result.output.value
     finally:
-        await state.close()
+        await runtime._state.close()

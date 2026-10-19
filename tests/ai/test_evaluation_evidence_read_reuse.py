@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Snapshot-local evidence reads keep current authorization and retention checks."""
 
+from linktools.ai.runtime.state import RuntimeState
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -60,10 +61,10 @@ async def completed(path: Path, *, count: int = 2) -> AsyncIterator[tuple[Runtim
             engine=runtime.tasks.bind(target, scorer))
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         policy.calls.clear()
-        yield runtime, storage, run, scorer, policy
+        yield runtime, runtime._state, run, scorer, policy
 
 
-async def report_count(storage: RuntimeStorage) -> int:
+async def report_count(storage: RuntimeState) -> int:
     return len(await storage.evaluation.records.state_store.read(
         lambda tx: tx.list_records(RecordQuery(kind="evaluation_report"))))
 

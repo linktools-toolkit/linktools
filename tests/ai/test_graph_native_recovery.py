@@ -107,15 +107,15 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             )
             await asyncio.wait_for(entered.wait(), 10)
             bound = await _wait_for_committed(
-                lambda: storage.task.tasks.graph_state(run.graph_id, tenant_id=origin.tenant_id),
+                lambda: runtime._state.task.tasks.graph_state(run.graph_id, tenant_id=origin.tenant_id),
                 lambda state: state is not None and state.node_states[0].execution_id is not None,
             )
             execution_id = bound.node_states[0].execution_id
             assert execution_id is not None
             backend = runtime._execution_service.runtime_backend()
             worker = backend._tasks[execution_id]
-            before = await storage.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
-            head = await storage.execution.executions.get_history_head(execution_id, tenant_id=origin.tenant_id)
+            before = await runtime._state.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
+            head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=origin.tenant_id)
             assert before is not None and head is not None
             assert before.status is ExecutionStatus.STARTED
             assert bound.nodes[0].input_capture == task_capture
@@ -163,8 +163,8 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             assert completed.status is TaskStatus.SUCCEEDED
             result = await runtime.executions.result(execution_id, principal=origin)
             assert result.output == {"text": "recovered answer"}
-            current = await storage.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
-            recovered_head = await storage.execution.executions.get_history_head(
+            current = await runtime._state.execution.executions.get(execution_id, tenant_id=origin.tenant_id)
+            recovered_head = await runtime._state.execution.executions.get_history_head(
                 execution_id, tenant_id=origin.tenant_id,
             )
             assert current is not None and recovered_head is not None
@@ -179,7 +179,7 @@ async def test_run_only_actor_recovers_native_captured_agent_graph(
             final_graph = await run.state(include_content=True)
             assert final_graph.nodes[0].input_capture == task_capture
             assert final_graph.node_states[0].execution_id == execution_id
-            receipts = await storage.execution.operations.list_pending(
+            receipts = await runtime._state.execution.operations.list_pending(
                 ResourceKind.EXECUTION, execution_id, tenant_id=origin.tenant_id,
                 limit=10, states=frozenset({OperationStatus.SUCCEEDED}),
             )
@@ -224,16 +224,16 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
             )
             await asyncio.wait_for(entered.wait(), 10)
             bound = await _wait_for_committed(
-                lambda: storage.task.tasks.graph_state(run.graph_id, tenant_id=runtime.tenant_id),
+                lambda: runtime._state.task.tasks.graph_state(run.graph_id, tenant_id=runtime.tenant_id),
                 lambda state: state is not None and state.node_states[0].execution_id is not None,
             )
             execution_id = bound.node_states[0].execution_id
             assert execution_id is not None
-            head = await storage.execution.executions.get_history_head(
+            head = await runtime._state.execution.executions.get_history_head(
                 execution_id, tenant_id=runtime.tenant_id,
             )
             assert head is not None
-            receipts = await storage.execution.operations.list_pending(
+            receipts = await runtime._state.execution.operations.list_pending(
                 ResourceKind.EXECUTION, execution_id, tenant_id=runtime.tenant_id,
                 limit=10, states=frozenset(OperationStatus),
             )
@@ -241,12 +241,12 @@ async def test_graph_takeover_rejects_active_local_worker_without_child_claim(tm
             with pytest.raises(AIError) as raised:
                 await run.recover(idempotency_key="reject-local-takeover")
             assert raised.value.code is ErrorCode.STORAGE_CONFLICT
-            unchanged_head = await storage.execution.executions.get_history_head(
+            unchanged_head = await runtime._state.execution.executions.get_history_head(
                 execution_id, tenant_id=runtime.tenant_id,
             )
             assert unchanged_head.producer_generation == head.producer_generation
             assert unchanged_head.producer_claim_id == head.producer_claim_id
-            assert await storage.execution.operations.list_pending(
+            assert await runtime._state.execution.operations.list_pending(
                 ResourceKind.EXECUTION, execution_id, tenant_id=runtime.tenant_id,
                 limit=10, states=frozenset(OperationStatus),
             ) == ()

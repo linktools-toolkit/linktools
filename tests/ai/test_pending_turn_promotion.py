@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeDomain
@@ -239,7 +240,7 @@ async def test_pending_turn_promotion_independent_connections_grant_only_one_can
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool,
 ) -> None:
     async with _turn_state("sqlite", tmp_path) as first:
-        second_storage = _storage("sqlite", tmp_path)
+        second_storage = RuntimeState(_storage("sqlite", tmp_path))
         await second_storage.initialize(namespace=_NAMESPACE, tenant_id="tenant")
         try:
             second = _TurnState(second_storage, _runtime_commands(second_storage, _NAMESPACE), first.session)

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._model_interaction import StagedModelInteraction
@@ -32,7 +33,7 @@ def _storage(backend: str, path: Path) -> RuntimeStorage:
 async def test_observed_transcript_does_not_extend_recoverable_checkpoint(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="independent-observation", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -65,7 +66,7 @@ async def test_observed_transcript_does_not_extend_recoverable_checkpoint(
 async def test_overlapping_request_updates_keep_their_admitted_identities(
     tmp_path: Path, backend: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="overlapping-observation", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -109,7 +110,7 @@ async def test_recovery_checkpoint_commits_guarded_truth_before_public_projectio
     from linktools.ai.runtime.state._step_archive import StateStepArchive
     from linktools.ai.runtime.state._step_contracts import StepEvent
 
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="atomic-checkpoint", tenant_id="tenant")
     try:
         execution = replace(_execution(), revision=1)
@@ -222,7 +223,7 @@ async def test_caller_cancellation_waits_for_atomic_checkpoint_truth(
 ) -> None:
     from linktools.ai.runtime.state._step_archive import StateStepArchive
 
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="cancel-checkpoint", tenant_id="tenant")
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -290,7 +291,7 @@ async def test_recovery_restores_context_without_assuming_public_checkpoint_ackn
     from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 
     namespace = "deferred-context-restore"
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=namespace, tenant_id="tenant")
     run_id = agent_run_id(namespace=namespace, tenant_id="tenant", execution_id="execution", agent_run_seq=1)
     conversation_id = agent_conversation_id(namespace=namespace, tenant_id="tenant", execution_id="execution")

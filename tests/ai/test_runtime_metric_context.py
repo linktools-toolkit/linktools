@@ -7,6 +7,7 @@ from ._runtime_test_helpers import workspace_features
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -234,14 +235,14 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
 
     metrics = Metrics.from_store(CancellingStore(), cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
     storage = RuntimeStorage.in_memory()
-    original_close = storage.close
+    original_close = RuntimeState.close
 
-    async def close_storage() -> None:
+    async def close_storage(owner) -> None:
         assert returned.is_set()
         storage_closed.set()
-        await original_close()
+        await original_close(owner)
 
-    monkeypatch.setattr(storage, "close", close_storage)
+    monkeypatch.setattr(RuntimeState, "close", close_storage)
     features = RuntimeFeatures("close-metrics")
     async with Runtime.open(
         "close-owner", metrics=metrics, models=ModelRegistry(), storage=storage, features=features,

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Current conversation envelopes and portable snapshots preserve terminal meaning."""
 
+from linktools.ai.runtime.state import RuntimeState
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -80,6 +81,7 @@ async def test_repository_and_snapshot_reject_same_corrupt_turn_metadata(
     tmp_path: Path, field: str, value: object,
 ) -> None:
     storage = RuntimeStorage.sqlite(tmp_path / "state.db")
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="turn-codec", tenant_id="tenant")
     try:
         repository = storage.conversation.sessions
@@ -113,12 +115,14 @@ async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
         await session.run(("original input", BinaryContent(attachment, media_type="text/plain")), timeout_seconds=5)
         expected = (await session.timeline()).items
     storage = _storage(tmp_path, backend)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         await _erase_execution_owners(storage)
     finally:
         await storage.close()
     reader = _storage(tmp_path, backend)
+    reader = RuntimeState(reader)
     await reader.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id, read_only=True)
     archive = InMemoryObjectStore("turn-snapshot")
     limits = SnapshotLimits(max_entries=1000, max_bytes=4 * 1024 * 1024)
@@ -127,10 +131,11 @@ async def test_snapshot_roundtrips_retained_turn_payloads_after_execution_prune(
     finally:
         await reader.close()
     root = tmp_path / "restored"
-    await RuntimeStorage.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
+    await RuntimeState.restore_snapshot(snapshot, object_store=archive, root=root, limits=limits)
     async with RuntimeHistory.open(_NAMESPACE, storage=RuntimeStorage.from_root(root)) as history:
         assert (await history.session_timeline("session", principal=principal)).items == expected
     restored = RuntimeStorage.from_root(root)
+    restored = RuntimeState(restored)
     await restored.initialize(namespace=_NAMESPACE, tenant_id=principal.tenant_id)
     try:
         commits = await restored.conversation.sessions.list_timeline_commits(

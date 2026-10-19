@@ -83,7 +83,7 @@ async def test_minimal_runtime_supports_sessions_without_retained_model_context(
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         assert (await execution.wait(timeout_seconds=5)).result.status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
         with pytest.raises(AIError) as missing:
@@ -119,7 +119,7 @@ async def test_conversation_pending_requires_complete_cache(tmp_path, monkeypatc
         await asyncio.wait_for(entered.wait(), 5)
         pending = cache_kind == "full" and evidence == "none"
         try:
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert (record is None) == pending
             if pending:
                 assert writes == []
@@ -145,17 +145,17 @@ async def test_no_optional_features_preserves_required_deferred_frontier(tmp_pat
         execution = await runtime.agents.get().start("read a file")
         async def wait_for_deferred():
             while True:
-                record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+                record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
                 if record and record.status is ExecutionStatus.WAITING_DEFERRED:
                     return record
                 await asyncio.sleep(.01)
 
         record = await asyncio.wait_for(wait_for_deferred(), timeout=5)
         assert not record.conversation and not record.restart_checkpoints and not record.durable_trace
-        checkpoint = await storage.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        checkpoint = await runtime._state.recovery.checkpoints.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert checkpoint is not None and checkpoint.state is RecoveryCheckpointState.WAITING
         assert checkpoint.pending_tools is not None
-        approvals = await storage.recovery.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
+        approvals = await runtime._state.recovery.approvals.list_pending(execution.execution_id, tenant_id=runtime.tenant_id)
         assert len(approvals) == 1 and approvals[0].status is ApprovalStatus.PENDING
 
 
@@ -188,12 +188,12 @@ async def test_reconstructed_test_actual_effect_promotes_before_invocation_but_r
     state = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=InMemoryCacheBackend(max_bytes=2**20))
     owner = {}
     async def lookup(context: AgentContext[None]) -> str:
-        record = await state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
+        record = await runtime._state.execution.executions.get(context.execution_id, tenant_id=context.principal.tenant_id)
         calls.append(record)
         return 'value'
     async def model(messages, info):
         if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
-            assert await state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
+            assert await runtime._state.execution.executions.get(owner['execution'], tenant_id=owner['tenant']) is None
             return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='lookup-call')])
         return ModelResponse(parts=[TextPart('answer')])
     group = RuntimeFeatures('tool-pending')
@@ -242,12 +242,12 @@ async def test_reconstructed_test_pending_cancel_promotes_and_quiesces_before_ca
         session = await runtime.agents.get().create_session('session')
         execution = await session.start('question')
         await asyncio.wait_for(entered.wait(), 5)
-        assert await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
+        assert await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id) is None
         await execution.cancel()
         assert stopped.is_set()
         result = (await execution.wait(timeout_seconds=5)).result
         assert result.status is ExecutionStatus.CANCELLED
-        record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.status is ExecutionStatus.CANCELLED
 
 
@@ -329,5 +329,5 @@ async def test_capture_does_not_reinterpret_later_feature_registration():
         session = await runtime.agents.get().create_session("session")
         execution = await session.start("question")
         await execution.wait(timeout_seconds=5)
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.conversation and not record.durable_trace

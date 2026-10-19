@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Terminal ownership preserves concurrent dependency retention metadata."""
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import ConversationCapability, TraceCapability
 from dataclasses import replace
 from datetime import timedelta
@@ -157,7 +158,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         result = (await handle.wait(timeout_seconds=20)).result
         assert changed
         assert result.status is ExecutionStatus.SUCCEEDED
-        observed = await state.execution.executions.get(
+        observed = await runtime._state.execution.executions.get(
             handle.execution_id, tenant_id=runtime.tenant_id
         )
         assert observed is not None
@@ -166,7 +167,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
         assert observed.result == terminal_results[-1]
         assert observed.result.usage.model_requests == 1
         assert (
-            await state.execution.executions.get_history_seal(
+            await runtime._state.execution.executions.get_history_seal(
                 handle.execution_id, tenant_id=runtime.tenant_id
             )
             is not None
@@ -190,6 +191,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
     post_commit_change: str,
 ) -> None:
     state = _storage(tmp_path, backend, split_session)
+    state = RuntimeState(state)
     await state.initialize(namespace="terminal-readback", tenant_id="tenant")
     repository = state.execution.executions
     current = _record(ExecutionStatus.STARTED, 0)
@@ -364,6 +366,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
     drift: str,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="terminal-conflict", tenant_id="tenant")
     repository = state.execution.executions
     current = _record(ExecutionStatus.STARTED, 0)
@@ -477,6 +480,7 @@ async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_reg
     from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="unregistered-terminal-fence", tenant_id="tenant")
     try:
         repository = state.execution.executions

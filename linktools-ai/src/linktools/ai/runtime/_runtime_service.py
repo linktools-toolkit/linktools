@@ -111,7 +111,7 @@ from .service_api import (
     UpdateSessionRequest,
     ExecutionTreeEvent,
 )
-from .state import RuntimeStorage
+from .state import RuntimeStorage, RuntimeState
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
@@ -302,6 +302,7 @@ class Runtime(Generic[AppT]):
         metric_control: "_MetricControl | None" = None,
         _binding_resolver: "_AgentBindingResolver | None" = None,
         input_captures: "RuntimeInputCaptures | None" = None,
+        _state: RuntimeState | None = None,
     ) -> None:
         if any(
             value is None
@@ -355,6 +356,7 @@ class Runtime(Generic[AppT]):
         self._tree_streamer = tree_streamer
         self._metric_control = metric_control
         self._binding_resolver = _binding_resolver
+        self._state = _state
         self._closed = False
         self._closing = False
         self._observation_sessions: set[_ObservationSession] = set()
@@ -1495,6 +1497,7 @@ async def _open_runtime(
             metric_control=components.metric_control,
             _binding_resolver=components.binding_resolver,
             input_captures=components.input_captures,
+            _state=components.state,
         )
     except BaseException:
         try:

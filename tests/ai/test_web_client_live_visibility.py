@@ -80,7 +80,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
         "web-client-live", models=models, storage=storage,
         features=group,
     ) as runtime:
-        commit = storage.run_store.commit_captured_execution_projection
+        commit = runtime._state.run_store.commit_captured_execution_projection
 
         async def observed_commit(
             captured: CapturedExecutionProjection, flight: _AgentRunProjectionFlight,
@@ -97,7 +97,7 @@ async def test_web_client_live_visibility_follows_completed_request_commit(
                     await release_commit.wait()
             await commit(captured, flight, execution_id=execution_id)
 
-        monkeypatch.setattr(storage.run_store, "commit_captured_execution_projection", observed_commit)
+        monkeypatch.setattr(runtime._state.run_store, "commit_captured_execution_projection", observed_commit)
         execution = await runtime.agents.get("default").start("原始\nrequest with  spaces")
         async with _client(create_app(runtime=runtime)) as http:
             path = f"/api/executions/{execution.execution_id}/models?include_client_requests=true"

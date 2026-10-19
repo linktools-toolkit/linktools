@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
+
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     RuntimeSnapshot,
@@ -15,7 +17,6 @@ from linktools.ai.runtime import (
     SnapshotTargetInfo,
 )
 from linktools.ai.runtime import _snapshot as snapshot_module
-from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
 
@@ -86,7 +87,7 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeStorage,
+        RuntimeState,
         "restore_snapshot",
         classmethod(restore_storage),
     )
@@ -176,7 +177,7 @@ async def test_collect_temporary_skips_active_restore_generation(
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeStorage,
+        RuntimeState,
         "restore_snapshot",
         classmethod(restore_storage),
     )
@@ -251,7 +252,7 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeStorage,
+        RuntimeState,
         "restore_snapshot",
         classmethod(restore_storage),
     )

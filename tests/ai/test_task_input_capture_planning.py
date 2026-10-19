@@ -46,7 +46,7 @@ async def test_derived_input_description_matches_publication_without_writes(
                             storage=storage) as runtime:
         source = await _source_capture(runtime)
         captures = runtime._input_captures
-        objects = storage.object_store(RuntimeDomain.TASK)
+        objects = runtime._state.object_store(RuntimeDomain.TASK)
 
         async def reject_write(*args: object, **kwargs: object) -> object:
             raise AssertionError("input planning must not publish payloads")
@@ -118,7 +118,7 @@ async def test_owned_input_expiry_fences_only_its_reserved_derivation(
             with pytest.raises(AIError) as retained:
                 await captures.expire_task_input_objects(candidates, principal=PRINCIPAL, now=datetime.now(timezone.utc))
             assert retained.value.code is ErrorCode.STORAGE_CONFLICT
-            await storage.object_store(RuntimeDomain.TASK).delete_object(candidates[0].key, expected_digest=candidates[0].digest)
+            await runtime._state.object_store(RuntimeDomain.TASK).delete_object(candidates[0].key, expected_digest=candidates[0].digest)
         receipt_objects = tuple(replace(reference, store_id="runtime") for reference in candidates)
         await captures.expire_task_input_objects(receipt_objects, principal=PRINCIPAL, now=datetime.now(timezone.utc))
         with pytest.raises(AIError) as rejected:

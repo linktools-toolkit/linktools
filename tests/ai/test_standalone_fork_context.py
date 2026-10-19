@@ -76,17 +76,17 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
             assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         expected = encode_model_messages(tuple(actual))
         source_id = source.execution_id
-        record = await state.execution.executions.get(source_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(source_id, tenant_id=runtime.tenant_id)
         assert record is not None and not record.durable_trace and not record.restart_checkpoints
         run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                               execution_id=source_id, agent_run_seq=record.agent_run_seq)
-        archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
+        archive = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
         checkpoint = await archive.latest_checkpoint(agent_run_id=run_id)
         assert checkpoint is not None
         assert encode_model_messages(tuple(checkpoint.context_messages or checkpoint.messages)) == expected
         assert await archive.checkpoint_count(agent_run_id=run_id) == 1
         assert await archive.list_events(agent_run_id=run_id) == []
-        assert await state.run_store.read_store(RuntimeDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
+        assert await runtime._state.run_store.read_store(RuntimeDomain.TRACE).get_agent_run(agent_run_id=run_id) is None
 
     async with Runtime.open("standalone-fork", storage=storage(), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         original = await runtime.executions.get(source_id)
@@ -122,7 +122,7 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
             if statement.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
                 transactions.add(connection.get_transaction())
 
-        engine = state.execution.executions.state_store.storage_group.context.engine.sync_engine
+        engine = runtime._state.execution.executions.state_store.storage_group.context.engine.sync_engine
         event.listen(engine, "before_cursor_execute", capture)
         try:
             source = await runtime.agents.get().start("question", idempotency_key="question")
@@ -194,7 +194,7 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
         source = await runtime.agents.get().start("source")
         assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         source_id = source.execution_id
-        await _damage_fork_context(storage.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
+        await _damage_fork_context(runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT).state_store, damage)
     with pytest.raises(AIError) as raised:
         async with Runtime.open("corrupt-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None), models=models, features=group) as runtime:
             source = await runtime.executions.get(source_id)
@@ -265,7 +265,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
             finally:
                 run_id = agent_run_id(namespace=runtime.namespace, tenant_id=runtime.tenant_id,
                                       execution_id=source.execution_id, agent_run_seq=1)
-                archive = storage.run_store.read_store(RuntimeDomain.CHECKPOINT)
+                archive = runtime._state.run_store.read_store(RuntimeDomain.CHECKPOINT)
                 assert await archive.latest_checkpoint(agent_run_id=run_id) is None
                 if state == "running":
                     await source.cancel()

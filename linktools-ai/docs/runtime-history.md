@@ -5,8 +5,8 @@ its recorded content. Live progress can arrive before its history is persisted.
 Detailed execution persistence requires `TraceCapability()` registered
 at Runtime scope; storage retention alone does not select it. Without this
 capability, the owning Runtime exposes its existing live staging content while
-retained locally. Final results follow execution retention. Session metadata and display history
-are built in; retained model context for subsequent turns requires
+retained locally. Final results follow execution retention. Session management is supplied by the default `SessionCapability`; retained
+conversation content and model context for subsequent turns require
 `ConversationCapability()` and follows conversation retention. An unretained
 completed turn makes subsequent resume/fork fail with
 `SESSION_HISTORY_UNAVAILABLE`; it cannot be repaired by enabling Conversation
@@ -21,10 +21,10 @@ terminal commits and result consumption retain their authoritative transaction
 checks. Task-owned runs and their delegated descendants keep source-only model control
 checks, including on transient execution routes.
 
-With durable trace enabled, retained execution routes coalesce observation writes
-with one Runtime-owned timer. The first queued observation starts a three-second window; the shared
-tick flushes queued runs. A run reaching 128 observation boundaries flushes
-earlier. Each run keeps its own transaction and completion barrier, so a blocked
+With durable trace enabled and a write-buffer cache on its effective route,
+Trace coalesces observation writes through its owned cache-buffer scopes. The
+default batch policy flushes at 128 observation boundaries or after three seconds.
+Without a write-buffer cache, observation writes are synchronous. Each run keeps its own transaction and completion barrier, so a blocked
 run does not stop another run's publication. An idle Runtime performs no flush.
 Storage latency and contention can extend publication time. A blocked provider
 or tool does not need to produce another event for that scheduled flush to run.
@@ -599,3 +599,13 @@ still exceed the target, and the summary request itself must fit the selected
 model. Custom capabilities that enlarge input after the compaction hook remain
 responsible for that late change. Runtime neither rejects a request solely from
 this heuristic nor adds a token-counting network request on every model call.
+
+## Resource declarations and read scopes
+
+`RuntimeStorage` is a reusable resource declaration. Opening a Runtime or
+`RuntimeHistory` creates a separate operational binding over those resources;
+closing one binding does not mutate the declaration or close borrowed backends.
+Repositories, retained-content readers, and snapshot/cleanup operations belong
+to the binding, rather than to the configuration object. Use the domain/history
+APIs for reads and `RuntimeSnapshot` for portable snapshots. Explicit route
+overrides must also be supplied when opening history over custom domain routes.

@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import _steps, _trace_persistence
+from linktools.ai.runtime.state import RuntimeState, _steps, _trace_persistence
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from linktools.ai.runtime._transcript_staging import StagedTranscript
 
@@ -23,7 +23,7 @@ _DEFAULT_CACHE = object()
 
 
 async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     if cache is _DEFAULT_CACHE:
         cache = InMemoryCacheBackend(max_bytes=65536)
     await state.initialize(

@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
@@ -45,7 +46,7 @@ def _binding_contract() -> AgentBindingContract:
 
 @pytest.mark.asyncio
 async def test_execution_idempotency_repository_owns_resource_kind() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="idempotency-owner", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)
@@ -73,7 +74,7 @@ async def test_execution_idempotency_repository_owns_resource_kind() -> None:
 async def test_in_memory_terminal_commit_validates_success_result(
     payload_kind: str,
 ) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="memory-terminal", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)

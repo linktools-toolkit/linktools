@@ -53,7 +53,7 @@ async def test_closed_evaluations_reject_control_without_persisting(
 
         pending = await asyncio.wait_for(waiting_score(), 10)
         await runtime.evaluations.close()
-        repository = storage.evaluation.records
+        repository = runtime._state.evaluation.records
         before = await repository.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="evaluation")))
         assert len(before) == 1
@@ -76,7 +76,7 @@ async def test_closed_evaluations_reject_control_without_persisting(
         assert not raised.value.retryable
         assert await repository.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="evaluation"))) == before
-        assert await storage.evaluation.idempotency.get("evaluation.run", idempotency_key_digest(key),
+        assert await runtime._state.evaluation.idempotency.get("evaluation.run", idempotency_key_digest(key),
                                                        tenant_id=PRINCIPAL.tenant_id) is None
         reopened = await runtime.evaluations.get(run.experiment_id, principal=PRINCIPAL)
         assert (await reopened.inspect()).completion == "running"

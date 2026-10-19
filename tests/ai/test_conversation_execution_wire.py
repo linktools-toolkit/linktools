@@ -34,7 +34,7 @@ async def test_execution_writer_requires_explicit_conversation(
     ) as runtime:
         execution = await runtime.agents.get().start("answer")
         await execution.wait(timeout_seconds=5)
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.conversation is conversation
         encode = _encode_persisted_domain if persisted else encode_domain
         payload = encode(record)

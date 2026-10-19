@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from pathlib import Path
 
-from ...storage import StorageRoute, StorageRetentionMode
+from ...storage import CacheCapabilities, ObjectStore, StorageRoute, StorageRetentionMode
 
 
 from ...core import RuntimeDomain
@@ -47,6 +47,24 @@ class RuntimeStoragePlan:
         default_factory=dict, init=False, repr=False, compare=False,
     )
 
+    @classmethod
+    def from_default(cls, route: StorageRoute) -> "RuntimeStoragePlan":
+        """Apply one default resource to the independently routed domains."""
+        return cls(**{domain.value: route for domain in RuntimeDomain
+                      if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}})
+
+    @classmethod
+    def filesystem(cls, root: Path, *, cache: CacheCapabilities | None = None) -> "RuntimeStoragePlan":
+        """Keep domain members distinct within one filesystem transaction group."""
+        return cls(**{
+            domain.value: StorageRoute.filesystem(
+                root if domain is RuntimeDomain.EXECUTION else root / domain.value,
+                transaction_root=root, cache=cache,
+            )
+            for domain in RuntimeDomain
+            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
+        })
+
     def __post_init__(self) -> None:
         routes = tuple(self.route(domain) for domain in RuntimeDomain)
         if any(not isinstance(route, StorageRoute) for route in routes):
@@ -74,6 +92,41 @@ class RuntimeStoragePlan:
                 for right in sorted(paths)[index + 1 :]:
                     if left in right.parents or right in left.parents:
                         raise ValueError("filesystem group member paths must be disjoint")
+
+    @property
+    def resolved_routes(self) -> Mapping[RuntimeDomain, StorageRoute]:
+        return MappingProxyType({domain: self.route(domain) for domain in RuntimeDomain})
+
+    def validate_object_store(self, object_store: ObjectStore | None) -> None:
+        if object_store is not None and not any(
+            runtime_domain_uses_object_store(domain)
+            and self.route(domain).retention is StorageRetentionMode.DURABLE
+            for domain in RuntimeDomain
+        ):
+            raise ValueError(
+                "object_store requires at least one durable object-capable RuntimeDomain"
+            )
+        if (
+            self.route(RuntimeDomain.CONVERSATION).retention
+            is StorageRetentionMode.DURABLE
+        ):
+            if (
+                self.route(RuntimeDomain.EXECUTION).retention
+                is not StorageRetentionMode.DURABLE
+            ):
+                raise ValueError("durable conversation requires durable execution")
+            if (
+                self.route(RuntimeDomain.RECOVERY).retention
+                is not StorageRetentionMode.DURABLE
+            ):
+                raise ValueError("durable conversation requires durable recovery")
+        if (
+            self.route(RuntimeDomain.EVALUATION).retention
+            is StorageRetentionMode.DURABLE
+            and self.route(RuntimeDomain.EXECUTION).retention
+            is not StorageRetentionMode.DURABLE
+        ):
+            raise ValueError("durable evaluation requires durable execution")
 
     def with_module_routes(
         self, routes: Mapping[RuntimeDomain, StorageRoute],

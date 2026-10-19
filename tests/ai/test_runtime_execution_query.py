@@ -20,6 +20,7 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import ListExecutionRequest, RuntimeHistory
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
@@ -174,7 +175,7 @@ async def test_execution_service_list_delegates_public_query_request() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="execution-query", tenant_id="tenant")
     try:
         records = (
@@ -243,7 +244,7 @@ async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None
 
 @pytest.mark.asyncio
 async def test_execution_list_cursor_binds_identity_and_continues_without_repeat() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="execution-cursor", tenant_id="tenant")
     try:
         records = tuple(
@@ -298,7 +299,7 @@ async def test_execution_list_cursor_binds_identity_and_continues_without_repeat
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_unauthorized_candidates() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="execution-auth", tenant_id="tenant")
     try:
         for index in range(1, 4):
@@ -324,7 +325,7 @@ async def test_execution_list_skips_unauthorized_candidates() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_new_records_before_cursor() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="execution-weak-consistency", tenant_id="tenant")
     try:
         for execution_id in ("exec-001", "exec-002", "exec-003"):
@@ -351,7 +352,7 @@ async def test_execution_list_skips_new_records_before_cursor() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_exact_physical_boundary_has_no_false_cursor() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="execution-boundary", tenant_id="tenant")
     try:
         for index in range(1000):
@@ -379,7 +380,7 @@ async def test_execution_list_exact_physical_boundary_has_no_false_cursor() -> N
 
 @pytest.mark.asyncio
 async def test_runtime_and_history_execution_queries_share_projection() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="execution-parity", tenant_id="tenant")
     try:
         record = _record(

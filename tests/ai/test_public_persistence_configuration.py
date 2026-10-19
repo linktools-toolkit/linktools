@@ -70,7 +70,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         expected = (await execution.model_interactions()).items
         assert expected
         for domain, route in routes.items():
-            assert state.plan.route(domain) == route
+            assert runtime._state.plan.route(domain) == route
             assert list(route.path.rglob("manifest.json"))
 
     async def unexpected_hook(*args, **kwargs):
@@ -129,11 +129,11 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
         storage=state.plan.route(RuntimeDomain.TRACE).with_cache(trace_cache),
     ))
     features = _features(ConversationCapability(), trace)
-    async with Runtime.open("module-cache", storage=state, models=_FeatureModels(), features=features):
+    async with Runtime.open("module-cache", storage=state, models=_FeatureModels(), features=features) as runtime:
         before_root = (root_cache.reads, root_cache.writes)
         before_module = (module_cache.reads, module_cache.writes)
-        assert await state.conversation.sessions.get("missing", tenant_id="default") is None
-        assert await state.conversation.sessions.get("missing", tenant_id="default") is None
+        assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
+        assert await runtime._state.conversation.sessions.get("missing", tenant_id="default") is None
         assert root_cache.reads > before_root[0]
         assert root_cache.writes > before_root[1]
         assert (module_cache.reads, module_cache.writes) == before_module
@@ -145,13 +145,13 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
         for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.TRACE):
             key = "cache-probe-" + domain.value
             digest = hashlib.sha256(content).hexdigest()
-            await state.object_store(domain).put(
+            await runtime._state.object_store(domain).put(
                 key, chunks(), expected_size=len(content), expected_digest=digest,
             )
             before = [(cache.reads, cache.writes) for cache in (root_cache, module_cache)]
             ref = ObjectRef("runtime", key, digest, len(content))
-            assert await state.read_object(domain, ref) == content
-            assert await state.read_object(domain, ref) == content
+            assert await runtime._state.read_object(domain, ref) == content
+            assert await runtime._state.read_object(domain, ref) == content
             expected_cache = root_cache if domain is RuntimeDomain.CONVERSATION else trace_cache
             for cache, counters in zip((root_cache, module_cache), before):
                 if cache is expected_cache:
@@ -197,7 +197,7 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
         execution = await session.start("question", idempotency_key="turn")
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            record = await state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert record is not None
             assert record.status is ExecutionStatus.STARTED
         finally:

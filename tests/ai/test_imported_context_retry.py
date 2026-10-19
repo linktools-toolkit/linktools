@@ -38,7 +38,7 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
-        record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == ("inline" if metadata_size == 16 else "object")
         with capture_run_messages() as messages:
             retry = await source.retry("replacement prompt")
@@ -105,16 +105,16 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
         assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
         source = await agent.start("question", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
-        source_record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
-        source_memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
+        source_record = await runtime._state.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
+        source_memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=source.execution_id, memory_scope=source_record.memory_scope)
         baseline = await source_memory.read("facts.txt", max_chars=1000)
         await source_memory.write("facts.txt", "source execution edit", expected_version=baseline.version)
         retry = await source.retry("replacement question")
         assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
-        retry_record = await storage.execution.executions.get(retry.execution_id, tenant_id=principal.tenant_id)
+        retry_record = await runtime._state.execution.executions.get(retry.execution_id, tenant_id=principal.tenant_id)
         assert retry_record.memory_scope != source_record.memory_scope
-        retry_memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
+        retry_memory = RuntimeMemoryStore(runtime._state.memory, object_store=runtime._state.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=retry.execution_id, memory_scope=retry_record.memory_scope)
         retained = await retry_memory.read("facts.txt", max_chars=1000)
         assert retained.content == baseline.content

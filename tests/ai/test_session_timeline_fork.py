@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session timeline fork regressions."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timezone
 
 import pytest
@@ -119,6 +120,7 @@ class _ExecutionService:
 @pytest.mark.asyncio
 async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="session-timeline-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session("source"))

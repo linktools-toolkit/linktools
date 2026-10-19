@@ -36,7 +36,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
             if prior_turn:
                 await session.run("prior committed turn", timeout_seconds=5)
             seq = 2 if prior_turn else 1
-            sessions = storage.conversation.sessions
+            sessions = runtime._state.conversation.sessions
             original = sessions.state_store.mutate
             calls = 0
 
@@ -62,9 +62,9 @@ async def test_unknown_release_must_not_report_success_without_envelope(
                 "s", tenant_id=tenant, start_turn_seq=seq, end_turn_seq=seq + 1
             )
             assert commits == ()
-            raw = await storage.execution.executions.get(execution_id, tenant_id=tenant)
+            raw = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
             header = await sessions.get("s", tenant_id=tenant)
-            recovery = await storage.recovery.checkpoints.get(
+            recovery = await runtime._state.recovery.checkpoints.get(
                 execution_id, tenant_id=tenant
             )
             assert header.active_execution_id == execution_id
@@ -101,7 +101,7 @@ async def test_unknown_release_must_not_report_success_without_envelope(
     async with Runtime.open(
         _NAMESPACE, storage=storage, features=_features(), models=_models()
     ) as runtime:
-        recovered_commits = await storage.conversation.sessions.list_timeline_commits(
+        recovered_commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=seq, end_turn_seq=seq + 1
         )
         result = (
@@ -133,11 +133,11 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
         async def reject(*args, **kwargs):
             raise AIError(ErrorCode.SESSION_CONFLICT)
 
-        original_claim = storage.execution.executions.claim_start
-        monkeypatch.setattr(storage.execution.executions, "claim_start", reject)
+        original_claim = runtime._state.execution.executions.claim_start
+        monkeypatch.setattr(runtime._state.execution.executions, "claim_start", reject)
         with pytest.raises(AIError):
             await session.start("original rejected input")
-        sessions = storage.conversation.sessions
+        sessions = runtime._state.conversation.sessions
         head = await sessions.timeline_head(
             "s", tenant_id=runtime.default_principal.tenant_id
         )
@@ -153,7 +153,7 @@ async def test_rejected_admitted_start_retains_input(tmp_path, monkeypatch):
         )
         assert commits[0].output is None
         assert commits[0].start_message_index == commits[0].end_message_index == 0
-        monkeypatch.setattr(storage.execution.executions, "claim_start", original_claim)
+        monkeypatch.setattr(runtime._state.execution.executions, "claim_start", original_claim)
         await session.run("next real input", timeout_seconds=5)
         page = await session.timeline()
         assert len(page.items) == 2 and page.items[0].items == ()
@@ -175,7 +175,7 @@ async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it
         execution = await session.start("original input")
         await execution.wait(timeout_seconds=5)
         principal = runtime.default_principal
-        sessions = storage.conversation.sessions
+        sessions = runtime._state.conversation.sessions
 
         async def corrupt(transaction):
             record = await transaction.get_record(sessions._timeline_commit_key("s", 1))
@@ -191,7 +191,7 @@ async def test_closed_result_survives_receipt_corruption_but_timeline_rejects_it
             )
 
         await sessions.state_store.mutate(corrupt)
-        closed = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+        closed = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
         assert closed is not None and closed.retention_closed
         result = await runtime.executions.result(execution.execution_id, principal=principal)
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -235,7 +235,7 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         await session.run("second", timeout_seconds=5)
         principal = runtime.default_principal
         expected_page = await session.timeline()
-        expected_session = await storage.conversation.sessions.get("s", tenant_id=principal.tenant_id)
+        expected_session = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
     monkeypatch.setattr(LocalExecutionBackend, "_complete_handoff", old_complete)
     reopened = RuntimeStorage.from_plan(plan)
     async with Runtime.open(
@@ -247,12 +247,12 @@ async def test_completed_receipt_old_handoff_after_later_turn(tmp_path, monkeypa
         page = await runtime.sessions.timeline("s", principal=principal)
         assert len(page.items) == 2
         assert page.items == expected_page.items
-        current = await reopened.conversation.sessions.get("s", tenant_id=principal.tenant_id)
+        current = await runtime._state.conversation.sessions.get("s", tenant_id=principal.tenant_id)
         assert current.continuation == expected_session.continuation
         assert current.active_execution_id is None
-        checkpoint = await reopened.recovery.checkpoints.get(first_id, tenant_id=principal.tenant_id)
+        checkpoint = await runtime._state.recovery.checkpoints.get(first_id, tenant_id=principal.tenant_id)
         assert checkpoint.state is RecoveryCheckpointState.COMPLETED
-        commits = await reopened.conversation.sessions.list_timeline_commits(
+        commits = await runtime._state.conversation.sessions.list_timeline_commits(
             "s", tenant_id=principal.tenant_id, start_turn_seq=1, end_turn_seq=3,
         )
         assert [(item.start_message_index, item.end_message_index) for item in commits] == [(0, 2), (2, 4)]

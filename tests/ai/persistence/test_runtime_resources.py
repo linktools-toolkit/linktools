@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 from linktools.ai.migrate import provision_database
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -16,12 +17,12 @@ async def test_sqlite_runtime_storage_owns_and_reopens_database(tmp_path) -> Non
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeStorage.sql(engine)
+    state = RuntimeState(RuntimeStorage.sql(engine))
     await state.initialize(namespace="runtime", tenant_id="tenant")
     assert state.ready is True
     await state.close()
 
-    reopened = RuntimeStorage.sql(engine)
+    reopened = RuntimeState(RuntimeStorage.sql(engine))
     await reopened.initialize(namespace="runtime", tenant_id="tenant")
     assert reopened.ready is True
     await reopened.close()
@@ -37,7 +38,7 @@ async def test_transient_runtime_storage_closes_repository_and_object_domains() 
             if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}
         }
     )
-    state = RuntimeStorage.from_plan(plan)
+    state = RuntimeState(RuntimeStorage.from_plan(plan))
     await state.initialize(namespace="transient", tenant_id="tenant")
     await state.close()
     await state.close()
@@ -46,7 +47,7 @@ async def test_transient_runtime_storage_closes_repository_and_object_domains() 
 
 @pytest.mark.asyncio
 async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_cancellation() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="close-cursor", tenant_id="tenant")
     calls: list[str] = []
     failed = True
@@ -68,7 +69,7 @@ async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_c
     await state.close()
     assert calls == ["first", "first", "second"]
 
-    cancelled = RuntimeStorage.in_memory()
+    cancelled = RuntimeState(RuntimeStorage.in_memory())
     await cancelled.initialize(namespace="close-cancellation", tenant_id="tenant")
     started = asyncio.Event()
     release = asyncio.Event()

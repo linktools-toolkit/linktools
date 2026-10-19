@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pending and source-first writers share one live admission owner."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -44,6 +45,7 @@ class _Coordinator(_PendingTurnCoordination):
 @asynccontextmanager
 async def _writers():
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="mixed-admission", tenant_id="tenant")
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     services = []

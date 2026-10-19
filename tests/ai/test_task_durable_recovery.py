@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Durable Task admission and recovery contracts."""
 
+from linktools.ai.runtime.state import RuntimeState
 from datetime import datetime, timezone
 
 import pytest
@@ -133,6 +134,7 @@ def test_task_admission_rejects_unsupported_version() -> None:
 @pytest.mark.asyncio
 async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request("memory")
@@ -199,6 +201,7 @@ async def test_partial_admission_operation_without_graph_fails_closed(
     operation_status: OperationStatus,
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request(f"partial-operation-{operation_status.value.lower()}")
@@ -219,6 +222,7 @@ async def test_existing_admitted_graph_rejects_different_operation_as_storage_co
     None
 ):
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         first = _request("occupied", idempotency_key="submit:occupied:first")
@@ -242,6 +246,7 @@ async def test_existing_admitted_graph_rejects_different_operation_as_storage_co
 async def test_corrupt_occupied_graph_without_its_admission_operation_fails_closed(
 ) -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         first = _request(
@@ -310,6 +315,7 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
 
     try:
         state = create_state()
+        state = RuntimeState(state)
         await state.initialize(namespace="task-test", tenant_id="tenant")
         try:
             view = await state.task.admissions.admit(admission, request.graph)
@@ -318,6 +324,7 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
             await state.close()
 
         reopened = create_state()
+        reopened = RuntimeState(reopened)
         await reopened.initialize(namespace="task-test", tenant_id="tenant")
         try:
             page = await reopened.task.admissions.list_recoverable_page(
@@ -341,6 +348,7 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
 @pytest.mark.asyncio
 async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         for index in range(129):
@@ -370,6 +378,7 @@ async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
 @pytest.mark.asyncio
 async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
     state = RuntimeStorage.in_memory()
+    state = RuntimeState(state)
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request("empty", nodes=())

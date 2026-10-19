@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Live cached Conversation turns share Session display paging without durable writes."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
@@ -59,7 +60,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
             runtime = await stack.enter_async_context(Runtime.open(
                 "pending-session-display", storage=storage, models=models, features=group(),
             ))
-            values.append((runtime, storage))
+            values.append((runtime, runtime._state))
         try:
             yield values, entered, finish, block_next
         finally:
@@ -208,6 +209,7 @@ async def test_pending_session_projection_source_wins_observation_race(
 @pytest.mark.parametrize("method", ("get", "refresh", "timeline"))
 async def test_pending_session_projection_denial_precedes_observation(principal: Principal, method: str) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())
@@ -227,6 +229,7 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
 @pytest.mark.parametrize("fault", ("owner", "session", "child", "terminal", "older_session"))
 async def test_pending_session_projection_rejects_unbound_observations(fault: str) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         record = await storage.conversation.sessions.create(_session())
@@ -300,6 +303,7 @@ async def test_pending_session_projection_no_cache_keeps_source_admission(tmp_pa
 @pytest.mark.parametrize("limit", (1, 10))
 async def test_pending_session_projection_cannot_fill_missing_source_execution(limit: int) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         await storage.conversation.sessions.create(_session())
@@ -323,6 +327,7 @@ async def test_pending_session_projection_cannot_fill_missing_source_execution(l
 @pytest.mark.parametrize("method", ("timeline", "refresh"))
 async def test_pending_session_projection_older_page_cannot_fill_missing_source_execution(method: str) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         sessions = storage.conversation.sessions
@@ -368,6 +373,7 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
     method: str, max_age: float, keep_active: bool, observation: str,
 ) -> None:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="session-refresh", tenant_id="tenant")
     try:
         sessions = storage.conversation.sessions

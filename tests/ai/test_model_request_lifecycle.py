@@ -1301,7 +1301,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                 ]
                 assert first.next_cursor is not None
 
-                archive = storage.run_store.read_store(RuntimeDomain.TRACE)
+                archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
                 original_list = archive.list_model_interactions
                 archive_read_started = asyncio.Event()
                 allow_archive_read_to_return = asyncio.Event()
@@ -1338,7 +1338,7 @@ def test_history_cursor_keeps_captured_identity_during_durable_completion(
                 models.release.set()
                 result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
-                await storage.retention.release_execution_handoff(
+                await runtime._state.retention.release_execution_handoff(
                     execution.execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )
@@ -1414,7 +1414,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
                 assert dict(reread_terminal.items[0].request) == expected_request
                 assert reread_terminal.items[0].response == expected_response
 
-                await storage.retention.release_execution_handoff(
+                await runtime._state.retention.release_execution_handoff(
                     execution.execution_id,
                     tenant_id=runtime.default_principal.tenant_id,
                 )

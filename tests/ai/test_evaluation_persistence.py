@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation facts share backend transactions and preserve every planned slot."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -133,6 +134,7 @@ def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
 async def test_dataset_publication_and_slot_arbitration_are_backend_atomic(backend: str, tmp_path: Path) -> None:
     storage = storage_for(backend, tmp_path)
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="evaluation", tenant_id="tenant")
     try:
         repository = storage.evaluation.records

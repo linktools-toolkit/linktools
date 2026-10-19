@@ -159,7 +159,7 @@ async def test_admitted_policy_preserves_stronger_durability(
     ) as runtime:
         execution = await runtime.agents.get().start("answer", idempotency_key="answer")
         assert (await execution.wait(timeout_seconds=10)).result.output == {"text": "done"}
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None
         assert record.conversation is conversation
         assert record.restart_checkpoints is restart
@@ -183,7 +183,7 @@ async def test_task_admission_keeps_conversation_disabled() -> None:
         )
         assert (await graph.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
         execution = await graph.execution("answer")
-        record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert record is not None and record.binding_kind == "task"
         assert record.conversation is False
         assert record.restart_checkpoints and record.durable_trace
@@ -210,7 +210,7 @@ async def test_reopening_cannot_reinterpret_admitted_conversation(
             if execution_id is None:
                 execution_id = execution.execution_id
             assert execution.execution_id == execution_id
-            record = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+            record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
             assert record is not None
             assert record.conversation is initial_conversation
 
@@ -250,7 +250,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
             fault.setattr(runtime._execution_service.runtime_backend(), "launch", interrupted_launch)
             execution = await runtime.agents.get().start("answer", idempotency_key="answer")
         assert written
-        before = await storage.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert before is not None and before.status is ExecutionStatus.STARTED
         assert before.restart_checkpoints and before.conversation
 
@@ -260,6 +260,6 @@ async def test_current_execution_record_retains_conversation_through_recovery(
     ) as runtime:
         recovered = await runtime.executions.get(execution.execution_id)
         assert (await recovered.wait(timeout_seconds=10)).result.output == {"text": "done"}
-        after = await reopened.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
+        after = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=runtime.tenant_id)
         assert after is not None and after.status is ExecutionStatus.SUCCEEDED
         assert after.restart_checkpoints and after.conversation

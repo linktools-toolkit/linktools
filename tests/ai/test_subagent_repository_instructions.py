@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.agent import AgentBinding, AgentCompiler
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -161,7 +162,7 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
 
 
 def _service(
-    state: RuntimeStorage,
+    state: RuntimeState,
     *,
     resolver: _Resolver | None,
     ids: tuple[str, ...],
@@ -193,7 +194,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_new_child_inherits_exact_parent_structured_pin_without_live_resolution() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="subagent-inherit", tenant_id="tenant")
     try:
         _, parent_pin = _pin("parent-v1")
@@ -217,7 +218,7 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
 
 @pytest.mark.asyncio
 async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="subagent-root", tenant_id="tenant")
     try:
         await state.execution.executions.create(_parent(None))
@@ -244,7 +245,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_parent_pin", [False, True])
 async def test_standalone_service_without_resolver_never_assigns_child_pin(with_parent_pin: bool) -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace=f"subagent-standalone-{with_parent_pin}", tenant_id="tenant")
     try:
         parent_pin = _pin("parent-v1")[1] if with_parent_pin else None
@@ -266,7 +267,7 @@ async def test_standalone_service_without_resolver_never_assigns_child_pin(with_
 
 @pytest.mark.asyncio
 async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_root_changes() -> None:
-    state = RuntimeStorage.in_memory()
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="subagent-replay", tenant_id="tenant")
     try:
         await state.execution.executions.create(_parent(None))

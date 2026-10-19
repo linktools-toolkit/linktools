@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Cancellation and capability error-boundary behavior."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -45,8 +46,9 @@ from linktools.ai.workspace import BubblewrapSandbox
 
 
 @pytest_asyncio.fixture
-async def execution_storage() -> AsyncIterator[RuntimeStorage]:
+async def execution_storage() -> AsyncIterator[RuntimeState]:
     storage = RuntimeStorage.in_memory()
+    storage = RuntimeState(storage)
     await storage.initialize(namespace="boundary", tenant_id="tenant")
     try:
         yield storage
@@ -284,7 +286,7 @@ async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: RuntimeStorage) -> None:
+async def test_immediate_terminal_execution_waits_for_task_dependency_hold(execution_storage: RuntimeState) -> None:
     from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
 
     service = object.__new__(DefaultExecutionService)

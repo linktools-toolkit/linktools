@@ -10,6 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._model_interaction import StagedContextProjection, StagedModelInteraction, request_envelope
 from linktools.ai.runtime._transcript_staging import StagedTranscript
@@ -33,9 +34,9 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
 
     cache = Cache(max_bytes=1024 * 1024)
     root = tmp_path / "state"
-    storage = RuntimeStorage.filesystem(root, cache=cache)
+    storage = RuntimeState(RuntimeStorage.filesystem(root, cache=cache))
     await storage.initialize(
-        namespace="close-projection", tenant_id="tenant", module_caches={RuntimeDomain.TRACE: cache},
+        namespace="close-projection", tenant_id="tenant", module_routes={RuntimeDomain.TRACE: storage.plan.route(RuntimeDomain.TRACE).with_cache(cache)},
     )
     message = ModelRequest(parts=[UserPromptPart("external transcript " * 4096)])
     try:
@@ -81,10 +82,10 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
     finally:
         await storage.close()
 
-    reopened = RuntimeStorage.filesystem(root, cache=cache)
+    reopened = RuntimeState(RuntimeStorage.filesystem(root, cache=cache))
     await reopened.initialize(
         namespace="close-projection", tenant_id="tenant", read_only=True,
-        module_caches={RuntimeDomain.TRACE: cache},
+        module_routes={RuntimeDomain.TRACE: reopened.plan.route(RuntimeDomain.TRACE).with_cache(cache)},
     )
     try:
         archive = reopened.run_store.read_store(RuntimeDomain.TRACE)

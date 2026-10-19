@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bounded model update reads preserve authority and existing history extensions."""
 
+from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
 from pathlib import Path
@@ -28,7 +29,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path, backend: str) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -71,7 +72,7 @@ async def test_updates_read_bounded_fresh_suffix_without_content(tmp_path: Path,
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
 async def test_update_boundary_observes_run_admitted_during_authorization(tmp_path: Path, backend: str) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -107,7 +108,7 @@ async def test_update_boundary_observes_run_admitted_during_authorization(tmp_pa
 async def test_update_read_does_not_disclose_metadata_without_current_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -138,7 +139,7 @@ async def test_update_read_does_not_disclose_metadata_without_current_authority(
 
 @pytest.mark.parametrize("kind", ("structural_service", "service_subclass", "reader", "reader_subclass", "history_subclass"))
 async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind: str) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -189,7 +190,7 @@ async def test_updates_preserve_custom_public_read_dispatch(tmp_path: Path, kind
 async def test_update_cancellation_releases_owner_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, phase: str,
 ) -> None:
-    state = _storage(backend, tmp_path)
+    state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     pending = None
     try:
@@ -230,7 +231,7 @@ async def test_update_cancellation_releases_owner_scope(
 
 @pytest.mark.parametrize("active", (tuple(range(1, 206)), (1, 3, 205), ()))
 async def test_live_update_pages_preserve_all_active_and_new_identities(tmp_path: Path, active: tuple[int, ...]) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)
@@ -266,7 +267,7 @@ async def test_live_update_pages_preserve_all_active_and_new_identities(tmp_path
 async def test_structural_short_pages_keep_cross_run_budget_and_finish_via_existing_pages(
     tmp_path: Path, optional_read: bool,
 ) -> None:
-    state = _storage("memory", tmp_path)
+    state = RuntimeState(_storage("memory", tmp_path))
     await state.initialize(namespace=_NAMESPACE, tenant_id="tenant")
     try:
         await _seed(state)

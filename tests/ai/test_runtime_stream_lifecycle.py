@@ -99,19 +99,19 @@ async def test_runtime_close_drains_default_remote_watch(tmp_path: Path, mode: s
                 cache.cleanup_entered.clear()
                 close = asyncio.create_task(reader.close())
                 await asyncio.wait_for(cache.cleanup_entered.wait(), 5)
-                assert storage.ready and not close.done()
+                assert reader._state.ready and not close.done()
                 close.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await close
                 close = asyncio.create_task(reader.close())
                 await asyncio.sleep(0)
-                assert storage.ready and not close.done()
+                assert reader._state.ready and not close.done()
                 cache.cleanup_release.set()
                 await asyncio.wait_for(close, 5)
             else:
                 await asyncio.wait_for(reader.close(), 5)
             assert cache.active_reads == 0
-            assert not storage.ready
+            assert not reader._state.ready
             assert not reader._observation_sessions
             assert not release.is_set()
             if pending is not None:
@@ -211,7 +211,7 @@ async def test_cancelled_default_watch_read_releases_only_its_observer(tmp_path:
             pending.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await pending
-            assert cache.active_reads == 0 and storage.ready
+            assert cache.active_reads == 0 and reader._state.ready
             assert not reader._observation_sessions and not release.is_set()
         finally:
             if pending is not None:
@@ -251,7 +251,7 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
         async with Runtime.open("early-preview", models=models, features=group,
                                 storage=reader_storage) as reader:
             execution = await owner.agents.get().start("question")
-            repository = reader_storage.execution.executions
+            repository = reader._state.execution.executions
             read_head = repository.get_history_head
 
             async def observed_head(*args, **kwargs):

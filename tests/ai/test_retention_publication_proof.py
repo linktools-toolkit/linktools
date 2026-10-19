@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeHistory
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("cached", ("absent", "pending"))
 async def test_stale_unadmitted_cache_cannot_prove_publication(tmp_path, monkeypatch, cached):
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -113,10 +114,10 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
     async with Runtime.open(
         _NAMESPACE, storage=storage, features=_features(), models=_models(),
     ) as runtime:
-        record = await storage.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+        record = await runtime._state.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
         assert record.retention_closed
         receipt_reads = []
-        sessions = storage.conversation.sessions
+        sessions = runtime._state.conversation.sessions
         original = sessions.pending_turn_commit_in_transaction
 
         async def count_receipt(*args, **kwargs):
@@ -150,7 +151,7 @@ async def test_closed_public_results_reuse_proof_across_runtime(tmp_path, monkey
 
 @pytest.mark.parametrize("committed", (False, True))
 async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, monkeypatch, committed):
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
@@ -185,7 +186,7 @@ async def test_unknown_close_preserves_only_durable_publication_proof(tmp_path, 
 
 
 async def test_dependency_hold_added_after_source_confirmation_prevents_close(tmp_path, monkeypatch):
-    state = _storage("sqlite", tmp_path)
+    state = RuntimeState(_storage("sqlite", tmp_path))
     await state.initialize(namespace="retention-io", tenant_id="tenant")
     try:
         repository = state.execution.executions
