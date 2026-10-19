@@ -24,14 +24,19 @@ function button(label, action, className='quiet') {
 }
 function markdownMessage(source, className='') {
   const node=element('div',`message ${className}`), body=element('div','markdown');
-  const original=element('details','message-source');
+  const original=element('details','message-source'), raw=element('pre');
   original.append(element('summary','','Markdown source'),button('Copy Markdown',async()=>{
     if(!navigator.clipboard)throw new Error('Clipboard unavailable. Open Markdown source to copy the original text.');
-    await navigator.clipboard.writeText(source);
-  },'quiet copy-message'),element('pre','',source));
+    await navigator.clipboard.writeText(node.markdownSource);
+  },'quiet copy-message'),raw);
   node.append(body,original);
-  body.innerHTML=renderMarkdown(source);
+  node.markdownBody=body;node.markdownRaw=raw;updateMarkdownMessage(node,source);
   return node;
+}
+function updateMarkdownMessage(node,source) {
+  if(node.markdownSource===source)return;
+  node.markdownBody.innerHTML=renderMarkdown(source);
+  node.markdownRaw.textContent=source;node.markdownSource=source;
 }
 function userMessage(value) {
   const input=inputPresentation(value), node=element('div','user-input');
@@ -274,7 +279,7 @@ function renderList() {
   });
   if(focus)[...$('list').children].find(node=>node.dataset.listKey===focus)?.focus({preventScroll:true});
 }
-function stopStream() { state.stream?.abort(); state.stream=null; }
+function stopStream() { state.stream?.abort(); state.stream=null;cancelLiveRender(); }
 function navigate(sessionId, executionId) {
   const params=new URLSearchParams();
   if(!sessionId && executionId)params.set('view','executions');
@@ -412,37 +417,65 @@ function renderConversation({prepend=false}={}) {
   container.scrollTop=original?previousTop:prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
 }
 
-let liveRenderTimer=null;
+let liveRenderTimer=null,liveRenderFrame=null,liveRenderCost=0,previousLiveRenderCost=0;
+const liveFrameBudget=1000/60;
+function cancelLiveRender() {
+  if(liveRenderTimer!==null){clearTimeout(liveRenderTimer);liveRenderTimer=null;}
+  if(liveRenderFrame!==null){cancelAnimationFrame(liveRenderFrame);liveRenderFrame=null;}
+}
 function scheduleLiveRender() {
-  if(liveRenderTimer===null)liveRenderTimer=setTimeout(()=>{liveRenderTimer=null;renderLive();},60);
+  if(liveRenderTimer!==null || liveRenderFrame!==null)return;
+  const frame=()=>{liveRenderTimer=null;liveRenderFrame=requestAnimationFrame(()=>{liveRenderFrame=null;renderLive();});};
+  // Sustained expensive parsing retains batching without penalizing one slow frame.
+  if(Math.min(liveRenderCost,previousLiveRenderCost)>liveFrameBudget)liveRenderTimer=setTimeout(frame,60-liveFrameBudget);
+  else frame();
 }
 function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
+  cancelLiveRender();const started=performance.now();
+  try {
   let live=$('live');
   if(state.view==='executions'){live=$('execution-live');if(state.selectedExecution!==state.observedExecution){live.replaceChildren();return;}}
   if (!live) return;
-  const container=$('conversation'), follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
-  live.replaceChildren();
-  if (state.liveThinking) { const detail=element('details','tool-message'); detail.append(element('summary','','Live thinking · incomplete SDK response'),element('pre','',state.liveThinking)); live.append(detail); }
-  if (state.liveText) {
-    if(live.markdownSource!==state.liveText){live.markdownSource=state.liveText;live.markdownMessage=markdownMessage(state.liveText);}
-    live.append(element('div','message-label',`LIVE RESPONSE · incomplete SDK display · ${state.observedInfo?.agent_id || 'AGENT'} · ${short(state.observedExecution)}`),live.markdownMessage);
+  const container=$('conversation'), follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40,wanted=[];
+  if (state.liveThinking) {
+    if(!live.thinkingNode){live.thinkingNode=element('details','tool-message');live.thinkingBody=element('pre');live.thinkingNode.append(element('summary','','Live thinking · incomplete SDK response'),live.thinkingBody);}
+    if(live.thinkingSource!==state.liveThinking){live.thinkingBody.textContent=state.liveThinking;live.thinkingSource=state.liveThinking;}
+    wanted.push(live.thinkingNode);
   }
-  const events=[...state.events.values()].slice(-12),activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
+  if (state.liveText) {
+    if(!live.markdownMessage)live.markdownMessage=markdownMessage(state.liveText);
+    else updateMarkdownMessage(live.markdownMessage,state.liveText);
+    live.liveLabel ||= element('div','message-label');
+    const label=`LIVE RESPONSE · incomplete SDK display · ${state.observedInfo?.agent_id || 'AGENT'} · ${short(state.observedExecution)}`;
+    if(live.liveLabel.textContent!==label)live.liveLabel.textContent=label;
+    wanted.push(live.liveLabel,live.markdownMessage);
+  }
+  const events=[...state.events.values()].slice(-12);
+  if(!live.activityEvents || events.length!==live.activityEvents.length || events.some((item,index)=>item!==live.activityEvents[index])) {
+  live.activityEvents=events;live.activityFocusNodes=new Map();live.activityNodes=[];
+  const activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
   activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
   const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
     || ['MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
   const ordinary=events.filter(item=>!attention(item)).length;
   const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
-  let restoreFocus=liveFocus==='summary' && ordinary ? summary:null;
+  if(ordinary)live.activityFocusNodes.set('summary',summary);
   events.forEach(item => {
     const payload=item.event.payload || {};
     const row=element('div',`live-event${item.depth?' child':''}`,`${item.depth?'↳ ':''}${item.agent_id || 'task'} · ${item.event.event_type.replaceAll('_',' ').toLowerCase()}${payload.status?' · '+payload.status:''}${payload.error_code?' · '+payload.error_code:''}${payload.tool_name?' · '+payload.tool_name:''}${payload.call_id?' #'+short(payload.call_id):''}`);
-    if(item.depth){const inspect=button('Inspect subagent',async()=>{showInspector(true,true);await selectExecution(item.execution_id);});inspect.dataset.liveFocus=eventKey(item);row.append(inspect);if(liveFocus===inspect.dataset.liveFocus)restoreFocus=inspect;}
-    (attention(item)?live:activity).append(row);
+    if(item.depth){const inspect=button('Inspect subagent',async()=>{showInspector(true,true);await selectExecution(item.execution_id);});inspect.dataset.liveFocus=eventKey(item);row.append(inspect);live.activityFocusNodes.set(inspect.dataset.liveFocus,inspect);}
+    if(attention(item))live.activityNodes.push(row);else activity.append(row);
   });
-  if(ordinary)live.append(activity);
-  restoreFocus?.focus({preventScroll:true});
+  if(ordinary)live.activityNodes.push(activity);
+  }
+  wanted.push(...live.activityNodes);
+  if(wanted.length!==live.children.length || wanted.some((node,index)=>node!==live.children[index])) {
+    const focus=document.activeElement,preserve=focus && wanted.some(node=>node.contains(focus));
+    live.replaceChildren(...wanted);if(preserve)focus.focus({preventScroll:true});
+  }
+  live.activityFocusNodes.get(liveFocus)?.focus({preventScroll:true});
   if(follows)container.scrollTop=container.scrollHeight;
+  } finally {previousLiveRenderCost=liveRenderCost;liveRenderCost=performance.now()-started;}
 }
 function observedInfo(info, readGeneration=state.observationReadGeneration) {
   if(info.execution_id!==state.observedExecution)return info;
@@ -969,6 +1002,7 @@ async function watchExecution(id,generation) {
         if(!current())return;
         if(frame.event==='snapshot') {
           ++state.observationReadGeneration;const info=observedInfo(frame.data);ended=true;
+          renderLive();
           if(id===state.selectedExecution){state.execution=info;renderExecution();}
           setDisabled();return;
         }
@@ -1017,7 +1051,7 @@ async function watchExecution(id,generation) {
       await backoff();delay=Math.min(delay*2,5000);
     }
   }
-  } finally {if(state.stream===controller)state.stream=null;}
+  } finally {if(state.stream===controller){state.stream=null;if(current())renderLive();}}
 }
 async function sendMessage(event) {
   event.preventDefault(); const sessionId=state.selectedSession,generation=state.generation,promptValue=$('prompt').value;

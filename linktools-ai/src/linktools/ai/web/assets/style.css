@@ -84,7 +84,7 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;height:100dvh}
 .action-items{position:absolute;right:0;top:calc(100% + 8px);z-index:25;display:grid;gap:4px;width:250px;max-width:85vw;padding:9px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 35px #20252c18}
 .action-items button{text-align:left;font-size:12px;border:0;line-height:1.5}
 .request-navigation{padding:10px 28px 0}.request-navigation button{border:0;padding:5px 0;font-size:12px}
-.conversation{padding:24px;flex:1;min-height:60px;overflow:auto;scroll-behavior:smooth}
+.conversation{padding:24px;flex:1;min-height:60px;overflow:auto}
 .conversation>.turn{max-width:780px;margin-left:auto;margin-right:auto}
 .turn{margin-bottom:32px}
 .turn-heading{display:flex;gap:12px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:12px}
