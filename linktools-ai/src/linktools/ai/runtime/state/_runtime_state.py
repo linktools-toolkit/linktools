@@ -7,11 +7,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from ...core import validate_persistence_namespace
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectRef, ObjectStore, StorageRoute
+from ...storage import ObjectRef, ObjectStore, StorageRetentionMode, StorageRoute
 from ._root import RuntimeStorage, _validate_storage_configuration
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 from ._contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
@@ -26,6 +26,15 @@ if TYPE_CHECKING:
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
     from ._steps import RuntimeAgentRunStore
+
+
+class RuntimeStorageStatus(TypedDict):
+    domain: RuntimeDomain
+    backend: str
+    retention: StorageRetentionMode
+    path: str | None
+    object_store_id: str
+    object_store_paths: tuple[str, ...]
 
 
 class _RuntimeStateLifecycle(str, Enum):
@@ -74,6 +83,24 @@ class RuntimeState:
     @property
     def plan(self) -> RuntimeStoragePlan:
         return self._plan
+
+    def status(self) -> tuple[RuntimeStorageStatus, ...]:
+        """Describe bound routes and object resources without probing their health."""
+        self._require_ready()
+        result: list[RuntimeStorageStatus] = []
+        for domain in RuntimeDomain:
+            route = self._plan.route(domain)
+            path = self._plan.filesystem_path(domain) if route.kind == "filesystem" else route.path
+            objects = self.object_store(domain)
+            result.append({
+                "domain": domain,
+                "backend": route.kind,
+                "retention": route.retention,
+                "path": str(path) if path is not None else None,
+                "object_store_id": objects.store_id,
+                "object_store_paths": tuple(str(path) for path in objects.local_paths()),
+            })
+        return tuple(result)
 
     @property
     def ready(self) -> bool:
@@ -354,4 +381,4 @@ class RuntimeState:
         await restore_snapshot(ref, object_store=object_store, root=root, limits=limits, open_target=open_target)
 
 
-__all__ = ["RuntimeState"]
+__all__ = ["RuntimeState", "RuntimeStorageStatus"]

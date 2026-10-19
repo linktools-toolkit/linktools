@@ -9,7 +9,7 @@ import secrets
 from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Protocol, TypedDict, TypeVar, overload
 
 from linktools.core import environ
 from pydantic import BaseModel
@@ -111,7 +111,7 @@ from .service_api import (
     UpdateSessionRequest,
     ExecutionTreeEvent,
 )
-from .state import RuntimeStorage, RuntimeState
+from .state import RuntimeStorage, RuntimeState, RuntimeStorageStatus
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
@@ -273,6 +273,13 @@ def _overlay_request_correlation(
         return overlay_correlation(base, overlay)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+
+class RuntimeStatus(TypedDict):
+    namespace: str
+    tenant_id: str
+    storage: tuple[RuntimeStorageStatus, ...] | None
+    metrics: MetricRecorderStatus
 
 
 class Runtime(Generic[AppT]):
@@ -458,6 +465,16 @@ class Runtime(Generic[AppT]):
     @property
     def namespace(self) -> str:
         return self._namespace
+
+    def status(self) -> RuntimeStatus:
+        """Read current composition and recorder state without a health probe."""
+        self._ensure_open()
+        return {
+            "namespace": self.namespace,
+            "tenant_id": self.tenant_id,
+            "storage": self._state.status() if self._state is not None else None,
+            "metrics": self.metrics.status(),
+        }
 
     def _watch_execution_tree(
         self,
@@ -1526,4 +1543,4 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     )
 
 
-__all__ = ["Runtime"]
+__all__ = ["Runtime", "RuntimeStatus"]

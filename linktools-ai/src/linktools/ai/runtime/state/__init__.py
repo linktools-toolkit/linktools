@@ -16,7 +16,7 @@ from ._snapshot import (
 )
 from ._input_capture import input_capture_key, input_capture_expiry_key, input_capture_object_dependency, iter_input_capture_dependencies
 from ._root import RuntimeStorage
-from ._runtime_state import RuntimeState
+from ._runtime_state import RuntimeState, RuntimeStorageStatus
 from ._snapshot_operations import RuntimeSnapshotOperations
 from ._conversation_persistence import ConversationPersistence
 from ._checkpoint_persistence import CheckpointPersistence
@@ -50,6 +50,7 @@ __all__ = [
     "RuntimeDomain",
     "RuntimeStorage",
     "RuntimeState",
+    "RuntimeStorageStatus",
     "RuntimeSnapshotOperations",
     "ExecutionRepositories",
     "TaskRepositories",

@@ -75,7 +75,7 @@ globalThis.fetch=async(path,options={})=>{
   calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
   if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key)){const pending=delays.get(method+' '+key);pending.started();return pending.promise;}
-  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
+  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
   if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
@@ -1260,7 +1260,28 @@ await refresh();assert.equal(scans(),1);
 assert.equal(node('list-action').value,'paged');assert.equal(node('filter-session').disabled,false);
 node('filter-session').value=opaque;node('filter-form').requestSubmit();await until('session filter results',()=>node('execution-filter-summary').textContent.includes('1 applied'));
 assert.equal(calls.filter(call=>call.key==='/api/executions').at(-1).query.session_id,opaque);assert.match(node('execution-filter-summary').textContent,/1 applied/);
-node('settings').click();assert.match(node('settings-content').textContent,/Asset root\/workspace\/\.linktools/);node('settings-dialog').close();
+const configReads=calls.filter(call=>call.key==='/api/config').length;
+await node('settings').click();
+assert.equal(calls.filter(call=>call.key==='/api/config').length,configReads+1);
+assert.match(node('settings-content').textContent,/Asset root\/workspace\/\.linktools/);
+assert.match(node('settings-content').textContent,/Namespaceactual-runtime/);
+assert.match(node('settings-content').textContent,/Inspect Runtime status/);node('settings-dialog').close();
+
+// Repeated Settings clicks share the pending read, even after another view updates controls.
+const settingsReads=calls.filter(call=>call.key==='/api/config').length;
+const pendingSettings=deferred('GET /api/config'),openingSettings=node('settings').click();await pendingSettings.requested;
+await select('#session=b');
+const repeatedSettings=node('settings').click();
+assert.equal(calls.filter(call=>call.key==='/api/config').length,settingsReads+1);
+pendingSettings({runtime:{namespace:'fresh-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,capabilities:[]});
+await openingSettings;assert.match(node('settings-content').textContent,/Namespacefresh-runtime/);
+node('settings-dialog').close();await repeatedSettings;await settle();
+assert.equal(node('settings-dialog').open,false,'Completing a repeated click cannot reopen dismissed Settings');
+assert.match(node('settings-content').textContent,/Namespacefresh-runtime/);
+networkFailures.add('GET /api/config');await node('settings').click();networkFailures.delete('GET /api/config');
+assert.equal(node('settings-dialog').open,false);assert.match(node('notice').textContent,/Runtime read unavailable/);
+await node('settings').click();assert.equal(node('settings-dialog').open,true);
+assert.match(node('settings-content').textContent,/Namespaceactual-runtime/);node('settings-dialog').close();
 
 // Unavailable history cannot hide readable metadata or make refresh show stale values.
 unavailableTimelines.add('a');sessions.set('a',{...sessions.get('a'),revision:3,cwd:'old/path',history_quality:'partial',active_execution_id:null});

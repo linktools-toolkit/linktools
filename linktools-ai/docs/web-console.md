@@ -47,19 +47,20 @@ The console's "Captured input MIME types" panel shows the expanded, normalized
 `input_mime_types` list from the captured contract. It does not show the original
 authoring tokens. These stored MIME permissions are not re-expanded at restore.
 A match permits an input but does not verify provider support; SDK encoding and
-resource limits still apply. Without a configured model, settings report that
-no model is configured.
+resource limits still apply.
 
 Configure attachment permissions explicitly with workspace `input_types`.
 
-```bash
-ai-web --project /path/to/project --read-only
-```
+The console opens one execution Runtime and requires a configured model.
+Persisted history remains available in the same console. Merely opening the
+console does not request a model response.
 
-Read-only mode opens `RuntimeHistory`, never an execution `Runtime`, and does not
-invoke recovery. It also works without a model configuration. An unconfigured
-model automatically selects this mode. Missing history and metrics stores are
-shown as empty/unavailable, without provisioning them through a history read.
+The settings panel reads current `Runtime.status()` through `/api/config` when
+opened. Runtime owns the namespace, tenant, effective per-domain storage routes,
+object-store identities and local paths, and metric-recorder state. These are
+composition details, not a connectivity or storage health check. SQL connection
+strings and provider credentials are never included. Workspace and model
+configuration remain console display metadata.
 
 ### Finding details and controls
 
@@ -220,9 +221,9 @@ publication guarantees.
 
 `ai-history`, `ai-session`, `ai-status`, `ai-trace`, and `ai-metrics`, including
 their `lt ai` / `python -m linktools ai` forms, are intentionally removed. There
-are no compatibility aliases. Start `ai-web --read-only` to inspect an existing
-workspace, then choose Session or Execution in **Open exact ID** to open a known
-identity. `ai-run` and `ai-acp` remain available for terminal execution and ACP
+are no compatibility aliases. Start `ai-web` with the workspace model configured
+to inspect persisted history, then choose Session or Execution in **Open exact ID**
+to open a known identity. `ai-run` and `ai-acp` remain available for terminal execution and ACP
 stdio clients. The console uses the same public Runtime domains.
 
 The former viewers had no filter or export flags. Their optional session or
@@ -390,11 +391,13 @@ automatic recovery is implied by keeping a page open.
 ## Local trust boundary
 
 - The CLI binds only `127.0.0.1`; no remote-host option is provided
-- The HTTP adapter checks the loopback peer, exact local Host/port, browser Origin
-  and cross-site fetch metadata; mutation requests require JSON and a custom
-  same-origin header, with no permissive CORS policy
+- The HTTP adapter requires a loopback peer and rejects explicit cross-site fetch
+  metadata; mutation requests require JSON and a custom request header, with no
+  permissive CORS policy
+- Host and Origin headers are not restricted; the console does not provide a
+  browser-origin or DNS-rebinding boundary
 - Forwarded proxy headers are disabled; the actual connection peer must be
-  loopback, including in proxy mode
+  loopback
 - No persistent access token, login system or new permission model is added
 - Credentials are represented only as configured/missing; exception messages
   are omitted from HTTP diagnostics because they can contain provider secrets;
@@ -408,21 +411,14 @@ path bypasses Workspace policy.
 
 ### Reverse proxy
 
-For a reverse proxy on the same machine, opt in explicitly:
-
-```bash
-ai-web --proxy --project /path/to/project --model your-model
-```
-
-`--proxy` accepts the proxy's external Host and browser Origin, including HTTPS
-origins. It does not change the loopback listener or trust forwarded peer
-headers. The proxy must connect to `127.0.0.1` and provide authentication, TLS,
-and access control. The console has no login: an unauthenticated public proxy
-exposes history and execution, cancellation, and recovery controls.
+The console accepts external Host and Origin headers by default. A reverse
+proxy must connect to `127.0.0.1` and provide authentication, TLS, and access
+control. The console has no login: an unauthenticated public proxy exposes
+history and execution, cancellation, and recovery controls. It does not trust
+forwarded headers to establish the connection peer.
 
 Cross-site fetch rejection, the mutation request header, and the absence of
-permissive CORS remain in force. The default mode retains local Host/Origin
-validation. Serve the UI and API at the same external origin.
+permissive CORS remain in force. Serve the UI and API at the same external origin.
 
 Keep proxy response buffering and caching disabled for the existing
 `/api/executions/{id}/events` SSE route, and allow long-lived responses. The

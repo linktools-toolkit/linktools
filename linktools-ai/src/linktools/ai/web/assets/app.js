@@ -1227,8 +1227,19 @@ async function exportResult() {
 }
 function showSettings() {
   clear('settings-content'); const config=state.config;if(!config)return;
-  $('settings-content').append(properties({Workspace:config.workspace,'Asset root':config.asset_root,Namespace:config.namespace,Model:config.model || 'Not configured','API key':config.api_key_configured?'Configured':'Not configured','Base URL':config.base_url_configured?'Configured':'Default','Runtime DB':config.runtime_db,'Object store':config.object_store,'Metrics DB':config.metrics_db,Mode:config.read_only?'Read-only':'Local execution'}));
+  $('settings-content').append(properties({
+    Workspace:config.workspace,'Asset root':config.asset_root,Namespace:config.runtime?.namespace,
+    Tenant:config.runtime?.tenant_id,Model:config.model || 'Not configured',
+    'API key':config.api_key_configured?'Configured':'Not configured',
+    'Base URL':config.base_url_configured?'Configured':'Default',
+    Mode:config.read_only?'Read-only':'Local execution',
+  }));
   const inputs=element('div','detail-card');inputs.append(element('h3','','Captured input MIME types'),element('p','','Category names are expanded when the model is captured. Only matching attachment MIME types are allowed. Plain text is unaffected; provider support has not been verified.'),element('pre','json',config.input_mime_types?json(config.input_mime_types):'No model configured'));$('settings-content').append(inputs);
+  if(config.runtime) {
+    const status=element('div','detail-card');
+    status.append(element('h3','','Runtime status'),element('p','','Current storage composition and metric recorder state, not a connectivity or storage health check.'),rawDetail(config.runtime,'Inspect Runtime status'));
+    $('settings-content').append(status);
+  }
   const card=element('div','detail-card');card.append(element('h3','','Captured capabilities'));config.capabilities.forEach(item=>card.append(element('p','',`${item.kind} · ${item.id} · revision ${item.revision}`)));if(!config.capabilities.length)card.append(element('p','','Capability composition is loaded when an execution Runtime starts.'));$('settings-content').append(card);$('settings-dialog').showModal();
 }
 async function bootstrap() {
@@ -1284,7 +1295,12 @@ $('activity-mode').onclick=()=>{state.readerExpanded.delete('reader:tools');clos
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{if(!state.cancellationNoticeId)notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}const generation=state.generation,executionGeneration=state.executionGeneration;await refreshSelected();if(generation===state.generation && executionGeneration===state.executionGeneration)await syncObservation({refresh:true});})().catch(showError);};
-$('settings').onclick=showSettings;$('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
+let settingsRequest=null;
+$('settings').onclick=()=>{
+  if(!settingsRequest)settingsRequest=api('/api/config').then(config=>{state.config=config;showSettings();}).catch(showError).finally(()=>{settingsRequest=null;});
+  return settingsRequest;
+};
+$('export').onclick=()=>{closeRunActions();return exportResult().catch(showError);};
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
 $('inspector-active-stop').onclick=()=>executionAction('cancel',{active:true}).catch(showError);
 $('cancel').onclick=()=>executionAction('cancel',{active:true}).catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>{closeRunActions();return executionAction('retry').catch(showError);};$('fork-run').onclick=()=>{closeRunActions();return executionAction('fork').catch(showError);};$('end-stopped').onclick=()=>endStoppedExecution();$('end-active').onclick=()=>endStoppedExecution({active:true});

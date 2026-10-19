@@ -168,7 +168,6 @@ Useful options:
 ```bash
 python manage.py install --editable 'linktools-ai[web]'
 ai-web --project /workspace/project --model your-model
-ai-web --project /workspace/project --read-only
 ```
 
 Open `http://127.0.0.1:8765` for conversations, live execution, history,
@@ -177,7 +176,7 @@ model/tool details, metrics and Runtime status. The command surface is
 The former history, session, status, trace and metrics commands are consolidated
 into the Web console; their old entry points are removed without aliases.
 See the [Web console guide](docs/web-console.md) for command coverage, local
-security, read-only operation and explicit recovery of stopped executors.
+security, persisted history and explicit recovery of stopped executors.
 
 ### Python
 

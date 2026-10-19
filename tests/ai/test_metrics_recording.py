@@ -404,3 +404,43 @@ def test_standalone_metrics_does_not_import_runtime() -> None:
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_owned", [False, True])
+async def test_metric_status_reads_preserve_failure_state_across_flush(runtime_owned: bool) -> None:
+    from linktools.ai.runtime._metrics_service import MetricsService
+
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(
+        batch_size=128, flush_interval=60.0,
+        buffer=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=1),
+    ))
+    owner = MetricsService(metrics) if runtime_owned else metrics.recorder()
+    try:
+        assert not await owner.try_record(None)
+        initial = owner.status()
+        assert initial.last_failure_code == ("ENRICHMENT_FAILED" if runtime_owned else "INVALID_OBSERVATION")
+        fields_before_read = vars(owner).copy()
+        assert owner.status() == owner.status() == initial
+        assert vars(owner) == fields_before_read
+
+        assert await owner.try_record(_observation("accepted"))
+        assert not await owner.try_record(_observation("rejected"))
+        fields_before_read = vars(owner).copy()
+        rejected = owner.status()
+        assert rejected.last_failure_code == "QUEUE_FULL"
+        assert rejected.rejected > initial.rejected
+        assert owner.status() == rejected
+        assert vars(owner) == fields_before_read
+
+        flushed = await owner.flush()
+        assert flushed.completed
+        assert flushed.status.persisted == 1
+        assert flushed.status.pending == 0
+        assert flushed.status.rejected == rejected.rejected
+        assert await metrics.get_observation("accepted") is not None
+        fields_before_read = vars(owner).copy()
+        assert owner.status() == owner.status() == flushed.status
+        assert vars(owner) == fields_before_read
+    finally:
+        await owner.close()

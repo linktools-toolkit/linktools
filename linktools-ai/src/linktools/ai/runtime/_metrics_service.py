@@ -129,13 +129,14 @@ class MetricsService:
 
     def status(self) -> MetricRecorderStatus:
         status = self._recorder.status()
+        last_failure_code = self._last_failure_code
         if self._failure_baseline != (
             status.rejected, status.unconfirmed, status.write_failures, status.last_failure_code,
         ):
-            self._last_failure_code = None
+            last_failure_code = None
         return replace(
             status, rejected=status.rejected + self._rejected,
-            last_failure_code=self._last_failure_code or status.last_failure_code,
+            last_failure_code=last_failure_code or status.last_failure_code,
         )
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult:

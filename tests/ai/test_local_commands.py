@@ -145,7 +145,7 @@ def test_ai_cli_rejects_unknown_commands() -> None:
         (("--help",), "ai"),
         (("ai", "run", "--help"), "prompt"),
         (("ai", "acp", "--help"), "ai acp"),
-        (("ai", "web", "--help"), "--read-only"),
+        (("ai", "web", "--help"), "--port"),
     ),
 )
 def test_lightweight_cli_commands_do_not_load_execution_dependencies(
