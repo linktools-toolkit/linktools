@@ -14,6 +14,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..core import PromptLimits, DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ..errors import AIError, ErrorCode
+from .persistence import CapabilityPersistence
 from ._agent_run_recorder import AgentRunRecorder
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
@@ -117,6 +118,16 @@ async def compose_platform_capabilities(
             rebound = copy(capability)
             rebound.wrapped = wrapped
             return rebound
+        if isinstance(capability, CapabilityPersistence):
+            if not isinstance(run_store, RuntimeAgentRunStore) or run_store.capability_writes is None or execution_id is None or capability.id is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            bound = run_store.capability_writes.bind(
+                capability.id, agent_run_id, execution_id, capability,
+                revision=run_store.capability_revisions[capability.id],
+            )
+            if not isinstance(bound, AbstractCapability):
+                raise TypeError("bind_persistence must preserve the SDK capability type")
+            return bound
         for enabled, feature, service in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability), (ConversationService, CheckpointService, TraceService)):
             if isinstance(capability, feature):
                 if not enabled:

@@ -39,7 +39,7 @@ from ._contracts import (
     TranscriptSpanRef,
 )
 from ._execution_repositories import ExecutionRepositoryImpl
-from ._durability import CommitObservation, DurableCommitState, _await_owned_task, run_durable_commit
+from ._durability import CommitObservation, DurableCommitState, await_owned_task, run_durable_commit
 from ._plan import RuntimeDomain
 from ._step_archive import (
     CapturedExecutionProjection,
@@ -67,6 +67,7 @@ from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, Agen
 from ._store import StateGroupTransaction, StateTransaction
 
 if TYPE_CHECKING:
+    from .._capability_writes import RuntimeCapabilityWrites
     from ..service_api import ModelInteractionSubscription
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
@@ -124,6 +125,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         tenant_id: str | None = None,
     ) -> None:
         del conversation_retention, execution_retention, recovery_retention
+        self.capability_writes: RuntimeCapabilityWrites | None = None
+        self.capability_revisions: dict[str, int] = {}
         self._staging = staging
         self.conversation_persistence = ConversationPersistence(conversation_archive)
         self.checkpoint_persistence = CheckpointPersistence(staging, recovery_archive, execution_archive)
@@ -1896,7 +1899,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         async def run() -> _BoundaryResult:
             return await operation
 
-        value, error, cancelled = await _await_owned_task(
+        value, error, cancelled = await await_owned_task(
             asyncio.create_task(run()), self._background_tasks,
         )
         if error is not None:
@@ -2217,6 +2220,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         await self._settle_observation_boundary(self._preflight_close())
 
     async def _preflight_close(self) -> None:
+        if self.capability_writes is not None:
+            await self.capability_writes.close()
         for agent_run_id in tuple(self.trace_persistence.offsets):
             await self.trace_persistence.stop(agent_run_id)
         await self.trace_persistence.settle_buffers()

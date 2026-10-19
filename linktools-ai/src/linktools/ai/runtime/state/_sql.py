@@ -239,7 +239,7 @@ class SqlStateStorageGroup:
         if lock is not None:
             await lock.acquire()
         try:
-            domains = ",".join(store.runtime_domain.value for store in members)
+            domains = ",".join(store.partition for store in members)
             result = await self._context.run_mutation(
                 execute,
                 domain=f"runtime.state.group[{domains}]",
@@ -342,7 +342,7 @@ class SqlStateStore:
         *,
         metadata: "MetaData | None" = None,
         context: "SqlStorageContext | None" = None,
-        runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
+        runtime_domain: RuntimeDomain | str = RuntimeDomain.CONVERSATION,
         group: SqlStateStorageGroup | None = None,
         cache: CacheBackend | None = None,
         store_digest: bytes | None = None,
@@ -356,7 +356,7 @@ class SqlStateStore:
         self._runtime_domain = runtime_domain
         self._store_digest = (
             hashlib.sha256(
-                f"standalone:{runtime_domain.value}".encode("utf-8")
+                f"standalone:{self.partition}".encode("utf-8")
             ).digest()
             if store_digest is None
             else bytes(store_digest)
@@ -383,8 +383,12 @@ class SqlStateStore:
         return self._storage_group
 
     @property
-    def runtime_domain(self) -> RuntimeDomain:
+    def runtime_domain(self) -> RuntimeDomain | str:
         return self._runtime_domain
+
+    @property
+    def partition(self) -> str:
+        return self._runtime_domain.value if isinstance(self._runtime_domain, RuntimeDomain) else self._runtime_domain
 
     @property
     def store_digest(self) -> bytes:
@@ -573,7 +577,7 @@ class SqlStateStore:
                 break
             operation_cursor = OperationScanCursor(values[-1].key_digest)
         _logger.info(
-            "SQL StateStore integrity validated: domain=%s", self._runtime_domain.value
+            "SQL StateStore integrity validated: domain=%s", self.partition
         )
 
     def _ensure_ready(self) -> None:

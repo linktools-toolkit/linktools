@@ -10,6 +10,7 @@ from ..errors import AIError, ErrorCode
 from ..capability import CheckpointCapability, ConversationCapability, TraceCapability
 from ..storage import StorageRoute
 from .state import RuntimeDomain
+from .persistence import CapabilityPersistence
 
 
 def persistence_storage_configuration(
@@ -47,4 +48,32 @@ def persistence_storage_configuration(
     return routes
 
 
-__all__ = ["persistence_storage_configuration"]
+__all__ = ["persistence_storage_configuration", "capability_storage_configuration"]
+
+
+def capability_storage_configuration(
+    capabilities: Sequence[tuple[str, AbstractCapability[object]]], *, default_route: StorageRoute,
+) -> dict[str, StorageRoute]:
+    """Resolve optional participants without binding their run callbacks."""
+    routes: dict[str, StorageRoute] = {}
+
+    def collect(capability: AbstractCapability[object], registered_id: str | None) -> None:
+        if isinstance(capability, WrapperCapability):
+            collect(capability.wrapped, None)
+        elif isinstance(capability, CombinedCapability):
+            for child in capability.capabilities:
+                collect(child, None)
+        elif isinstance(capability, CapabilityPersistence):
+            identity = capability.id or registered_id
+            if not identity:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            if identity in routes:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            route = capability.storage or default_route
+            if not isinstance(route, StorageRoute):
+                raise TypeError("Persistent capability storage must use StorageRoute")
+            routes[identity] = route
+
+    for identity, capability in capabilities:
+        collect(capability, identity)
+    return routes

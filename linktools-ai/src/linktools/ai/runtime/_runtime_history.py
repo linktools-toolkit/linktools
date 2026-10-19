@@ -45,7 +45,7 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
-from ._persistence_configuration import persistence_storage_configuration
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
 from .state._object_router import runtime_object_source_reads
 from ._event import project_event_payload
 from ..core import decode_cursor as decode_runtime_cursor
@@ -1172,6 +1172,10 @@ async def _open_runtime_history(
         item.value for item in captured.contributions if item.scope == "runtime"
     )
     module_routes = persistence_storage_configuration(capabilities)
+    capability_routes = capability_storage_configuration(
+        () if captured is None else tuple((item.id, item.value) for item in captured.contributions if item.scope == "runtime"),
+        default_route=storage.plan.route(RuntimeDomain.EXECUTION),
+    )
     selected_state = RuntimeState(storage)
     initialized = False
     body_error: BaseException | None = None
@@ -1181,6 +1185,7 @@ async def _open_runtime_history(
             tenant_id=effective_tenant_id,
             read_only=True,
             module_routes=module_routes,
+            capability_routes=capability_routes,
         )
         initialized = True
         if captured is not None:

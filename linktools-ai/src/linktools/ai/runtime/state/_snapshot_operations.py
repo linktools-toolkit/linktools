@@ -19,6 +19,7 @@ from ...storage import ObjectRef, ObjectStore, ObjectStoreInspection, read_objec
 from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
 from ._input_capture import input_capture_expiry_key, input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
+from ._capability_marker import has_capability_partition_marker
 from ._plan import RuntimeDomain
 from ._store import (
     FactScanCursor,
@@ -66,6 +67,7 @@ class SnapshotResources:
     stores: Mapping[RuntimeDomain, StateStore]
     object_stores: Mapping[RuntimeDomain, ObjectStore]
     read_only: bool
+    portable_export: bool = True
 
 
 class RuntimeSnapshotOperations:
@@ -102,12 +104,18 @@ class RuntimeSnapshotOperations:
     ) -> ObjectRef:
         """Export this initialized read-only state as one bounded logical snapshot."""
         self._require_ready()
+        if not self._resources.portable_export:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
         if not self._resources.read_only:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         if not isinstance(limits, SnapshotLimits):
             raise TypeError("limits must be SnapshotLimits")
         if not self._resources.durable_domains:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+        for domain in self._resources.durable_domains:
+            if await self._resources.stores[domain].read(has_capability_partition_marker):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
 
         domains: dict[str, dict[str, list[object]]] = {}
         snapshot_records: dict[RuntimeDomain, tuple[StoredRecord, ...]] = {}

@@ -67,6 +67,7 @@ class RuntimeState:
         self._run_store: RuntimeAgentRunStore | None = None
         self._retention: RuntimeRetentionController | None = None
         self._stores: dict[RuntimeDomain, StateStore] = {}
+        self.capability_stores: dict[str, StateStore] = {}
         self._read_only = False
 
     @property
@@ -138,6 +139,7 @@ class RuntimeState:
         tenant_id: str,
         read_only: bool = False,
         module_routes: Mapping[RuntimeDomain, StorageRoute] | None = None,
+        capability_routes: Mapping[str, StorageRoute] | None = None,
     ) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStateLifecycle.NEW:
@@ -167,6 +169,7 @@ class RuntimeState:
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
                     read_only=read_only,
+                    capability_routes=capability_routes,
                 )
                 self._assign_materialized(
                     materialized,
@@ -234,6 +237,7 @@ class RuntimeState:
         self._run_store = value.run_store
         self._retention = value.retention
         self._stores = dict(value.stores)
+        self.capability_stores = dict(value.capability_stores)
         self._close_actions = value.close_actions
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -307,6 +311,14 @@ class RuntimeState:
             paths.extend(self._objects.local_paths())
         return tuple(dict.fromkeys(paths))
 
+    def capability_marker_store(self) -> StateStore | None:
+        """Choose an existing durable partition visible to portable snapshots."""
+        self._require_ready()
+        domains = self.plan.durable_domains
+        if RuntimeDomain.EXECUTION in domains:
+            return self._stores[RuntimeDomain.EXECUTION]
+        return next((self._stores[domain] for domain in RuntimeDomain if domain in domains), None)
+
     def snapshot_resources(self) -> SnapshotResources:
         self._require_ready()
         return SnapshotResources(
@@ -315,6 +327,7 @@ class RuntimeState:
             object_stores={domain: self.object_store(domain) for domain in RuntimeDomain
                            if runtime_domain_uses_object_store(domain)},
             read_only=self.read_only,
+            portable_export=not self.capability_stores,
         )
 
     def snapshot_operations(self) -> RuntimeSnapshotOperations:

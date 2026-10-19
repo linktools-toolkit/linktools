@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """Runtime storage composition contracts."""
 
+from ._durability import CommitObservation, DurableCommitState, run_durable_commit, await_owned_task
+from ._capability_contracts import CapabilityPersistence, CapabilityWriter
+from ._store import (StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction,
+                     StoredRecord, StoredFact, StoredOperation, RecordReplacement, RecordQuery)
 from ._object_cleanup import ObjectCleanupResult
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 from ._snapshot import (
@@ -20,7 +24,17 @@ from ._trace_persistence import TracePersistence
 from ._contracts import (ArtifactRecord, ArtifactRepositories, BudgetRepository,
                          ExecutionRepositories, TaskRepositories, EvaluationRepositories)
 
+from ._capability_marker import ensure_capability_partition_marker, has_capability_partition_marker
+from ._resource_scope import reject_filesystem_capability_partitions
+
 __all__ = [
+    "reject_filesystem_capability_partitions",
+    "ensure_capability_partition_marker",
+    "has_capability_partition_marker",
+    "CommitObservation", "DurableCommitState", "run_durable_commit", "await_owned_task",
+    "CapabilityPersistence", "CapabilityWriter",
+    "StateStore", "StateTransaction", "StateStorageGroup", "StateGroupTransaction",
+    "StoredRecord", "StoredFact", "StoredOperation", "RecordReplacement", "RecordQuery",
     "ConversationPersistence",
     "CheckpointPersistence",
     "TracePersistence",

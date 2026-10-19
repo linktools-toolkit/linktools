@@ -450,3 +450,10 @@ are observation markers, not SQL rows. Each owner still writes and settles
 independently in its own transactions. Explicit flush, close and safety
 boundaries remain owner-local, and separate Runtime instances do not share
 a scheduler.
+
+## Optional atomic persistence
+
+Runtime-scoped native capabilities can opt into the structural
+[`CapabilityPersistence` protocol](capability-persistence.md) to submit run-local
+writes using `storage` and `commit`. Compatible participants share actual
+transactions; the guide specifies failure, forced-boundary and recovery limits.

@@ -380,6 +380,7 @@ class LocalExecutionBackend:
             ),
             background_tasks=self._checkpoint_tasks,
             observe_cancellation=not exclusive_execution_writer,
+            capability_writes=(run_store.capability_writes if isinstance(run_store, RuntimeAgentRunStore) else None),
         )
         self._recovery_coordinator = _RecoveryCoordinator(
             self,
@@ -5615,6 +5616,7 @@ class LocalExecutionBackend:
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
                 turn.reservation, commit, expected_session=turn.session,
+                capability_run_id=agent_run_id,
                 next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),
                 conversation_agent_run=None if turn.session is None else run,
                 conversation_checkpoint=None if turn.session is None else checkpoint,
@@ -6097,6 +6099,7 @@ class LocalExecutionBackend:
             execution_events=step_events,
             execution_checkpoints=checkpoints,
             execution_projections=execution_projections,
+            capability_run_id=agent_run_id,
             audit_events=pending_audit,
             background_tasks=self._execution_task_set(current.execution_id),
         )

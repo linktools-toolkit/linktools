@@ -3,9 +3,11 @@
 """Physical resource groups and ownership for requested state stores."""
 
 import asyncio
+import hashlib
+import json
 import os
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -327,4 +329,29 @@ def _filesystem_group_scope(
     )[:32]
 
 
-__all__ = ["StorageResourceRequest", "StorageResourceScope", "MemoryResource", "FilesystemResource", "SqlResource"]
+__all__ = ["reject_filesystem_capability_partitions", "StorageResourceRequest", "StorageResourceScope", "MemoryResource", "FilesystemResource", "SqlResource"]
+
+def reject_filesystem_capability_partitions(routes: Sequence[StorageRoute], namespace: str, tenant_id: str) -> None:
+    """Recognize existing group membership before opening a reduced resource set."""
+    roots = {route.transaction_root or route.path for route in routes if route.kind == "filesystem"}
+    namespace_digest = hashlib.sha256(namespace.encode()).hexdigest()
+    tenant_digest = hashlib.sha256(tenant_id.encode()).hexdigest()
+    for root in roots:
+        if root is None:
+            continue
+        for path in (root / ".state-groups").glob("*/manifest.json"):
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if not isinstance(manifest, dict):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if manifest.get("namespace_digest") != namespace_digest or manifest.get("tenant_digest") != tenant_digest:
+                continue
+            members = manifest.get("members")
+            if (manifest.get("format") != "linktools-ai-state-group" or manifest.get("version") != 1
+                    or not isinstance(members, list)
+                    or any(not isinstance(member, dict) or not isinstance(member.get("runtime_domain"), str) for member in members)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if any(member["runtime_domain"].startswith("capability:") for member in members):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")

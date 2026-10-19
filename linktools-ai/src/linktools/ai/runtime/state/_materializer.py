@@ -14,6 +14,7 @@ from linktools.core import environ
 from ...errors import AIError, ErrorCode
 from ...storage import (
     CacheBackend,
+    StorageRoute,
     ObjectStore,
     SqlStorageContext,
     build_object_sql_metadata,
@@ -64,6 +65,7 @@ class _MaterializedRuntimeStorage:
     run_store: RuntimeAgentRunStore
     retention: RuntimeRetentionController
     stores: Mapping[RuntimeDomain, StateStore]
+    capability_stores: Mapping[str, StateStore]
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
@@ -85,6 +87,7 @@ async def materialize_runtime_storage(
     tenant_id: str,
     object_store: ObjectStore | None,
     read_only: bool = False,
+    capability_routes: Mapping[str, StorageRoute] | None = None,
 ) -> _MaterializedRuntimeStorage:
     from ._schema import build_runtime_sql_metadata
 
@@ -105,6 +108,18 @@ async def materialize_runtime_storage(
         )
         for domain in RuntimeDomain
     )
+    participant_routes = dict(capability_routes or {})
+    requests += tuple(
+        StorageResourceRequest(
+            name=f"capability:{identity}", route=route,
+            member_path=(route.path / "capabilities" / hashlib.sha256(identity.encode()).hexdigest()
+                         / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
+                         if route.kind == "filesystem" and route.path is not None else None),
+            configure_schema=lambda metadata: build_runtime_sql_metadata(frozenset({RuntimeDomain.EXECUTION}), metadata=metadata),
+        )
+        for identity, route in participant_routes.items()
+    )
+    capability_stores: dict[str, StateStore] = {}
     stores: dict[RuntimeDomain, StateStore] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
@@ -142,8 +157,26 @@ async def materialize_runtime_storage(
             stores[domain] = store
             cleanups.append(store.close)
 
+        for (identity, route), resource in zip(participant_routes.items(), resources.resources[len(RuntimeDomain):]):
+            partition = f"capability:{identity}"
+            if isinstance(resource, MemoryResource):
+                store = InMemoryStateStore(resource.group, cache=route.cache)
+            elif isinstance(resource, FilesystemResource):
+                store = FilesystemStateStore(
+                    resource.member_path, namespace=namespace, tenant_id=tenant_id,
+                    runtime_domain=partition, group=resource.group, cache=route.cache,
+                )
+            else:
+                store = SqlStateStore(
+                    resource.context.engine, metadata=resource.metadata, context=resource.context,
+                    runtime_domain=partition, group=resource.group, cache=route.cache,
+                    store_digest=state_store_digest(namespace, tenant_id, partition),
+                )
+            capability_stores[identity] = store
+            cleanups.append(store.close)
+
         # Filesystem groups seal their membership when initialization starts.
-        for store in stores.values():
+        for store in (*stores.values(), *capability_stores.values()):
             await store.initialize()
 
         execution_store = stores[RuntimeDomain.EXECUTION]
@@ -252,6 +285,7 @@ async def materialize_runtime_storage(
             run_store=run_store,
             retention=retention,
             stores=dict(stores),
+            capability_stores=capability_stores,
             close_actions=tuple(actions),
         )
     except BaseException:

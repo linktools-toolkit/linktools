@@ -12,7 +12,7 @@ from linktools.core import environ
 from ...core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from ...storage import BatchWriteScope, BatchWriteScopeFactory, WriteBufferBackend, WriteBufferEntry
 from ...errors import AIError, ErrorCode
-from ._durability import _await_owned_task
+from ._durability import await_owned_task
 from ._step_archive import _AgentRunHistoryLock, _ProjectionOffset
 from ._step_contracts import AgentRunStore
 
@@ -155,7 +155,7 @@ class TracePersistence:
                             # A buffer callback timeout must not cancel durable
                             # publication. Wait for its actual outcome; caller
                             # cancellation remains owned by the outer boundary.
-                            _, error, _ = await _await_owned_task(
+                            _, error, _ = await await_owned_task(
                                 asyncio.create_task(self._flush(
                                     agent_run_id, execution_id=execution_id,
                                     producer_generation=producer_generation,
@@ -199,7 +199,7 @@ class TracePersistence:
         action. Undispatched markers can be acknowledged once paused because
         their facts remain in staging; an entered callback must settle first.
         """
-        _, error, cancelled = await _await_owned_task(
+        _, error, cancelled = await await_owned_task(
             asyncio.create_task(self._stop(agent_run_id)), self._background_tasks,
         )
         if error is not None:

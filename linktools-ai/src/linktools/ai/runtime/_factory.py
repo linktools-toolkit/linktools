@@ -76,9 +76,12 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._capabilities import runtime_feature_leaves
+from ..storage import StorageRoute
+from .persistence import CapabilityPersistence
+from ._capability_writes import RuntimeCapabilityWrites
 from linktools.ai.capability import ConversationCapability
 from ._metrics_service import MetricsService
-from ._persistence_configuration import persistence_storage_configuration
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
 from linktools.ai.capability import TraceCapability, CheckpointCapability
 from ._runtime_history import RuntimeHistory
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
@@ -190,6 +193,8 @@ async def compose_runtime_components(
                 asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
         def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
+            if isinstance(capability, CapabilityPersistence):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capabilities require runtime scope")
             if isinstance(capability, (
                 CheckpointCapability,
                 TraceCapability,
@@ -245,10 +250,43 @@ async def compose_runtime_components(
                 return rebound
             return capability
 
-        runtime_capabilities = tuple(
-            selected for candidate in candidates if candidate.scope == "runtime"
-            if (selected := candidate.value.visit_and_replace(consume_runtime_declaration)) is not None
-        )
+        capability_routes: dict[str, StorageRoute] = {}
+        capability_revisions: dict[str, int] = {}
+        runtime_capability_values = []
+        for candidate in candidates:
+            if candidate.scope != "runtime":
+                continue
+
+            def capture_persistence(capability: AbstractCapability[AgentContext[AppT]]) -> AbstractCapability[AgentContext[AppT]] | None:
+                if isinstance(capability, WrapperCapability):
+                    wrapped = capability.wrapped.visit_and_replace(capture_persistence)
+                    if wrapped is None:
+                        return None
+                    rebound = copy(capability)
+                    rebound.wrapped = wrapped
+                    return rebound
+                selected = consume_runtime_declaration(capability)
+                if selected is None or not isinstance(selected, CapabilityPersistence):
+                    return selected
+                identity = selected.id
+                if identity is None:
+                    if capability is not candidate.value:
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "Persistent capability leaves require a registered identity")
+                    identity = candidate.id
+                if identity in capability_routes:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                if selected.storage is not None and not isinstance(selected.storage, StorageRoute):
+                    raise TypeError("Persistent capability storage must use StorageRoute")
+                capability_routes[identity] = selected.storage or storage.plan.route(RuntimeDomain.EXECUTION)
+                capability_revisions[identity] = candidate.revision
+                bound = copy(selected)
+                bound.id = identity
+                return bound
+
+            selected = candidate.value.visit_and_replace(capture_persistence)
+            if selected is not None:
+                runtime_capability_values.append(selected)
+        runtime_capabilities = tuple(runtime_capability_values)
         runtime_ids: set[str] = set()
 
         def register_runtime_id(capability: AbstractCapability[AgentContext[AppT]]) -> None:
@@ -260,6 +298,10 @@ async def compose_runtime_components(
         for capability in runtime_capabilities:
             capability.apply(register_runtime_id)
         module_routes = persistence_storage_configuration(runtime_capabilities)
+        capability_routes = capability_storage_configuration(
+            tuple((capability.id or "", capability) for capability in runtime_capabilities),
+            default_route=storage.plan.route(RuntimeDomain.EXECUTION),
+        )
         candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -313,8 +355,14 @@ async def compose_runtime_components(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
             module_routes=module_routes,
+            capability_routes=capability_routes,
         )
 
+        selected_state.run_store.capability_writes = RuntimeCapabilityWrites(
+            selected_state.capability_stores, namespace=resolved_namespace, tenant_id=effective_tenant_id,
+            marker_store=selected_state.capability_marker_store(),
+        )
+        selected_state.run_store.capability_revisions = capability_revisions
         initialized = True
         for group in groups:
             await group.verify_source_revision()
