@@ -26,6 +26,7 @@ from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
+from linktools.ai.core import CommitPolicy
 from linktools.ai.capability import TraceCapability
 from linktools.ai.storage import InMemoryCacheBackend
 
@@ -383,8 +384,8 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     storage_path = tmp_path / "scheduled"
     storage = RuntimeStorage.filesystem(storage_path)
     group = RuntimeFeatures("scheduled-history")
-    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE).with_cache(
-        InMemoryCacheBackend(max_bytes=65536),
+    group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(
+        buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0,
     )), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(

@@ -46,7 +46,7 @@ from ..spec import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
 )
-from ..storage import ObjectStore, PayloadPolicy, StreamBackend
+from ..storage import CacheBackend, ObjectStore, PayloadPolicy, StreamBackend, TurnCoordinationBackend
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
@@ -370,6 +370,7 @@ async def compose_runtime_components(
             state=selected_state,
             metrics=metrics,
             commit=execution_capability.commit,
+            coordination=execution_capability.coordination,
             catalog=catalog,
             compiler=compiler,
             authorization=selected_authorization,
@@ -575,6 +576,7 @@ async def _build_local_components(
     state: RuntimeState,
     metrics: Metrics | None,
     commit: CommitPolicy,
+    coordination: CacheBackend | TurnCoordinationBackend | StreamBackend | None,
     catalog: AgentCatalog,
     compiler: AgentCompiler,
     authorization: AuthorizationPolicy,
@@ -641,13 +643,13 @@ async def _build_local_components(
         )
         metric_buffer = None if metrics is None else MetricsService(metrics)
         metric_source_namespace = None if metric_buffer is None else namespace
-        if state.plan.route(RuntimeDomain.EXECUTION).cache is not None:
+        if coordination is not None:
             runtime_bridge.pending_turns.bind_coordination(_PendingTurnCoordination.select(
-                state.plan.route(RuntimeDomain.EXECUTION).cache, namespace=namespace, tenant_id=tenant_id,
+                coordination, namespace=namespace, tenant_id=tenant_id,
             ))
         stream_cache = (
-            state.plan.route(RuntimeDomain.EXECUTION).cache
-            if isinstance(state.plan.route(RuntimeDomain.EXECUTION).cache, StreamBackend)
+            coordination
+            if isinstance(coordination, StreamBackend)
             and state.plan.route(RuntimeDomain.EXECUTION).retention is StorageRetentionMode.DURABLE
             else None
         )

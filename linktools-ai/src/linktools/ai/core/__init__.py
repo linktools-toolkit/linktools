@@ -3,6 +3,7 @@
 """Pure core values and errors."""
 
 from ._commit_policy import CommitPolicy
+from ._write_buffer import WriteBufferBackend, WriteBufferEntry
 from ._budget import BudgetUsage, RunBudget
 from ._correlation import (
     CorrelationData,
@@ -113,6 +114,8 @@ __all__ = [
     "HandoffState",
 
     "CommitPolicy",
+    "WriteBufferBackend",
+    "WriteBufferEntry",
     "BudgetUsage",
     "RunBudget",
     "ApprovalDecision",

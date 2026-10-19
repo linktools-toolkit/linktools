@@ -124,7 +124,7 @@ Metrics retain their own batching; a conversation turn does not force a metrics 
 ### Module storage and cache configuration
 
 `StorageRoute` and `StorageRetentionMode` are imported from `linktools.ai.storage`.
-A route bundles its backend with an optional borrowed cache, for example
+A route bundles its backend with an optional borrowed hot-read cache, for example
 `StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
 persistence identity. Session and Conversation use the root `RuntimeStorage`
 resource; `ConversationCapability()` only selects context retention. Set
@@ -134,7 +134,7 @@ For plan-based construction, caches live on the routes rather than a second
 `RuntimeStorage.sqlite(path, cache=cache)` apply the cache to their generated routes.
 
 `CheckpointCapability(storage=route)` and
-`TraceCapability(storage=route, commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))`
+`TraceCapability(storage=route, commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=3.0))`
 configure their archives. Omitted storage inherits the Runtime backend and cache
 with separate logical partitions. An explicit route supplies the complete
 resource: `cache=None` disables that route's cache instead of inheriting it.
@@ -144,10 +144,19 @@ uses durable admission and recoverable prepared terminal handoffs rather than
 single-transaction deferred turns. Shared SQL engines, caches, and object stores
 remain borrowed resources.
 
-The effective execution route cache supplies turn coordination, live streams,
-and execution record reads. Session metadata/display and Conversation content
-use the effective Conversation route cache; shortcut storage factories share the
-supplied cache across these routes. A module resource override cannot create a separate producer ownership
+The workspace ACP convenience entry point accepts the same execution declaration:
+`ACPApplication.for_workspace(workspace, models=models, storage=storage,
+execution=ExecutionCapability(coordination=cache))`. Its workspace and conversation
+capabilities remain built in. A cache attached only to storage does not enable
+turn or stream coordination.
+
+`ExecutionCapability(coordination=cache)` explicitly supplies shared turn
+coordination and live streams. The execution route cache only serves hot
+execution record reads. Session metadata/display and Conversation content
+use the Conversation route cache; shortcut storage factories apply the supplied
+hot cache to their routes. Pending-turn visibility comes through the explicit
+coordination channel, not through the hot cache.
+A module resource override cannot create a separate producer ownership
 namespace. Reuse the root storage plan and the same features with
 `RuntimeHistory.open(features=...)` and `RuntimeSnapshot.create()` to read and
 export all custom routes without activating hooks or Metrics recorders.
@@ -216,15 +225,17 @@ existing confirmation outcome. It must not claim completion from force alone.
 
 Import `CommitPolicy` from `linktools.ai.core`. Its factories are
 `CommitPolicy.sync()`, `CommitPolicy.terminal()`, and
-`CommitPolicy.batch(batch_size=..., flush_interval=...)`. The policy selects
-write timing independently of storage routing and cache availability.
+`CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...)`. The policy
+pairs write timing with its optional borrowed buffer, independently of read
+cache routing. Without a buffer, observation writes await the source. A buffer
+never becomes a hot-read cache and is never closed by the policy.
 Runtime execution supports sync and terminal; Trace and Metrics support sync and batch.
 `ExecutionCapability(commit=CommitPolicy.sync())` is the default: new turns use durable admission even with
 a coordination cache. Shared admission ownership and idempotency coordination
 remain active for every policy, including a sync caller joining an already
 admitted terminal-policy turn. Opt into `ExecutionCapability(commit=CommitPolicy.terminal())`
 to defer eligible ordinary native turns until the terminal boundary. Deferred
-admission additionally requires an explicitly configured execution-route cache
+admission additionally requires explicitly configured `coordination`
 with the required coordination groups and compatible storage routes.
 Execution timing is independent of Conversation retention and Session activation.
 Execution is required and installed by default. Register one explicit
@@ -234,7 +245,9 @@ Execution is required and installed by default. Register one explicit
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import CommitPolicy
 
-features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+features.capability(ExecutionCapability(
+    commit=CommitPolicy.terminal(), coordination=shared_cache,
+), scope="runtime")
 ```
 
 `Runtime.open` does not take a separate execution commit policy.
@@ -252,8 +265,8 @@ idempotency, producer fencing, tool-effect ownership, and unknown-commit readbac
 remain part of the execution core. A process crash cannot recover an uncommitted
 turn merely because Conversation or Trace was enabled.
 
-Multiple Runtime instances need shared cache turn coordination for provisional
-live turns. Without an injected cache, or when its required groups are absent,
+Multiple Runtime instances need shared turn coordination for provisional
+live turns. Without injected coordination, or when its required groups are absent,
 Runtime retains ordinary durable admission. It does not silently substitute
 private coordination. Remote preview remains
 provisional. Result completion and unknown-commit resolution use authoritative
@@ -376,10 +389,10 @@ by [OpenAI](https://developers.openai.com/api/docs/guides/rate-limits) and
 
 ### Observation batch timing
 
-`TraceCapability(commit=CommitPolicy.batch(batch_size=128, flush_interval=3.0))` controls observation-only
+`TraceCapability(commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=3.0))` controls observation-only
 flush pressure (counted in observation boundaries) and maximum scheduled delay
-in seconds when the selected storage resource cache supplies `append`, `read_batch` and `ack`. Each run owns
-an independent cache-backed recording scope. A resource with `cache=None` or a hot-content-only cache
+in seconds when `commit.buffer` supplies `append`, `read_batch` and `ack`. Each run owns
+an independent cache-backed recording scope. A policy with `buffer=None`
 awaits publication at each observation boundary; timing options do not create a
 hidden Runtime queue. A lower threshold or interval can make partial trace
 visible sooner at the cost of more writes.
@@ -388,7 +401,7 @@ publish earlier and cannot be delayed by these options. Cache configuration does
 not weaken those boundaries.
 
 Metrics recording independently accepts
-`commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0)` on its dataset
-constructors. With `cache=None`, automatic observations remain
+`commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60.0)` on its dataset
+constructors. With `buffer=None`, automatic observations remain
 synchronous; timing options do not introduce an in-memory queue. These settings
 are resource scheduling policy, not model-visible execution binding identity.

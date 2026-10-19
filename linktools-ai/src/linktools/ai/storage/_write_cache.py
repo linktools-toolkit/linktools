@@ -18,7 +18,7 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._cache import CacheBackend, read_cache, write_cache
-from ._write_buffer import WriteBufferBackend, WriteBufferEntry
+from ..core import WriteBufferBackend, WriteBufferEntry
 from ._contracts import StorageBatchResult, StorageChange, StorageOperation
 
 _Key = TypeVar("_Key", bound=Hashable)
@@ -73,7 +73,7 @@ class BatchWriteScope:
         write_batch: Callable[[tuple[WriteBufferEntry, ...]], Awaitable[None]],
         *, batch_size: int = 128, flush_interval: float = 60.0,
     ) -> None:
-        if not isinstance(cache, WriteBufferBackend) or not all(
+        if not all(
             callable(getattr(cache, name, None)) for name in ("append", "read_batch", "ack")
         ):
             raise TypeError("cache must provide append, read_batch and ack")

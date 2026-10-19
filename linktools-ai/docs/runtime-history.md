@@ -21,7 +21,7 @@ terminal commits and result consumption retain their authoritative transaction
 checks. Task-owned runs and their delegated descendants keep source-only model control
 checks, including on transient execution routes.
 
-With durable trace enabled and a write-buffer cache on its effective route,
+With durable trace enabled and an explicit `CommitPolicy.batch(buffer=...)`,
 Trace coalesces observation writes through its owned cache-buffer scopes. The
 default batch policy flushes at 128 observation boundaries or after three seconds.
 Without a write-buffer cache, observation writes are synchronous. Each run keeps its own transaction and completion barrier, so a blocked

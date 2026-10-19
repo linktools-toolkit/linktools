@@ -57,19 +57,20 @@ miss; it consumes at least one byte of the built-in capacity budget. These
 capacity limits do not define domain retention or promise TTL expiration; the
 owning domain remains responsible for its retention rules.
 
-## One cache instance, optional method groups
+## Read resources and write policies
 
-Pass one `cache` to `RuntimeStorage`, `Metrics`, or `StorageBuffer`. An adapter
-provides only the complete method groups it needs: `get`/`put`/`delete` for hot
-content, `append`/`read_batch`/`ack` for pending writes, and
-`open_stream`/`read_stream` for live previews. Each consumer checks the groups it uses. A missing group leaves it on its
-existing source/local path; a partial required group is a configuration error. No new all-capabilities wrapper or inheritance is required.
+`StorageRoute(..., cache=...)` and the RuntimeStorage factories borrow a
+`CacheBackend` for hot reads only. `CommitPolicy.batch(buffer=..., ...)` borrows
+an independent `WriteBufferBackend` for pending writes. The same implementation
+may provide both capabilities, but each use is explicitly configured.
+`ExecutionCapability(coordination=...)` separately supplies turn ownership and
+live streams, including the non-authoritative pending-turn view.
 
-`CacheBackend` names only the hot-content protocol, not an interface requiring
-all three groups. A stream-only or pending-only adapter can therefore be a valid
-`cache` without implementing `CacheBackend`. Pending bytes await settlement;
-they must not inherit hot-entry eviction rules. Preview streams have their own
-gap and retention semantics and do not replace durable execution history.
+Adapters implement complete method groups: `get`/`put`/`delete` for hot content,
+`append`/`read_batch`/`ack` for pending writes, and `open_stream`/`read_stream`
+for previews. A write-only adapter is valid as a policy buffer, not as a
+StorageRoute cache. Pending bytes must not inherit hot-entry eviction rules;
+preview streams do not replace durable execution history.
 
 `InMemoryCacheBackend(max_bytes=..., max_size=...)` provides hot content and
 buffered writes with one shared capacity budget, including in-flight writes.
@@ -105,8 +106,8 @@ from linktools.ai.storage import InMemoryCacheBackend
 
 cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
 metrics = Metrics.sqlite(
-    "metrics.sqlite3", cache=cache,
-    commit=CommitPolicy.batch(batch_size=64, flush_interval=15.0),
+    "metrics.sqlite3",
+    commit=CommitPolicy.batch(buffer=cache, batch_size=64, flush_interval=15.0),
 )
 recorder = metrics.recorder()
 try:
@@ -120,7 +121,7 @@ Automatic Agent and Task observations, including evaluation work in a Runtime,
 require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
-All Metrics constructors and factories accept `cache` and `commit`, defaulting
+All Metrics constructors and factories accept `commit`, defaulting
 to `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
 `CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
 policies. A Metrics batch policy requires an integer `batch_size`
@@ -128,7 +129,7 @@ from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are
 invalid for both.
 These settings are validated when creating the dataset and inherited by each
 fresh recorder, including those owned by separate Runtimes. Only automatic recorders
-use its complete buffer group; otherwise they await the source in the caller,
+use `commit.buffer`; without a buffer they await the source in the caller,
 without a hidden local queue. `record`, `record_observations`, and queries keep
 their strong source semantics. Queries never add pending observations.
 
@@ -284,12 +285,16 @@ require a new per-call cache option or a different Runtime profile.
 
 ## Runtime observation publication
 
-Metrics uses the cache's pending-write group with its configurable scheduler
-(defaults: 60 seconds or 128 entries). Trace uses the same owner-scoped buffering
-primitive when its explicitly supplied cache implements `append`, `read_batch`
-and `ack` (defaults: three seconds or 128 observation boundaries). Without that
-write-buffer capability, including `cache=None` and a hot-content-only cache, each
-observation boundary awaits the existing guarded projection commit.
+Metrics uses `commit.buffer` with its configurable scheduler (defaults: 60
+seconds or 128 entries). Trace uses the same owner-scoped buffering primitive
+through its own `commit.buffer` (defaults: three seconds or 128 observation
+boundaries). Without a buffer, each observation boundary awaits the existing
+guarded projection commit. The route's hot cache never enables write batching.
+
+The policy borrows its buffer; equality and hashing compare timing values only.
+Equal policies or a shared buffer do not currently merge recorder timers or SQL
+transactions. Each Runtime/recorder owns its own work and retains its domain
+failure semantics. Sharing a cache does not imply cross-process claiming.
 
 A Trace queue entry is a flush request, not the sole copy of trace evidence.
 The run's existing staging owner retains facts until atomic publication and
@@ -407,10 +412,10 @@ remain in use.
 
 ## Ordered live streams
 
-`RuntimeStorage.sqlite(path, cache=cache)` uses the optional `open_stream`/`read_stream`
+`ExecutionCapability(coordination=cache)` uses the optional `open_stream`/`read_stream`
 methods on that same borrowed instance for ordered, disposable live previews.
-`object_store` still owns authoritative payloads; `get`/`put`/`delete` on the
-cache instance, when available, cache reproducible content. A live preview
+`object_store` still owns authoritative payloads; the separately configured
+StorageRoute cache holds reproducible content. A live preview
 is not a successful durable commit. Configure shared authoritative execution
 storage as well as a shared stream backend to observe another Runtime's live
 output. Execution routes must have `DURABLE` retention; temporary execution

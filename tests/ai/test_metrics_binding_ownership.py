@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.core import CommitPolicy
 
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
@@ -29,7 +30,7 @@ async def test_binding_owns_only_its_recording_and_reuses_dataset(cached: bool) 
         async def close(self) -> None:
             pytest.fail("recording must not close the borrowed cache")
 
-    metrics = Metrics.in_memory(cache=BorrowedCache(max_bytes=2**20) if cached else None)
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=BorrowedCache(max_bytes=2**20) if cached else None))
     first, second = MetricsService(metrics), MetricsService(metrics)
     try:
         assert await first.try_record(_observation("first"))
@@ -56,7 +57,7 @@ async def test_binding_owns_only_its_recording_and_reuses_dataset(cached: bool) 
 
 @pytest.mark.asyncio
 async def test_shared_dataset_creates_independent_runtime_services() -> None:
-    dataset = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=2**20))
+    dataset = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
     first, second = MetricsService(dataset), MetricsService(dataset)
     try:
         assert first is not second
@@ -138,7 +139,7 @@ async def test_recording_bindings_borrow_shared_sql_engine(tmp_path, monkeypatch
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'metrics.db'}")
     await provision_metrics_database(engine)
-    metrics = Metrics.sql(engine, cache=InMemoryCacheBackend(max_bytes=2**20))
+    metrics = Metrics.sql(engine, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
     first, second = MetricsService(metrics), MetricsService(metrics)
     async def unexpected_dispose(*args, **kwargs):
         pytest.fail("recording must not dispose the borrowed SQL engine")

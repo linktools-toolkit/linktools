@@ -62,7 +62,9 @@ def test_storage_route_borrows_cache_without_changing_backend_identity(kind, tmp
     assert cached == plain
     assert hash(cached) == hash(plain)
     assert repr(cached) == repr(plain)
-    replacement = _WriteOnly()
+    with pytest.raises(TypeError, match="get, put and delete"):
+        cached.with_cache(_WriteOnly())
+    replacement = _HotOnly()
     copied = cached.with_cache(replacement)
     assert copied is not cached
     assert copied == cached

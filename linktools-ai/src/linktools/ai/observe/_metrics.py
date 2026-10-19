@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 from ..core import CommitPolicy, canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, WriteBufferBackend
 from ._codec import (
     same_definition_contract,
     observation_envelope,
@@ -52,29 +51,24 @@ _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 class Metrics:
     """Close-free dataset; each recorder owns its batching lifetime.
 
-    A batch commit policy uses a write-capable cache to flush at its threshold
+    A batch commit policy uses its explicit buffer to flush at its threshold
     or interval from the first pending observation, whichever comes first.
-    Sync policies, explicit writes and cache-free recording await persistence.
+    Sync policies, explicit writes and buffer-free recording await persistence.
     """
 
     def __init__(
         self, store: MetricStore, *, namespace: str = "default",
-        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> None:
         self._validate_commit(commit)
         self._commit = commit
-        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
-        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
-            raise TypeError("cache must implement append, read_batch and ack together")
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
-        self._cache = cache if isinstance(cache, WriteBufferBackend) and all(callable(method) for method in methods) else None
 
     def recorder(self) -> MetricRecorder:
         """Open an independently owned automatic-recording lifetime."""
         return MetricRecording(
-            self, self._cache, commit=self._commit,
+            self, commit=self._commit,
         )
 
     @property
@@ -83,48 +77,45 @@ class Metrics:
 
     @classmethod
     def in_memory(
-        cls, *, namespace: str = "default", cache: CacheBackend | WriteBufferBackend | None = None,
+        cls, *, namespace: str = "default",
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         return cls(
-            InMemoryMetricStore(), namespace=namespace, cache=cache,
+            InMemoryMetricStore(), namespace=namespace,
             commit=commit,
         )
 
     @classmethod
     def sqlite(
         cls, path: str | Path, *, namespace: str = "default",
-        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         cls._validate_commit(commit)
         return cls(
-            SQLiteMetricStore(path), namespace=namespace, cache=cache,
+            SQLiteMetricStore(path), namespace=namespace,
             commit=commit,
         )
 
     @classmethod
     def sql(
         cls, engine: AsyncEngine, *, namespace: str = "default",
-        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         from ._sql import SqlMetricStore
 
         cls._validate_commit(commit)
         return cls(
-            SqlMetricStore(engine), namespace=namespace, cache=cache,
+            SqlMetricStore(engine), namespace=namespace,
             commit=commit,
         )
 
     @classmethod
     def from_store(
         cls, store: MetricStore, *, namespace: str = "default",
-        cache: CacheBackend | WriteBufferBackend | None = None,
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> Metrics:
         return cls(
-            store, namespace=namespace, cache=cache,
+            store, namespace=namespace,
             commit=commit,
         )
 

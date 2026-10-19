@@ -14,7 +14,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import CacheBackend, CacheCapabilities, Lease, TurnCoordination, TurnCoordinationBackend
+from ..storage import CacheBackend, StreamBackend, Lease, TurnCoordination, TurnCoordinationBackend
 from .state._codec import decode_domain, encode_domain
 from .state._contracts import ExecutionRecord
 
@@ -41,7 +41,7 @@ class _PendingTurnCoordination:
 
     @classmethod
     def select(
-        cls, cache: CacheCapabilities | None, *, namespace: str, tenant_id: str,
+        cls, cache: CacheBackend | TurnCoordinationBackend | StreamBackend | None, *, namespace: str, tenant_id: str,
     ) -> _PendingTurnCoordination | None:
         if not isinstance(cache, CacheBackend) or not isinstance(cache, TurnCoordinationBackend):
             return None

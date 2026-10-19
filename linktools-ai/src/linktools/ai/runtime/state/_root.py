@@ -5,33 +5,17 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...storage import CacheCapabilities, StorageRoute, FilesystemObjectStore, ObjectStore
+from ...storage import CacheBackend, StorageRoute, FilesystemObjectStore, ObjectStore
 from ._plan import RuntimeStoragePlan
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
-
-def _validate_cache(cache: CacheCapabilities | None) -> None:
-    if cache is None:
-        return
-    for methods in (
-        ("get", "put", "delete"),
-        ("append", "read_batch", "ack"),
-        ("open_stream", "read_stream"),
-        ("claim_turn", "read_turn", "renew_turn", "release_turn", "cancel_turn"),
-    ):
-        available = tuple(getattr(cache, method, None) for method in methods)
-        if any(method is not None for method in available) and not all(map(callable, available)):
-            raise TypeError(f"cache must implement all methods in {', '.join(methods)}")
-
 
 class RuntimeStorage:
     """Reusable resource declaration; each Runtime binds its own operational state."""
 
     def __init__(self, plan: RuntimeStoragePlan, *, object_store: ObjectStore | None = None) -> None:
         _validate_storage_configuration(plan, object_store)
-        for route in plan.resolved_routes.values():
-            _validate_cache(route.cache)
         self._plan = plan
         self._object_store = object_store
 
@@ -46,7 +30,7 @@ class RuntimeStorage:
 
     @classmethod
     def in_memory(
-        cls, *, cache: CacheCapabilities | None = None,
+        cls, *, cache: CacheBackend | None = None,
     ) -> "RuntimeStorage":
         route = StorageRoute.memory(cache=cache)
         return cls(RuntimeStoragePlan.from_default(route))
@@ -57,7 +41,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        cache: CacheCapabilities | None = None,
+        cache: CacheBackend | None = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(path)
         return cls(
@@ -71,7 +55,7 @@ class RuntimeStorage:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-        cache: CacheCapabilities | None = None,
+        cache: CacheBackend | None = None,
     ) -> "RuntimeStorage":
         route = StorageRoute.sqlite(path, cache=cache)
         return cls(
@@ -81,7 +65,7 @@ class RuntimeStorage:
 
     @classmethod
     def from_root(
-        cls, root: "str | Path", *, cache: CacheCapabilities | None = None,
+        cls, root: "str | Path", *, cache: CacheBackend | None = None,
     ) -> "RuntimeStorage":
         base = _normalize_path(root)
         return cls.sqlite(
@@ -96,7 +80,7 @@ class RuntimeStorage:
         engine: "AsyncEngine",
         *,
         object_store: "ObjectStore | None" = None,
-        cache: CacheCapabilities | None = None,
+        cache: CacheBackend | None = None,
     ) -> "RuntimeStorage":
         route = StorageRoute.sql(engine, cache=cache)
         return cls(

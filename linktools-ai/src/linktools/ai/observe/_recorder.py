@@ -14,7 +14,7 @@ from linktools.core import environ
 
 from ..core import CommitPolicy, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ..storage import BatchWriteScope, WriteBufferBackend, WriteBufferEntry
+from ..storage import BatchWriteScope, WriteBufferEntry
 from ._codec import decode_observation_envelope, observation_envelope
 from ._model import MetricRecorderStatus, MetricFlushResult, Observation
 
@@ -26,16 +26,16 @@ _WARNING_INTERVAL_SECONDS = 30.0
 
 
 class MetricRecording:
-    """Own one dataset recording scope, never its borrowed store or cache."""
+    """Own one dataset recording scope, never its borrowed store or buffer."""
     def __init__(
-        self, metrics: Metrics, cache: WriteBufferBackend | None, *,
+        self, metrics: Metrics, *,
         commit: CommitPolicy,
     ) -> None:
         self._metrics = metrics
         self._scope = None
-        if cache is not None and commit.mode == "batch":
+        if commit.buffer is not None and commit.mode == "batch":
             self._scope = BatchWriteScope(
-                cache, self._write_batch,
+                commit.buffer, self._write_batch,
                 batch_size=commit.batch_size, flush_interval=commit.flush_interval,
             )
         self._accepting = True

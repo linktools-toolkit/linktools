@@ -3,7 +3,7 @@
 """Dataset batching settings preserve delivery and Runtime ownership."""
 
 import asyncio
-from collections.abc import Hashable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -36,8 +36,8 @@ class _Store(InMemoryMetricStore):
 @pytest.mark.parametrize("size", [None, 2, 256])
 async def test_metrics_batch_threshold_flushes_without_explicit_flush(size: int | None) -> None:
     store = _Store()
-    options = {} if size is None else {"commit": CommitPolicy.batch(batch_size=size, flush_interval=60.0)}
-    metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20), **options)
+    options = {"commit": CommitPolicy.batch(batch_size=128 if size is None else size, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20))}
+    metrics = Metrics.from_store(store, **options)
     recorder = metrics.recorder()
     threshold = 128 if size is None else size
     try:
@@ -71,8 +71,8 @@ async def test_metrics_batch_interval_flushes_without_another_admission(monkeypa
     monkeypatch.setattr(_write_cache, "monotonic", lambda: clock[0])
     monkeypatch.setattr(_write_cache.asyncio, "wait_for", advancing_wait)
     store = _Store()
-    options = {} if interval is None else {"commit": CommitPolicy.batch(batch_size=128, flush_interval=interval)}
-    recorder = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20), **options).recorder()
+    options = {"commit": CommitPolicy.batch(batch_size=128, flush_interval=60.0 if interval is None else interval, buffer=InMemoryCacheBackend(max_bytes=2**20))}
+    recorder = Metrics.from_store(store, **options).recorder()
     try:
         assert await recorder.try_record(_observation("timed"))
         await wait_for(store.written.wait(), 1)
@@ -108,7 +108,7 @@ async def test_metrics_batch_options_leave_direct_and_explicit_writes_synchronou
         assert recorder.status().pending == 0
     finally:
         await recorder.close()
-    cached = Metrics.sqlite(tmp_path / "cached.sqlite", cache=InMemoryCacheBackend(max_bytes=2**20), commit=CommitPolicy.batch(batch_size=256, flush_interval=300))
+    cached = Metrics.sqlite(tmp_path / "cached.sqlite", commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=2**20), batch_size=256, flush_interval=300))
     await cached.record_observations((_observation("explicit"),))
     assert await cached.get_observation("explicit") is not None
 
@@ -124,7 +124,7 @@ async def test_shared_metrics_custom_batching_has_independent_runtime_flush_and_
             recorders.append(recorder)
             return recorder
 
-    metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite", cache=InMemoryCacheBackend(max_bytes=2**20), commit=CommitPolicy.batch(batch_size=2, flush_interval=300))
+    metrics = RecordingMetrics.sqlite(tmp_path / "shared.sqlite", commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=2**20), batch_size=2, flush_interval=300))
     async with Runtime.open("first", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=metrics) as first:
         async with Runtime.open("second", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), metrics=metrics) as second:
             assert await recorders[0].try_record(_observation("first"))
@@ -179,18 +179,9 @@ def test_metrics_rejects_unsupported_commit_policy_before_opening_source(
 
 
 @pytest.mark.asyncio
-async def test_metrics_sync_policy_bypasses_borrowed_cache_and_owns_no_source_task() -> None:
-    class Cache(InMemoryCacheBackend):
-        async def append(
-            self, scope: str, id: str, key: Hashable, content: bytes | None, *, wait: bool,
-        ) -> bool:
-            pytest.fail("sync recording must not admit cache entries")
-
-        async def close(self) -> None:
-            pytest.fail("recording must not close its borrowed cache")
-
+async def test_metrics_sync_policy_owns_no_source_task() -> None:
     store = _ControlledStore()
-    metrics = Metrics.from_store(store, cache=Cache(max_bytes=65536), commit=CommitPolicy.sync())
+    metrics = Metrics.from_store(store, commit=CommitPolicy.sync())
     recorder = metrics.recorder()
     writing = asyncio.create_task(recorder.try_record(_observation("sync")))
     closing = None

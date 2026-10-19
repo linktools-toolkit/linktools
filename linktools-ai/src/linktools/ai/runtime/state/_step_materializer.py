@@ -65,7 +65,6 @@ def build_runtime_agent_run_store(
         StagingAgentRunStore(),
         execution_repository=execution_repository,
         tenant_id=tenant_id,
-        trace_cache=plan.route(RuntimeDomain.TRACE).cache,
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
         execution_archive=archives.get(RuntimeDomain.TRACE),
         recovery_archive=archives.get(RuntimeDomain.CHECKPOINT),

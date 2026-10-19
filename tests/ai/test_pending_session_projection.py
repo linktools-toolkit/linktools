@@ -43,7 +43,7 @@ async def _runtimes(tmp_path, *, cache, shared=True):
 
     def group():
         value = RuntimeFeatures("pending-session-display")
-        value.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+        value.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
         value.agent("default", model="default", allow_tools=())
         value.capability(ConversationCapability(), scope="runtime")
         return value

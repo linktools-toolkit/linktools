@@ -41,7 +41,7 @@ ObjectStore 和 CacheBackend 不能为了词形一致合并。get 返回可缺�
 | Runtime 内容注入 | cache | 保留 Runtime 的引用、租户和来源验证 |
 | 内容摘要 | digest | SHA-256 内容完整性 |
 | 物理记录修订 | storage_revision / expected_storage_revision | 与业务 revision 区分 |
-| 写缓存 | cache 的 append/read_batch/ack；既有 BatchWriteScope 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
+| 写缓存 | CommitPolicy.buffer 的 append/read_batch/ack；既有 BatchWriteScope 调度 | 待写字节属于所注入实例，scope 只拥有该调用者的调度和结算，见第8节 |
 
 其他名称只有真实职责歧义时才调整，不为了字面整齐改变公开接口。本轮不同时推行另一组未实施的路径、metadata或revision方法改名。
 
@@ -78,7 +78,7 @@ StoredRecord.storage_revision 与 Observed.storage_revision 是物理 CAS token�
 
 已有：CacheBackend、内存/文件/Tiered实现、ObjectStore、StorageOverlay。PR191已实现并验证：RuntimeStorage 快捷构造器的 cache 参数及内部读取路由（当前缓存由各 StorageRoute 持有）。Storage 与 Asset 批读沿用第3节的分层合同；当前术语见第3节，已确认的写缓存公开形状在第8节。
 
-普通调用方只注入一个可选 cache 实例，不另外构造写策略、options、总管理器或全能力包装。实例按实际需要提供完整方法组：热点 get/put/delete，批写 append/read_batch/ack，流 open_stream/read_stream。contains_many 是可选热点批探测。所属消费方仅检查自身使用的方法组；该组全部缺失就沿用该场景的直接源或已有本地流路径，半组立即 TypeError，不静默换用内部队列。宿主无需继承新 Protocol，也无需给无用能力写空方法。
+配置分为两组：StorageRoute.cache 只借用 get/put/delete 热点读取能力；CommitPolicy.batch(buffer=..., batch_size=..., flush_interval=...) 借用 append/read_batch/ack 写缓存并声明提交时机。ExecutionCapability.coordination 独立借用 turn/stream 与 pending-turn 所需能力。同一底层实例可以分别注入多个用途，但不会因实现某组方法而隐式启用它。无写 buffer 时保持领域原有直接源写入路径，不创建隐藏队列；无热点 cache 时直接回源。宿主无需继承全能力包装或提供无用空方法。
 
 SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 的完整 session/execution 记录写入同一 singleton 热点 key。no-op mutation 不失效也不重发已有观察。每个 store 最多持有一个受管发布任务，忙时丢弃后续填充，不新增待写队列；缓存错误不能改变源提交结果，关闭等待该任务的取消清理。未确认或结果未知的提交不发布，整批读取仍独立捕获完整快照，不拼接 singleton。期限始终从原事务 capture 起算3秒，commit、延迟发布及跨层读取都不续期；本 owner 失效阻止旧本地填充，跨 owner 晚到的旧快照在其原期限内仍可能覆盖较新的缓存，不承诺全局单调。该优化仅覆盖这两种 SQL metadata 热点，其他 backend 保持原 read-through；节省源查询可能增加 cache put 和传输字节，须分别计量。
 
@@ -224,20 +224,23 @@ max_bytes 只保留在各实例内存中。每次成功写入的put持共享锁�
 
 ## 8. 同一 cache 实例上的缓冲批写
 
-本节接口以本次确认的单一 cache 参数为准。普通用户只提供已有实例；不另行配置独立写缓存管理器。自动观测指标接受 best-effort 延迟和进程退出时的丢失风险；审计、恢复、控制、检查点及显式强写保持原有持久保证。数据库原生批量 API、原子事务和业务既有强 staging 不因此移除。
+热点读取与缓冲写入使用独立配置入口。自动观测指标接受 best-effort 延迟和进程退出时的丢失风险；审计、恢复、控制、检查点及显式强写保持原有持久保证。数据库原生批量 API、原子事务和业务既有强 staging 不因此移除。
 
-### 单一装配入口
+### 读资源与写策略配对
 
+    from linktools.ai.core import CommitPolicy
     from linktools.ai.observe import Metrics
     from linktools.ai.runtime import RuntimeStorage
     from linktools.ai.storage import InMemoryCacheBackend
 
     cache = InMemoryCacheBackend(max_bytes=8 * 1024 * 1024, max_size=1024)
     direct = Metrics.sqlite("metrics-direct.sqlite3")
-    metrics = Metrics.sqlite("metrics-cached.sqlite3", cache=cache)
+    metrics = Metrics.sqlite("metrics-cached.sqlite3", commit=CommitPolicy.batch(
+        buffer=cache, batch_size=128, flush_interval=60,
+    ))
     storage = RuntimeStorage.in_memory(cache=cache)
 
-Metrics 的构造与 in_memory/sqlite/sql/from_store 工厂均接收 cache。Runtime 仍只接收 metrics，不另传指标缓存参数；同一 cache 可以供 RuntimeStorage 的热点内容与 Metrics 的自动批写按需复用。若实例仅有热点或流方法组，Metrics 直接等待源 I/O，不偷偷创建内部本地队列。
+Metrics 的工厂通过 commit.buffer 配置自动批写；Runtime 仍只接收 metrics，不另传指标缓存。RuntimeStorage 工厂的 cache 参数仅配置热点读取。相同 cache 可以在两组配置中显式复用；仅设置热点 cache 不启用批写。CommitPolicy 不拥有 buffer 生命周期，值相等与哈希不包括资源。各 Runtime/recorder 仍拥有独立队列、timer 和结算，不因共用实例自动合并 flush 或 SQL 事务，也不提供跨 Pod 消费 claim。
 
 Metrics.record、record_observations 与 MetricStore.put_observations 保留确认写入合同；仅自动 recorder 走批写接纳。Metrics.query/get_observation 读取权威已提交数据，不混入 pending，不因注入缓存增加查询 TTL。
 
@@ -279,7 +282,7 @@ MetricRecorder.try_record 是异步接纳操作，bool 不能当持久提交凭�
 
 | 已确认需求 | 实现与当前验证入口 | 结论与边界 |
 |---|---|---|
-| 单一 cache 接入与全局命名 | storage/asset/runtime 公开接口、`test_runtime_stream_storage.py`、架构 gate | 完整可选方法组已收敛；无新总管理器或 Redis 依赖 |
+| 读缓存、写策略与协调能力入口 | storage/asset/runtime 公开接口、`test_runtime_stream_storage.py`、架构 gate | 完整可选方法组已收敛；无新总管理器或 Redis 依赖 |
 | 热点内容、miss合并、版本绑定与损坏回源 | `test_storage_cache_miss_io.py`、`test_asset_cache_integrity_and_close.py`、Runtime object/history cache 测试 | 同owner共享flight；每reader独立解码；源错误与删除不被缓存吞掉 |
 | 共享纯文件真实预算 | `test_filesystem_content_cache_shared.py`、`test_storage_cache_regressions.py` | Linux本地跨进程、kill writer、dirty恢复、失败发布、空值计费和正常mutation不全扫描已验证；不是全局最小quota |
 | revision新鲜度与writer归属 | `test_storage_metadata_refresh.py`、`test_storage_writer_revision_source.py` | 同批观察、后到读、旧刷新失效与非primary writer通知已验证；未引入通用TTL提示框架 |

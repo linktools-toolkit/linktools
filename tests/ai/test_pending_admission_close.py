@@ -48,9 +48,8 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
         await original_preflight(service)
 
     monkeypatch.setattr(DefaultExecutionService, "preflight_close", observe_preflight)
-    storage = RuntimeStorage.sqlite(
-        tmp_path / "state.db", cache=BlockingCache(max_bytes=2**20),
-    )
+    cache = BlockingCache(max_bytes=2**20)
+    storage = RuntimeStorage.sqlite(tmp_path / "state.db")
     original_close = RuntimeState.close
 
     async def close_storage(owner):
@@ -61,7 +60,7 @@ async def test_runtime_close_joins_pending_publication_after_start_cancellation(
     monkeypatch.setattr(RuntimeState, "close", close_storage)
     async with Runtime.open(
         "pending-admission-close", storage=storage,
-        models=_Models(_UsageFunctionModel(model)), features=_group(),
+        models=_Models(_UsageFunctionModel(model)), features=_group(coordination=cache),
     ) as runtime:
         session = await runtime.agents.get().create_session("session")
         starting = asyncio.create_task(session.start("question", idempotency_key="request"))

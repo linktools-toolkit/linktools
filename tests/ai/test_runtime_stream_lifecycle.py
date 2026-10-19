@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryStreamBackend, StreamBatch, StreamWriter
 from ._runtime_test_helpers import _Models
@@ -44,7 +44,7 @@ class _Streams(InMemoryStreamBackend):
 
 
 @asynccontextmanager
-async def _runtimes(tmp_path, cache):
+async def _runtimes(tmp_path, cache, *, finish_provider: asyncio.Event | None = None):
     release = asyncio.Event()
     entered = asyncio.Event()
 
@@ -53,14 +53,17 @@ async def _runtimes(tmp_path, cache):
         yield "first "
         await release.wait()
         yield "last"
+        if finish_provider is not None:
+            await finish_provider.wait()
 
     group = RuntimeFeatures[None]("stream-lifecycle")
     group.agent("default", model="default", allow_tools=())
+    group.capability(ExecutionCapability(coordination=cache), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "state.db"
     async with Runtime.open("stream-lifecycle", models=models, features=group,
-                            storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
-        storage = RuntimeStorage.sqlite(path, cache=cache)
+                            storage=RuntimeStorage.sqlite(path)) as owner:
+        storage = RuntimeStorage.sqlite(path)
         async with Runtime.open("stream-lifecycle", models=models, features=group, storage=storage) as reader:
             execution = await owner.agents.get().start("question")
             try:
@@ -69,6 +72,8 @@ async def _runtimes(tmp_path, cache):
             finally:
                 cache.cleanup_release.set()
                 release.set()
+                if finish_provider is not None:
+                    finish_provider.set()
                 assert (await execution.wait(timeout_seconds=5)).result.output == {"text": "first last"}
 
 
@@ -243,11 +248,12 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
     cache = _Streams()
     group = RuntimeFeatures("early-preview")
     group.agent("default", model="default", allow_tools=())
+    group.capability(ExecutionCapability(coordination=cache), scope="runtime")
     models = _Models(FunctionModel(stream_function=model))
     path = tmp_path / "early.db"
     async with Runtime.open("early-preview", models=models, features=group,
-                            storage=RuntimeStorage.sqlite(path, cache=cache)) as owner:
-        reader_storage = RuntimeStorage.sqlite(path, cache=cache)
+                            storage=RuntimeStorage.sqlite(path)) as owner:
+        reader_storage = RuntimeStorage.sqlite(path)
         async with Runtime.open("early-preview", models=models, features=group,
                                 storage=reader_storage) as reader:
             execution = await owner.agents.get().start("question")
@@ -305,7 +311,8 @@ async def test_remote_watch_before_first_admission_receives_later_preview(tmp_pa
 @pytest.mark.parametrize("remote", (False, True))
 async def test_preview_resume_keeps_received_prefix_until_terminal(tmp_path: Path, remote: bool) -> None:
     cache = _Streams()
-    async with _runtimes(tmp_path, cache) as (_, reader, _, execution, release):
+    finish_provider = asyncio.Event()
+    async with _runtimes(tmp_path, cache, finish_provider=finish_provider) as (_, reader, _, execution, release):
         observed = await reader.executions.get(execution.execution_id) if remote else execution
         first_watch = observed.watch(include_content=True)
         try:
@@ -321,6 +328,7 @@ async def test_preview_resume_keeps_received_prefix_until_terminal(tmp_path: Pat
             release.set()
             suffix = await asyncio.wait_for(received, 5)
             assert suffix.event.payload["text"] == "last"
+            finish_provider.set()
             remaining = [item async for item in resumed]
             assert all(item.event.event_type != "STREAM_RESET" for item in remaining)
             assert any(item.event.event_type == "EXECUTION_SUCCEEDED" for item in remaining)

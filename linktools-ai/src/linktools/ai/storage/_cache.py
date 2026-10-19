@@ -31,7 +31,7 @@ from ..errors import AIError, ErrorCode
 from ._files import sync_directory
 from ._lock import FilesystemMutationLock, Lease
 from ._turn import TurnCoordination
-from ._write_buffer import WriteBufferEntry
+from ..core import WriteBufferEntry
 
 ContentCacheKey: TypeAlias = str
 

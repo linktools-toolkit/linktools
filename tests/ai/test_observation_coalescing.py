@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from linktools.ai.storage import InMemoryCacheBackend
+from linktools.ai.storage import InMemoryCacheBackend, WriteBufferBackend
 from linktools.ai.runtime import RuntimeDomain
 from linktools.ai.runtime.state import RuntimeState, _steps, _trace_persistence
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
@@ -28,7 +28,6 @@ async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
         cache = InMemoryCacheBackend(max_bytes=65536)
     await state.initialize(
         namespace="observation-batches", tenant_id="tenant",
-        module_routes={RuntimeDomain.TRACE: state.plan.route(RuntimeDomain.TRACE).with_cache(cache)},
     )
     execution = replace(_execution(), revision=1)
     repository = state.execution.executions
@@ -37,7 +36,7 @@ async def _setup(tmp_path: Path, backend: str, *, cache=_DEFAULT_CACHE):
         lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
     )
     state.run_store.trace_persistence.configure(
-        "run",
+        "run", buffer=cache if isinstance(cache, WriteBufferBackend) else None,
         batch_size=_trace_persistence.DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=_trace_persistence.DEFAULT_TRACE_FLUSH_INTERVAL,
     )
@@ -59,7 +58,7 @@ async def _add_run(state, run_id: str, execution_id: str) -> None:
         lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
     )
     state.run_store.trace_persistence.configure(
-        run_id,
+        run_id, buffer=state.run_store.trace_persistence._caches["run"],
         batch_size=_trace_persistence.DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=_trace_persistence.DEFAULT_TRACE_FLUSH_INTERVAL,
     )
@@ -489,7 +488,7 @@ async def test_buffer_callback_settles_before_release_rebind_or_pressure_drain(
                 await repository.state_store.mutate(
                     lambda tx: repository.admit_history_producer_in_transaction(tx, replace(_execution(), revision=2))
                 )
-                store.trace_persistence.configure("run", flush_interval=60.0)
+                store.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
                 store.bind_execution_producer("run", execution_id="execution", producer_generation=2)
                 run = await archive.get_agent_run(agent_run_id="run")
                 assert run is not None

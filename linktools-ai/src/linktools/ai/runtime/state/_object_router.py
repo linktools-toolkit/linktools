@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime object-store routing and lifecycle ownership."""
 
-from ...storage import CacheCapabilities, StorageRetentionMode
+from ...storage import StorageRetentionMode
 
 import asyncio
 import hashlib
@@ -51,8 +51,8 @@ class _RuntimeObjectRouter:
         stores: Mapping[RuntimeDomain, ObjectStore],
         *,
         close_guard_stores: Sequence[ObjectStore],
-        cache: CacheCapabilities | None = None,
-        domain_caches: Mapping[RuntimeDomain, CacheCapabilities | None] | None = None,
+        cache: CacheBackend | None = None,
+        domain_caches: Mapping[RuntimeDomain, CacheBackend | None] | None = None,
         cache_domains: Sequence[RuntimeDomain] = (),
         namespace: str = "",
         tenant_id: str = "",

@@ -6,12 +6,13 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.core import CommitPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import (
     MetricAggregation, MetricDefinition, MetricQuery, Metrics, MetricSource, MetricType, MetricWindow, Observation,
 )
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
+from linktools.ai.storage import InMemoryCacheBackend
 
 
 def _observation(identity: str) -> Observation:
@@ -99,7 +100,7 @@ async def test_unconfirmed_recording_can_already_exist_in_source(buffered: bool)
 
     metrics = Metrics.from_store(
         CommittedThenCancelledStore(),
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if buffered else None,
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024) if buffered else None),
     )
     recorder = metrics.recorder()
     observation = _observation("committed-without-confirmation")
@@ -119,7 +120,7 @@ async def test_unconfirmed_recording_can_already_exist_in_source(buffered: bool)
 @pytest.mark.asyncio
 async def test_cached_recorder_accepts_without_source_io_and_reads_only_committed() -> None:
     store = _ControlledStore()
-    metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     recorder = metrics.recorder()
     assert await recorder.try_record(_observation("pending"))
     assert not store.entered.is_set()
@@ -136,7 +137,7 @@ async def test_cached_recorder_accepts_without_source_io_and_reads_only_committe
 
 @pytest.mark.asyncio
 async def test_shared_metrics_creates_independently_closed_recorders() -> None:
-    metrics = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     first, second = metrics.recorder(), metrics.recorder()
     assert await first.try_record(_observation("first"))
     assert await second.try_record(_observation("second"))
@@ -155,7 +156,7 @@ async def test_shared_metrics_creates_independently_closed_recorders() -> None:
 @pytest.mark.asyncio
 async def test_configured_cache_does_not_weaken_explicit_record_observations() -> None:
     store = _ControlledStore()
-    metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     writing = asyncio.create_task(metrics.record_observations((_observation("strong"),)))
     await asyncio.wait_for(store.entered.wait(), 1)
     assert store.task is writing
@@ -176,7 +177,7 @@ async def test_cached_recorder_respects_metric_write_batch_limit() -> None:
             await super().put_observations(namespace, observations)
 
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
-    metrics = Metrics.from_store(Store(), cache=cache)
+    metrics = Metrics.from_store(Store(), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=cache))
     observations = tuple(_observation(f"batch-{index}") for index in range(257))
     recorder = metrics.recorder()
     try:
@@ -206,7 +207,7 @@ async def test_cached_recorder_preserves_confirmed_batch_when_later_batch_fails(
             await super().put_observations(namespace, observations)
 
     metrics = Metrics.from_store(
-        Store(), cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        Store(), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     )
     observations = tuple(_observation(f"batch-{index}") for index in range(257))
     recorder = metrics.recorder()
@@ -248,39 +249,13 @@ async def test_direct_recorder_fails_open_on_unconfirmed_storage() -> None:
 @pytest.mark.parametrize("cached", (False, True))
 @pytest.mark.parametrize("timeout", (True, -1, float("nan"), float("inf")))
 async def test_recorder_flush_rejects_invalid_deadlines(cached: bool, timeout: float) -> None:
-    recorder = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=1024 * 1024) if cached else None).recorder()
+    recorder = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024) if cached else None)).recorder()
     try:
         with pytest.raises(AIError) as raised:
             await recorder.flush(timeout_seconds=timeout)
         assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:
         await recorder.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ("none", "content", "stream"))
-async def test_cache_without_buffer_methods_uses_direct_source(kind: str) -> None:
-    class ContentCache:
-        async def get(self, key: object) -> None:
-            raise AssertionError("automatic recording does not use hot content")
-
-        async def put(self, key: object, content: bytes) -> None:
-            raise AssertionError("automatic recording does not use hot content")
-
-        async def delete(self, key: object) -> None:
-            raise AssertionError("automatic recording does not use hot content")
-
-    cache = {"none": None, "content": ContentCache(), "stream": InMemoryStreamBackend(max_bytes=1024)}[kind]
-    store = _ControlledStore()
-    recorder = Metrics.from_store(store, cache=cache).recorder()
-    writing = asyncio.create_task(recorder.try_record(_observation("direct-capability")))
-    await asyncio.wait_for(store.entered.wait(), 1)
-    assert store.task is writing
-    assert not writing.done()
-    assert recorder.status().queue_capacity == 0
-    store.release.set()
-    assert await writing
-    await recorder.close()
 
 
 @pytest.mark.parametrize("names", (("append",), ("read_batch", "ack"), ("append", "ack")))
@@ -294,14 +269,14 @@ def test_metrics_rejects_partial_buffer_capabilities(names: tuple[str, ...]) -> 
     cache = PartialCache()
     for name in names:
         setattr(cache, name, method)
-    with pytest.raises(TypeError, match="append, read_batch and ack"):
-        Metrics.in_memory(cache=cache)
+    with pytest.raises(TypeError, match="buffer"):
+        Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=cache))
 
 
 @pytest.mark.asyncio
 async def test_shared_cache_budget_is_not_freed_by_another_recorder_close() -> None:
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=1)
-    metrics = Metrics.in_memory(cache=cache)
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=cache))
     first, second = metrics.recorder(), metrics.recorder()
     assert await first.try_record(_observation("first-budget"))
     assert not await second.try_record(_observation("second-rejected"))
@@ -322,7 +297,7 @@ async def test_explicit_record_and_query_remain_authoritative_with_buffer_cache(
 
     cache = InMemoryCacheBackend(max_bytes=1024 * 1024)
     store = _ControlledStore()
-    metrics = Metrics.from_store(store, cache=cache)
+    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=cache))
     await metrics.define(MetricDefinition(
         name="test.value", revision=1, observation_kind="test.recording",
         source=MetricSource.measurement("value"), metric_type=MetricType.COUNTER,
@@ -370,7 +345,7 @@ async def test_buffer_only_cache_holds_observation_bytes_and_remains_borrowed() 
     import json
 
     cache = BufferCache()
-    metrics = Metrics.in_memory(namespace="buffer-only", cache=cache)
+    metrics = Metrics.in_memory(namespace="buffer-only", commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=cache))
     observation = _observation("encoded")
     recorder = metrics.recorder()
     assert await recorder.try_record(observation)
@@ -391,7 +366,7 @@ async def test_cache_admission_error_is_fail_open_but_close_exposes_unknown_clea
         ) -> bool:
             raise OSError("cache unavailable")
 
-    metrics = Metrics.in_memory(cache=FailingCache(max_bytes=1024))
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=FailingCache(max_bytes=1024)))
     recorder = metrics.recorder()
     assert not await recorder.try_record(_observation("cache-failed"))
     assert recorder.status().last_failure_code == "CACHE_OPERATION_FAILED"
@@ -411,9 +386,21 @@ async def test_corrupt_buffer_content_cannot_become_a_committed_observation() ->
             batch = await super().read_batch(scope, limit=limit)
             return tuple((id, key, b"{") for id, key, _ in batch)
 
-    metrics = Metrics.in_memory(cache=CorruptCache(max_bytes=1024))
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=CorruptCache(max_bytes=1024)))
     recorder = metrics.recorder()
     assert await recorder.try_record(_observation("corrupt"))
     await recorder.close()
     assert await metrics.get_observation("corrupt") is None
     assert recorder.status().unconfirmed == recorder.status().write_failures == 1
+
+
+def test_standalone_metrics_does_not_import_runtime() -> None:
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from linktools.ai.observe import Metrics; import sys; "
+         "assert 'linktools.ai.runtime' not in sys.modules; Metrics.in_memory()"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr

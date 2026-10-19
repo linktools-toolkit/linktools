@@ -7,6 +7,7 @@ from ._runtime_test_helpers import workspace_features
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
@@ -180,7 +181,7 @@ async def test_runtime_recorder_reports_later_source_failure_after_enrichment_fa
 async def test_runtimes_sharing_metrics_close_only_their_own_write_scopes() -> None:
     from linktools.ai.storage import InMemoryCacheBackend
 
-    metrics = Metrics.in_memory(cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    metrics = Metrics.in_memory(commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     features = await RuntimeFeatures("shared-metrics").capture()
     async with Runtime.open(
         "first", metrics=metrics, models=ModelRegistry(), storage=RuntimeStorage.in_memory(), features=features,
@@ -233,7 +234,7 @@ async def test_runtime_cancelled_close_keeps_storage_open_until_metric_sink_sett
             await super().put_observations(namespace, observations)
             returned.set()
 
-    metrics = Metrics.from_store(CancellingStore(), cache=InMemoryCacheBackend(max_bytes=1024 * 1024))
+    metrics = Metrics.from_store(CancellingStore(), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)))
     storage = RuntimeStorage.in_memory()
     original_close = RuntimeState.close
 

@@ -37,7 +37,7 @@ async def test_trace_custom_pressure_and_required_flush_are_independent(tmp_path
     state = await _setup(tmp_path, "memory")
     try:
         store = state.run_store
-        store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
+        store.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
         archive = store.read_store(RuntimeDomain.TRACE)
         await _observe(store, 1)
         assert await archive.list_events(agent_run_id="run") == []
@@ -61,8 +61,8 @@ async def test_trace_scheduler_respects_each_runs_deadline(tmp_path):
     try:
         await _add_run(state, "slow", "slow-execution")
         store = state.run_store
-        store.trace_persistence.configure("run", batch_size=100, flush_interval=0.01)
-        store.trace_persistence.configure("slow", batch_size=100, flush_interval=60.0)
+        store.trace_persistence.configure("run", buffer=store.trace_persistence._caches["run"], batch_size=100, flush_interval=0.01)
+        store.trace_persistence.configure("slow", buffer=store.trace_persistence._caches["run"], batch_size=100, flush_interval=60.0)
         archive = store.read_store(RuntimeDomain.TRACE)
         await _observe(store, 1, run_id="slow", execution_id="slow-execution")
         await _observe(store, 1)
@@ -90,7 +90,8 @@ async def test_runtime_binds_trace_batch_options_before_model_work():
         await release.wait()
         return ModelResponse(parts=[TextPart("done")])
 
-    feature = TraceCapability(commit=CommitPolicy.batch(batch_size=7, flush_interval=0.25))
+    buffer = InMemoryCacheBackend(max_bytes=65536)
+    feature = TraceCapability(commit=CommitPolicy.batch(buffer=buffer, batch_size=7, flush_interval=0.25))
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "trace-options", features=_features(feature), storage=storage,
@@ -103,6 +104,7 @@ async def test_runtime_binds_trace_batch_options_before_model_work():
             assert len(offsets) == 1
             assert offsets[0].observation_batch_size == 7
             assert offsets[0].observation_flush_interval == 0.25
+            assert all(value is buffer for value in runtime._state.run_store.trace_persistence._caches.values())
             assert feature._service is None
         finally:
             release.set()
@@ -123,13 +125,10 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
     restored = RuntimeState(restored)
     await restored.initialize(
         namespace="observation-batches", tenant_id="tenant",
-        module_routes={RuntimeDomain.TRACE: restored.plan.route(RuntimeDomain.TRACE).with_cache(
-            InMemoryCacheBackend(max_bytes=65536),
-        )},
     )
     try:
         store = restored.run_store
-        store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
+        store.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=2, flush_interval=60.0)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(run, execution_id="execution")
         offset = store.trace_persistence.offsets["run"]
@@ -147,3 +146,112 @@ async def test_trace_policy_survives_restoring_existing_projection_offsets(tmp_p
         assert len(await archive.list_events(agent_run_id="run")) == 3
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_independent_runtime_stores_borrow_one_buffer_without_draining_each_other(tmp_path):
+    shared = InMemoryCacheBackend(max_bytes=65536)
+    first = await _setup(tmp_path / "first", "memory", cache=shared)
+    second = await _setup(tmp_path / "second", "memory", cache=shared)
+    try:
+        await _observe(first.run_store, 1)
+        await _observe(second.run_store, 1)
+        await first.close()
+        assert len(await second.run_store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id="run")) == 0
+        await second.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
+        assert len(await second.run_store.read_store(RuntimeDomain.TRACE).list_events(agent_run_id="run")) == 1
+        await shared.put("still-borrowed", b"usable")
+        assert await shared.get("still-borrowed") == b"usable"
+    finally:
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_uses_buffer_without_hot_cache_protocol(tmp_path):
+    class Buffer:
+        def __init__(self):
+            self.backend = InMemoryCacheBackend(max_bytes=65536)
+
+        async def append(self, scope, id, key, content, *, wait):
+            return await self.backend.append(scope, id, key, content, wait=wait)
+
+        async def read_batch(self, scope, *, limit):
+            return await self.backend.read_batch(scope, limit=limit)
+
+        async def ack(self, scope, tokens):
+            return await self.backend.ack(scope, tokens)
+
+    state = await _setup(tmp_path, "memory", cache=Buffer())
+    try:
+        await _observe(state.run_store, 1)
+        archive = state.run_store.read_store(RuntimeDomain.TRACE)
+        assert await archive.list_events(agent_run_id="run") == []
+        await state.run_store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
+        assert len(await archive.list_events(agent_run_id="run")) == 1
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_route_cache_does_not_supply_implicit_write_buffer():
+    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.storage import StorageRoute
+    from .test_explicit_runtime_features import _FeatureModels, _features
+
+    class ReadCache(InMemoryCacheBackend):
+        async def append(self, *args, **kwargs):
+            pytest.fail("hot-cache route must not schedule writes")
+
+    feature = TraceCapability(storage=StorageRoute.memory(cache=ReadCache(max_bytes=65536)))
+    async with Runtime.open(
+        "trace-hot-cache", features=_features(feature), storage=RuntimeStorage.in_memory(),
+        models=_FeatureModels(),
+    ) as runtime:
+        execution = await runtime.agents.get().start("question")
+        assert (await execution.wait(timeout_seconds=5)).result is not None
+
+
+@pytest.mark.asyncio
+async def test_shared_trace_capability_keeps_runtime_lifetimes_independent():
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels, _features
+
+    class Buffer(InMemoryCacheBackend):
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+        async def append(self, *args, **kwargs):
+            assert not self.closed
+            return await super().append(*args, **kwargs)
+
+    buffer = Buffer(max_bytes=65536)
+    feature = TraceCapability(commit=CommitPolicy.batch(buffer=buffer, batch_size=128, flush_interval=60))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked(messages, info):
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("second")])
+
+    async with Runtime.open(
+        "shared-trace", features=_features(feature), storage=RuntimeStorage.in_memory(),
+        models=_FeatureModels(_FeatureFunctionModel(blocked)),
+    ) as second:
+        pending = await second.agents.get().start("second")
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            async with Runtime.open(
+                "shared-trace", features=_features(feature), storage=RuntimeStorage.in_memory(),
+                models=_FeatureModels(),
+            ) as first:
+                execution = await first.agents.get().start("first")
+                assert (await execution.wait(timeout_seconds=5)).result is not None
+            assert not buffer.closed
+        finally:
+            release.set()
+        assert (await pending.wait(timeout_seconds=5)).result.output == {"text": "second"}
+    assert not buffer.closed

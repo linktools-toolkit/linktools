@@ -61,7 +61,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("remote-cancel-release")
     group.capability(ConversationCapability(), scope="runtime")
-    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE).with_cache(InMemoryCacheBackend(max_bytes=65536))), scope="runtime")
+    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     try:
@@ -317,7 +317,7 @@ async def test_history_projection_cancel_conflict_preserves_explicit_retry_ident
 
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("projection-cancel-conflict")
-    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE).with_cache(InMemoryCacheBackend(max_bytes=65536)), commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0)), scope="runtime")
+    group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=60.0)), scope="runtime")
     group.tool(tool, effect_policy="replay_safe")
     group.agent("default", model="default", allow_tools=("tool",))
     original_replace = _SqlTransaction.replace_record

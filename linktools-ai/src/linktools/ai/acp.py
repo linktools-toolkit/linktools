@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import RuntimeFeatures, WorkspaceCapability
+from .capability import ExecutionCapability, RuntimeFeatures, WorkspaceCapability
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -227,6 +227,7 @@ class ACPApplication:
     workspace: Workspace
     models: ModelRegistry
     storage: RuntimeStorage
+    execution: ExecutionCapability | None = None
 
     @classmethod
     def for_workspace(
@@ -235,8 +236,9 @@ class ACPApplication:
         *,
         models: ModelRegistry,
         storage: RuntimeStorage,
+        execution: ExecutionCapability | None = None,
     ) -> "ACPApplication":
-        return cls(workspace, models, storage)
+        return cls(workspace, models, storage, execution)
 
     async def serve(self, *, memory_scope: str) -> None:
         from linktools.ai.capability import ConversationCapability
@@ -244,6 +246,8 @@ class ACPApplication:
         features = RuntimeFeatures("workspace")
         features.capability(WorkspaceCapability(self.workspace))
         features.capability(ConversationCapability())
+        if self.execution is not None:
+            features.capability(self.execution)
         async with Runtime.open(
             "default",
             models=self.models,

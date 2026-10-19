@@ -317,14 +317,14 @@ async def test_delayed_observation_cannot_write_after_another_producer_is_admitt
         await first.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         archive = first.read_store(RuntimeDomain.TRACE)
         old_producer = RuntimeAgentRunStore(
-            StagingAgentRunStore(), trace_cache=InMemoryCacheBackend(max_bytes=65536), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
+            StagingAgentRunStore(), execution_repository=state.execution.executions, tenant_id="tenant", conversation_archive=first.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=archive, recovery_archive=first.read_store(RuntimeDomain.CHECKPOINT),
             conversation_retention=StorageRetentionMode.VOLATILE,
             execution_retention=StorageRetentionMode.VOLATILE,
             recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await old_producer.initialize()
-        old_producer.trace_persistence.configure("run")
+        old_producer.trace_persistence.configure("run", buffer=InMemoryCacheBackend(max_bytes=65536))
         old_producer.bind_execution_producer("run", execution_id="execution", producer_generation=1)
 
         async def delayed_boundary():
@@ -391,7 +391,8 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
 ) -> None:
     import asyncio
 
-    state = RuntimeState(RuntimeStorage.in_memory(cache=InMemoryCacheBackend(max_bytes=65536)))
+    buffer = InMemoryCacheBackend(max_bytes=65536)
+    state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="observation-checkpoint", tenant_id="tenant")
     release = asyncio.Event()
     checkpoint_task = None
@@ -403,7 +404,7 @@ async def test_recovery_checkpoint_settles_and_public_drain_retries_interrupted_
             lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
         )
         store = state.run_store
-        store.trace_persistence.configure("run")
+        store.trace_persistence.configure("run", buffer=buffer)
         store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
         await store.register_agent_run(AgentRunRecord("run", agent_id="agent"), execution_id="execution")
         first = ModelRequest(parts=[UserPromptPart("start")])

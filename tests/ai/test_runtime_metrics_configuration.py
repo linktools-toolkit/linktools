@@ -3,6 +3,7 @@
 """Automatic Agent metrics are explicit and independently owned."""
 import asyncio
 import pytest
+from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.test import TestModel
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.observe import Metrics
@@ -27,7 +28,7 @@ class _RecordingStore(InMemoryMetricStore):
 @pytest.mark.parametrize("cached", (False, True))
 async def test_agent_metrics_require_resource_and_keep_batching(enabled, cached):
     store = _RecordingStore()
-    metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20) if cached else None)
+    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20) if cached else None))
     features = _definitions()
     async with Runtime.open("metrics-explicit", storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=features, metrics=metrics if enabled else None) as runtime:
         execution = await runtime.agents.get().start("question")
@@ -64,7 +65,7 @@ async def test_trace_and_checkpoint_do_not_enable_metrics():
 @pytest.mark.asyncio
 async def test_shared_metrics_survive_other_runtime_close():
     store = _RecordingStore()
-    metrics = Metrics.from_store(store, cache=InMemoryCacheBackend(max_bytes=2**20))
+    metrics = Metrics.from_store(store, commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=2**20)))
     for namespace in ("first", "second"):
         async with Runtime.open(namespace, storage=RuntimeStorage.in_memory(), models=_FeatureModels(), features=_definitions(), metrics=metrics) as runtime:
             execution = await runtime.agents.get().start("question")

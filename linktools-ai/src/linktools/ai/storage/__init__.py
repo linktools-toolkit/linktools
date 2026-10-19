@@ -8,9 +8,8 @@ from ._cache import (
     InMemoryCacheBackend,
     TieredCacheBackend,
 )
-from ._cache_contracts import CacheCapabilities
 from ._route import StorageRoute, StorageRetentionMode
-from ._write_buffer import WriteBufferBackend, WriteBufferEntry
+from ..core import WriteBufferBackend, WriteBufferEntry
 from ._composition import (
     ContentCache,
     StorageLayer,
@@ -126,7 +125,6 @@ from ._turn import TurnCoordination, TurnCoordinationBackend
 from ._write_cache import StorageBuffer, StorageReadCache, BatchWriteFlushResult, BatchWriteScope, BatchWriteStatus
 
 __all__ = [
-    "CacheCapabilities",
     "StorageRoute",
     "StorageRetentionMode",
     "WriteBufferBackend",

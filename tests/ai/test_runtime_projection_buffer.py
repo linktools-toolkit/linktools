@@ -18,7 +18,7 @@ from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
 from .test_step_projection import _execution
 
 
-async def _setup(tmp_path: Path, backend: str, cache: object | None):
+async def _setup(tmp_path: Path, backend: str, cache: object | None = None, *, buffer=None):
     if backend == "memory":
         state = RuntimeState(RuntimeStorage.in_memory(cache=cache))
     elif backend == "filesystem":
@@ -32,7 +32,7 @@ async def _setup(tmp_path: Path, backend: str, cache: object | None):
     await repository.state_store.mutate(
         lambda tx: repository.admit_history_producer_in_transaction(tx, execution)
     )
-    state.run_store.trace_persistence.configure("run", flush_interval=60.0)
+    state.run_store.trace_persistence.configure("run", buffer=buffer, flush_interval=60.0)
     state.run_store.bind_execution_producer("run", execution_id="execution", producer_generation=1)
     await state.run_store.register_agent_run(AgentRunRecord("run"), execution_id="execution")
     return state
@@ -94,7 +94,7 @@ async def test_required_drain_repeated_cancellation_waits_for_source_confirmatio
 ) -> None:
     import asyncio
 
-    state = await _setup(tmp_path, backend, InMemoryCacheBackend(max_bytes=65536))
+    state = await _setup(tmp_path, backend, buffer=InMemoryCacheBackend(max_bytes=65536))
     archive = state.run_store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     entered, release = asyncio.Event(), asyncio.Event()
@@ -157,9 +157,9 @@ async def test_write_only_cache_batches_trace_without_hot_content_operations(
     tmp_path: Path, backend: str, source_fails: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cache = _WriteOnlyCache()
-    state = await _setup(tmp_path, backend, cache)
+    state = await _setup(tmp_path, backend, buffer=cache)
     store = state.run_store
-    store.trace_persistence.configure("run", batch_size=2, flush_interval=60.0)
+    store.trace_persistence.configure("run", buffer=cache, batch_size=2, flush_interval=60.0)
     archive = store.read_store(RuntimeDomain.TRACE)
     original = archive.sync_prepared_projection
     source_error = AIError(ErrorCode.STORAGE_UNAVAILABLE)

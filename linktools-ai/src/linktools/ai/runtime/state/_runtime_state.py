@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from ...core import validate_persistence_namespace
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StorageRoute
-from ._root import RuntimeStorage, _validate_storage_configuration, _validate_cache
+from ._root import RuntimeStorage, _validate_storage_configuration
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 from ._contracts import (ArtifactRepositories, ConversationRepositories, EvaluationRepositories,
                          ExecutionRepositories, MemoryRepositories, RecoveryRepositories, TaskRepositories)
@@ -155,8 +155,6 @@ class RuntimeState:
                 raise TypeError("module storage must use StorageRoute")
             if not routes.keys() <= {RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}:
                 raise ValueError("module storage only configures Trace and Checkpoint resources")
-            for route in routes.values():
-                _validate_cache(route.cache)
             self._plan = self._plan.with_module_routes(routes)
             _validate_storage_configuration(self._plan, self._external_object_store)
             self._lifecycle = _RuntimeStateLifecycle.INITIALIZING

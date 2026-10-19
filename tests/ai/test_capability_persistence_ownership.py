@@ -148,13 +148,12 @@ async def test_trace_pressure_and_timer_lifetimes_are_isolated_between_owners() 
             None, history_lock=_AgentRunHistoryLock(), ensure_ready=ready,
             require_mutable=lambda _run: None, has_flight=lambda _run: False,
             flush=flush, flush_boundary=flush, background_tasks=tasks,
-            cache=InMemoryCacheBackend(max_bytes=65536),
         )
 
     owners.update((name, make_owner(name)) for name in ("first", "second"))
     try:
         for name, owner in owners.items():
-            owner.configure("same-run", flush_interval=60.0)
+            owner.configure("same-run", buffer=InMemoryCacheBackend(max_bytes=65536), flush_interval=60.0)
             owner.dirty.add("same-run")
             await owner.defer("same-run", execution_id=name, producer_generation=1)
         for _ in range(_trace_persistence.DEFAULT_TRACE_BATCH_SIZE - 1):

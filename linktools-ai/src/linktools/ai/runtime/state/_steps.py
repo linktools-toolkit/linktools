@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime AgentRunStore orchestration over durable archives."""
 
-from ...storage import CacheCapabilities, StorageRetentionMode
+from ...storage import StorageRetentionMode
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
@@ -122,7 +122,6 @@ class RuntimeAgentRunStore(AgentRunStore):
         recovery_retention: StorageRetentionMode,
         execution_repository: ExecutionRepository | None = None,
         tenant_id: str | None = None,
-        trace_cache: CacheCapabilities | None = None,
     ) -> None:
         del conversation_retention, execution_retention, recovery_retention
         self._staging = staging
@@ -146,7 +145,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
         self._history_lock = _AgentRunHistoryLock()
         self.trace_persistence = TracePersistence(
-            execution_archive, history_lock=self._history_lock, cache=trace_cache,
+            execution_archive, history_lock=self._history_lock,
             ensure_ready=self._ensure_business,
             require_mutable=self._ensure_run_mutable,
             has_flight=lambda run_id: run_id in self._durability_flights,

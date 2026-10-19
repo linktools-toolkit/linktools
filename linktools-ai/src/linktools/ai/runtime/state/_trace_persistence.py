@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Trace projection scheduling over an explicitly borrowed write cache."""
+"""Trace projection scheduling over an explicitly borrowed write buffer."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -10,7 +10,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ...core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
-from ...storage import BatchWriteScope, CacheCapabilities, WriteBufferBackend, WriteBufferEntry
+from ...storage import BatchWriteScope, WriteBufferBackend, WriteBufferEntry
 from ...errors import AIError, ErrorCode
 from ._durability import _await_owned_task
 from ._step_archive import _AgentRunHistoryLock, _ProjectionOffset
@@ -35,11 +35,11 @@ class _ObservationBuffer:
 
 
 class TracePersistence:
-    """Keep semantic facts in staging and optional flush requests in the cache.
+    """Keep semantic facts in staging and optional flush requests in the buffer.
 
     Queue acknowledgements settle scheduling requests, never durable facts.
     Only Runtime's guarded projection commit may advance offsets or clear dirty
-    staging. Each run owns its consumer; the cache itself is borrowed.
+    staging. Each run owns its consumer; the buffer itself is borrowed.
     """
 
     def __init__(
@@ -50,12 +50,7 @@ class TracePersistence:
         flush: _FlushProjection,
         flush_boundary: _FlushProjection,
         background_tasks: set[asyncio.Task[object]],
-        cache: CacheCapabilities | None = None,
     ) -> None:
-        methods = tuple(getattr(cache, name, None) for name in ("append", "read_batch", "ack"))
-        if any(method is not None for method in methods) and not all(callable(method) for method in methods):
-            raise TypeError("cache must implement append, read_batch and ack together")
-        self._cache = cache if isinstance(cache, WriteBufferBackend) and all(callable(method) for method in methods) else None
         self.archive = archive
         self.offsets: dict[str, _ProjectionOffset] = {}
         self.dirty: set[str] = set()
@@ -71,16 +66,16 @@ class TracePersistence:
         self._locks: dict[str, asyncio.Lock] = {}
 
     def configure(
-        self, agent_run_id: str, *, batching: bool = True,
+        self, agent_run_id: str, *, buffer: WriteBufferBackend | None = None,
         batch_size: int = DEFAULT_TRACE_BATCH_SIZE,
         flush_interval: float = DEFAULT_TRACE_FLUSH_INTERVAL,
     ) -> None:
         """Bind this run's observation policy before admission."""
         if agent_run_id in self._buffers:
             raise RuntimeError("observation batching cannot change during an active run")
-        if not isinstance(batching, bool):
-            raise TypeError("batching must be bool")
-        self._caches[agent_run_id] = self._cache if batching else None
+        if buffer is not None and not isinstance(buffer, WriteBufferBackend):
+            raise TypeError("buffer must implement append, read_batch and ack")
+        self._caches[agent_run_id] = buffer
         offset = self.offsets.setdefault(agent_run_id, _ProjectionOffset())
         offset.observation_batch_size = batch_size
         offset.observation_flush_interval = flush_interval
@@ -135,7 +130,7 @@ class TracePersistence:
                             # One run/producer owns this scope. A marker requests
                             # capture of its latest staged facts, not a replay of
                             # a previously committed payload.
-                            # A cache callback timeout must not cancel durable
+                            # A buffer callback timeout must not cancel durable
                             # publication. Wait for its actual outcome; caller
                             # cancellation remains owned by the outer boundary.
                             _, error, _ = await _await_owned_task(
@@ -202,7 +197,7 @@ class TracePersistence:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # Cache transport failure cannot erase a source failure or make
+                # Buffer transport failure cannot erase a source failure or make
                 # a durable receipt. Disable optional buffering; caller's direct
                 # guarded publication still decides whether staging is durable.
                 self._caches[agent_run_id] = None

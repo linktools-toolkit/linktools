@@ -124,7 +124,7 @@ async def compose_platform_capabilities(
                 bound_types.add(feature)
                 if isinstance(capability, TraceCapability) and isinstance(run_store, RuntimeAgentRunStore):
                     run_store.trace_persistence.configure(
-                        agent_run_id, batching=capability.commit.mode == "batch",
+                        agent_run_id, buffer=capability.commit.buffer,
                         batch_size=capability.commit.batch_size or DEFAULT_TRACE_BATCH_SIZE,
                         flush_interval=capability.commit.flush_interval or DEFAULT_TRACE_FLUSH_INTERVAL,
                     )

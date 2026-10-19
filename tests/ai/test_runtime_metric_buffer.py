@@ -83,7 +83,7 @@ async def test_metric_buffer_reports_backpressure_without_raising(
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="backpressure",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024, max_size=2)),
     ).recorder()
 
     assert await buffer.try_record(_observation("first")) is True
@@ -107,7 +107,7 @@ async def test_metric_buffer_flush_waits_for_accepted_observations() -> None:
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="flush",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     assert await buffer.try_record(_observation("accepted")) is True
     await buffer.flush(timeout_seconds=0)
@@ -136,7 +136,7 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="close",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     assert await buffer.try_record(_observation("blocked")) is True
     await buffer.flush(timeout_seconds=0)
@@ -157,7 +157,7 @@ async def test_metric_buffer_cancelled_batch_settles_owned_observations(
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="batch-cancel",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     assert await buffer.try_record(_observation("batched")) is True
     await asyncio.sleep(0)
@@ -188,8 +188,7 @@ async def test_metric_buffer_close_stops_when_write_completion_races_cancellatio
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="close-completion",  # type: ignore[arg-type]
-        commit=CommitPolicy.batch(batch_size=1, flush_interval=60.0),
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=1, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     assert await buffer.try_record(_observation("completing")) is True
     await buffer.flush(timeout_seconds=0)
@@ -231,7 +230,7 @@ async def test_metric_buffer_flush_cancellation_preserves_accepted_observations(
     store = _BlockingStore()
     buffer = Metrics.from_store(
         store, namespace="flush-cancel",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     assert await buffer.try_record(_observation("accepted")) is True
     await buffer.flush(timeout_seconds=0)
@@ -283,8 +282,7 @@ async def test_metric_buffer_close_settles_inflight_before_queued_observations(
     store = _CancellingStore()
     buffer = Metrics.from_store(
         store, namespace="close-order",  # type: ignore[arg-type]
-        commit=CommitPolicy.batch(batch_size=1, flush_interval=60.0),
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=1, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     first = _observation("inflight")
     assert await buffer.try_record(first) is True
@@ -339,7 +337,7 @@ async def test_metric_buffer_default_batch_reaches_128_before_one_minute() -> No
     store.release.set()
     buffer = Metrics.from_store(
         store, namespace="batch-size",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         for index in range(127):
@@ -363,7 +361,7 @@ async def test_metric_buffer_window_stays_with_first_accepted_observation(
     store.release.set()
     buffer = Metrics.from_store(
         store, namespace="batch-window",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         assert await buffer.try_record(_observation("first")) is True
@@ -390,7 +388,7 @@ async def test_metric_buffer_explicit_drain_wakes_partial_batch(
     store.release.set()
     buffer = Metrics.from_store(
         store, namespace="explicit-drain",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         assert await buffer.try_record(_observation("partial")) is True
@@ -420,8 +418,7 @@ async def test_metric_buffer_expired_queued_batch_does_not_start_another_window(
     store = _RecordingStore()
     buffer = Metrics.from_store(
         store, namespace="queued-window",  # type: ignore[arg-type]
-        commit=CommitPolicy.batch(batch_size=2, flush_interval=60.0),
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=2, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         assert await buffer.try_record(_observation("first")) is True
@@ -445,8 +442,7 @@ async def test_metric_buffer_flush_wakes_prefix_queued_behind_inflight_write(
     store = _RecordingStore()
     buffer = Metrics.from_store(
         store, namespace="inflight-flush",  # type: ignore[arg-type]
-        commit=CommitPolicy.batch(batch_size=2, flush_interval=60.0),
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=2, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         assert await buffer.try_record(_observation("first")) is True
@@ -472,8 +468,7 @@ async def test_metric_buffer_timer_writes_without_another_observation(
     store.release.set()
     buffer = Metrics.from_store(
         store, namespace="idle-window",  # type: ignore[arg-type]
-        commit=CommitPolicy.batch(batch_size=128, flush_interval=0.01),
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=0.01, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         assert await buffer.try_record(_observation("alone")) is True
@@ -490,7 +485,7 @@ async def test_metric_buffer_completed_flush_does_not_bypass_later_batch_window(
     store.release.set()
     buffer = Metrics.from_store(
         store, namespace="flush-prefix",  # type: ignore[arg-type]
-        cache=InMemoryCacheBackend(max_bytes=1024 * 1024),
+        commit=CommitPolicy.batch(batch_size=128, flush_interval=60.0, buffer=InMemoryCacheBackend(max_bytes=1024 * 1024)),
     ).recorder()
     try:
         assert await buffer.try_record(_observation("prefix")) is True

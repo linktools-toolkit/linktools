@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from pathlib import Path
 
-from ...storage import CacheCapabilities, ObjectStore, StorageRoute, StorageRetentionMode
+from ...storage import CacheBackend, ObjectStore, StorageRoute, StorageRetentionMode
 
 
 from ...core import RuntimeDomain
@@ -54,7 +54,7 @@ class RuntimeStoragePlan:
                       if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT}})
 
     @classmethod
-    def filesystem(cls, root: Path, *, cache: CacheCapabilities | None = None) -> "RuntimeStoragePlan":
+    def filesystem(cls, root: Path, *, cache: CacheBackend | None = None) -> "RuntimeStoragePlan":
         """Keep domain members distinct within one filesystem transaction group."""
         return cls(**{
             domain.value: StorageRoute.filesystem(

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..errors import AIError, ErrorCode
-from ._cache_contracts import CacheCapabilities
+from ._cache import CacheBackend
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -38,7 +38,7 @@ class StorageRoute:
     _path: "Path | None"
     _transaction_root: "Path | None"
     _engine: "AsyncEngine | None"
-    _cache: "CacheCapabilities | None" = field(compare=False, hash=False, repr=False)
+    _cache: "CacheBackend | None" = field(compare=False, hash=False, repr=False)
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise TypeError("use StorageRoute factory methods")
@@ -52,7 +52,7 @@ class StorageRoute:
         path: "Path | None" = None,
         transaction_root: "Path | None" = None,
         engine: "AsyncEngine | None" = None,
-        cache: "CacheCapabilities | None" = None,
+        cache: "CacheBackend | None" = None,
     ) -> "StorageRoute":
         value = object.__new__(cls)
         object.__setattr__(value, "_kind", kind)
@@ -65,6 +65,10 @@ class StorageRoute:
         return value
 
     def _validate(self) -> None:
+        if self._cache is not None and not all(
+            callable(getattr(self._cache, name, None)) for name in ("get", "put", "delete")
+        ):
+            raise TypeError("cache must provide get, put and delete")
         valid = (
             (
                 self._kind is _StorageBackendKind.MEMORY
@@ -122,11 +126,11 @@ class StorageRoute:
         return self._engine
 
     @property
-    def cache(self) -> "CacheCapabilities | None":
-        """Borrowed optional cache, independent of persistence identity."""
+    def cache(self) -> "CacheBackend | None":
+        """Borrowed hot-read cache, independent of persistence identity."""
         return self._cache
 
-    def with_cache(self, cache: "CacheCapabilities | None") -> "StorageRoute":
+    def with_cache(self, cache: "CacheBackend | None") -> "StorageRoute":
         """Copy this persistence route while borrowing a different cache."""
         return type(self)._create(
             kind=self._kind, retention=self._retention, path=self._path,
@@ -134,11 +138,11 @@ class StorageRoute:
         )
 
     @classmethod
-    def memory(cls, *, cache: "CacheCapabilities | None" = None) -> "StorageRoute":
+    def memory(cls, *, cache: "CacheBackend | None" = None) -> "StorageRoute":
         return cls._create(kind=_StorageBackendKind.MEMORY, retention=StorageRetentionMode.VOLATILE, cache=cache)
 
     @classmethod
-    def transient(cls, *, cache: "CacheCapabilities | None" = None) -> "StorageRoute":
+    def transient(cls, *, cache: "CacheBackend | None" = None) -> "StorageRoute":
         return cls._create(kind=_StorageBackendKind.MEMORY, retention=StorageRetentionMode.TRANSIENT, cache=cache)
 
     @classmethod
@@ -147,7 +151,7 @@ class StorageRoute:
         path: "str | Path",
         *,
         transaction_root: "str | Path | None" = None,
-        cache: "CacheCapabilities | None" = None,
+        cache: "CacheBackend | None" = None,
     ) -> "StorageRoute":
         return cls._create(
             kind=_StorageBackendKind.FILESYSTEM,
@@ -158,14 +162,14 @@ class StorageRoute:
         )
 
     @classmethod
-    def sqlite(cls, path: "str | Path", *, cache: "CacheCapabilities | None" = None) -> "StorageRoute":
+    def sqlite(cls, path: "str | Path", *, cache: "CacheBackend | None" = None) -> "StorageRoute":
         if not isinstance(path, (str, Path)) or not str(path).strip() or str(path).strip() == ":memory:":
             raise ValueError("StorageRoute.sqlite requires a filesystem path")
         normalized = _normalize_path(path)
         return cls._create(kind=_StorageBackendKind.SQLITE, retention=StorageRetentionMode.DURABLE, path=normalized, cache=cache)
 
     @classmethod
-    def sql(cls, engine: "AsyncEngine", *, cache: "CacheCapabilities | None" = None) -> "StorageRoute":
+    def sql(cls, engine: "AsyncEngine", *, cache: "CacheBackend | None" = None) -> "StorageRoute":
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         if not isinstance(engine, AsyncEngine):
