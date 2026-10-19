@@ -10,6 +10,7 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.execution import ExecutionCancelRequestCommit, ExecutionRecord
 from linktools.ai.capability import ConversationCapability, CheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest
@@ -81,7 +82,10 @@ async def test_shared_pending_duplicate_observe_wait_and_one_commit(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("concurrent_owner_checkpoint", (False, True))
+async def test_remote_cancel_signals_owner_then_confirms_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, concurrent_owner_checkpoint: bool,
+) -> None:
     from linktools.ai.runtime._local import LocalExecutionBackend
 
     owner_ready, release_owner = asyncio.Event(), asyncio.Event()
@@ -94,6 +98,23 @@ async def test_remote_cancel_signals_owner_then_confirms_source(tmp_path: Path, 
         return await cancel(self, execution, force=force)
 
     monkeypatch.setattr(LocalExecutionBackend, 'cancel', held_owner_cancel)
+    if concurrent_owner_checkpoint:
+        reader_checkpoint_ready = asyncio.Event()
+        commit_cancel_checkpoint = LocalExecutionBackend.commit_cancel_checkpoint
+
+        async def ordered_cancel_checkpoint(
+            self: LocalExecutionBackend, commit: ExecutionCancelRequestCommit,
+            *, expected_status: ExecutionStatus,
+        ) -> ExecutionRecord:
+            if commit.execution_id in self._tasks:
+                await asyncio.wait_for(reader_checkpoint_ready.wait(), 5)
+            else:
+                assert expected_status is ExecutionStatus.STARTED
+                reader_checkpoint_ready.set()
+                await asyncio.wait_for(owner_ready.wait(), 5)
+            return await commit_cancel_checkpoint(self, commit, expected_status=expected_status)
+
+        monkeypatch.setattr(LocalExecutionBackend, 'commit_cancel_checkpoint', ordered_cancel_checkpoint)
     cache = InMemoryCacheBackend(max_bytes=2**20)
     entered, stopped = asyncio.Event(), asyncio.Event()
     async def model(messages, info):
