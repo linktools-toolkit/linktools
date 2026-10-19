@@ -26,6 +26,8 @@ class CapabilityPersistence(Protocol):
 
     Transaction callbacks must have no external side effects. Bound writers and
     pending callbacks are owner-local, not portable distributed queue consumers.
+    Resolve omitted batch timing with CommitPolicy.resolve_batch in the owning
+    constructor before registration; Runtime does not supply custom defaults.
     """
 
     @property

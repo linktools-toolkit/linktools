@@ -133,12 +133,13 @@ class _WriteScope:
                         raise AIError(ErrorCode.STORAGE_CONFLICT, "capability write buffer rejected append")
                     write.queued = True
             if self.policy.mode == "batch" and self.policy.buffer is not None and self.failure is None:
-                if sum(item.queued for item in self.pending) >= (self.policy.batch_size or 1):
+                assert self.policy.batch_size is not None and self.policy.flush_interval is not None
+                if sum(item.queued for item in self.pending) >= self.policy.batch_size:
                     self.stop_timer()
                     self._schedule()
                 elif self.timer is None:
                     self.timer = asyncio.get_running_loop().call_later(
-                        self.policy.flush_interval or 1.0, self._schedule,
+                        self.policy.flush_interval, self._schedule,
                     )
         if synchronous:
             await self.flush()

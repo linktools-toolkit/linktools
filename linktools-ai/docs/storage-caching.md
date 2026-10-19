@@ -66,6 +66,47 @@ may provide both capabilities, but each use is explicitly configured.
 `ExecutionCapability(coordination=...)` separately supplies turn ownership and
 live streams, including the non-authoritative pending-turn view.
 
+### Owner defaults for batch writes
+
+Provide only the batch settings you want to override. A buffer-only declaration
+uses Trace's 128-entry / 3-second defaults or Metrics' 128-entry / 60-second
+defaults:
+
+```python
+from linktools.ai.capability import TraceCapability
+from linktools.ai.core import CommitPolicy
+from linktools.ai.observe import Metrics
+
+trace = TraceCapability(commit=CommitPolicy.batch(buffer=write_buffer))
+metrics = Metrics.sql(engine, commit=CommitPolicy.batch(buffer=write_buffer))
+```
+
+Here `write_buffer` is a host-provided `WriteBufferBackend` and `engine` is the
+host's provisioned SQL engine. Omit `buffer` for synchronous source writes,
+without a hidden queue. Explicit `batch_size` and `flush_interval` always win;
+for example, `CommitPolicy.batch(buffer=write_buffer, batch_size=32)` changes
+only the size and retains the receiving owner's interval.
+
+`None` for either timing field means an omitted authoring value. Trace and
+Metrics resolve those fields once in their constructors and retain a complete,
+immutable policy before any Runtime capture, recorder or write scope uses it.
+The input policy is not mutated, so it can be reused by owners with different
+defaults. The generic policy has no universal batch interval.
+
+A custom `CapabilityPersistence` owner chooses its own defaults in its
+constructor with the same public operation:
+
+```python
+self._commit = commit.resolve_batch(batch_size=32, flush_interval=5.0)
+```
+
+Expose that complete policy through the capability's `commit` property before
+registering it. Runtime rejects custom batch policies that still omit either
+timing field rather than guessing defaults. `resolve_batch` leaves sync and
+terminal policies unchanged and preserves explicit batch settings and the
+borrowed buffer. It does not change safety writes, transaction grouping, or
+flush/close ownership.
+
 ### Runtime archive routes and defaults
 
 `CheckpointCapability(storage=None)` and `TraceCapability(storage=None)` inherit
@@ -169,8 +210,8 @@ Automatic Agent and Task observations, including evaluation work in a Runtime,
 require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
-All Metrics constructors and factories accept `commit`, defaulting
-to `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
+All Metrics constructors and factories accept `commit`. Their effective default
+is `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
 `CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
 policies. A Metrics batch policy requires an integer `batch_size`
 from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are

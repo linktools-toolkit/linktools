@@ -134,6 +134,7 @@ class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
 class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     """Retain model, transcript and tool evidence without enabling recovery.
 
+    Omitted batch timing resolves to 128 entries and 3 seconds at construction.
     A borrowed write buffer supports optional batch publication. Without one,
     batch observation boundaries await publication. Terminal mode retains observations
     until Runtime seals the final tail or a required safety boundary publishes them.
@@ -150,13 +151,13 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
 
     def __init__(
         self, *, storage: StorageRoute | None = None,
-        commit: CommitPolicy = CommitPolicy.batch(
-            batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
-        ),
+        commit: CommitPolicy = CommitPolicy.batch(),
     ) -> None:
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "batch", "terminal"}:
             raise ValueError("Trace requires sync, batch or terminal commit")
-        self._commit = commit
+        self._commit = commit.resolve_batch(
+            batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
+        )
         self._storage = storage
 
     @property

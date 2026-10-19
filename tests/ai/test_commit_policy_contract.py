@@ -17,6 +17,7 @@ def test_commit_policy_defaults_and_immutable_shared_declarations() -> None:
         batch_size=DEFAULT_TRACE_BATCH_SIZE,
         flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
     )
+    assert CommitPolicy("batch") == CommitPolicy.batch()
     policy = CommitPolicy.terminal()
     first = ExecutionCapability(commit=policy)
     second = ExecutionCapability(commit=policy)
@@ -29,7 +30,6 @@ def test_commit_policy_defaults_and_immutable_shared_declarations() -> None:
     {"mode": "unknown"},
     {"mode": "sync", "batch_size": 1},
     {"mode": "terminal", "flush_interval": 1},
-    {"mode": "batch"},
     {"mode": "batch", "batch_size": True, "flush_interval": 1},
     {"mode": "batch", "batch_size": 1, "flush_interval": float("nan")},
     {"mode": "batch", "batch_size": 1, "flush_interval": float("inf")},

@@ -78,7 +78,8 @@ async def test_trace_scheduler_respects_each_runs_deadline(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_binds_trace_batch_options_before_model_work():
+@pytest.mark.parametrize("options,expected", [({}, (128, 3.0)), ({"batch_size": 7, "flush_interval": 0.25}, (7, 0.25))])
+async def test_runtime_binds_trace_batch_options_before_model_work(options, expected):
     from pydantic_ai.messages import ModelResponse, TextPart
     from linktools.ai.runtime import Runtime, RuntimeStorage
     from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels, _features
@@ -91,7 +92,7 @@ async def test_runtime_binds_trace_batch_options_before_model_work():
         return ModelResponse(parts=[TextPart("done")])
 
     buffer = InMemoryCacheBackend(max_bytes=65536)
-    feature = TraceCapability(commit=CommitPolicy.batch(buffer=buffer, batch_size=7, flush_interval=0.25))
+    feature = TraceCapability(commit=CommitPolicy.batch(buffer=buffer, **options))
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "trace-options", features=_features(feature), storage=storage,
@@ -102,8 +103,8 @@ async def test_runtime_binds_trace_batch_options_before_model_work():
             await asyncio.wait_for(entered.wait(), 2)
             offsets = tuple(runtime._state.run_store.trace_persistence.offsets.values())
             assert len(offsets) == 1
-            assert offsets[0].observation_batch_size == 7
-            assert offsets[0].observation_flush_interval == 0.25
+            assert offsets[0].observation_batch_size == expected[0]
+            assert offsets[0].observation_flush_interval == expected[1]
             assert all(value is buffer for value in runtime._state.run_store.trace_persistence._caches.values())
             assert feature._service is None
         finally:

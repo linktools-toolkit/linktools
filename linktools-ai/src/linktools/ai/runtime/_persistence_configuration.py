@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 
 from ..errors import AIError, ErrorCode
+from ..core import CommitPolicy
 from ..capability import CheckpointCapability, ConversationCapability, TraceCapability
 from ..storage import StorageRoute
 from .state import RuntimeDomain
@@ -64,6 +65,13 @@ def capability_storage_configuration(
             for child in capability.capabilities:
                 collect(child, None)
         elif isinstance(capability, CapabilityPersistence):
+            policy = capability.commit
+            if not isinstance(policy, CommitPolicy):
+                raise TypeError("capability commit must be a CommitPolicy")
+            if policy.mode == "batch" and (
+                policy.batch_size is None or policy.flush_interval is None
+            ):
+                raise ValueError("custom capability must resolve batch timing before registration")
             identity = capability.id or registered_id
             if not identity:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
