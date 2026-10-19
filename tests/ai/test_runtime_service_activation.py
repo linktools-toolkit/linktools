@@ -33,11 +33,12 @@ async def test_idle_services_do_not_read_write_or_launch_workers(
     async def initialize_and_guard(
         state: RuntimeState, *, namespace: str, tenant_id: str, read_only: bool = False,
         module_routes: Mapping[RuntimeDomain, StorageRoute] | None = None,
+        capability_routes: Mapping[str, StorageRoute] | None = None,
     ) -> None:
         # Shared schema provisioning is permitted; domain business IO is not.
         await initialize(
             state, namespace=namespace, tenant_id=tenant_id, read_only=read_only,
-            module_routes=module_routes,
+            module_routes=module_routes, capability_routes=capability_routes,
         )
         service_stores = {
             state.task.tasks.state_store,
