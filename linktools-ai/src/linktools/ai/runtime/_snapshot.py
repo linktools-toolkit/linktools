@@ -32,12 +32,11 @@ from ..storage import (
     InMemoryObjectStore,
     ObjectRef,
     ObjectStore,
+    StorageRetentionMode,
     read_object,
 )
 from ._runtime_history import RuntimeHistory
-from ._capabilities import runtime_feature_leaves
-from .persistence import CapabilityPersistence
-from ._persistence_configuration import persistence_storage_configuration
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
 from .state import (
     SnapshotExclusiveGuard,
     RuntimeStorage,
@@ -123,8 +122,11 @@ class RuntimeSnapshot:
             capabilities = () if captured is None else tuple(
                 item.value for item in captured.contributions if item.scope == "runtime"
             )
-            if any(isinstance(leaf, CapabilityPersistence)
-                   for capability in capabilities for leaf in runtime_feature_leaves(capability)):
+            capability_routes = capability_storage_configuration(
+                () if captured is None else tuple((item.id, item.value) for item in captured.contributions if item.scope == "runtime"),
+                default_route=storage.plan.route(RuntimeDomain.EXECUTION),
+            )
+            if any(route.retention is StorageRetentionMode.DURABLE for route in capability_routes.values()):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED, "Capability persistence partitions are not supported by portable snapshots")
             await asyncio.to_thread(reject_filesystem_capability_partitions, tuple(storage.plan.route(domain) for domain in RuntimeDomain), resolved_namespace, resolved_tenant)
             module_routes = persistence_storage_configuration(capabilities)
@@ -135,6 +137,7 @@ class RuntimeSnapshot:
                     tenant_id=resolved_tenant,
                     read_only=True,
                     module_routes=module_routes,
+                    capability_routes=capability_routes,
                 )
                 initialized = True
                 if captured is not None:

@@ -203,6 +203,17 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return producer[1]
 
+    def require_active_capability_run(self, agent_run_id: str, execution_id: str) -> None:
+        """Require a locally owned active run before binding optional writers."""
+        producer = self._execution_producers.get(agent_run_id)
+        if producer is None or producer[0] != execution_id:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._ensure_run_mutable(agent_run_id)
+
+    def has_active_execution_producer(self, execution_id: str) -> bool:
+        """Whether an execution still owns any local run producer."""
+        return any(owner == execution_id for owner, _ in self._execution_producers.values())
+
     async def require_active_producer(self, agent_run_id: str) -> None:
         """Fence model admission against the run's current execution authority."""
         producer = self._execution_producers.get(agent_run_id)
@@ -2001,7 +2012,9 @@ class RuntimeAgentRunStore(AgentRunStore):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
-                        self._execution_producers.pop(agent_run_id, None)
+                        producer = self._execution_producers.pop(agent_run_id, None)
+                        if producer is not None and self.capability_writes is not None:
+                            self.capability_writes.release_run(agent_run_id, producer[0])
                         self._execution_persistence.pop(agent_run_id, None)
                         self.trace_persistence.offsets.pop(agent_run_id, None)
                         self.trace_persistence.release(agent_run_id)

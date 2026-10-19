@@ -68,6 +68,7 @@ class RuntimeState:
         self._retention: RuntimeRetentionController | None = None
         self._stores: dict[RuntimeDomain, StateStore] = {}
         self.capability_stores: dict[str, StateStore] = {}
+        self.durable_capability_ids: frozenset[str] = frozenset()
         self._read_only = False
 
     @property
@@ -238,6 +239,7 @@ class RuntimeState:
         self._retention = value.retention
         self._stores = dict(value.stores)
         self.capability_stores = dict(value.capability_stores)
+        self.durable_capability_ids = value.durable_capability_ids
         self._close_actions = value.close_actions
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -327,7 +329,7 @@ class RuntimeState:
             object_stores={domain: self.object_store(domain) for domain in RuntimeDomain
                            if runtime_domain_uses_object_store(domain)},
             read_only=self.read_only,
-            portable_export=not self.capability_stores,
+            portable_export=not self.durable_capability_ids,
         )
 
     def snapshot_operations(self) -> RuntimeSnapshotOperations:

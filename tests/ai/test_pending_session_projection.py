@@ -169,7 +169,7 @@ async def test_pending_session_projection_source_wins_observation_race(
         execution = await session.start("question")
         await asyncio.wait_for(entered.wait(), 5)
         service = reader.sessions._service
-        observe = service._pending_session_execution
+        observe = service._runtime_pending_session_execution
         crossed = False
 
         async def cross_boundary(session_id, *, tenant_id):
@@ -187,7 +187,7 @@ async def test_pending_session_projection_source_wins_observation_race(
                     assert await owner.executions._service.acquire_dependency_hold(execution.execution_id, tenant_id=owner.tenant_id, hold_id="hold")
             return pending
 
-        monkeypatch.setattr(service, "_pending_session_execution", cross_boundary)
+        monkeypatch.setattr(service, "_runtime_pending_session_execution", cross_boundary)
         detail = await reader.sessions.refresh("session", principal=reader.default_principal, limit=1, max_age=60)
         assert crossed
         assert [turn.execution_id for turn in detail.timeline.items] == [execution.execution_id]
@@ -218,7 +218,7 @@ async def test_pending_session_projection_denial_precedes_observation(principal:
         async def forbidden(*args, **kwargs):
             raise AssertionError("unauthorized caller reached a live observation")
 
-        service._pending_session_execution = forbidden
+        service._runtime_pending_session_execution = forbidden
         with pytest.raises(AIError) as denied:
             await getattr(service, method)("session", principal=principal)
         assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
@@ -248,7 +248,7 @@ async def test_pending_session_projection_rejects_unbound_observations(fault: st
             assert (session_id, tenant_id) == ("session", "tenant")
             return pending
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         principal = Principal("owner", "tenant")
         detail = await service.refresh("session", principal=principal)
         assert detail.session.active_execution_id is None and detail.timeline.items == ()
@@ -316,7 +316,7 @@ async def test_pending_session_projection_cannot_fill_missing_source_execution(l
         async def observe(session_id, *, tenant_id):
             return pending
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         with pytest.raises(AIError) as unavailable:
             await service.refresh("session", principal=Principal("owner", "tenant"), limit=limit)
         assert unavailable.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -357,7 +357,7 @@ async def test_pending_session_projection_older_page_cannot_fill_missing_source_
         async def observe(session_id, *, tenant_id):
             return pending
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         with pytest.raises(AIError) as still_unavailable:
             await read("session", principal=principal, limit=1, cursor=newest.next_cursor)
         assert still_unavailable.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -403,7 +403,7 @@ async def test_pending_session_projection_rechecks_owner_after_empty_observation
                 return None
             return replace(_execution("rejected", status=ExecutionStatus.STARTED, prompt="observation"), principal_id="other")
 
-        service._pending_session_execution = observe
+        service._runtime_pending_session_execution = observe
         options = {"max_age": max_age} if method == "refresh" else {}
         with pytest.raises(AIError) as denied:
             await getattr(service, method)("session", principal=principal, limit=1, **options)

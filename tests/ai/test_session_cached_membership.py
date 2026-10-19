@@ -208,7 +208,7 @@ async def test_cached_canonical_page_projects_live_pending_without_freezing_prog
     async def observe(session_id, *, tenant_id):
         return pending
 
-    service._pending_session_execution = observe
+    service._runtime_pending_session_execution = observe
     engine = state.conversation.sessions.state_store.storage_group.context.engine
     statements = []
 

@@ -112,13 +112,16 @@ Already committed records remain in the configured backend; uncommitted memory
 is subject to the selected deferred policy's loss boundary. Execution recovery
 and checkpoint safety boundaries do not move into this optional queue.
 
-Portable snapshot export is rejected when these custom partitions are configured.
+Portable snapshot export is rejected when durable custom partitions are configured.
+Memory and transient custom partitions follow the existing volatile-domain policy:
+they are omitted from portable snapshots and do not establish a sticky marker.
+A Runtime with both volatile and durable custom partitions still rejects export.
 A sticky presence marker in an existing durable core store also prevents export
-after custom data has committed, even if the declarations are omitted on reopen.
+after durable custom data has committed, even if the declarations are omitted on reopen.
 Filesystem export also checks existing transaction-group membership before opening
 a reduced resource set. Read-only history must reopen with the same declarations
 to materialize the original filesystem group.
-The first compatible transaction includes that marker; a separate core resource
+The first durable custom transaction includes that marker; a separate core resource
 requires a confirmed marker transaction before the custom transaction starts.
 Once confirmed, the Runtime does not repeat marker operations for later writes.
 The marker conservatively continues to block export; this is not a partition

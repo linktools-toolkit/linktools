@@ -5,11 +5,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar, overload
 
 from linktools.core import environ
 from ..agent import AgentBindingContract
@@ -52,18 +52,25 @@ from ._contracts import (
 )
 
 HandleT = TypeVar("HandleT")
+HandleT_co = TypeVar("HandleT_co", covariant=True)
 _logger = environ.get_logger("ai.session")
 _SESSION_CURSOR_KIND = "SESSION"
 _VIEW_ACTIVE_UNSET = object()
 
 
 class SessionExecutionState(Protocol):
-    execution_id: str
-    session_id: str | None
-    parent_execution_id: str | None
-    status: ExecutionStatus
-    invalidates_session_history: bool
-    conversation: bool
+    @property
+    def execution_id(self) -> str: ...
+    @property
+    def session_id(self) -> str | None: ...
+    @property
+    def parent_execution_id(self) -> str | None: ...
+    @property
+    def status(self) -> ExecutionStatus: ...
+    @property
+    def invalidates_session_history(self) -> bool: ...
+    @property
+    def conversation(self) -> bool: ...
 
 
 class SessionExecutionReader(Protocol):
@@ -75,7 +82,7 @@ class SessionExecutionReader(Protocol):
     ) -> Mapping[str, SessionExecutionState]: ...
 
 
-class SessionExecutionService(Protocol[HandleT]):
+class SessionExecutionService(Protocol[HandleT_co]):
     async def start_for_session(
         self,
         agent_id: str,
@@ -87,7 +94,7 @@ class SessionExecutionService(Protocol[HandleT]):
         dependency_hold_id: str | None = None,
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
-    ) -> HandleT: ...
+    ) -> HandleT_co: ...
     async def cancel(
         self, execution_id: str, *, principal: Principal, idempotency_key: str
     ) -> None: ...
@@ -110,12 +117,28 @@ class SessionOperations(Protocol):
 
 
 class SessionRepositories(Protocol):
-    sessions: SessionRepository
-    operations: SessionOperations
+    @property
+    def sessions(self) -> SessionRepository: ...
+    @property
+    def operations(self) -> SessionOperations: ...
 
 
-class SessionPendingExecutionLookup(Protocol):
-    async def __call__(self, session_id: str, *, tenant_id: str) -> SessionExecutionState | None: ...
+ExecutionStateT = TypeVar("ExecutionStateT", bound=SessionExecutionState, covariant=True)
+AdmissionT = TypeVar("AdmissionT", bound=SessionExecutionState)
+
+
+class SessionPendingExecutionLookup(Protocol[ExecutionStateT]):
+    async def __call__(self, session_id: str, *, tenant_id: str) -> ExecutionStateT | None: ...
+
+
+class SessionRecordReader(Protocol):
+    async def __call__(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
+
+
+class SessionViewObserver(Protocol):
+    async def __call__(
+        self, record: SessionRecord, principal: Principal, *, active: str | None,
+    ) -> SessionView: ...
 
 
 class SessionReleaseCallback(Protocol):
@@ -148,10 +171,9 @@ class SessionManager(Generic[HandleT]):
         enabled: bool = True,
         release_terminal: SessionReleaseCallback | None = None,
         canonicalize_path: Callable[[str], Awaitable[str]] | None = None,
-        pending_session_execution: Callable[
-            ..., Awaitable[SessionExecutionState | None]
-        ]
-        | None = None,
+        pending_session_execution: SessionPendingExecutionLookup[SessionExecutionState] | None = None,
+        read_session: SessionRecordReader | None = None,
+        observe_view: SessionViewObserver | None = None,
     ) -> None:
         self._enabled = enabled
         self._conversation = conversation
@@ -162,19 +184,18 @@ class SessionManager(Generic[HandleT]):
         self._release_terminal = release_terminal or _no_release_terminal
         self._canonicalize_path = canonicalize_path
         self._pending_session_execution = pending_session_execution
+        self._read_session = read_session or conversation.sessions.get
+        self._observe_view = observe_view
         self._display_reads: set[asyncio.Future[None]] = set()
         self._display_close_started = False
         self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
 
-    async def _load_session(
-        self, session_id: str, *, tenant_id: str
-    ) -> SessionRecord | None:
-        return await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
-
     async def _observed_view(
         self, record: SessionRecord, principal: Principal, *, active: str | None
     ) -> SessionView:
-        return await self._view(record, principal, active=active)
+        if self._observe_view is not None:
+            return await self._observe_view(record, principal, active=active)
+        return await self.project_view(record, principal, active=active)
 
     def require_available(self) -> None:
         if not self._enabled:
@@ -245,11 +266,11 @@ class SessionManager(Generic[HandleT]):
             record.session_id,
             request.principal.tenant_id,
         )
-        return await self._view(record, request.principal)
+        return await self.project_view(record, request.principal)
 
     async def get(self, session_id: str, *, principal: Principal) -> SessionView:
-        async with self._session_consumer(session_id, principal.tenant_id):
-            record = await self._authorized(
+        async with self.consume_session(session_id, principal.tenant_id):
+            record = await self.read_authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
             return await self._observed_view(
@@ -332,12 +353,12 @@ class SessionManager(Generic[HandleT]):
         return Page(views, next_cursor)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
-        async with self._session_consumer(session_id, principal.tenant_id):
-            record = await self._authorized(
+        async with self.consume_session(session_id, principal.tenant_id):
+            record = await self.read_authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
-            record = await self._reconcile_terminal_admission(record)
-            return await self._view(record, principal)
+            record = await self.reconcile_admission(record)
+            return await self.project_view(record, principal)
 
     async def resume(
         self,
@@ -374,11 +395,11 @@ class SessionManager(Generic[HandleT]):
         requires_task_invocation_capture: bool = False,
         budget_scope_id: str | None = None,
     ) -> HandleT:
-        async with self._session_consumer(session_id, request.principal.tenant_id):
-            record = await self._authorized(
+        async with self.consume_session(session_id, request.principal.tenant_id):
+            record = await self.read_authorized(
                 session_id, request.principal, AuthorizationAction.SESSION_READ
             )
-            record = await self._reconcile_terminal_admission(record)
+            record = await self.reconcile_admission(record)
             if record.cwd is not None and self._canonicalize_path is None:
                 raise AIError(
                     ErrorCode.REQUEST_FIELD_INVALID,
@@ -409,11 +430,11 @@ class SessionManager(Generic[HandleT]):
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
     ) -> SessionView:
-        async with self._session_consumer(session_id, request.principal.tenant_id):
-            source = await self._authorized(
+        async with self.consume_session(session_id, request.principal.tenant_id):
+            source = await self.read_authorized(
                 session_id, request.principal, AuthorizationAction.SESSION_READ
             )
-            source = await self._reconcile_terminal_admission(source)
+            source = await self.reconcile_admission(source)
             if source.history_quality == "unavailable":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             await self._authorization.authorize(
@@ -484,18 +505,18 @@ class SessionManager(Generic[HandleT]):
             _logger.debug(
                 "session forked: source=%s target=%s", session_id, target.session_id
             )
-            return await self._view(target, request.principal)
+            return await self.project_view(target, request.principal)
 
     async def update(
         self, agent_id: str, session_id: str, request: UpdateSessionRequest
     ) -> SessionView:
-        async with self._session_consumer(session_id, request.principal.tenant_id):
+        async with self.consume_session(session_id, request.principal.tenant_id):
             return await self._update(agent_id, session_id, request)
 
     async def _update(
         self, agent_id: str, session_id: str, request: UpdateSessionRequest
     ) -> SessionView:
-        current = await self._authorized(
+        current = await self.read_authorized(
             session_id, request.principal, AuthorizationAction.SESSION_UPDATE
         )
         if current.agent_id != agent_id:
@@ -544,7 +565,7 @@ class SessionManager(Generic[HandleT]):
         _logger.debug(
             "session updated: session=%s revision=%s", session_id, updated.revision
         )
-        return await self._view(updated, request.principal)
+        return await self.project_view(updated, request.principal)
 
     async def _canonicalize_cwd(self, value: str | None) -> str | None:
         if value is None:
@@ -562,13 +583,13 @@ class SessionManager(Generic[HandleT]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
-        async with self._session_consumer(session_id, request.principal.tenant_id):
+        async with self.consume_session(session_id, request.principal.tenant_id):
             return await self._close(session_id, request)
 
     async def _close(
         self, session_id: str, request: CloseSessionRequest
     ) -> SessionView:
-        await self._authorized(
+        await self.read_authorized(
             session_id, request.principal, AuthorizationAction.SESSION_CLOSE
         )
         if self._pending_session_execution is not None:
@@ -600,7 +621,7 @@ class SessionManager(Generic[HandleT]):
             digest,
         )
         if operation.status is OperationStatus.SUCCEEDED:
-            closed = await self._load_session(
+            closed = await self._read_session(
                 session_id, tenant_id=request.principal.tenant_id
             )
             if closed is None:
@@ -611,20 +632,20 @@ class SessionManager(Generic[HandleT]):
                 session_id,
                 tenant_id=request.principal.tenant_id,
             )
-            view = await self._view(closed, request.principal)
+            view = await self.project_view(closed, request.principal)
             await self._request_session_release(
                 session_id,
                 request.principal.tenant_id,
                 closed.continuation,
             )
             return view
-        current = await self._load_session(
+        current = await self._read_session(
             session_id,
             tenant_id=request.principal.tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        current = await self._reconcile_terminal_admission(current)
+        current = await self.reconcile_admission(current)
         if current.status is SessionStatus.CLOSED:
             await self._complete_close_operation(
                 operation,
@@ -634,7 +655,7 @@ class SessionManager(Generic[HandleT]):
                     {"session_id": session_id, "revision": current.revision}
                 ),
             )
-            view = await self._view(current, request.principal)
+            view = await self.project_view(current, request.principal)
             await self._request_session_release(
                 session_id,
                 request.principal.tenant_id,
@@ -660,7 +681,7 @@ class SessionManager(Generic[HandleT]):
                         ErrorCode.SESSION_CONFLICT,
                     }:
                         raise
-                    latest = await self._load_session(
+                    latest = await self._read_session(
                         session_id,
                         tenant_id=request.principal.tenant_id,
                     )
@@ -703,7 +724,7 @@ class SessionManager(Generic[HandleT]):
                         raise
                     if error.code is not ErrorCode.SESSION_CONFLICT:
                         raise
-                    current = await self._load_session(
+                    current = await self._read_session(
                         session_id,
                         tenant_id=request.principal.tenant_id,
                     )
@@ -718,13 +739,13 @@ class SessionManager(Generic[HandleT]):
                     }:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             while True:
-                current = await self._load_session(
+                current = await self._read_session(
                     session_id,
                     tenant_id=request.principal.tenant_id,
                 )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                current = await self._reconcile_terminal_admission(current)
+                current = await self.reconcile_admission(current)
                 if current.active_execution_id is None:
                     break
                 execution = await self._active_admitted_execution(current)
@@ -745,7 +766,7 @@ class SessionManager(Generic[HandleT]):
                         timeout=request.wait_timeout_seconds,
                     )
                 except asyncio.TimeoutError as error:
-                    current = await self._load_session(
+                    current = await self._read_session(
                         session_id,
                         tenant_id=request.principal.tenant_id,
                     )
@@ -760,7 +781,7 @@ class SessionManager(Generic[HandleT]):
                         )
                     raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
                 break
-            current = await self._load_session(
+            current = await self._read_session(
                 session_id,
                 tenant_id=request.principal.tenant_id,
             )
@@ -788,7 +809,7 @@ class SessionManager(Generic[HandleT]):
             current.revision,
             request.force,
         )
-        view = await self._view(current, request.principal)
+        view = await self.project_view(current, request.principal)
         await self._request_session_release(
             session_id,
             request.principal.tenant_id,
@@ -819,7 +840,7 @@ class SessionManager(Generic[HandleT]):
                 ErrorCode.SESSION_CONFLICT,
             }:
                 raise
-            latest = await self._load_session(
+            latest = await self._read_session(
                 session_id,
                 tenant_id=tenant_id,
             )
@@ -838,13 +859,14 @@ class SessionManager(Generic[HandleT]):
             await asyncio.wait(tuple(self._display_reads))
 
     @asynccontextmanager
-    async def _session_consumer(
+    async def consume_session(
         self,
         session_id: str,
         tenant_id: str,
         *,
         display_read: bool = False,
-    ):
+    ) -> AsyncIterator[None]:
+        """Keep session resources retained while a control or display reader uses them."""
         self.require_available()
         completed = None
         if display_read:
@@ -856,7 +878,7 @@ class SessionManager(Generic[HandleT]):
             key = (tenant_id, session_id)
             state = await self._handoff.enter(key)
             try:
-                yield state
+                yield
             finally:
                 owner = await self._handoff.leave(key, state)
                 if owner:
@@ -911,13 +933,13 @@ class SessionManager(Generic[HandleT]):
             raise cleanup_error
 
     async def _wait_for_no_active(self, session_id: str, tenant_id: str) -> None:
-        record = await self._load_session(session_id, tenant_id=tenant_id)
+        record = await self._read_session(session_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution = await self._active_admitted_execution(record)
         if execution is None:
             if record.active_execution_id is not None:
-                await self._reconcile_terminal_admission(record)
+                await self.reconcile_admission(record)
             return
         await self._execution.wait(
             execution.execution_id,
@@ -927,12 +949,12 @@ class SessionManager(Generic[HandleT]):
                 PrincipalKind.LOCAL_TRUSTED.value,
             ),
         )
-        current = await self._load_session(session_id, tenant_id=tenant_id)
+        current = await self._read_session(session_id, tenant_id=tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._reconcile_terminal_admission(current)
+        await self.reconcile_admission(current)
 
-    async def _authorized(
+    async def read_authorized(
         self, session_id: str, principal: Principal, action: AuthorizationAction
     ) -> SessionRecord:
         header = await self._conversation.sessions.get_header(
@@ -949,13 +971,36 @@ class SessionManager(Generic[HandleT]):
         self._check_display_authority(record, header)
         return record
 
-    async def _view(
+    @overload
+    async def project_view(
+        self,
+        record: SessionRecord,
+        principal: Principal,
+        *,
+        authorized_header: ResourceRef | None = None,
+    ) -> SessionView: ...
+
+    @overload
+    async def project_view(
+        self,
+        record: SessionRecord,
+        principal: Principal,
+        *,
+        active: str | None,
+        authorized_header: ResourceRef | None = None,
+    ) -> SessionView: ...
+
+    async def project_view(
         self,
         record: SessionRecord,
         principal: Principal,
         *,
         active: object = _VIEW_ACTIVE_UNSET,
+        authorized_header: ResourceRef | None = None,
     ) -> SessionView:
+        """Project session metadata with validated admission and captured authority."""
+        if authorized_header is not None:
+            self._check_display_authority(record, authorized_header)
         if active is _VIEW_ACTIVE_UNSET:
             active_execution = await self._active_admitted_execution(record)
             active = None if active_execution is None else active_execution.execution_id
@@ -977,17 +1022,17 @@ class SessionManager(Generic[HandleT]):
         record: SessionRecord,
         execution: "SessionExecutionState | None",
     ) -> "str | None":
-        active = SessionManager._validate_active_admitted_execution(
+        active = SessionManager.validate_admission(
             record,
             execution,
         )
         return None if active is None else active.execution_id
 
     @staticmethod
-    def _validate_active_admitted_execution(
+    def validate_admission(
         record: SessionRecord,
-        execution: "SessionExecutionState | None",
-    ) -> "SessionExecutionState | None":
+        execution: AdmissionT | None,
+    ) -> AdmissionT | None:
         execution_id = record.active_execution_id
         if execution_id is None:
             if execution is not None:
@@ -1019,9 +1064,9 @@ class SessionManager(Generic[HandleT]):
             execution_id,
             tenant_id=self._conversation.sessions.tenant_id,
         )
-        return self._validate_active_admitted_execution(record, execution)
+        return self.validate_admission(record, execution)
 
-    async def _reconcile_terminal_admission(
+    async def reconcile_admission(
         self, record: SessionRecord
     ) -> SessionRecord:
         execution_id = record.active_execution_id
@@ -1031,7 +1076,7 @@ class SessionManager(Generic[HandleT]):
             execution_id,
             tenant_id=self._conversation.sessions.tenant_id,
         )
-        if self._validate_active_admitted_execution(record, execution) is not None:
+        if self.validate_admission(record, execution) is not None:
             return record
         await self._conversation.sessions.release_execution(
             record.session_id,
@@ -1345,4 +1390,6 @@ __all__ = [
     "SessionOperations",
     "SessionReleaseCallback",
     "SessionPendingExecutionLookup",
+    "SessionRecordReader",
+    "SessionViewObserver",
 ]

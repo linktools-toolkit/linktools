@@ -68,7 +68,7 @@ async def test_refresh_reconciles_once_outside_metadata_scope(
         await state.conversation.sessions.create(_session())
         await _admit(state, status=status)
         service = _service(state)
-        reconcile = service._reconcile_terminal_admission
+        reconcile = service.reconcile_admission
         calls = []
 
         async def checked(record):
@@ -76,7 +76,7 @@ async def test_refresh_reconciles_once_outside_metadata_scope(
             calls.append(record.active_execution_id)
             return await reconcile(record)
 
-        monkeypatch.setattr(service, "_reconcile_terminal_admission", checked)
+        monkeypatch.setattr(service, "reconcile_admission", checked)
         detail = await service.refresh("session", principal=_PRINCIPAL)
         assert isinstance(detail, SessionDetail)
         assert calls == ([] if status is ExecutionStatus.PENDING_START else ["active"])

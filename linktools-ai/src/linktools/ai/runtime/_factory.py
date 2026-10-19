@@ -358,10 +358,14 @@ async def compose_runtime_components(
             capability_routes=capability_routes,
         )
 
-        selected_state.run_store.capability_writes = RuntimeCapabilityWrites(
-            selected_state.capability_stores, namespace=resolved_namespace, tenant_id=effective_tenant_id,
-            marker_store=selected_state.capability_marker_store(),
-        )
+        if selected_state.capability_stores:
+            selected_state.run_store.capability_writes = RuntimeCapabilityWrites(
+                selected_state.capability_stores, namespace=resolved_namespace, tenant_id=effective_tenant_id,
+                durable_capability_ids=selected_state.durable_capability_ids,
+                require_active_run=selected_state.run_store.require_active_capability_run,
+                has_active_execution=selected_state.run_store.has_active_execution_producer,
+                marker_store=selected_state.capability_marker_store(),
+            )
         selected_state.run_store.capability_revisions = capability_revisions
         initialized = True
         for group in groups:

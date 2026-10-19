@@ -31,6 +31,8 @@ from ._service import (
     SessionOperations,
     SessionReleaseCallback,
     SessionPendingExecutionLookup,
+    SessionRecordReader,
+    SessionViewObserver,
 )
 
 __all__ = [
@@ -42,6 +44,8 @@ __all__ = [
     "SessionOperations",
     "SessionReleaseCallback",
     "SessionPendingExecutionLookup",
+    "SessionRecordReader",
+    "SessionViewObserver",
     "SessionRepository",
     "ConversationCursor",
     "SessionRecord",

@@ -15,6 +15,7 @@ from ...errors import AIError, ErrorCode
 from ...storage import (
     CacheBackend,
     StorageRoute,
+    StorageRetentionMode,
     ObjectStore,
     SqlStorageContext,
     build_object_sql_metadata,
@@ -66,6 +67,7 @@ class _MaterializedRuntimeStorage:
     retention: RuntimeRetentionController
     stores: Mapping[RuntimeDomain, StateStore]
     capability_stores: Mapping[str, StateStore]
+    durable_capability_ids: frozenset[str]
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
@@ -286,6 +288,7 @@ async def materialize_runtime_storage(
             retention=retention,
             stores=dict(stores),
             capability_stores=capability_stores,
+            durable_capability_ids=frozenset(identity for identity, route in participant_routes.items() if route.retention is StorageRetentionMode.DURABLE),
             close_actions=tuple(actions),
         )
     except BaseException:

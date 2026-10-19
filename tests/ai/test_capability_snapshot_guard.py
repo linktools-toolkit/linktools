@@ -75,3 +75,43 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
         )
     assert rejected.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
     assert "Capability persistence partitions" in str(rejected.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("sqlite", "filesystem"))
+@pytest.mark.parametrize("with_features", (False, True))
+@pytest.mark.parametrize("mixed", (False, True))
+async def test_volatile_custom_writes_do_not_block_durable_core_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, with_features: bool, mixed: bool,
+) -> None:
+    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.core import CommitPolicy
+    from linktools.ai.runtime import RuntimeSnapshot
+    from .test_capability_atomic_writes import _opened
+    from .test_runtime_snapshot_operations import Offline
+
+    routes = (StorageRoute.memory(), None if mixed else StorageRoute.transient())
+    async with _opened(tmp_path, monkeypatch, backend=backend,
+                       policies=(CommitPolicy.sync(), CommitPolicy.sync()), routes=routes) as opened:
+        audit, index = await opened.start()
+        await audit.submit("volatile-value")
+        await index.submit("second-value")
+        assert len(await opened.probe.facts("audit")) == 1
+        assert len(await opened.probe.facts("index")) == 1
+        assert opened.runtime._state.durable_capability_ids == (frozenset({"index"}) if mixed else frozenset())
+        await opened.finish()
+        features = RuntimeFeatures("snapshot-capabilities")
+        for template in opened.templates:
+            features.capability(template)
+    options = dict(
+        tenant_id="default",
+        storage=RuntimeStorage.sqlite(tmp_path / "state.db") if backend == "sqlite" else RuntimeStorage.filesystem(tmp_path / "state"),
+        object_store=InMemoryObjectStore(), features=features if with_features else None,
+        exclusive=Offline(), limits=SnapshotLimits(max_entries=1000, max_bytes=1_000_000),
+    )
+    if mixed:
+        with pytest.raises(AIError) as rejected:
+            await RuntimeSnapshot.create("atomic-capabilities", **options)
+        assert rejected.value.code is ErrorCode.SNAPSHOT_UNSUPPORTED
+    else:
+        assert await RuntimeSnapshot.create("atomic-capabilities", **options)
