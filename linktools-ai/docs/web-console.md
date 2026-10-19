@@ -426,8 +426,12 @@ validation. Serve the UI and API at the same external origin.
 
 Keep proxy response buffering and caching disabled for the existing
 `/api/executions/{id}/events` SSE route, and allow long-lived responses. The
-server already sends `X-Accel-Buffering: no`; a proxy must not override it or
-cache the stream. See the [NGINX response buffering contract](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering).
+server sends `X-Accel-Buffering: no` and `Cache-Control: private, no-store,
+no-transform`; a proxy must not override these directives or cache the stream.
+Compression middleware that honors `no-transform`, including code-server's port
+proxy, leaves these events uncompressed instead of buffering them for compression.
+See the [NGINX response buffering contract](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering)
+and [Express compression's streaming guidance](https://github.com/expressjs/compression#server-sent-events).
 A dropped stream reattaches with the Runtime cursor using
 bounded backoff, even if an intervening canonical read also fails. A terminal
 read or explicit recovery boundary ends observation; neither transport failure

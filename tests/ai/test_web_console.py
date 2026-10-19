@@ -92,7 +92,10 @@ async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding()
         for asset in ("message.js", "markdown-it.js"):
             resource = await http.get(f"/assets/{asset}")
             assert resource.status_code == 200 and "javascript" in resource.headers["content-type"]
-        assert (await http.get("/api/config", headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})).status_code == 200
+            assert resource.headers["cache-control"] == "private, no-store"
+        config = await http.get("/api/config", headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})
+        assert config.status_code == 200
+        assert config.headers["cache-control"] == "private, no-store"
 
 
 @pytest.mark.asyncio
@@ -296,6 +299,10 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
         async with client(create_app(runtime=runtime)) as http:
             response = await http.get(f"/api/executions/{execution.execution_id}/events")
             assert response.status_code == 200
+            assert {"private", "no-store", "no-transform"} <= {
+                directive.strip() for directive in response.headers["cache-control"].split(",")
+            }
+            assert response.headers["x-accel-buffering"] == "no"
             frames = [frame for frame in response.text.split("\n\n") if frame]
             assert any(frame.startswith("event: snapshot") for frame in frames)
             cursor = [frame.split("\n", 1)[0][4:] for frame in frames if frame.startswith("id: ")][-1]

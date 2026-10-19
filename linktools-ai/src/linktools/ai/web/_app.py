@@ -399,7 +399,11 @@ class _Console:
             finally:
                 await watch.aclose()
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={**_HEADERS, "X-Accel-Buffering": "no"})
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={
+            **_HEADERS,
+            "Cache-Control": _HEADERS["Cache-Control"] + ", no-transform",
+            "X-Accel-Buffering": "no",
+        })
 
     async def metric_query(self, request: Request) -> Response:
         if environ.debug:
