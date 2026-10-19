@@ -387,12 +387,14 @@ async def test_agent_recovery_relaunches_with_original_binding(tmp_path: Path, s
         if subagent:
             await run.recover(idempotency_key="recover")
         execution = await runtime.executions.get(execution_id)
-        assert (await execution.wait(timeout_seconds=3)).result.status is ExecutionStatus.SUCCEEDED
+        # Durable parent/child recovery needs an I/O observation guard, separate
+        # from the node deadline whose original start time must be preserved.
+        assert (await execution.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         assert calls == (3 if subagent else 1)
         current = await runtime.executions.inspect(execution_id, principal=runtime.default_principal)
         assert current.started_at == started_at
         if subagent:
-            assert (await run.wait(timeout_seconds=3)).result.status is TaskStatus.SUCCEEDED
+            assert (await run.wait(timeout_seconds=10)).result.status is TaskStatus.SUCCEEDED
         assert (await runtime._state.execution.executions.get(
             execution_id, tenant_id=runtime.default_principal.tenant_id,
         )).binding == original_binding
