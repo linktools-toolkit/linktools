@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.agent import AgentBindingContract, AgentCompiler
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ImmutableJsonMapping, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry

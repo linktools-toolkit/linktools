@@ -316,7 +316,8 @@ async def test_unknown_attempts_still_validate_tool_identity_and_coordinates(cor
 @pytest.mark.asyncio
 async def test_runtime_composition_records_failed_tool_trace() -> None:
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.capability import AgentContext, RuntimeFeatures
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime, RuntimeStorage
     from .test_explicit_runtime_features import _FeatureModels
 

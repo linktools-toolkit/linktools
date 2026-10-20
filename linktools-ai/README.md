@@ -289,7 +289,8 @@ still match their captured metadata through verification. Conflicting
 identities or layouts fail closed. Omitting `AssetCapability` contributes no Asset declarations.
 
 ```python
-from linktools.ai.capability import AssetCapability, RuntimeFeatures
+from linktools.ai.capability import AssetCapability
+from linktools.ai.runtime import RuntimeFeatures
 
 assets = AssetCapability(store)
 features = RuntimeFeatures("application")
@@ -1193,8 +1194,10 @@ from linktools.ai import (
 Package-specific public contracts remain available from their owning packages,
 for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 `linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
-These include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
-`RuntimeFeaturesCapture`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
+`RuntimeFeatures` and `RuntimeFeaturesCapture` are owned by `linktools.ai.runtime`;
+`RuntimeFeatures` is also available from the top-level composition API.
+Other package contracts include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
+MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.
 

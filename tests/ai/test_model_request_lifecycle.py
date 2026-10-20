@@ -28,7 +28,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage, RunUsage
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (

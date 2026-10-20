@@ -46,7 +46,7 @@ async def test_portable_snapshot_rejects_custom_partitions_only(tmp_path: Path, 
 async def test_public_snapshot_detects_committed_custom_partitions_without_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_features: bool, separate_resource: bool, backend: str,
 ) -> None:
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy
     from linktools.ai.runtime import RuntimeSnapshot, RuntimeHistory
     from .test_capability_atomic_writes import _opened
@@ -84,7 +84,7 @@ async def test_public_snapshot_detects_committed_custom_partitions_without_confi
 async def test_volatile_custom_writes_do_not_block_durable_core_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, with_features: bool, mixed: bool,
 ) -> None:
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy
     from linktools.ai.runtime import RuntimeSnapshot
     from .test_capability_atomic_writes import _opened

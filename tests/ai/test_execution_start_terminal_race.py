@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, IdempotencyStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage

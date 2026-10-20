@@ -14,7 +14,8 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeHistory
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder

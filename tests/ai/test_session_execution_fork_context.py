@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage

@@ -11,7 +11,7 @@ from pydantic_ai.models import CompletedStreamedResponse, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequestRecorder
 from linktools.ai.runtime import Runtime, RuntimeStorage

@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.agent import AgentBindingContract
-from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, SkillDefinition
+from linktools.ai.capability import CapabilityContribution, SkillDefinition
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInput, ExecutionInfo, Runtime, RuntimeHistory, RuntimeStorage, UsageSummary

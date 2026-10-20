@@ -14,7 +14,8 @@ from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from sqlalchemy import event
 
-from linktools.ai.capability import ExecutionCapability, AgentContext, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage

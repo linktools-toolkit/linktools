@@ -8,11 +8,11 @@ from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     AssetCapability,
-    RuntimeFeatures,
     SkillCapability,
     SkillDefinition,
     SubagentCapability,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability._skill_source import SkillSourceRegistry
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode

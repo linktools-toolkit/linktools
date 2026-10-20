@@ -210,7 +210,8 @@ async def test_runtime_history_session_reader_pending_overlay_and_canonical_boun
 ):
     import asyncio
     from contextlib import nullcontext
-    from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy, ExecutionStatus
     from linktools.ai.runtime import Runtime, RuntimeStorage
     from linktools.ai.runtime.service_api import CancelExecutionRequest
@@ -345,7 +346,8 @@ async def test_runtime_history_session_reader_fork_raw_prefix_and_cold_readonly_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("keep_pending", [True, False])
 async def test_runtime_history_session_reader_independent_terminal_commit_is_authoritative(tmp_path, keep_pending):
-    from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+    from linktools.ai.capability import ExecutionCapability
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import CommitPolicy, ExecutionStatus
     from linktools.ai.runtime import RuntimeStorage
     from linktools.ai.runtime.state import RuntimeState

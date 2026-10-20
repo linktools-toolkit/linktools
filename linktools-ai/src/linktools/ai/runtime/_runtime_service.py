@@ -23,7 +23,7 @@ from ..agent import (
     OutputBinding,
     restore_output,
 )
-from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
+from ._features import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
     RunBudget,
     CorrelationData,

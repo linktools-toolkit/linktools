@@ -24,7 +24,6 @@ from linktools.ai.capability import (
     AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
-    RuntimeFeatures,
     SkillCapability,
     SkillResource,
     SkillDefinition,
@@ -33,6 +32,7 @@ from linktools.ai.capability import (
     tool_metadata,
     validate_tool_metadata,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.asset import (
     AssetKey,
     AssetStore,

@@ -23,7 +23,8 @@ from linktools.ai.asset import (
     validate_materialized_path,
 )
 from linktools.ai.asset import _materialization
-from linktools.ai.capability import AssetCapability, RuntimeFeatures, SkillResource, validate_resource_path
+from linktools.ai.capability import AssetCapability, SkillResource, validate_resource_path
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 

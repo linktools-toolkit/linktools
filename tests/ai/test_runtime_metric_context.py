@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import (

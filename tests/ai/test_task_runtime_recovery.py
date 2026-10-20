@@ -8,7 +8,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     JsonValue,

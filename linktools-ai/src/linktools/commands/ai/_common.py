@@ -174,7 +174,8 @@ async def _open_local_runtime(
     *,
     models: "ModelRegistry | None" = None,
 ) -> "AsyncIterator[Runtime]":
-    from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
+    from linktools.ai.capability import AssetCapability, WorkspaceCapability
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
     from linktools.ai.runtime import Runtime
 

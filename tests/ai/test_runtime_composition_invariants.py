@@ -17,7 +17,8 @@ import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output, restore_output
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, RuntimeFeatures
+from linktools.ai.capability import AssetCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,

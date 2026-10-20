@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.agent import AgentBindingContract
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,

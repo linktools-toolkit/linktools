@@ -12,7 +12,7 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ModelMessage, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import JsonValue, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (

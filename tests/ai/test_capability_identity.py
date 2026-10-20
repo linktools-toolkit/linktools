@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 import pytest
 from linktools.ai.agent import OutputBinding
-from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, AgentContext
+from linktools.ai.capability import CapabilityContribution, AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability, PrepareTools, SelectModel
@@ -158,6 +159,22 @@ def test_invalid_capability_revision_is_rejected(revision: object) -> None:
     group = RuntimeFeatures[None]("group")
     with pytest.raises(AIError) as error:
         group.capability(_Capability(), revision=revision, scope="agent")  # type: ignore[arg-type]
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.parametrize("registration", ["agent", "tool"])
+@pytest.mark.parametrize("revision", [0, -1, True])
+def test_named_registration_rejects_invalid_revision(registration: str, revision: object) -> None:
+    features = RuntimeFeatures("revisions")
+
+    def tool(context: object) -> str:
+        return "ready"
+
+    with pytest.raises(AIError) as error:
+        if registration == "agent":
+            features.agent("agent", revision=revision)  # type: ignore[arg-type]
+        else:
+            features.tool(tool, revision=revision)  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 

@@ -17,7 +17,8 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability, TraceCapability, CheckpointCapability

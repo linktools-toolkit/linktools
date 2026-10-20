@@ -10,7 +10,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database

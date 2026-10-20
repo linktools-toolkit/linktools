@@ -9,7 +9,8 @@ import pytest
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import RuntimeFeatures, WorkspaceCapability
+from linktools.ai.capability import WorkspaceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import LocalSandbox, Workspace

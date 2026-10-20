@@ -12,7 +12,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     HmacCursorSigner, Principal, ResourceKind, ResourceRef,
     TenantAuthorizationPolicy, agent_conversation_id,

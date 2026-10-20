@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, JsonValue, Principal, ResourceRef, TenantAuthorizationPolicy,
     idempotency_key_digest, service_principal,

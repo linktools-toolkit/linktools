@@ -9,7 +9,8 @@ import pytest
 from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, PrefixTools
 
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, CapabilityContribution, RuntimeFeatures
+from linktools.ai.capability import AssetCapability, CapabilityContribution
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError
 from linktools.ai.spec import AgentSpec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay

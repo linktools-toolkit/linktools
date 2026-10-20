@@ -18,7 +18,8 @@ import pytest
 
 pytest.importorskip("starlette")
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeStorage, TaskModelProjection
 from linktools.ai.runtime.state._step_archive import (

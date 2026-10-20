@@ -11,7 +11,8 @@ import pytest
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget, TaskStatus
 from linktools.ai.runtime import AgentTaskInput, ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode

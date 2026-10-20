@@ -11,7 +11,8 @@ from pydantic_ai.capabilities import AbstractCapability
 from linktools.ai import Runtime
 from linktools.ai.agent import AgentBindingContract, AgentCompiler
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
-from linktools.ai.capability import AssetCapability, CapabilityContribution, RuntimeFeatures, SkillCapability, SkillDefinition, SkillSourceRegistry
+from linktools.ai.capability import AssetCapability, CapabilityContribution, SkillCapability, SkillDefinition, SkillSourceRegistry
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeStorage

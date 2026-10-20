@@ -12,7 +12,7 @@ from linktools.ai.capability import ExecutionCapability
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal
 from linktools.ai.capability import TraceCapability
 from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, Runtime, RuntimeStorage

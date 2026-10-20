@@ -7,7 +7,8 @@ from ._runtime_test_helpers import workspace_features
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures, ToolCallFailed, ToolCallRetry
+from linktools.ai.capability import AgentContext, ToolCallFailed, ToolCallRetry
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.capability import TraceCapability

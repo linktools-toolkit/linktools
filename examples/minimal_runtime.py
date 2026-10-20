@@ -5,7 +5,8 @@
 import os
 from pathlib import Path
 
-from linktools.ai.capability import RuntimeFeatures, WorkspaceCapability
+from linktools.ai.capability import WorkspaceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import Workspace

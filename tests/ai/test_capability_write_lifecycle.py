@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError
 from linktools.ai.runtime import Runtime, RuntimeStorage

@@ -15,7 +15,8 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Text
 from pydantic_ai.models.function import AgentInfo
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import RuntimeFeatures, TraceCapability
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import agent_run_id, canonical_json_bytes
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeStorage

@@ -5,7 +5,8 @@ import asyncio
 import pytest
 from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.test import TestModel
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.observe import Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.capability import CheckpointCapability, TraceCapability

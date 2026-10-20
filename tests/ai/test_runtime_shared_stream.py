@@ -11,7 +11,8 @@ import pytest
 from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeDomain

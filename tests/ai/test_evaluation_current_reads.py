@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction, ExecutionStatus, Principal, ResourceRef, TaskStatus, service_principal,
 )

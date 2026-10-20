@@ -258,7 +258,7 @@ async def test_facade_forwards_metadata_mode() -> None:
 @pytest.mark.parametrize("durable_trace", [False, True])
 async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import TraceCapability
     from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
     from linktools.ai.storage import StorageRoute
@@ -623,7 +623,7 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
 @pytest.mark.asyncio
 async def test_transient_task_model_observation_keeps_canonical_success_after_staging_release() -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan
     from linktools.ai.storage import StorageRoute

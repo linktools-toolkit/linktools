@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (

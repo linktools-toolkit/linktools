@@ -11,7 +11,8 @@ from typing import cast
 
 import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin, bind_output, restore_output
-from linktools.ai.capability import RuntimeFeatures, workspace_capabilities
+from linktools.ai.capability import workspace_capabilities
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     IdempotencyStatus,
     JsonValue,

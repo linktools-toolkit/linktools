@@ -5,7 +5,8 @@
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures, SessionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, SessionCapability, TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage

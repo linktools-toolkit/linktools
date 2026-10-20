@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage

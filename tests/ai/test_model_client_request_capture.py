@@ -24,7 +24,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 

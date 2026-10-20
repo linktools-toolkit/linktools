@@ -8,7 +8,8 @@ from copy import deepcopy
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ListSessionRequest, Runtime, RuntimeContext, RuntimeStorage, RuntimeStoragePlan

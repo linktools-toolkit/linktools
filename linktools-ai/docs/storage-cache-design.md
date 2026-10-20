@@ -134,7 +134,7 @@ SQL Runtime 在 mutation 确认提交后，可以把事务实际写入或 guard 
 
     from pathlib import Path
 
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import AuthorizationPolicy, Principal
     from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
     from linktools.ai.storage import (

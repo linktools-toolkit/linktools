@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore

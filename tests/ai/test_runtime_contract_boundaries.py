@@ -25,7 +25,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.agent._output import bind_output, canonicalize_output_schema_v1
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _thinking_capability
 from linktools.ai.runtime._tool import ToolOperationDecision

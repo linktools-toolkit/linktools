@@ -21,9 +21,9 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetCapability,
     AssetSkillSource,
-    RuntimeFeatures,
     SkillDefinition,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 

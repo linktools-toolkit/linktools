@@ -388,7 +388,7 @@ async def test_volatile_task_and_descendant_keep_strong_model_boundaries(
     delegated: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStoragePlan
     from linktools.ai.storage import StorageRoute
@@ -430,7 +430,8 @@ async def test_remote_cancel_stops_model_retry_and_strong_tool_admission(
 ) -> None:
     from pydantic import BaseModel
     from pydantic_ai.messages import ModelResponse, ToolCallPart
-    from linktools.ai.capability import AgentContext, RuntimeFeatures
+    from linktools.ai.capability import AgentContext
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime
     from linktools.ai.runtime.service_api import CancelExecutionRequest
     from ._runtime_test_helpers import _Models, _UsageFunctionModel

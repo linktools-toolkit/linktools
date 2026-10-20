@@ -6,7 +6,7 @@ Pydantic AI `AbstractCapability[AgentContext[AppT]]` as host policy. The same
 behavior and Runtime-wide policy; there is no separate registration system.
 
 ```python
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import Runtime
 
 # GlobalRateLimit is owned by the application; see the executable example below.
@@ -37,7 +37,9 @@ pass through these hooks.
 All public capability declarations are imported from `linktools.ai.capability`,
 including `ExecutionCapability`, `SessionCapability`,
 `CheckpointCapability`, and `TraceCapability`.
-`linktools.ai.runtime` owns Runtime entry points and services; it does not provide duplicate capability exports.
+`linktools.ai.runtime` owns Runtime entry points, services, and the
+`RuntimeFeatures` / `RuntimeFeaturesCapture` composition contracts; it does not
+provide duplicate capability exports.
 
 A captured declaration can be reused across Runtime instances. Runtime binds
 isolated `ConversationService`, `CheckpointService` and `TraceService` instances
@@ -63,7 +65,7 @@ its `RuntimeFeaturesCapture` through `features`; complete registrations
 before capture or opening the Runtime.
 
 ```python
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
 
 chat = RuntimeFeatures("chat")
@@ -279,9 +281,8 @@ currently require the same transaction resource as Execution; incompatible
 routes are rejected during initialization. No distributed transaction is implied.
 
 ```python
-from linktools.ai.capability import (
-    ExecutionCapability, RuntimeFeatures, TraceCapability,
-)
+from linktools.ai.capability import ExecutionCapability, TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime import RuntimeStorage
 

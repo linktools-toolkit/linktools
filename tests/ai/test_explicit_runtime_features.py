@@ -15,7 +15,8 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import ExecutionCapability, AgentContext, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import CheckpointCapability, TraceCapability

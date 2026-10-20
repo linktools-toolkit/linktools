@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Mapping, cast
 from filelock import FileLock, Timeout
 from linktools.core import environ
 
-from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
+from ._features import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
     RUNTIME_OBJECT_STORE_ID,
     JsonValue,

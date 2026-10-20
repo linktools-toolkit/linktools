@@ -104,6 +104,12 @@ class CapabilityContribution(Generic[AppT]):
         return value
 
     @classmethod
+    def validate_revision(cls, value: int) -> None:
+        """Validate the explicit revision of a named contribution."""
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+    @classmethod
     def from_opaque(
         cls,
         kind: Literal["tool", "capability"],
@@ -116,7 +122,7 @@ class CapabilityContribution(Generic[AppT]):
     ) -> "CapabilityContribution[AppT]":
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        _validate_revision(revision)
+        cls.validate_revision(revision)
         return _ContractContribution(
             kind,
             identity,
@@ -272,10 +278,6 @@ def _validate_external_capability_id(value: str) -> None:
     if value.startswith("linktools."):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-
-def _validate_revision(value: int) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
 __all__ = ["CapabilityContribution"]

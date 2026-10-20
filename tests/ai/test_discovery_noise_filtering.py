@@ -18,13 +18,13 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetCapability,
     AssetSkillSource,
-    RuntimeFeatures,
     SkillResource,
     SkillCapability,
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageLayer, StorageOverlay

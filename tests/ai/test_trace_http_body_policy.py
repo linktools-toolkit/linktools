@@ -8,7 +8,8 @@ import httpx2
 import pytest
 from pydantic_ai.capabilities import CombinedCapability, WrapperCapability
 
-from linktools.ai.capability import CheckpointCapability, RuntimeFeatures, TraceCapability
+from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from linktools.ai.model import _openai

@@ -23,9 +23,11 @@ from ..capability import (
     AssetCapability,
     AssetSkillSource,
     CapabilityContribution,
+    SkillSourceRegistry,
+)
+from ._features import (
     RuntimeFeatures,
     RuntimeFeaturesCapture,
-    SkillSourceRegistry,
 )
 from ..core import (
     CommitPolicy,

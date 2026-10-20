@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.capabilities import AbstractCapability
 
 from linktools.ai.agent import AgentCompiler
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelRegistry
 from linktools.ai.spec import AgentSpec
 

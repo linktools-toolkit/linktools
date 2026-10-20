@@ -27,7 +27,8 @@ from linktools.ai.asset import (
     MaterializedAssets,
     SqlAssetBackend,
 )
-from linktools.ai.capability import AssetCapability, RuntimeFeatures
+from linktools.ai.capability import AssetCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_asset_database

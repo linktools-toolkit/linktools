@@ -4,7 +4,8 @@
 
 import pytest
 
-from linktools.ai.capability import RuntimeFeatures, TraceCapability
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy
 from linktools.ai.observe import Metrics
 from linktools.ai.storage import BatchWriteScope, InMemoryCacheBackend

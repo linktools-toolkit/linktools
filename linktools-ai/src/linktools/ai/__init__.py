@@ -5,8 +5,8 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .capability import RuntimeFeatures, AgentContext
-    from .runtime import Agent, Execution, Runtime, Session
+    from .capability import AgentContext
+    from .runtime import Agent, Execution, Runtime, RuntimeFeatures, Session
     from .workspace import Workspace
 
 __all__ = [
@@ -22,14 +22,17 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     """Keep domain imports independent until a root export is requested."""
-    if name in {"Agent", "Execution", "Runtime", "Session"}:
-        from .runtime import Agent, Execution, Runtime, Session
+    if name in {"Agent", "Execution", "Runtime", "RuntimeFeatures", "Session"}:
+        from .runtime import Agent, Execution, Runtime, RuntimeFeatures, Session
 
-        globals().update(Agent=Agent, Execution=Execution, Runtime=Runtime, Session=Session)
-    elif name in {"RuntimeFeatures", "AgentContext"}:
-        from .capability import RuntimeFeatures, AgentContext
+        globals().update(
+            Agent=Agent, Execution=Execution, Runtime=Runtime,
+            RuntimeFeatures=RuntimeFeatures, Session=Session,
+        )
+    elif name == "AgentContext":
+        from .capability import AgentContext
 
-        globals().update(RuntimeFeatures=RuntimeFeatures, AgentContext=AgentContext)
+        globals()[name] = AgentContext
     elif name == "Workspace":
         from .workspace import Workspace
 
