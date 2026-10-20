@@ -318,18 +318,23 @@ async def test_task_owned_model_boundaries_do_not_use_bounded_observation(
     tmp_path: Path, delegated: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from .test_task_agent_persistence import test_task_agent_trace_survives_terminal_release_and_reopen
+    from linktools.ai.runtime.state._store import active_state_transaction
 
     original = RuntimeStorage.sqlite
+    original_observe = ExecutionRepositoryImpl.observe_execution_control
 
     def sqlite(*args, **kwargs):
         kwargs["cache"] = InMemoryCacheBackend(max_bytes=1000000)
         return original(*args, **kwargs)
 
-    async def unexpected(*args, **kwargs):
-        raise AssertionError("Task-owned checkpoints require the durable recovery path")
+    async def observe(self, *args, **kwargs):
+        assert active_state_transaction(self.state_store) is not None, (
+            "Task-owned checkpoints require the durable recovery path"
+        )
+        return await original_observe(self, *args, **kwargs)
 
     monkeypatch.setattr(RuntimeStorage, "sqlite", sqlite)
-    monkeypatch.setattr(ExecutionRepositoryImpl, "observe_execution_control", unexpected)
+    monkeypatch.setattr(ExecutionRepositoryImpl, "observe_execution_control", observe)
     await test_task_agent_trace_survives_terminal_release_and_reopen(tmp_path, delegated)
 
 

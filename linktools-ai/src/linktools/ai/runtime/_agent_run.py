@@ -31,7 +31,7 @@ from ._plan import RuntimePlanStore
 from ._tool import ToolOperationBridge
 from ._tool_boundary import RepositoryInstructionBoundary
 from .state import RuntimeDomain, CheckpointPersistence
-from .state._contracts import LoadedModelContext
+from .state._contracts import ExecutionRecord, LoadedModelContext
 from .state._step_contracts import AgentRunStore
 from .state._steps import ExecutionTerminalSealPlan
 
@@ -77,6 +77,7 @@ class _AgentRunLifecycle(Protocol):
     ) -> None: ...
     async def discard_revoked_producer_staging(
         self, agent_run_id: str, *, execution_id: str, producer_generation: int,
+        terminal_execution: ExecutionRecord | None = None,
     ) -> None: ...
     async def wait_projection_flight(self, agent_run_id: str) -> None: ...
     async def prepare_execution_terminal_seal(

@@ -4320,6 +4320,7 @@ class LocalExecutionBackend:
     ) -> None:
         await self._agent_run_lifecycle.discard_revoked_producer_staging(
             agent_run_id, execution_id=execution.execution_id, producer_generation=producer_generation,
+            terminal_execution=execution,
         )
         async with self._audit_lock(execution.execution_id):
             self._pending_audit_events.pop(execution.execution_id, None)

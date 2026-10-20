@@ -41,6 +41,7 @@ from ._contracts import (
     ConversationHistoryRepository,
     ExecutionHistoryHeadRecord,
     ExecutionHistoryState,
+    ExecutionRecord,
     ExecutionRepository,
     ExecutionRunSealHead,
     HistoryQuality,
@@ -56,6 +57,7 @@ from ._contracts import (
     TranscriptOrigin,
     TranscriptSpanRef,
 )
+from ._execution_repositories import ExecutionRepositoryImpl
 from ._history import (
     PreparedTranscriptObservation,
     TranscriptCapture,
@@ -1670,50 +1672,89 @@ class StateStepArchive(AgentRunStore):
         existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
         return await self._relocate_conversation_checkpoint(run, checkpoint, existing_run)
 
+    async def conversation_preparation_record_keys(
+        self, run: AgentRunRecord, checkpoint: AgentRunCheckpoint,
+    ) -> Mapping[StateStore, tuple[bytes, ...]] | None:
+        """Name the records a built-in conversation preparation can capture together."""
+        self._ensure_open()
+        require_no_run_history_lock("StateStepArchive.conversation_preparation_record_keys")
+        if (
+            type(self).relocate_conversation_checkpoint is not StateStepArchive.relocate_conversation_checkpoint
+            or type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
+            or not isinstance(self._store.storage_group, GroupRecordReader)
+        ):
+            return None
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        content = await self._history.content_archive(create=True)
+        if content.store.storage_group is not self._store.storage_group:
+            return None
+        keys = {self._store: (self._agent_run_key(run.agent_run_id),
+                             self._history.head_key(self._history_id(run)))}
+        values = tuple(("model-message", encode_model_messages((message,))) for message in checkpoint.messages)
+        keys[content.store] = tuple(dict.fromkeys((*keys.get(content.store, ()),
+                                                 *content.content_record_keys(values))))
+        return keys
+
     async def prepare_conversation_checkpoint(
         self,
         run: AgentRunRecord,
         checkpoint: AgentRunCheckpoint,
         *,
         archive: PreparedArchive | None = None,
+        observed_records: Mapping[StateStore, Mapping[bytes, StoredRecord | None]] | None = None,
     ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch]:
         """Relocate and prepare one conversation checkpoint from one metadata capture."""
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.prepare_conversation_checkpoint")
+        if observed_records is not None and active_state_scope() is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
             type(self).relocate_conversation_checkpoint is not StateStepArchive.relocate_conversation_checkpoint
             or type(self).prepare_checkpoints is not StateStepArchive.prepare_checkpoints
         ):
+            if observed_records is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             relocated = await self.relocate_conversation_checkpoint(run, checkpoint)
             return relocated, await self.prepare_checkpoints(run, (relocated,))
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         run_key = self._agent_run_key(run.agent_run_id)
         head_key = self._history.head_key(self._history_id(run))
+        requests = (None if observed_records is not None
+                    else await self.conversation_preparation_record_keys(run, checkpoint))
         content = None
         content_keys: tuple[bytes, ...] = ()
         observed_content = None
-        if isinstance(self._store.storage_group, GroupRecordReader):
+        if observed_records is not None or requests is not None:
             content = await self._history.content_archive(create=True)
-            values = tuple(("model-message", encode_model_messages((message,))) for message in checkpoint.messages)
-            content_keys = content.content_record_keys(values)
-            content_key_set = frozenset(content_keys)
-
-            async def capture(group: StateGroupTransaction):
-                if not isinstance(group, GroupRecordReader):
-                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                requests = {self._store: (run_key, head_key)}
-                requests[content.store] = tuple(dict.fromkeys((*requests.get(content.store, ()), *content_keys)))
-                captured = await group.get_records(requests)
-                observed = {key: record for key, record in captured[content.store].items() if key in content_key_set}
-                return captured[self._store], observed
-
-            if content.store.storage_group is self._store.storage_group:
-                records, observed_content = await self._store.storage_group.read_many(
-                    (self._store, content.store), capture,
-                )
+            if observed_records is not None:
+                owner_keys = {run_key, head_key}
+                if (not isinstance(self._store.storage_group, GroupRecordReader)
+                        or content.store.storage_group is not self._store.storage_group
+                        or set(observed_records) != {self._store, content.store}
+                        or not owner_keys.issubset(observed_records[self._store])
+                        or (content.store is not self._store and set(observed_records[self._store]) != owner_keys)
+                        or any(not isinstance(key, bytes) or len(key) != 32
+                               or (record is not None and record.key_digest != key)
+                               for values in observed_records.values() for key, record in values.items())):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                captured = {store: {key: value for key, value in values.items() if value is not None}
+                            for store, values in observed_records.items()}
+                content_keys = tuple(key for key in observed_records[content.store]
+                                     if content.store is not self._store or key not in owner_keys)
             else:
-                records = await self._store.read(lambda transaction: transaction.get_records((run_key, head_key)))
+                assert requests is not None
+                content_keys = tuple(key for key in requests[content.store] if key not in (run_key, head_key))
+                async def capture(group: StateGroupTransaction):
+                    if not isinstance(group, GroupRecordReader):
+                        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                    return await group.get_records(requests)
+
+                captured = await self._store.storage_group.read_many(tuple(requests), capture)
+            records = captured[self._store]
+            observed_content = {key: captured[content.store][key] for key in content_keys
+                                if key in captured[content.store]}
         else:
             records = await self._store.read(lambda transaction: transaction.get_records((run_key, head_key)))
         record = records.get(run_key)
@@ -2385,19 +2426,33 @@ class StateStepArchive(AgentRunStore):
 
     async def require_revoked_execution_producer(
         self, *, execution_id: str, producer_generation: int,
+        terminal_execution: ExecutionRecord | None = None,
     ) -> None:
         """Prove that a newer generation or immutable seal revoked this producer."""
         require_no_run_history_lock("StateStepArchive.require_revoked_execution_producer")
         repository = self._execution_repository
         if repository is None:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        batch_control_reads = (
+            type(repository) is ExecutionRepositoryImpl
+            and terminal_execution is not None
+            and terminal_execution.execution_id == execution_id
+            and terminal_execution.status in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }
+        )
 
         async def read(_transaction: StateTransaction) -> None:
-            head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
+            # The terminal record selects the read shape, never the revocation proof.
+            if batch_control_reads:
+                execution, head = await repository.observe_execution_control(execution_id, tenant_id=self._tenant_id)
+            else:
+                head = await repository.get_history_head(execution_id, tenant_id=self._tenant_id)
             if (head is not None and head.state is ExecutionHistoryState.OPEN
                     and head.producer_generation > producer_generation):
                 return
-            execution = await repository.get(execution_id, tenant_id=self._tenant_id)
+            if not batch_control_reads:
+                execution = await repository.get(execution_id, tenant_id=self._tenant_id)
             if (execution is not None and not execution.durable_trace
                     and execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
                     and head is not None and head.state is ExecutionHistoryState.CLOSED

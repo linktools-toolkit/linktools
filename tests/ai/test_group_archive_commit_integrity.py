@@ -72,8 +72,9 @@ async def test_pending_turn_rejects_content_winner_after_preparation_and_rolls_b
 
         async def inject_after_prepare(
             run: AgentRunRecord, checkpoint: AgentRunCheckpoint, *, archive: PreparedArchive | None = None,
+            observed_records=None,
         ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch]:
-            result = await original(run, checkpoint, archive=archive)
+            result = await original(run, checkpoint, archive=archive, observed_records=observed_records)
             assert active_state_scope() is None
             prepared = result[1][0].archive
             record = next(value for value in prepared.records.values() if value.kind == "archive_content")
