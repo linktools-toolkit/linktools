@@ -184,6 +184,7 @@ class SqlStateStorageGroup:
         *,
         owns_context: bool = False,
         read_only: bool = False,
+        uses_archive: bool = False,
     ) -> None:
         self._context = context
         self._metadata = metadata
@@ -197,6 +198,8 @@ class SqlStateStorageGroup:
         self._initialized = False
         self._members: dict[bytes, SqlStateStore] = {}
         self._archive_member: SqlStateStore | None = None
+        self._archive_scope_initialized = False
+        self._archive_on_mutation = uses_archive
         self._owned_members: set[SqlStateStore] = set()
 
     def add_member(self, store: "SqlStateStore") -> None:
@@ -249,7 +252,52 @@ class SqlStateStorageGroup:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archive_digest = hashlib.sha256(b"linktools-ai:state-group-archive").digest()
         self._archive_member = await self._open_partition(archive_digest)
+        self._archive_scope_initialized = True
         return scope, self._archive_member
+
+    async def _initialize_archive_scope(
+        self, session: "AsyncSession", clock: "_SqlTransactionClock",
+    ) -> None:
+        """Establish resource identity in the first owner mutation's commit."""
+        metadata_digest = hashlib.sha256(b"linktools-ai:state-group-metadata").digest()
+        key = hashlib.sha256(b"archive_scope_id").digest()
+        metadata = _SqlTransaction(
+            session, self._metadata, self._context, metadata_digest, clock=clock,
+        )
+        record = await metadata.get_record(key)
+        if record is not None:
+            scope = record.data.get("archive_scope_id")
+            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        archive = _SqlTransaction(
+            session, self._metadata, self._context,
+            hashlib.sha256(b"linktools-ai:state-group-archive").digest(), clock=clock,
+        )
+        if await archive.scan_records_page(after=None, limit=1):
+            # Under READ COMMITTED another writer can publish between the two
+            # reads. Recheck identity before treating visible content as orphaned.
+            metadata = _SqlTransaction(
+                session, self._metadata, self._context, metadata_digest, clock=clock,
+            )
+            record = await metadata.get_record(key)
+            scope = None if record is None else record.data.get("archive_scope_id")
+            if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        record = StoredRecord(
+            key_digest=key, scope_digest=None, parent_digest=None,
+            kind="archive_scope", sort_key="archive_scope", state=None,
+            storage_revision=0, lease_owner=None, lease_fence=0,
+            lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
+        )
+        # Another first writer may already have established this resource's
+        # immutable identity. Its winning value must never be overwritten.
+        await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
+            session, table=self._metadata.tables["ai_state_records"],
+            values={**_record_values(record), "store_digest": metadata_digest.hex()},
+            index_elements=("store_digest", "key_digest"),
+        ))
 
     async def _open_partition(self, digest: bytes) -> "SqlStateStore":
         store = self._members.get(digest)
@@ -390,6 +438,8 @@ class SqlStateStorageGroup:
             captured_at = time()
             capture_tokens = {store: store._reads.capture_token for store in members}
             clock = _SqlTransactionClock(session, self._context)
+            if self._archive_on_mutation and not self._archive_scope_initialized:
+                await self._initialize_archive_scope(session, clock)
             transactions = {
                 store: _SqlTransaction(
                     session,
@@ -432,6 +482,8 @@ class SqlStateStorageGroup:
                 domain=f"runtime.state.group[{domains}]",
             )
             confirmed = True
+            if self._archive_on_mutation:
+                self._archive_scope_initialized = True
             return result
         except asyncio.CancelledError:
             raise

@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
+from linktools.ai.core import ExecutionStatus, JsonValue, OperationStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
@@ -146,6 +146,10 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             assert state.node_states[0].safe_error_details["phase"] == "task_invocation_capture_cancel"
             execution = await run.execution("agent")
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.STARTED
+            before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            assert before.requires_task_invocation_capture
+            before_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
+                tenant_id=principal.tenant_id)
             with pytest.raises(AIError) as pending:
                 await runtime.executions.capture_input(execution.execution_id,
                     CaptureInputRequest(principal, "recovered-input"))
@@ -159,6 +163,14 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
                 models.release.set()
             await asyncio.wait_for(run.recover(idempotency_key="recover"), 5)
             assert models.requests == 1
+            recovered_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
+                tenant_id=principal.tenant_id)
+            assert recovered_head.producer_generation == before_head.producer_generation
+            assert recovered_head.producer_claim_id == before_head.producer_claim_id
+            assert await runtime._state.execution.operations.list_pending(
+                ResourceKind.EXECUTION, execution.execution_id, tenant_id=principal.tenant_id,
+                states=frozenset(OperationStatus), limit=10,
+            ) == ()
             models.release.set()
             assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert (await run.execution("agent")).execution_id == execution.execution_id

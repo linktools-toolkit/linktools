@@ -67,3 +67,37 @@ async def test_prepared_frontier_reuse_does_not_bypass_publication_integrity(tmp
         assert raised.value.code == ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
+
+
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("has_baseline", (False, True))
+async def test_empty_model_projection_does_not_open_archive_or_keep_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, has_baseline: bool,
+) -> None:
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from linktools.ai.runtime import RuntimeDomain
+    from linktools.ai.runtime.state._contracts import ContextProjection
+
+    state = RuntimeState(_storage(backend, tmp_path))
+    await state.initialize(namespace="empty-projection", tenant_id="tenant")
+    try:
+        repository = state.run_store.read_store(RuntimeDomain.CHECKPOINT).transcript_repository
+        baseline = None
+        if has_baseline:
+            previous = PreparedArchive()
+            baseline = await repository.prepare_model_projection(
+                (ModelResponse(parts=[TextPart("previous context")]),), previous,
+            )
+            await repository.publish_archive(previous)
+
+        async def unexpected_archive(*, create=False):
+            raise AssertionError("empty context must not open or initialize content storage")
+
+        monkeypatch.setattr(repository, "content_archive", unexpected_archive)
+        prepared = PreparedArchive()
+        projection = await repository.prepare_model_projection((), prepared, baseline=baseline)
+        assert projection == ContextProjection(())
+        assert not prepared.records and not prepared.nodes
+        assert (await repository.load_projected_context("run", projection)).model_messages() == ()
+    finally:
+        await state.close()

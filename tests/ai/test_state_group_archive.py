@@ -309,3 +309,195 @@ async def test_memory_group_owns_archive_without_borrowed_member_close_cascade()
         assert error.value.code is ErrorCode.STORAGE_CLOSED
     await second.close()
     await group.close()
+
+
+def _sql_archive_owner(engine) -> SqlStateStore:
+    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    context = create_sql_storage_context(engine)
+    group = SqlStateStorageGroup(context, metadata, uses_archive=True)
+    return SqlStateStore(engine, context=context, metadata=metadata, group=group)
+
+
+async def test_sql_first_owner_write_establishes_scope_in_the_same_commit(tmp_path: Path) -> None:
+    from sqlalchemy import event
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'first-write.db'}")
+    await provision_database(engine)
+    owner = _sql_archive_owner(engine)
+    await owner.initialize()
+    group = owner.storage_group
+    value = _record("first-owner")
+    transactions = set()
+
+    def capture(connection, cursor, statement, parameters, context, many):
+        if statement.split()[0] in {"INSERT", "UPDATE", "DELETE"}:
+            transactions.add(connection.get_transaction())
+
+    async def abort(tx):
+        await tx.insert_record(value)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    try:
+        assert await group.open_archive() is None
+        with pytest.raises(AIError):
+            await owner.mutate(abort)
+        assert await group.open_archive() is None
+        assert await owner.read_record(value.key_digest) is None
+        event.listen(engine.sync_engine, "before_cursor_execute", capture)
+        try:
+            await owner.mutate(lambda tx: tx.insert_record(value))
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", capture)
+        assert len(transactions) == 1 and None not in transactions
+        opened = await group.open_archive()
+        assert opened is not None
+        assert await owner.read_record(value.key_digest) == value
+    finally:
+        await owner.close()
+        await group.close()
+        await engine.dispose()
+
+
+async def test_sql_concurrent_first_owner_writes_keep_one_scope(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'concurrent-first-write.db'}"
+    engines = (create_async_engine(url), create_async_engine(url))
+    await provision_database(engines[0])
+    stores = tuple(_sql_archive_owner(engine) for engine in engines)
+    try:
+        for store in stores:
+            await store.initialize()
+        await asyncio.gather(*(
+            store.mutate(lambda tx, index=index: tx.insert_record(_record(f"owner-{index}")))
+            for index, store in enumerate(stores)
+        ))
+        opened = await asyncio.gather(*(store.storage_group.open_archive() for store in stores))
+        assert all(item is not None for item in opened)
+        assert opened[0][0] == opened[1][0]
+        for index in range(2):
+            assert await stores[0].read_record(_record(f"owner-{index}").key_digest) == _record(f"owner-{index}")
+    finally:
+        for store in stores:
+            await store.close()
+            await store.storage_group.close()
+        for engine in engines:
+            await engine.dispose()
+
+
+async def test_sql_owner_without_archive_declaration_does_not_create_scope(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'no-archive.db'}")
+    await provision_database(engine)
+    owner = SqlStateStore(engine)
+    try:
+        await owner.initialize()
+        await owner.mutate(lambda tx: tx.insert_record(_record("plain-owner")))
+        assert await owner.storage_group.open_archive() is None
+    finally:
+        await owner.close()
+        await owner.storage_group.close()
+        await engine.dispose()
+
+
+async def test_sql_first_owner_write_rejects_orphan_archive_without_repair(tmp_path: Path) -> None:
+    from sqlalchemy import delete
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'orphan-archive.db'}")
+    await provision_database(engine)
+    owner = SqlStateStore(engine)
+    reopened = _sql_archive_owner(engine)
+    try:
+        await owner.initialize()
+        _, archive = await owner.storage_group.open_archive(create=True)
+        await archive.mutate(lambda tx: tx.insert_record(_record("orphan")))
+        table = owner.storage_group.metadata.tables["ai_state_records"]
+        async with engine.begin() as connection:
+            await connection.execute(delete(table).where(
+                table.c.store_digest == hashlib.sha256(b"linktools-ai:state-group-metadata").hexdigest(),
+            ))
+        await reopened.initialize()
+        with pytest.raises(AIError) as error:
+            await reopened.mutate(lambda tx: tx.insert_record(_record("rejected-owner")))
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await reopened.read_record(_record("rejected-owner").key_digest) is None
+        with pytest.raises(AIError) as error:
+            await reopened.storage_group.open_archive()
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        for store in (owner, reopened):
+            await store.close()
+            await store.storage_group.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("declared", (False, True))
+@pytest.mark.parametrize("read_only", (False, True))
+async def test_sql_resource_groups_aggregate_archive_owners_without_initialization_io(
+    tmp_path: Path, declared: bool, read_only: bool,
+) -> None:
+    from linktools.ai.runtime.state._resource_scope import StorageResourceRequest, StorageResourceScope
+    from linktools.ai.storage import StorageRoute
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'declared-group.db'}")
+    await provision_database(engine)
+    def configure(metadata):
+        build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}), metadata=metadata)
+
+    scope = await StorageResourceScope.open((
+        StorageResourceRequest("ordinary", StorageRoute.sql(engine), configure_schema=configure),
+        StorageResourceRequest("archive", StorageRoute.sql(engine), configure_schema=configure, uses_archive=declared),
+    ), namespace="declaration", tenant_id="tenant", read_only=read_only)
+    resource = scope.resources[0]
+    owner = SqlStateStore(engine, context=resource.context, metadata=resource.metadata, group=resource.group)
+    try:
+        assert scope.resources[1].group is resource.group
+        await owner.initialize()
+        assert await resource.group.open_archive() is None
+        if read_only:
+            with pytest.raises(AIError) as error:
+                await owner.mutate(lambda tx: tx.insert_record(_record("owner")))
+            assert error.value.code is ErrorCode.STORAGE_READ_ONLY
+        else:
+            await owner.mutate(lambda tx: tx.insert_record(_record("owner")))
+        assert (await resource.group.open_archive() is not None) is (declared and not read_only)
+    finally:
+        await owner.close()
+        await scope.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("committed", (False, True))
+async def test_sql_first_archive_owner_unknown_commit_keeps_scope_with_owner_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unknown-first-write.db'}")
+    await provision_database(engine)
+    owner = _sql_archive_owner(engine)
+    value = _record("uncertain-owner")
+    group = owner.storage_group
+    original = type(group.context).run_mutation
+
+    async def unknown(context, callback, **kwargs):
+        if context is group.context:
+            if committed:
+                await original(context, callback, **kwargs)
+            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+        return await original(context, callback, **kwargs)
+
+    try:
+        await owner.initialize()
+        with monkeypatch.context() as patch:
+            patch.setattr(type(group.context), "run_mutation", unknown)
+            with pytest.raises(AIError) as error:
+                await owner.mutate(lambda tx: tx.insert_record(value))
+            assert error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+        assert await owner.read_record(value.key_digest) == (value if committed else None)
+        opened = await group.open_archive()
+        assert (opened is not None) is committed
+        await owner.mutate(lambda tx: tx.insert_record(_record("later-owner")))
+        after = await group.open_archive()
+        assert after is not None
+        if committed:
+            assert after[0] == opened[0]
+    finally:
+        await owner.close()
+        await group.close()
+        await engine.dispose()

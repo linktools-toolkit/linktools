@@ -1015,6 +1015,8 @@ class TranscriptRepository:
         baseline: ContextProjection | None = None,
         baseline_frontier: tuple[StoredRecord, ...] = (),
     ) -> ContextProjection:
+        if not messages:
+            return ContextProjection(())
         archive = await self.content_archive(create=True)
         raw = encode_model_messages(messages)
         root = archive.empty_root()

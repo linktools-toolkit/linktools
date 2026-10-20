@@ -126,6 +126,10 @@ async def materialize_runtime_storage(
                 if plan.route(domain).kind == "filesystem" else None
             ),
             configure_schema=partial(configure_schema, domain),
+            uses_archive=domain in {
+                RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION,
+                RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT,
+            },
         )
         for domain in RuntimeDomain
     )

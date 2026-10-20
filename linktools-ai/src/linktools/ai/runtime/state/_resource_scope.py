@@ -39,6 +39,7 @@ class StorageResourceRequest:
     route: StorageRoute
     member_path: Path | None = None
     configure_schema: Callable[["MetaData"], None] | None = None
+    uses_archive: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +170,10 @@ class StorageResourceScope:
                 if route.engine is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 context = create_sql_storage_context(route.engine)
-            group = SqlStateStorageGroup(context, metadata, read_only=read_only)
+            group = SqlStateStorageGroup(
+                context, metadata, read_only=read_only,
+                uses_archive=any(requests[index].uses_archive for index in indices),
+            )
             self._close_actions.append(group.close)
             resource = SqlResource(group, context, metadata)
             for index in indices:
