@@ -502,7 +502,7 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
         return ScoreBundle(dimensions={"exact_match": 1.0}).to_mapping()
 
     rule = Task("semantics.initial-score", score, effect_policy="none")
-    async with Runtime.open("scorer-usage", models=models, storage=RuntimeStorage.filesystem(tmp_path),
+    async with Runtime.open("scorer-usage", models=models, storage=RuntimeStorage.in_memory(),
                             context=CONTEXT, features=capabilities()) as runtime:
         judge = runtime.tasks.from_agent("semantics.usage-judge", runtime.agents.get())
         engine = runtime.tasks.bind(target, rule, judge)
@@ -513,7 +513,7 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             tuple(CandidateSpec(slot, task=target.ref) for slot in ("baseline", "candidate")),
             (rule_scorer(rule if score_only else judge),),
-            policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"), engine=engine)
+            policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "start"), engine=engine)
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore"), engine=engine) if score_only else run
         assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
