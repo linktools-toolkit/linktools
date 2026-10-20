@@ -298,6 +298,7 @@ class ExecutionTreeStreamer:
         streams: dict[str, AsyncIterator[ExecutionStreamEvent]] = {}
         pending: dict[str, asyncio.Task[ExecutionStreamEvent]] = {}
         discovery_wait: asyncio.Task[None] | None = None
+        discovery: asyncio.Task[None] | None = None
         observing = False
         preparation_failure: _ExecutionStreamFailure | None = None
 
@@ -414,6 +415,25 @@ class ExecutionTreeStreamer:
             except Exception as error:
                 raise _ExecutionStreamFailure(error) from error
 
+        async def discover_ready(done: set[asyncio.Task]) -> None:
+            nonlocal discovery_wait, discovery_backoff
+            for parent_id, task in tuple(child_waits.items()):
+                if task in done:
+                    for child_id in broker_result(task):
+                        await discover_child(parent_id, child_id)
+                    wait_for_children(parent_id)
+
+            if discovery_wait in done:
+                added = await discover_persisted_children(tuple(views))
+                discovery_backoff = (
+                    _DISCOVERY_BACKOFF_INITIAL if added
+                    else min(_DISCOVERY_BACKOFF_MAX, discovery_backoff * 2)
+                )
+                discovery_wait = asyncio.create_task(
+                    asyncio.sleep(discovery_backoff),
+                    name=f"execution-tree-discovery-{execution_id}",
+                )
+
         try:
             add_view(root, 0)
             await discover_persisted_children((execution_id,))
@@ -439,6 +459,11 @@ class ExecutionTreeStreamer:
             final_discovery = False
             while True:
                 if not pending:
+                    if discovery is not None:
+                        await discovery
+                        discovery = None
+                        if pending:
+                            continue
                     if final_discovery:
                         return
                     # This is a finite observation phase, not permanent subtree
@@ -460,7 +485,9 @@ class ExecutionTreeStreamer:
                         return
 
                 wait_tasks = tuple(pending.values())
-                if not final_discovery:
+                if discovery is not None:
+                    wait_tasks += (discovery,)
+                elif not final_discovery:
                     wait_tasks += tuple(child_waits.values())
                     if discovery_wait is not None:
                         wait_tasks += (discovery_wait,)
@@ -472,7 +499,7 @@ class ExecutionTreeStreamer:
                     if task.cancelled():
                         task.result()
                 broker_tasks = set(child_waits.values())
-                for task in (*pending.values(), *child_waits.values()):
+                for task in (*pending.values(), *child_waits.values(), *((discovery,) if discovery is not None else ())):
                     if task not in done:
                         continue
                     error = task.exception()
@@ -480,23 +507,13 @@ class ExecutionTreeStreamer:
                         error, (StopAsyncIteration, _ExecutionStreamFailure)
                     ) and (task not in broker_tasks or isinstance(error, AIError)):
                         raise error
-                if not final_discovery:
-                    for parent_id, task in tuple(child_waits.items()):
-                        if task in done:
-                            for child_id in broker_result(task):
-                                await discover_child(parent_id, child_id)
-                            wait_for_children(parent_id)
-
-                    if discovery_wait in done:
-                        added = await discover_persisted_children(tuple(views))
-                        discovery_backoff = (
-                            _DISCOVERY_BACKOFF_INITIAL if added
-                            else min(_DISCOVERY_BACKOFF_MAX, discovery_backoff * 2)
-                        )
-                        discovery_wait = asyncio.create_task(
-                            asyncio.sleep(discovery_backoff),
-                            name=f"execution-tree-discovery-{execution_id}",
-                        )
+                if discovery is not None and discovery in done:
+                    discovery.result()
+                    discovery = None
+                if not final_discovery and discovery is None and (
+                    discovery_wait in done or any(task in done for task in child_waits.values())
+                ):
+                    discovery = asyncio.create_task(discover_ready(done))
 
                 completed = sorted(
                     (key, task) for key, task in pending.items() if task in done
@@ -524,6 +541,7 @@ class ExecutionTreeStreamer:
             active_error = sys.exc_info()[1]
 
             async def cleanup() -> None:
+                errors = await _drain_stream_tasks((discovery,)) if discovery is not None else []
                 wait_tasks = tuple(child_waits.values()) + tuple(pending.values())
                 if discovery_wait is not None:
                     wait_tasks += (discovery_wait,)
@@ -536,7 +554,7 @@ class ExecutionTreeStreamer:
                         return _ExecutionStreamFailure(error)
                     return error
 
-                errors = await _drain_stream_tasks(wait_tasks, map_error=map_error)
+                errors.extend(await _drain_stream_tasks(wait_tasks, map_error=map_error))
 
                 async def close_stream(stream: AsyncIterator[ExecutionStreamEvent]) -> None:
                     close = getattr(stream, "aclose", None)
