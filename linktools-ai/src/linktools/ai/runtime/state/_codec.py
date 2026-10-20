@@ -141,6 +141,7 @@ from ...task import (
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
+from .._agent_task_node import AgentTaskNode
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
@@ -383,7 +384,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("step_event", StepEvent),
 )
 _V1_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
+    {**{target: wire_id for wire_id, target in _V1_WIRE_TYPES}, AgentTaskNode: _TASK_NODE_WIRE_ID}
 )
 _V1_DOMAIN_TYPES = MappingProxyType(
     {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
@@ -455,6 +456,7 @@ def _encode_v1_task_node_fields(
             value.dependencies, codec, persisted=persisted
         ),
         "input": _encode_domain(value.input, codec, persisted=persisted),
+        "input_semantics": "agent-task-input-v1" if isinstance(value, AgentTaskNode) else "json-v1",
         "budget_cost": _encode_domain(
             value.budget_cost, codec, persisted=persisted
         ),
@@ -504,6 +506,8 @@ def _encode_v1_task_node(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
         raise TypeError("V1 task_node encoder received the wrong type")
+    if isinstance(value, AgentTaskNode):
+        value.to_mapping()
     return _encode_v1_task_node_fields(value, codec, persisted)
 
 
@@ -518,6 +522,7 @@ def _decode_v1_task_node(
             "task",
             "dependencies",
             "input",
+            "input_semantics",
             "budget_cost",
             "expander",
             "dependency_policy",
@@ -601,7 +606,13 @@ def _decode_v1_task_node(
         or not isinstance(failure_policy, str)
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return TaskNode.from_resolved(
+    semantics = raw_fields["input_semantics"]
+    if not isinstance(semantics, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if semantics not in {"json-v1", "agent-task-input-v1"}:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    node_type = AgentTaskNode if semantics == "agent-task-input-v1" else TaskNode
+    node = node_type.from_resolved(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
             _decode_domain(
@@ -655,6 +666,9 @@ def _decode_v1_task_node(
         dependency_policy=dependency_policy,
         failure_policy=failure_policy,
     )
+    if isinstance(node, AgentTaskNode):
+        node.to_mapping()
+    return node
 
 
 def _encode_v1_task_graph_view(
@@ -1831,7 +1845,7 @@ def _iter_runtime_object_refs(
             task_input = node.input
             prompt = task_input.get("prompt")
             if (
-                task_input.get("kind") == "agent-task-input"
+                isinstance(node, AgentTaskNode)
                 and isinstance(prompt, Mapping)
                 and prompt.get("kind") == "stored-user-content-v1"
             ):
@@ -2172,7 +2186,7 @@ def _decode_dataclass(
     expected_target = codec.domain_types.get(wire_id)
     if expected_target is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if expected_target is not target:
+    if codec.wire_ids.get(target) != wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
@@ -2188,7 +2202,10 @@ def _decode_dataclass(
     decoder = codec.dataclass_decoders.get(wire_id)
     if decoder is not None:
         try:
-            return decoder(raw_fields, codec, persisted)
+            decoded = decoder(raw_fields, codec, persisted)
+            if not isinstance(decoded, target):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return decoded
         except AIError:
             raise
         except (KeyError, TypeError, ValueError) as error:

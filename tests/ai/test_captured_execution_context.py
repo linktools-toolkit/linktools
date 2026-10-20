@@ -360,3 +360,56 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
         assert (await replay.wait()).result.output == {"text": "read:frozen memory value"}
         assert (await memory.read("memory/facts.md", max_chars=1000)).content == "changed production value"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rich_input", (False, True), ids=("text", "content"))
+async def test_execution_capture_preserves_detached_accepted_provenance(
+    tmp_path: Path, rich_input: bool,
+) -> None:
+    from pydantic_ai.messages import BinaryContent, TextContent
+    from linktools.ai.model import MaterializedUserContent
+
+    group = RuntimeFeatures("capture-provenance")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
+    group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    principal = Principal("owner", "default")
+    metadata = {"nested": {"labels": ["original"]}}
+    prompt = (
+        TextContent("hello", metadata=metadata),
+        BinaryContent(b"original bytes", media_type="text/plain", identifier="evidence"),
+    ) if rich_input else "hello"
+    storage = RuntimeStorage.filesystem(tmp_path / "state")
+    expected_view = None
+    async with Runtime.open("capture-provenance", models=_NoToolsModels(), storage=storage, features=group) as runtime:
+        execution = await runtime.agents.get().start(prompt, principal=principal)
+        assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
+        metadata["nested"]["labels"].append("author annotation")
+        reference = await runtime.executions.capture_input(
+            execution.execution_id, CaptureInputRequest(principal, "capture-provenance"),
+        )
+        captured = await runtime._input_captures.read_agent(reference, principal=principal)
+        if rich_input:
+            assert isinstance(captured.prompt, MaterializedUserContent)
+            expected_view = dict(captured.prompt.view)
+            text = next(item for item in captured.prompt if isinstance(item, TextContent) and item.content == "hello")
+            assert text.metadata == {"nested": {"labels": ["original"]}}
+            text.metadata["nested"]["labels"].append("consumer annotation")
+            captured.prompt.view["attachments"].append({"display_annotation": "local"})
+        else:
+            assert captured.prompt == "hello"
+        repeated = await runtime.executions.capture_input(
+            execution.execution_id, CaptureInputRequest(principal, "capture-provenance"),
+        )
+        assert repeated == reference
+
+    async with Runtime.open("capture-provenance", models=_NoToolsModels(), storage=storage, features=group) as runtime:
+        restored = await runtime._input_captures.read_agent(reference, principal=principal)
+        if rich_input:
+            assert isinstance(restored.prompt, MaterializedUserContent)
+            assert restored.prompt.view == expected_view
+            text = next(item for item in restored.prompt if isinstance(item, TextContent) and item.content == "hello")
+            assert text.metadata == {"nested": {"labels": ["original"]}}
+            assert [item.data for item in restored.prompt if isinstance(item, BinaryContent)] == [b"original bytes"]
+        else:
+            assert restored.prompt == "hello"

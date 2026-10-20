@@ -40,6 +40,7 @@
       "expander": null,
       "dependency_policy": "all_succeeded",
       "failure_policy": "propagate",
+      "input_semantics": "json-v1",
       "input": {
         "$mapping": [
           [
