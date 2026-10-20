@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -28,7 +28,7 @@ async def test_execution_writer_requires_explicit_conversation(
     persisted: bool, conversation: bool,
 ) -> None:
     storage = RuntimeStorage.in_memory()
-    features = _features(*(ConversationCapability(),) if conversation else ())
+    features = _features(*(ExecutionCapability(retain_history=True),) if conversation else ())
     async with Runtime.open(
         "conversation-wire", storage=storage, models=_FeatureModels(), features=features,
     ) as runtime:

@@ -25,6 +25,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.runtime.state._execution_repositories import ExecutionRepositoryImpl
 from linktools.ai.runtime.state._history import TranscriptRepository
+from linktools.ai.runtime.state._archive_closure import rekey_archive_roots
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._sql import _SqlTransaction
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
@@ -36,14 +37,22 @@ from .test_incremental_projection_boundaries import _storage
 pytestmark = pytest.mark.asyncio
 
 
-async def _snapshot(store):
+async def _snapshot(store, *, scope_mapping=None):
     async def read(transaction):
         return (
             tuple(sorted(await transaction.scan_records(), key=lambda item: item.key_digest)),
             tuple(sorted(await transaction.scan_facts(), key=lambda item: (item.stream_digest, item.sequence))),
             await transaction.scan_sequences(),
         )
-    return await store.read(read)
+    snapshot = await store.read(read)
+    if scope_mapping is None:
+        return snapshot
+    records, facts, sequences = snapshot
+    return (
+        tuple(replace(item, data=rekey_archive_roots(dict(item.data), scope_mapping)) for item in records),
+        tuple(replace(item, data=rekey_archive_roots(dict(item.data), scope_mapping)) for item in facts),
+        sequences,
+    )
 
 
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
@@ -78,6 +87,10 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
                 archive._history = ScalarTranscript(
                     archive.state_store, object_store=archive.transcript_repository._object_store, namespace="checkpoint-batch",
                     tenant_id="tenant", runtime_domain=RuntimeDomain.CHECKPOINT,
+                    archive_object_store=state.archive_object_store(RuntimeDomain.CHECKPOINT),
+                    archive_object_reader=lambda reference, owner=state: owner.read_archive_object(
+                        RuntimeDomain.CHECKPOINT, reference,
+                    ),
                 )
             archives.append(archive)
         messages = [ModelRequest(parts=[UserPromptPart(str(index))]) for index in range(133)]
@@ -100,7 +113,11 @@ async def test_checkpoint_batch_preserves_records_facts_sequences_and_revisions(
                 finally:
                     if engine is not None:
                         event.remove(engine, "before_cursor_execute", capture)
-            assert await _snapshot(archives[0].state_store) == await _snapshot(archives[1].state_store)
+            batch_scope = (await archives[0].transcript_repository.content_archive()).scope_id
+            scalar_scope = (await archives[1].transcript_repository.content_archive()).scope_id
+            assert await _snapshot(archives[0].state_store) == await _snapshot(
+                archives[1].state_store, scope_mapping={scalar_scope: batch_scope},
+            )
         assert calls == ["chunks", "projection"] * 3
         if backend == "sqlite":
             assert counts[0]["INSERT"] < counts[1]["INSERT"]

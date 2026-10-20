@@ -10,7 +10,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend
 from linktools.ai.runtime import RuntimeDomain
@@ -60,7 +60,7 @@ async def test_remote_cancel_releases_revoked_producer_staging(
 
     owner_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")
     group = RuntimeFeatures("remote-cancel-release")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(storage=owner_storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0)), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     remote_storage = RuntimeStorage.sqlite(tmp_path / "runtime.db")

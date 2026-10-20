@@ -110,5 +110,5 @@ def test_web_command_delivers_text_before_model_completion(monkeypatch: pytest.M
 
         monkeypatch.setattr(_openai, 'DefaultAsyncHttpxClient', lambda **kwargs: DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handle), **kwargs))
     monkeypatch.setattr(uvicorn, 'Server', Server)
-    args = web_command.command.create_parser().parse_args(['--project', str(tmp_path), '--model', 'gpt-4o', '--base-url', 'https://stream.invalid/v1', '--api-key', 'test-only-placeholder', '--proxy'])
+    args = web_command.command.create_parser().parse_args(['--project', str(tmp_path), '--model', 'gpt-4o', '--base-url', 'https://stream.invalid/v1', '--api-key', 'test-only-placeholder'])
     assert web_command.command.run(args) == 0

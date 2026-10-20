@@ -30,7 +30,6 @@ from pydantic_ai.capabilities import (
     CapabilityOrdering,
     PrepareTools,
     ProcessEventStream,
-    ReinjectSystemPrompt,
     Thinking,
     WrapModelRequestHandler,
 )
@@ -118,6 +117,8 @@ from ._journal import ModelRequestJournal
 from ._memory import MemoryStore
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
+from ._harness import ReinjectRuntimeSystemPrompt, SummaryProviderModel
+from ._message import without_history_system_prompts
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
@@ -589,7 +590,7 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         validate_model_inputs(compiled_agent.model, scope.user_prompt)
         validate_model_inputs(compiled_agent.model, scope.history)
-        model = compiled_agent.model.materialize()
+        model = SummaryProviderModel(compiled_agent.model.materialize())
         # Model cleanup must not replace cancellation or an established run failure.
         execution_error: BaseException | None = None
         try:
@@ -627,9 +628,7 @@ class AgentExecutor:
                     if scope.replace_history_system_prompt:
                         capabilities = (
                             *capabilities,
-                            ReinjectSystemPrompt(
-                                replace_existing=True, id="linktools.ai.reinject-system-prompt"
-                            ),
+                            ReinjectRuntimeSystemPrompt(),
                         )
                     _logger.debug(
                         "agent execution started: agent=%s revision=%s step=%s "
@@ -653,7 +652,10 @@ class AgentExecutor:
                         final_result = await agent.run(
                             user_prompt,
                             deps=scope.context,
-                            message_history=scope.history or None,
+                            message_history=(
+                                without_history_system_prompts(scope.history)
+                                if scope.replace_history_system_prompt else scope.history
+                            ) or None,
                             conversation_id=scope.agent_conversation_id,
                             usage_limits=usage_limits,
                             usage=run_usage,

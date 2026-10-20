@@ -39,8 +39,7 @@ def test_development_install_selects_declared_optional_extras() -> None:
     assert ordinary["linktools-ai"] == modules["linktools-ai"]["path"]
 
 
-@pytest.mark.parametrize(("read_only", "proxy"), [(True, False), (False, True)])
-def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path, read_only: bool, proxy: bool) -> None:
+def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path) -> None:
     pytest.importorskip("starlette")
     pytest.importorskip("uvicorn")
     source_root = Path(__file__).parents[2]
@@ -61,15 +60,10 @@ def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path, read_only: bool, 
         sys.executable, "-m", "linktools", "ai", "web",
         "--project", str(tmp_path / "workspace"), "--port", str(port),
     ]
-    if read_only:
-        arguments.append("--read-only")
-    else:
-        # Opening Runtime must not require a provider request or live credentials.
-        arguments.extend(("--model", "startup-test", "--base-url", "http://127.0.0.1:1",
-                          "--api-key", "offline-test-key"))
-    if proxy:
-        arguments.append("--proxy")
-    headers = {"Host": "console.example", "Origin": "https://console.example", "Sec-Fetch-Site": "same-origin"} if proxy else {}
+    # Opening Runtime must not require a provider request or live credentials.
+    arguments.extend(("--model", "startup-test", "--base-url", "http://127.0.0.1:1",
+                      "--api-key", "offline-test-key"))
+    headers = {"Host": "console.example", "Origin": "https://console.example", "Sec-Fetch-Site": "same-origin"}
     opener = build_opener(ProxyHandler({}))
     with (tmp_path / "server.log").open("w+") as output:
         process = subprocess.Popen(arguments, cwd=tmp_path, env=environment,
@@ -86,7 +80,7 @@ def test_web_cli_serves_http_and_exits_cleanly(tmp_path: Path, read_only: bool, 
             else:
                 output.seek(0)
                 pytest.fail("Web CLI did not become ready:\n" + output.read())
-            assert config["read_only"] is read_only
+            assert config["read_only"] is False
             with opener.open(Request(f"http://127.0.0.1:{port}/", headers=headers), timeout=2) as response:
                 assert response.status == 200
                 assert b"<html" in response.read().lower()

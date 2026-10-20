@@ -25,7 +25,7 @@ from ._snapshot import (
     SnapshotLimits,
     SnapshotTargetInfo,
 )
-from ._runtime_service import Runtime
+from ._runtime_service import Runtime, RuntimeStatus
 from ._tasks import RuntimeTasks, TaskEngine
 from ._task import TaskGraphRun
 from ._wait import WaitResult
@@ -105,6 +105,7 @@ from .state import (
     RuntimeDomain,
     RuntimeStorage,
     RuntimeStoragePlan,
+    RuntimeStorageStatus,
 )
 
 __all__ = [
@@ -121,6 +122,7 @@ __all__ = [
     "Execution",
     "Session",
     "Runtime",
+    "RuntimeStatus",
     "RuntimeTasks",
     "TaskEngine",
     "AgentTaskInput",
@@ -184,6 +186,7 @@ __all__ = [
     "RuntimeHistory",
     "RuntimeStorage",
     "RuntimeStoragePlan",
+    "RuntimeStorageStatus",
     "RestoredRuntime",
     "RuntimeSnapshot",
     "SnapshotExclusiveGuard",

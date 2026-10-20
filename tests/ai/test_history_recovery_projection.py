@@ -31,8 +31,8 @@ from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from linktools.ai.runtime.state._archive import PreparedArchive
 from linktools.ai.runtime.state._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
@@ -75,9 +75,6 @@ async def test_public_response_ahead_then_distinct_sdk_response(
             conversation_archive=restored.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=public,
             recovery_archive=recovery,
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await old.initialize()
 
@@ -369,9 +366,6 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
             conversation_archive=root_store.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=root_store.read_store(RuntimeDomain.TRACE),
             recovery_archive=root_store.read_store(RuntimeDomain.CHECKPOINT),
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await store.initialize()
         public = store.read_store(RuntimeDomain.TRACE)
@@ -410,9 +404,6 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
             conversation_archive=store.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=None,
             recovery_archive=recovery,
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await recovery_only.initialize()
         recorder = AgentRunRecorder(
@@ -465,8 +456,9 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         published_request = None
         if published_state is not None:
             source = await recovery.list_model_interactions(agent_run_id=run_id)
+            prepared = PreparedArchive()
             relocated = await public.prepare_relocated_interactions(
-                source, await recovery.resolve_model_interactions(source)
+                source, await recovery.resolve_model_interactions(source), prepared=prepared,
             )
             unfinished = replace(
                 relocated[0],
@@ -484,6 +476,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
                 checkpoints=(),
                 interactions=(unfinished,),
                 execution_id="execution",
+                archive=prepared,
             )
         root_store.bind_execution_producer(
             run_id, execution_id="execution", producer_generation=1
@@ -678,9 +671,6 @@ async def test_required_checkpoint_rejects_replaced_producer_before_recovery_wri
             conversation_archive=root.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=root.read_store(RuntimeDomain.TRACE),
             recovery_archive=root.read_store(RuntimeDomain.CHECKPOINT),
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await old.initialize()
         old.bind_execution_producer(

@@ -1042,6 +1042,11 @@ def _fact_stream(
     owner: object,
 ) -> bytes:
     relation, value = _fact_storage_identity(domain, fact, owner)
+    if isinstance(owner, TranscriptHeadRecord):
+        chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
+        if (chunk.content.content_scope != canonical_sha256([namespace, tenant_id])
+                or chunk.content.count != chunk.message_count):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return stream_digest(
         namespace,
         tenant_id,
@@ -1082,7 +1087,6 @@ def _fact_storage_identity(
                 or chunk.owner_id != owner.owner_id
                 or chunk.first_message_index > owner.message_count
                 or chunk.message_count != 1
-                or chunk.content.source_domain is not domain
                 or chunk.origin is not TranscriptOrigin.RAW
                 or fact.subject_digest is not None
                 or fact.state is not None

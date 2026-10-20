@@ -15,7 +15,7 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.web import create_app
 from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
@@ -73,18 +73,14 @@ async def test_failed_history_debug_reports_stage_without_payload_or_query(
 
 
 @pytest.mark.asyncio
-async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding() -> None:
+async def test_local_boundary_blocks_cross_site_fetches_and_unmarked_mutations() -> None:
     app = create_app()
     async with client(app) as http:
         response = await http.get("/")
         assert response.status_code == 200
         assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
         assert response.headers["cache-control"] == "private, no-store"
-        for headers in (
-            {"Host": "evil.example:8765"}, {"Host": "127.0.0.1:8000"},
-            {"Origin": "https://evil.example"}, {"Origin": "null"}, {"Sec-Fetch-Site": "cross-site"},
-        ):
-            assert (await http.get("/api/config", headers=headers)).status_code == 403
+        assert (await http.get("/api/config", headers={"Sec-Fetch-Site": "cross-site"})).status_code == 403
         assert (await http.post("/api/sessions", json={})).status_code == 403
         assert (await http.options("/api/sessions", headers={"Origin": "https://evil.example", "Access-Control-Request-Headers": "x-linktools-console"})).status_code == 403
         assert (await http.post("/api/sessions", json={}, headers=_HEADERS)).status_code == 503
@@ -92,14 +88,17 @@ async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding()
         for asset in ("message.js", "markdown-it.js"):
             resource = await http.get(f"/assets/{asset}")
             assert resource.status_code == 200 and "javascript" in resource.headers["content-type"]
-        assert (await http.get("/api/config", headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})).status_code == 200
+            assert resource.headers["cache-control"] == "private, no-store"
+        config = await http.get("/api/config", headers={"Host": "localhost:8765", "Origin": "http://localhost:8765"})
+        assert config.status_code == 200
+        assert config.headers["cache-control"] == "private, no-store"
 
 
 @pytest.mark.asyncio
 async def test_session_execution_history_trace_result_and_metrics_use_runtime() -> None:
     metrics = Metrics.in_memory()
     features = RuntimeFeatures("web-test")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "web-test", metrics=metrics, models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
@@ -186,7 +185,7 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-busy")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("web-busy", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
@@ -239,7 +238,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-clients")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("web-clients", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         app = create_app(runtime=runtime)
         async with client(app) as first, client(app) as second:
@@ -296,6 +295,10 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
         async with client(create_app(runtime=runtime)) as http:
             response = await http.get(f"/api/executions/{execution.execution_id}/events")
             assert response.status_code == 200
+            assert {"private", "no-store", "no-transform"} <= {
+                directive.strip() for directive in response.headers["cache-control"].split(",")
+            }
+            assert response.headers["x-accel-buffering"] == "no"
             frames = [frame for frame in response.text.split("\n\n") if frame]
             assert any(frame.startswith("event: snapshot") for frame in frames)
             cursor = [frame.split("\n", 1)[0][4:] for frame in frames if frame.startswith("id: ")][-1]
@@ -314,7 +317,7 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
 async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_path: Path) -> None:
     storage = RuntimeStorage.from_root(tmp_path)
     features = RuntimeFeatures("web-history")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("default", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         execution = await runtime.agents.get().start("saved", session_id="session")
         await execution.wait()
@@ -386,7 +389,7 @@ def test_web_command_preserves_runtime_flags_and_validates_port(monkeypatch: pyt
     from linktools.commands.ai.web import command
     from linktools.cli import CommandError
     parser = command.create_parser()
-    assert {"project", "model", "base_url", "api_key", "memory", "read_only", "port"} <= {action.dest for action in parser._actions}
+    assert {"project", "model", "base_url", "api_key", "memory", "port"} <= {action.dest for action in parser._actions}
     with pytest.raises(CommandError, match="port"):
         command.run(parser.parse_args(["--port", "0"]))
 
@@ -400,19 +403,18 @@ async def test_remote_peer_cannot_claim_a_local_host_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_proxy_mode_accepts_external_host_and_https_origin_without_relaxing_other_boundaries() -> None:
+async def test_external_host_and_origin_preserve_peer_and_request_boundaries() -> None:
     headers = {"Host": "console.example", "Origin": "https://console.example", "Sec-Fetch-Site": "same-origin"}
     async with client(create_app()) as http:
-        assert (await http.get("/api/config", headers=headers)).status_code == 403
-    async with client(create_app(proxy=True)) as http:
         response = await http.get("/api/config", headers=headers)
         assert response.status_code == 200
+        assert (await http.get("/api/config", headers={"Host": "another.example", "Origin": "null"})).status_code == 200
         assert "access-control-allow-origin" not in response.headers
         assert (await http.post("/api/sessions", headers=headers, json={})).status_code == 403
         assert (await http.post("/api/sessions", headers={**headers, **_HEADERS}, json={})).status_code == 503
         assert (await http.get("/api/config", headers={**headers, "Sec-Fetch-Site": "cross-site"})).status_code == 403
         assert (await http.options("/api/sessions", headers=headers)).status_code == 403
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(proxy=True), client=("203.0.113.9", 1000)), base_url="http://127.0.0.1:8765") as http:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(), client=("203.0.113.9", 1000)), base_url="http://127.0.0.1:8765") as http:
         response = await http.get("/api/config", headers={**headers, "X-Forwarded-For": "127.0.0.1"})
         assert response.status_code == 403
         assert response.json()["error_code"] == "LOOPBACK_REQUIRED"
@@ -510,40 +512,32 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
     assert lifecycle == ["open", "close"]
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, explicit: bool) -> None:
+def test_web_cli_requires_a_model_before_opening_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from linktools.cli import CommandError
     import linktools.commands.ai.web as web_command
     import uvicorn
 
     def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("read-only console must not open Runtime")
-
-    class Server:
-        def __init__(self, config: object) -> None:
-            self.config = config
-
-        async def serve(self) -> None:
-            async with client(self.config.app) as http:
-                response = await http.get("/api/config")
-                assert response.json()["read_only"]
-                assert response.json()["input_mime_types"] is None
-                assert "vision" not in response.json()
-                assert response.json()["api_key_configured"]
-                assert "secret-key-value" not in response.text
-                assert (await http.get("/api/sessions")).json()["items"] == []
+        raise AssertionError("unconfigured console must not open Runtime or start HTTP")
 
     monkeypatch.setattr(Runtime, "open", forbidden)
-    monkeypatch.setattr(uvicorn, "Server", Server)
+    monkeypatch.setattr(uvicorn, "Server", forbidden)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "secret-key-value")
     env = web_command.command.environ
     monkeypatch.setattr(env, "config", env.build_config("web-test", "LINKTOOLS_"))
-    args = web_command.command.create_parser().parse_args(["--project", str(tmp_path)] + (["--read-only"] if explicit else []))
-    assert web_command.command.run(args) == 0
-    assert not (tmp_path / ".linktools").exists()
+    args = web_command.command.create_parser().parse_args(["--project", str(tmp_path)])
+    with pytest.raises(CommandError, match="model is required"):
+        web_command.command.run(args)
+    assert not (tmp_path / ".linktools" / "runtime").exists()
 
 
-def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("argument", "environment", "configured"),
+    [(None, "", False), (None, " \t", True), (None, "value", True), ("", "value", True), (" \t", "", True)],
+)
+def test_web_settings_show_runtime_mime_types_and_connection_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argument: str | None, environment: str, configured: bool,
+) -> None:
     import linktools.commands.ai.web as web_command
     import uvicorn
 
@@ -565,39 +559,55 @@ def test_web_settings_show_captured_input_mime_types(monkeypatch: pytest.MonkeyP
                 from linktools.ai.model import ImageMediaType
 
                 assert response.json()["input_mime_types"] == sorted({*get_args(ImageMediaType), "audio/*"})
-                assert "inputs" not in response.json()
+                settings = response.json()
+                assert "inputs" not in settings
+                assert settings["read_only"] is False
+                assert settings["runtime"]["namespace"] == "default"
+                assert settings["workspace"] == str(tmp_path)
+                assert settings["asset_root"] == str(config_dir)
+                assert settings["model"] == "opaque-model"
+                storage = {item["domain"]: item for item in settings["runtime"]["storage"]}
+                assert storage["execution"]["backend"] == "sqlite"
+                assert storage["execution"]["path"] == str(config_dir / "runtime" / "runtime.db")
+                assert storage["execution"]["object_store_paths"] == [str(config_dir / "runtime" / "objects")]
+                assert settings["runtime"]["metrics"]["enabled"] is True
+                assert settings["base_url_configured"] is configured
+                assert settings["api_key_configured"] is configured
+                assert "credential-placeholder" not in response.text
+                assert "provider.invalid" not in response.text
 
-
+    base_url = " https://provider.invalid/v1 " if environment == "value" else environment
+    api_key = " credential-placeholder " if environment == "value" else environment
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", api_key)
+    env = web_command.command.environ
+    monkeypatch.setattr(env, "config", env.build_config("web-test", "LINKTOOLS_"))
     monkeypatch.setattr(uvicorn, "Server", Server)
-    args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
+    arguments = ["--project", str(tmp_path)]
+    if argument is not None:
+        arguments.extend(("--base-url", argument, "--api-key", argument))
+    args = web_command.command.create_parser().parse_args(arguments)
     assert web_command.command.run(args) == 0
-    assert not (config_dir / "runtime").exists()
+    assert (config_dir / "runtime" / "runtime.db").exists()
 
 
-def test_web_read_only_rejects_invalid_input_types(tmp_path: Path) -> None:
+def test_web_cli_rejects_invalid_input_types(tmp_path: Path) -> None:
     from linktools.commands.ai.web import command
     from linktools.cli import CommandError
 
     config = tmp_path / ".linktools" / "config.yaml"
     config.parent.mkdir()
     config.write_text("input_types: image/png\n")
-    args = command.create_parser().parse_args(["--project", str(tmp_path), "--read-only"])
+    args = command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     with pytest.raises(CommandError, match="input_types"):
         command.run(args)
-
-
-@pytest.mark.asyncio
-async def test_default_http_port_accepts_browser_canonical_host_and_origin() -> None:
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(port=80)), base_url="http://127.0.0.1") as http:
-        assert (await http.get("/api/config", headers={"Origin": "http://127.0.0.1"})).status_code == 200
-        assert (await http.get("/api/config", headers={"Origin": "http://evil.example"})).status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
     identity = "../team/conversation?notes#你好"
     features = RuntimeFeatures("opaque-web")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("opaque-web", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": identity, "request_id": "create-opaque", "title": "Opaque session"}, headers=_HEADERS)

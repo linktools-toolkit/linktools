@@ -29,7 +29,7 @@ from linktools.ai.runtime.state._store import stream_digest
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", (None, "future-index", "count", "duplicate-key", "body-domain"))
+@pytest.mark.parametrize("corruption", (None, "future-index", "count", "duplicate-key", "content-scope", "content-count"))
 async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
     tmp_path: Path, corruption: str | None,
 ) -> None:
@@ -52,7 +52,7 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
             records=records, facts=facts, operations=(),
         )
         assert not sequences
-        if corruption in {"future-index", "body-domain", "duplicate-key"}:
+        if corruption in {"future-index", "content-scope", "content-count", "duplicate-key"}:
             changed = []
             for fact in facts:
                 envelope = dict(decode_envelope(fact.data).value)
@@ -63,8 +63,10 @@ async def test_snapshot_pending_parts_are_bound_to_owner_and_current_head(
                         "pending-snapshot", "tenant", RuntimeDomain.CHECKPOINT.value,
                         "transcript_pending_parts", ["run", 1],
                     ))
-                elif corruption == "body-domain":
-                    chunk = replace(chunk, content=replace(chunk.content, source_domain=RuntimeDomain.TRACE))
+                elif corruption == "content-scope":
+                    chunk = replace(chunk, content=replace(chunk.content, content_scope="0" * 64))
+                elif corruption == "content-count":
+                    chunk = replace(chunk, content=replace(chunk.content, slices=()))
                 else:
                     envelope["pending_key"] = "part:0"
                 envelope["payload"] = _encode_persisted_domain(chunk)

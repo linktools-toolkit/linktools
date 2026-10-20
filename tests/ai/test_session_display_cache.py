@@ -13,7 +13,7 @@ from sqlalchemy import event
 import linktools.ai.runtime._session as session_module
 from linktools.ai.core import ExecutionStatus, HmacCursorSigner, Principal, TenantAuthorizationPolicy, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import RuntimeDomain, RuntimeSessions, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._session import RuntimeSessionService
@@ -816,7 +816,7 @@ async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tm
     else:
         storage = RuntimeStorage.from_plan(RuntimeStoragePlan(execution=StorageRoute.transient(cache=cache)))
     group = RuntimeFeatures[None]("display")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     async with Runtime.open(
         "display", storage=storage, models=_Models(TestModel()), features=group,
@@ -914,7 +914,7 @@ async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(t
     cache = _Cache()
     storage = RuntimeStorage.sqlite(tmp_path / "close.db", cache=cache)
     group = RuntimeFeatures[None]("display")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("agent", model="default", allow_tools=())
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     method = getattr(cache, phase)
@@ -1051,13 +1051,13 @@ async def test_display_cache_is_shared_across_readers_without_renewing_capture(
 @pytest.mark.parametrize("warm_page", (False, True))
 async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkeypatch, warm_page):
     from linktools.ai.runtime import RuntimeDomain
-    from linktools.ai.runtime.state import _history
+    from linktools.ai.runtime.state import _archive
     from linktools.ai.runtime.state._store import FactQuery
     from linktools.ai.storage import _write_cache
 
     clock = _clock(monkeypatch)
     monkeypatch.setattr(_write_cache, "time", lambda: clock.now)
-    monkeypatch.setattr(_history, "PAYLOAD_COMPRESS_MINIMUM", 0)
+    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
     cache = _Cache()
     state = RuntimeStorage.sqlite(tmp_path / "display.db", cache=cache)
     state = RuntimeState(state)
@@ -1068,7 +1068,12 @@ async def test_display_rebuild_does_not_stack_body_cache_expiry(tmp_path, monkey
         transcript = archive.transcript_repository
         stream = transcript.transcript_stream(session.history_id)
         facts = await archive.state_store.read(lambda tx: tx.list_facts(FactQuery(stream)))
-        references = [transcript.decode_chunk(fact).content.payload.ref for fact in facts]
+        contents = await transcript.content_archive()
+        content_ids = []
+        for fact in facts:
+            content_ids.extend(await contents.content_ids(transcript.decode_chunk(fact).content))
+        records = await contents.content_records(content_ids)
+        references = [record.payload.ref for record in records]
         assert references and all(reference is not None for reference in references)
         if warm_page:
             detail = await service.refresh("session", principal=_PRINCIPAL, max_age=3)

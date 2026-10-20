@@ -31,7 +31,7 @@ from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _recovery_commands
+from linktools.ai.runtime.state import _execution_repositories
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.runtime.state._step_contracts import (
@@ -1033,7 +1033,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                         )
                     if partial_projection:
                         patcher.setattr(
-                            _recovery_commands,
+                            _execution_repositories,
                             "_replace_checked",
                             leave_projection_unchanged,
                         )

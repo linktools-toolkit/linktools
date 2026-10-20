@@ -11,9 +11,9 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
+from linktools.ai.core import ExecutionStatus, JsonValue, OperationStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import TaskGraph, TaskNode
@@ -112,8 +112,9 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("release_before_recovery", [False, True])
 async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_before_recovery: bool,
 ) -> None:
     models = _ControlledModels()
     storage = RuntimeStorage.filesystem(tmp_path)
@@ -145,14 +146,32 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             assert state.node_states[0].safe_error_details["phase"] == "task_invocation_capture_cancel"
             execution = await run.execution("agent")
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.STARTED
+            before = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
+            assert before.requires_task_invocation_capture
+            before_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
+                tenant_id=principal.tenant_id)
             with pytest.raises(AIError) as pending:
                 await runtime.executions.capture_input(execution.execution_id,
                     CaptureInputRequest(principal, "recovered-input"))
             assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
             monkeypatch.setattr(objects, "put", original_put)
             monkeypatch.setattr(runtime._execution_service, "cancel", original_cancel)
+            with pytest.raises(AIError) as active:
+                await runtime.executions.recover(execution.execution_id, principal=principal)
+            assert active.value.code is ErrorCode.STORAGE_CONFLICT
+            if release_before_recovery:
+                models.release.set()
+            await asyncio.wait_for(run.recover(idempotency_key="recover"), 5)
+            assert models.requests == 1
+            recovered_head = await runtime._state.execution.executions.get_history_head(execution.execution_id,
+                tenant_id=principal.tenant_id)
+            assert recovered_head.producer_generation == before_head.producer_generation
+            assert recovered_head.producer_claim_id == before_head.producer_claim_id
+            assert await runtime._state.execution.operations.list_pending(
+                ResourceKind.EXECUTION, execution.execution_id, tenant_id=principal.tenant_id,
+                states=frozenset(OperationStatus), limit=10,
+            ) == ()
             models.release.set()
-            await run.recover(idempotency_key="recover")
             assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert (await run.execution("agent")).execution_id == execution.execution_id
             assert await run.result("agent") == {"text": "completed"}
@@ -360,7 +379,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
     producer = Task("capture.greeting", produce, effect_policy="none")
     features = _agents()
     if session_id is not None:
-        features.capability(ConversationCapability(), scope="runtime")
+        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("capture-ready", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime.tasks.bind(producer, task)
@@ -520,7 +539,7 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     principal = service_principal("default", "owner")
     storage = RuntimeStorage.filesystem(tmp_path)
     features = _agents()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("capture-lineage", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         source = await runtime.tasks.bind(task).start(TaskGraph("source", (

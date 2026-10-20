@@ -105,17 +105,18 @@ class MetricRecording:
     def status(self) -> MetricRecorderStatus:
         if self._scope is not None:
             status = self._scope.status()
+            last_failure_code = self._last_failure_code
             if self._failure_baseline != (
                 status.rejected, status.unconfirmed, status.write_failures, status.last_failure_code,
             ):
-                self._last_failure_code = None
+                last_failure_code = None
             return MetricRecorderStatus(
                 True, self._accepting and status.accepting,
                 status.accepted, status.confirmed, status.pending,
                 status.rejected + self._rejected, status.unconfirmed,
                 status.write_failures + self._write_failures, status.queue_size, status.queue_capacity,
                 status.high_watermark,
-                self._last_failure_code or status.last_failure_code,
+                last_failure_code or status.last_failure_code,
             )
         return MetricRecorderStatus(
             True, self._accepting, self._accepted, self._persisted, 0,

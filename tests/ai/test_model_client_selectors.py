@@ -27,6 +27,8 @@ from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._model_interaction import build_context_projection
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._archive import PreparedArchive
+from linktools.ai.runtime.state._archive_closure import iter_archive_roots
 from linktools.ai.runtime.state._codec import _encode_persisted_domain, iter_runtime_object_refs
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 
@@ -43,10 +45,18 @@ def _execution_service(history):
     )
 
 
-def _object_keys(value):
-    return {ref.key for _, ref in iter_runtime_object_refs(
-        _encode_persisted_domain(value), default_domain=RuntimeDomain.TRACE,
+async def _object_keys(value, archive):
+    encoded = _encode_persisted_domain(value)
+    keys = {ref.key for _, ref in iter_runtime_object_refs(
+        encoded, default_domain=RuntimeDomain.TRACE,
     )}
+    roots = tuple(iter_archive_roots(encoded))
+    if roots:
+        contents = await archive.transcript_repository.content_archive()
+        ids = await contents.content_ids_many(roots)
+        records = await contents.content_records(tuple(identity for group in ids for identity in group))
+        keys.update(content.payload.ref.key for content in records if content.payload.ref is not None)
+    return keys
 
 
 @asynccontextmanager
@@ -104,28 +114,25 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                         (), (ModelResponse(parts=[TextPart(marker + " SDK output " * 6000)]),), intern,
                     ),
                 ))
-            prepared = await archive.prepare_interactions(run, tuple(staged), payloads.__getitem__)
-            await archive.sync_projection(run, events=(), checkpoints=(), interactions=prepared, execution_id=execution_id)
+            bundle = PreparedArchive()
+            prepared = await archive.prepare_interactions(run, tuple(staged), payloads.__getitem__, prepared=bundle)
+            await archive.sync_projection(run, events=(), checkpoints=(), interactions=prepared, execution_id=execution_id, archive=bundle)
             for record in prepared:
                 identity = (execution_id, run_sequence, record.model_request_seq)
                 records[identity] = record
-                sdk_keys[identity] = _object_keys(replace(record, client_requests=None))
-                raw_keys[identity] = _object_keys(record) - sdk_keys[identity]
+                sdk_keys[identity] = await _object_keys(replace(record, client_requests=None), archive)
+                raw_keys[identity] = await _object_keys(record, archive) - sdk_keys[identity]
         reader = _reader(storage)
         signer = HmacCursorSigner("client-selectors", b"client-selectors-key")
         service = DefaultExecutionHistoryService(
             storage.execution.executions, TenantAuthorizationPolicy("tenant"), reader, signer,
         )
         objects = storage.object_store(RuntimeDomain.TRACE)
-        original_open = objects.open
         original_resolve = archive.resolve_model_interactions
         original_list_children = storage.execution.executions.list_children
         opened, resolved, children_reads = [], [], []
 
-        async def track_open(key):
-            opened.append(key)
-            async for chunk in original_open(key):
-                yield chunk
+
 
         async def track_resolve(interactions, **kwargs):
             resolved.extend((value.agent_run_id, value.model_request_seq) for value in interactions)
@@ -136,7 +143,15 @@ async def _seed(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return await original_list_children(execution_id, tenant_id=tenant_id)
 
         monkeypatch.setattr(storage.execution.executions, "list_children", track_children)
-        monkeypatch.setattr(objects, "open", track_open)
+        object_stores = {id(objects): objects}
+        archive_objects = storage.archive_object_store(RuntimeDomain.TRACE)
+        object_stores[id(archive_objects)] = archive_objects
+        for object_store in object_stores.values():
+            async def track_open(key, original_open=object_store.open):
+                opened.append(key)
+                async for chunk in original_open(key):
+                    yield chunk
+            monkeypatch.setattr(object_store, "open", track_open)
         monkeypatch.setattr(archive, "resolve_model_interactions", track_resolve)
         yield SimpleNamespace(
             storage=storage, reader=reader, service=service, signer=signer,

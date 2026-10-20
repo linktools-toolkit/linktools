@@ -29,6 +29,7 @@ from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ..workspace import (
     Workspace,
 )
+from ._context_archive import ExecutionContextArchive
 from ._agent_executor import (
     AgentExecutor,
     DurableBoundary,
@@ -71,6 +72,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricRecorder
 from ..storage import (
+    ObjectRef,
     ObjectStore,
     PayloadPolicy,
     StoredPayload,
@@ -266,6 +268,8 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
+        archive_objects: ObjectStore | None = None,
+        archive_object_reader: Callable[[ObjectRef], Awaitable[bytes]] | None = None,
         restore_binding: "Callable[[AgentBindingContract], AgentBinding] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
@@ -296,6 +300,8 @@ class LocalExecutionBackend:
         self._execution = execution_state
         self._recovery = recovery
         self._execution_objects = execution_objects
+        self._context_archive = ExecutionContextArchive(execution_state.executions.state_store, archive_objects or execution_objects,
+            namespace=namespace, tenant_id=tenant_id, object_reader=archive_object_reader)
         self._recovery_objects = recovery_objects
         self._metric_recorder = metric_recorder
         self._worker_completed = worker_completed
@@ -1106,6 +1112,12 @@ class LocalExecutionBackend:
 
             await self._check_pending_lease(turn, allow_cancelled=allow_cancelled)
             context = turn.execution.input_context
+            context_write = None
+            if context is not None:
+                prepared = await self._context_archive.prepare(await self.load_input_context(context),
+                    history_root=turn.history_root, history_digest=turn.history_digest)
+                context = prepared.reference
+                context_write = (prepared.archive, prepared.records)
             claim = turn.promotion_claim_id or uuid.uuid4().hex
             turn.promotion_claim_id = claim
 
@@ -1147,7 +1159,7 @@ class LocalExecutionBackend:
             async def promote_owned() -> None:
                 await self._runtime_commands.promote_pending_turn(
                     turn.reservation, expected_session=turn.session,
-                    captured_input_context=context, producer_claim_id=claim,
+                    captured_input_context=context, producer_claim_id=claim, context_write=context_write,
                 )
                 await accept()
 
@@ -3281,30 +3293,44 @@ class LocalExecutionBackend:
             return None
         payload = reference.payload
         value = payload.decode() if payload.kind == "inline" else json.loads(await read_runtime_object(self._execution_objects, payload.ref))
+        if isinstance(value, Mapping) and value.get("kind") == "execution-context":
+            return await self._context_archive.load(reference)
         return ExecutionInputContext.from_payload(value)
 
     async def _prepare_input_context(self, context: ExecutionInputContext) -> RuntimePayloadRef:
-        stored = StoredPayload.inline_json(context.to_payload())
-        if not payload_fits_inline(stored, self._payload_policy):
-            stored = StoredPayload.object(await put_runtime_object(self._execution_objects, RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.EXECUTION, self._tenant_id, canonical_json_bytes(context.to_payload())))
-        return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
+        # A pending owner retains this view only in-process. Coordination publishes
+        # control facts; promotion/terminal publication retains canonical content.
+        return RuntimePayloadRef(StoredPayload.inline_json(context.to_payload()), RuntimeDomain.EXECUTION)
 
-    async def _persist_input_context(self, execution: ExecutionRecord, context: ExecutionInputContext) -> ExecutionRecord:
-        reference = await self._prepare_input_context(context)
+    async def _persist_input_context(
+        self, execution: ExecutionRecord, context: ExecutionInputContext,
+        loaded: LoadedModelContext | None = None,
+    ) -> tuple[ExecutionRecord, ExecutionInputContext]:
+        prepared = await self._context_archive.prepare(context,
+            history_root=None if loaded is None else loaded.archive_root,
+            history_digest=None if loaded is None else loaded.archive_digest)
+        reference = prepared.reference
         current = execution
         while current.input_context is None:
             try:
-                return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
-                    expected_revision=current.revision,
-                    next_record=replace(current, input_context=reference, revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
+                async def publish_context(transaction):
+                    del transaction
+                    await prepared.publish()
+                    return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
+                        expected_revision=current.revision,
+                        next_record=replace(current, input_context=reference, revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
+                committed = await self._execution.executions.state_store.mutate(publish_context)
+                return committed, context
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
                 current = await self.load_execution(current.execution_id, tenant_id=self._tenant_id)
                 if current is None or current.status is not ExecutionStatus.STARTED:
                     raise AIError(ErrorCode.EXECUTION_CANCELLED) from error
-        return current
+        accepted = await self.load_input_context(current.input_context)
+        if accepted is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return current, accepted
 
     async def _run(
         self,
@@ -3580,6 +3606,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 session_metadata = session.metadata
             prepared_context = None
+            context_write = None
             if accepted_context is None:
                 memory_capture = None
                 reason = None
@@ -3594,10 +3621,16 @@ class LocalExecutionBackend:
                     replace_history_system_prompt=session_history_start, unavailable_reason=reason)
                 proposed_context = accepted_context
                 if prepared_admission is not None:
-                    prepared_context = await self._prepare_input_context(accepted_context)
+                    if self._pending_turns.get(execution_id, tenant_id=self._tenant_id) is not None:
+                        prepared_context = await self._prepare_input_context(accepted_context)
+                    else:
+                        prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)
+                        prepared_context = prepared.reference
+                        context_write = (prepared.archive, prepared.records)
                 else:
-                    current = await self._persist_input_context(current, accepted_context)
-                    accepted_context = await self.load_input_context(current.input_context)
+                    current, accepted_context = await self._persist_input_context(
+                        current, accepted_context, loaded_context,
+                    )
                     if accepted_context.digest != proposed_context.digest:
                         history = list(accepted_context.model_messages())
                         loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
@@ -3608,8 +3641,12 @@ class LocalExecutionBackend:
                 try:
                     pending = self._pending_turns.get(execution_id, tenant_id=self._tenant_id)
                     if pending is None:
+                        if context_write is None:
+                            prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)
+                            prepared_context = prepared.reference
+                            context_write = (prepared.archive, prepared.records)
                         current, checkpoint = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
-                            prepared_admission, prepared_context,
+                            prepared_admission, prepared_context, context_write=context_write,
                         )
                     else:
                         async with pending.boundary:
@@ -3617,11 +3654,17 @@ class LocalExecutionBackend:
                                 current, checkpoint = pending.activate(
                                     agent_run_id, prepared_context, now=datetime.now(timezone.utc),
                                 )
+                                pending.history_root = loaded_context.archive_root
+                                pending.history_digest = loaded_context.archive_digest
                                 assert self._pending_turns.coordination is not None and pending.coordination is not None
                                 await self._pending_turns.coordination.publish(current, pending.coordination)
                             else:
+                                if context_write is None:
+                                    prepared = await self._context_archive.prepare(accepted_context, history_root=loaded_context.archive_root, history_digest=loaded_context.archive_digest)
+                                    prepared_context = prepared.reference
+                                    context_write = (prepared.archive, prepared.records)
                                 current, checkpoint = await self._runtime_commands.commit_prepared_agent_attempt_checkpoint(
-                                    prepared_admission, prepared_context,
+                                    prepared_admission, prepared_context, context_write=context_write,
                                 )
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -4277,6 +4320,7 @@ class LocalExecutionBackend:
     ) -> None:
         await self._agent_run_lifecycle.discard_revoked_producer_staging(
             agent_run_id, execution_id=execution.execution_id, producer_generation=producer_generation,
+            terminal_execution=execution,
         )
         async with self._audit_lock(execution.execution_id):
             self._pending_audit_events.pop(execution.execution_id, None)
@@ -5559,9 +5603,15 @@ class LocalExecutionBackend:
         history_id = None if turn.session is None else turn.session.history_id or (
             None if turn.session.continuation is None else turn.session.continuation.history_id
         )
+        context = await self.load_input_context(current.input_context)
+        if context is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prepared_context = await self._context_archive.prepare(context,
+            history_root=turn.history_root, history_digest=turn.history_digest)
         now = datetime.now(timezone.utc)
         terminal = replace(
             _terminal_record(current, ExecutionStatus.SUCCEEDED, now, error_code=None),
+            input_context=prepared_context.reference,
             conversation_agent_run_id=None if turn.session is None else agent_run_id,
         )
         commit = ExecutionTerminalCommit(
@@ -5616,6 +5666,7 @@ class LocalExecutionBackend:
         async def commit_owned() -> ExecutionTerminalCommitResult:
             committed = await self._runtime_commands.commit_pending_turn(
                 turn.reservation, commit, expected_session=turn.session,
+                context_write=(prepared_context.archive, prepared_context.records),
                 capability_run_id=agent_run_id,
                 next_cursor=None if turn.session is None else ConversationCursor(agent_run_id, history_id=history_id),
                 conversation_agent_run=None if turn.session is None else run,

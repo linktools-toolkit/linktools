@@ -21,6 +21,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, RuntimeStorage
 from linktools.ai.runtime._input import ExecutionInputMaterializer
 from linktools.ai.runtime._input_capture import RuntimeInputCaptures
+from linktools.ai.runtime._context_archive import ExecutionContextArchive
 
 from .test_history_projection_conformance import _record
 
@@ -47,6 +48,12 @@ def _captures(state, *, prepare=None, authorization=None):
         object_stores={domain: state.object_store(domain) for domain in RuntimeDomain},
         execution_retention=state.plan.route(RuntimeDomain.EXECUTION).retention,
         task_retention=state.plan.route(RuntimeDomain.TASK).retention,
+        context_archive=ExecutionContextArchive(
+            state.execution.executions.state_store,
+            state.archive_object_store(RuntimeDomain.EXECUTION),
+            namespace="pending-capture", tenant_id=state.tenant_id,
+            object_reader=lambda reference: state.read_archive_object(RuntimeDomain.EXECUTION, reference),
+        ),
         prepare_pending_capture=prepare,
     )
 

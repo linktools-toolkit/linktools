@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Retry preserves imported pre-input context and its memory isolation."""
 
-from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from pathlib import Path
 
 import pytest
@@ -15,6 +15,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._archive import ContentArchive
 
 from .test_captured_execution_context import _NoToolsModels
 
@@ -39,7 +40,21 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
         assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
-        assert record.input_context.payload.kind == ("inline" if metadata_size == 16 else "object")
+        assert record.input_context.payload.kind == "inline"
+        manifest = record.input_context.payload.decode()
+        assert manifest["kind"] == "execution-context"
+        assert manifest["semantic_digest"] == context.digest
+        assert len(str(manifest)) < 4096
+        scope, archive_store = await runtime._state.execution.executions.state_store.storage_group.open_archive()
+        archive = ContentArchive(
+            archive_store, scope, namespace=runtime.namespace, tenant_id=principal.tenant_id,
+            object_store=runtime._state.archive_object_store(RuntimeDomain.EXECUTION),
+        )
+        note, = await archive.content_records((manifest["session_metadata"]["note"]["content_id"],))
+        assert note.payload.kind == ("inline" if metadata_size == 16 else "object")
+        source_id = source.execution_id
+    async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, features=group) as runtime:
+        source = await runtime.executions.get(source_id, principal=principal)
         with capture_run_messages() as messages:
             retry = await source.retry("replacement prompt")
             assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
@@ -63,7 +78,7 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     if trace:
         group.capability(TraceCapability(), scope="runtime")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("retry-parity", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         agent = runtime.agents.get()

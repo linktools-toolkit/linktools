@@ -4,7 +4,8 @@
 
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit, await_owned_task
 from ._capability_contracts import CapabilityPersistence, CapabilityWriter
-from ._store import (StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction,
+from ._archive_read import ArchiveNodeSlot, ArchiveNodeRead, ArchiveFrontierReader
+from ._store import (StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction, GroupRecordReader,
                      StoredRecord, StoredFact, StoredOperation, RecordReplacement, RecordQuery)
 from ._object_cleanup import ObjectCleanupResult
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
@@ -16,7 +17,7 @@ from ._snapshot import (
 )
 from ._input_capture import input_capture_key, input_capture_expiry_key, input_capture_object_dependency, iter_input_capture_dependencies
 from ._root import RuntimeStorage
-from ._runtime_state import RuntimeState
+from ._runtime_state import RuntimeState, RuntimeStorageStatus
 from ._snapshot_operations import RuntimeSnapshotOperations
 from ._conversation_persistence import ConversationPersistence
 from ._checkpoint_persistence import CheckpointPersistence
@@ -33,7 +34,9 @@ __all__ = [
     "has_capability_partition_marker",
     "CommitObservation", "DurableCommitState", "run_durable_commit", "await_owned_task",
     "CapabilityPersistence", "CapabilityWriter",
+    "ArchiveNodeSlot", "ArchiveNodeRead", "ArchiveFrontierReader",
     "StateStore", "StateTransaction", "StateStorageGroup", "StateGroupTransaction",
+    "GroupRecordReader",
     "StoredRecord", "StoredFact", "StoredOperation", "RecordReplacement", "RecordQuery",
     "ConversationPersistence",
     "CheckpointPersistence",
@@ -50,6 +53,7 @@ __all__ = [
     "RuntimeDomain",
     "RuntimeStorage",
     "RuntimeState",
+    "RuntimeStorageStatus",
     "RuntimeSnapshotOperations",
     "ExecutionRepositories",
     "TaskRepositories",

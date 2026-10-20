@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
 
@@ -35,7 +35,7 @@ from ._memory import InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 from ._recovery_repositories import build_recovery_repository_bundle
-from ._repositories import OperationLedgerRepositoryImpl, build_repository_bundle
+from ._repositories import OperationLedgerRepositoryImpl, RepositoryBase, build_repository_bundle
 from ._resource_scope import (
     FilesystemResource, MemoryResource, StorageResourceRequest, StorageResourceScope,
 )
@@ -49,6 +49,25 @@ from ._task_repository import TaskRepositoryImpl
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
+
+    from .._tool import ToolStateRepository
+    from ._contracts import (
+        ApprovalRepository,
+        ArtifactRepository,
+        BudgetRepository,
+        ConversationHistoryRepository,
+        EvaluationRepository,
+        EventRepository,
+        ExecutionRepository,
+        ExternalCallRepository,
+        IdempotencyRepository,
+        MemoryRepository,
+        OperationLedgerRepository,
+        RecoveryCheckpointRepository,
+        SessionRepository,
+        TaskAdmissionRepository,
+        TaskRepository,
+    )
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 
@@ -107,6 +126,10 @@ async def materialize_runtime_storage(
                 if plan.route(domain).kind == "filesystem" else None
             ),
             configure_schema=partial(configure_schema, domain),
+            uses_archive=domain in {
+                RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION,
+                RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT,
+            },
         )
         for domain in RuntimeDomain
     )
@@ -133,6 +156,7 @@ async def materialize_runtime_storage(
         for domain, resource in zip(RuntimeDomain, resources.resources):
             selected = plan.route(domain).cache
             cache = selected if isinstance(selected, CacheBackend) else None
+            store: StateStore
             if isinstance(resource, MemoryResource):
                 store = InMemoryStateStore(resource.group, cache=cache)
             elif isinstance(resource, FilesystemResource):
@@ -197,7 +221,7 @@ async def materialize_runtime_storage(
                     f"{domain.value} and execution must share a StateStorageGroup",
                 )
 
-        bundles = {
+        bundles: dict[RuntimeDomain, dict[str, RepositoryBase]] = {
             domain: build_repository_bundle(
                 stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
             )
@@ -232,7 +256,6 @@ async def materialize_runtime_storage(
             value
             for bundle in bundles.values()
             for value in bundle.values()
-            if hasattr(value, "initialize") and hasattr(value, "close")
         )
         for component in _unique(components):
             await component.initialize()
@@ -246,8 +269,8 @@ async def materialize_runtime_storage(
             plan,
             stores,
             objects,
-            history_repository=bundles[RuntimeDomain.CONVERSATION]["histories"],
-            execution_repository=bundles[RuntimeDomain.EXECUTION]["executions"],
+            history_repository=repositories.conversation.histories,
+            execution_repository=repositories.execution.executions,
             namespace=namespace,
             tenant_id=tenant_id,
         )
@@ -309,54 +332,54 @@ async def materialize_runtime_storage(
 
 
 def _repositories(
-    bundles: Mapping[RuntimeDomain, Mapping[str, object]],
+    bundles: Mapping[RuntimeDomain, Mapping[str, RepositoryBase]],
 ) -> _RuntimeRepositories:
     try:
         return _RuntimeRepositories(
             conversation=ConversationRepositories(
-                bundles[RuntimeDomain.CONVERSATION]["sessions"],
-                bundles[RuntimeDomain.CONVERSATION]["histories"],
-                bundles[RuntimeDomain.CONVERSATION]["operations"],
+                cast("SessionRepository", bundles[RuntimeDomain.CONVERSATION]["sessions"]),
+                cast("ConversationHistoryRepository", bundles[RuntimeDomain.CONVERSATION]["histories"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.CONVERSATION]["operations"]),
             ),
             execution=ExecutionRepositories(
-                bundles[RuntimeDomain.EXECUTION]["executions"],
-                bundles[RuntimeDomain.EXECUTION]["events"],
-                bundles[RuntimeDomain.EXECUTION]["idempotency"],
-                bundles[RuntimeDomain.EXECUTION]["operations"],
-                bundles[RuntimeDomain.EXECUTION]["budgets"],
+                cast("ExecutionRepository", bundles[RuntimeDomain.EXECUTION]["executions"]),
+                cast("EventRepository", bundles[RuntimeDomain.EXECUTION]["events"]),
+                cast("IdempotencyRepository", bundles[RuntimeDomain.EXECUTION]["idempotency"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.EXECUTION]["operations"]),
+                cast("BudgetRepository", bundles[RuntimeDomain.EXECUTION]["budgets"]),
             ),
             memory=MemoryRepositories(
-                bundles[RuntimeDomain.MEMORY]["records"],
-                bundles[RuntimeDomain.MEMORY]["operations"],
+                cast("MemoryRepository", bundles[RuntimeDomain.MEMORY]["records"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.MEMORY]["operations"]),
             ),
             artifact=ArtifactRepositories(
-                bundles[RuntimeDomain.ARTIFACT]["records"],
-                bundles[RuntimeDomain.ARTIFACT]["operations"],
+                cast("ArtifactRepository", bundles[RuntimeDomain.ARTIFACT]["records"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.ARTIFACT]["operations"]),
             ),
             task=TaskRepositories(
-                bundles[RuntimeDomain.TASK]["tasks"],
-                bundles[RuntimeDomain.TASK]["operations"],
-                bundles[RuntimeDomain.TASK]["admissions"],
+                cast("TaskRepository", bundles[RuntimeDomain.TASK]["tasks"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.TASK]["operations"]),
+                cast("TaskAdmissionRepository", bundles[RuntimeDomain.TASK]["admissions"]),
             ),
             evaluation=EvaluationRepositories(
-                bundles[RuntimeDomain.EVALUATION]["records"],
-                bundles[RuntimeDomain.EVALUATION]["idempotency"],
-                bundles[RuntimeDomain.EVALUATION]["operations"],
+                cast("EvaluationRepository", bundles[RuntimeDomain.EVALUATION]["records"]),
+                cast("IdempotencyRepository", bundles[RuntimeDomain.EVALUATION]["idempotency"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.EVALUATION]["operations"]),
             ),
             recovery=RecoveryRepositories(
-                bundles[RuntimeDomain.RECOVERY]["approvals"],
-                bundles[RuntimeDomain.RECOVERY]["external_calls"],
-                bundles[RuntimeDomain.RECOVERY]["checkpoints"],
-                bundles[RuntimeDomain.RECOVERY]["operations"],
-                bundles[RuntimeDomain.RECOVERY]["tools"],
+                cast("ApprovalRepository", bundles[RuntimeDomain.RECOVERY]["approvals"]),
+                cast("ExternalCallRepository", bundles[RuntimeDomain.RECOVERY]["external_calls"]),
+                cast("RecoveryCheckpointRepository", bundles[RuntimeDomain.RECOVERY]["checkpoints"]),
+                cast("OperationLedgerRepository", bundles[RuntimeDomain.RECOVERY]["operations"]),
+                cast("ToolStateRepository", bundles[RuntimeDomain.RECOVERY]["tools"]),
             ),
         )
     except KeyError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _unique(values: tuple[object, ...]) -> tuple[object, ...]:
-    result: list[object] = []
+def _unique(values: tuple[RepositoryBase, ...]) -> tuple[RepositoryBase, ...]:
+    result: list[RepositoryBase] = []
     seen: set[int] = set()
     for value in values:
         if id(value) not in seen:

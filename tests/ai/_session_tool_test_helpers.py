@@ -14,7 +14,7 @@ from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime._local import LocalExecutionBackend
@@ -76,7 +76,7 @@ def _application(
     release: asyncio.Event | None = None,
 ) -> RuntimeFeatures[None]:
     application: RuntimeFeatures[None] = RuntimeFeatures("application")
-    application.capability(ConversationCapability(), scope="runtime")
+    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
 
     async def lookup(_ctx: AgentContext[None]) -> str:
         calls.append("lookup")

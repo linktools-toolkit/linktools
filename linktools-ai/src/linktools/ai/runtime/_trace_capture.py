@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
+from ..capability import TraceCapability
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
@@ -18,10 +20,24 @@ from ._attachment import request_attachment_facts
 from ._journal import ModelRequestFact
 from ._message import freeze_model_messages
 from ._model_interaction import (
-    StagedContextProjection, StagedModelInteraction, build_context_projection,
+    StagedContextProjection, StagedContextSpan, StagedModelInteraction, build_context_projection,
     build_inline_context_projection, model_identity, request_envelope,
 )
 from ._run_context import RunContextProjection
+
+
+def record_http_bodies_enabled(capabilities: Iterable[AbstractCapability[object]]) -> bool:
+    """Read the active run's Trace policy through public native capability trees."""
+    for capability in capabilities:
+        if isinstance(capability, WrapperCapability):
+            if record_http_bodies_enabled((capability.wrapped,)):
+                return True
+        elif isinstance(capability, CombinedCapability):
+            if record_http_bodies_enabled(capability.capabilities):
+                return True
+        elif isinstance(capability, TraceCapability) and capability.record_http_bodies:
+            return True
+    return False
 
 
 class TraceStagingPort(Protocol):
@@ -186,6 +202,7 @@ class ModelInteractionCapture:
         duration_ns: int,
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
+        response_message_index: int | None = None,
     ) -> None:
         del model
         model_request_seq = fact.model_request_seq
@@ -199,14 +216,19 @@ class ModelInteractionCapture:
 
         response_projection = None
         if response is not None:
-            frozen_response = freeze_model_messages((response,))
-            response_projection = build_inline_context_projection(
-                frozen_response,
-                lambda payload: self._staging_store.intern_payload(
-                    self._agent_run_id,
-                    payload,
-                ),
-            )
+            if response_message_index is not None:
+                response_projection = StagedContextProjection((
+                    StagedContextSpan(response_message_index, response_message_index + 1),
+                ))
+            else:
+                frozen_response = freeze_model_messages((response,))
+                response_projection = build_inline_context_projection(
+                    frozen_response,
+                    lambda payload: self._staging_store.intern_payload(
+                        self._agent_run_id,
+                        payload,
+                    ),
+                )
         self._staging_store.stage_model_interaction(
             StagedModelInteraction(
                 agent_run_id=self._agent_run_id,
@@ -242,4 +264,4 @@ def _usage_metrics(value: object | None) -> UsageMetrics | None:
     )
 
 
-__all__ = ["ModelInteractionCapture", "TraceStagingPort"]
+__all__ = ["ModelInteractionCapture", "TraceStagingPort", "record_http_bodies_enabled"]

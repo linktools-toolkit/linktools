@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public capability extension contracts."""
 
-from ._persistence import ConversationCapability, CheckpointCapability, TraceCapability
+from ._persistence import CheckpointCapability, TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
@@ -62,7 +62,7 @@ __all__ = [
     "SessionCapability",
     "ExecutionCapability",
     "ToolResponseFixture",
-    "ConversationCapability", "CheckpointCapability", "TraceCapability",
+    "CheckpointCapability", "TraceCapability",
     "ToolResponsesCapability",
     "AssetCapability",
     "WorkspaceCapability",

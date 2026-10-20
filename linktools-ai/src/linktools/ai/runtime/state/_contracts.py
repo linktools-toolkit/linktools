@@ -8,6 +8,7 @@ is the single semantic boundary shared by the local and SQL implementations.
 
 from __future__ import annotations
 
+from ._archive import ArchiveRoot
 from ...execution import (RuntimePayloadRef, StoredUserInput, ExecutionRecord, ExecutionStartClaim, ExecutionStartUnknownCommit, ExecutionCancelRequestCommit, ExecutionStartReservation, ExecutionStartReservationResult, IdempotencyRecord, ResultRecord, ExecutionTerminalCommit, IdempotencyTerminalUpdate, OperationTerminalUpdate, ExecutionTerminalCommitResult)
 
 import binascii
@@ -15,7 +16,7 @@ import json
 from ...session import SessionRepository as SessionRepositoryContract
 from ...session import (ConversationCursor, SessionRecord, SessionTurnRef, SessionTurnCommit)
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -88,6 +89,7 @@ from ...workspace import validate_workspace_path
 from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
+    from ._archive import ContentArchive, PreparedArchive
     from .._tool import ToolStateRepository
     from ._store import StateStore, StateTransaction, StoredRecord
 
@@ -339,7 +341,7 @@ class TranscriptChunk:
     codec: str
     raw_digest: str
     raw_size: int
-    content: RuntimePayloadRef
+    content: ArchiveRoot
 
 
 class TranscriptSeekDimension(str, Enum):
@@ -425,6 +427,9 @@ class LoadedContextMessage:
 @dataclass(frozen=True, slots=True)
 class LoadedModelContext:
     messages: tuple[LoadedContextMessage, ...]
+    archive_root: ArchiveRoot | None = field(default=None, compare=False)
+    archive_digest: str | None = field(default=None, compare=False)
+    archive_frontier: tuple[StoredRecord, ...] = field(default=(), compare=False, repr=False)
 
     def model_messages(self) -> tuple[ModelMessage, ...]:
         return tuple(value.message for value in self.messages)
@@ -435,7 +440,22 @@ class InlineContextBlock:
     content: RuntimePayloadRef
 
 
-ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
+@dataclass(frozen=True, slots=True)
+class ArchivedContextBlock:
+    root: ArchiveRoot
+    raw_digest: str
+    raw_size: int
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.root, ArchiveRoot)
+                or not isinstance(self.raw_digest, str) or len(self.raw_digest) != 64
+                or any(value not in "0123456789abcdef" for value in self.raw_digest)
+                or isinstance(self.raw_size, bool) or not isinstance(self.raw_size, int)
+                or self.raw_size < 2):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+ContextProjectionItem = TranscriptSpanRef | InlineContextBlock | ArchivedContextBlock
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,7 +464,7 @@ class ContextProjection:
 
     def __post_init__(self) -> None:
         if not isinstance(self.items, tuple) or any(
-            not isinstance(item, (TranscriptSpanRef, InlineContextBlock))
+            not isinstance(item, (TranscriptSpanRef, InlineContextBlock, ArchivedContextBlock))
             for item in self.items
         ):
             raise TypeError("context projection items are invalid")
@@ -467,8 +487,8 @@ class ContextProjection:
             identities.append(
                 {
                     "kind": "inline",
-                    "digest": item.content.payload.digest,
-                    "size": item.content.payload.size,
+                    "digest": item.raw_digest if isinstance(item, ArchivedContextBlock) else item.content.payload.digest,
+                    "size": item.raw_size if isinstance(item, ArchivedContextBlock) else item.content.payload.size,
                 }
             )
         return canonical_sha256(
@@ -510,8 +530,7 @@ class ModelClientResponseRef:
 
     def __post_init__(self) -> None:
         if (
-            self.body is None and self.capture_error is None
-            or self.body is not None and not isinstance(self.body, ModelClientBodyRef)
+            self.body is not None and not isinstance(self.body, ModelClientBodyRef)
             or isinstance(self.status_code, bool)
             or not isinstance(self.status_code, int)
             or self.format not in {"json", "sse", "unknown"}
@@ -531,15 +550,19 @@ class ModelClientRequestRef:
     body: ModelClientBodyRef | None
     capture_error: str | None = None
     response: ModelClientResponseRef | None = None
+    record_http_bodies: bool = True
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.api, str)
             or not self.api
             or self.capture_error is not None and not isinstance(self.capture_error, str)
-            or (self.body is None) != (self.capture_error is not None)
-            or self.body is not None and not isinstance(self.body, ModelClientBodyRef)
+            or not isinstance(self.record_http_bodies, bool)
             or self.response is not None and not isinstance(self.response, ModelClientResponseRef)
+            or not self.record_http_bodies and (
+                self.body is not None or self.response is not None and self.response.body is not None
+            )
+            or self.body is not None and not isinstance(self.body, ModelClientBodyRef)
         ):
             raise ValueError("model client request reference is invalid")
 
@@ -1381,6 +1404,32 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None: ...
+    async def guard_recovery_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+    ) -> None: ...
+    async def record_recovery_cancel_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+        *,
+        operation_id: str,
+        admit_operation: Callable[[], Awaitable[OperationLedgerRecord]],
+    ) -> OperationLedgerRecord: ...
+    async def transition_recovery_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+        *,
+        next_status: ExecutionStatus,
+        event_type: ExecutionEventType,
+        event_payload: Mapping[str, JsonValue],
+        next_error_code: str | None,
+        next_safe_error_details: Mapping[str, JsonValue],
+        audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
+    ) -> ExecutionRecord: ...
     async def get_start_idempotency(
         self, claim: ExecutionStartClaim
     ) -> IdempotencyRecord | None: ...
@@ -1413,7 +1462,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     ) -> ExecutionCandidatePage: ...
     async def claim_start(self, claim: ExecutionStartClaim) -> ExecutionRecord: ...
     async def reserve_start(
-        self, reservation: ExecutionStartReservation
+        self, reservation: ExecutionStartReservation, *,
+        input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> ExecutionStartReservationResult: ...
     async def claim_next_agent_run(
         self,
@@ -2195,6 +2245,7 @@ __all__ = [
     "IdempotencyRepository",
     "IdempotencyTerminalUpdate",
     "InlineContextBlock",
+    "ArchivedContextBlock",
     "LoadedContextMessage",
     "LoadedModelContext",
     "MemoryRecord",

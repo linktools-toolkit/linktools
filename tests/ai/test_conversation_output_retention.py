@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart
 
-from linktools.ai.capability import ConversationCapability, ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, Principal, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
@@ -32,7 +32,7 @@ def _features(*, conversation: bool = True) -> RuntimeFeatures:
     features = RuntimeFeatures(_NAMESPACE)
     features.agent("default", model="default", allow_tools=())
     if conversation:
-        features.capability(ConversationCapability(), scope="runtime")
+        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     return features
 
 
@@ -319,8 +319,8 @@ async def test_unknown_terminal_commit_retains_exactly_one_canonical_turn(
     output = {"canonical": "durably committed despite lost acknowledgement"}
     _canonical_output(monkeypatch, output)
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
-    features = _features()
-    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    features = _features(conversation=False)
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     storage = RuntimeStorage.sqlite(
         tmp_path / "state.db", cache=cache,
         object_store=FilesystemObjectStore(tmp_path / "objects"),

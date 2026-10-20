@@ -29,7 +29,9 @@ class ModelClientResponse:
     not SDK success. Bytes after a terminator in the same received chunk may be
     present even though the SDK did not process them. No response headers other
     than the format/encoding hints are retained.
-    A missing body means capture failed; an empty body is retained as ``b""``.
+    A missing body may be intentionally unrecorded or omitted by a metadata-only
+    archive. capture_error is set only for an actual capture failure. An empty
+    captured body is retained as ``b""``.
     """
 
     body: bytes | None
@@ -40,8 +42,6 @@ class ModelClientResponse:
     capture_error: str | None = None
 
     def __post_init__(self) -> None:
-        if self.body is None and self.capture_error is None:
-            raise ValueError("missing client response body requires a capture error")
         if self.body is not None and not isinstance(self.body, bytes):
             raise TypeError("client response body must be bytes")
         if self.format not in ("json", "sse", "unknown"):
@@ -59,18 +59,25 @@ class ModelClientRequest:
     supplied through extra_body. A failed capture keeps its place among attempts
     without inventing a request body. ``response=None`` means no response view
     was recorded, not proof that the provider produced no response.
+    record_http_bodies preserves the dispatch's capture policy. Metadata-only
+    archives can omit recorded bytes without changing that policy or inventing errors.
     """
 
     api: str
     body: bytes | None
     capture_error: str | None = None
     response: ModelClientResponse | None = None
+    record_http_bodies: bool = True
 
     def __post_init__(self) -> None:
-        if not self.api or (self.body is None) != (self.capture_error is not None):
+        if not self.api or not isinstance(self.record_http_bodies, bool):
             raise ValueError("client request capture is invalid")
         if self.body is not None and not isinstance(self.body, bytes):
             raise TypeError("client request body must be bytes")
+        if not self.record_http_bodies and (
+            self.body is not None or self.response is not None and self.response.body is not None
+        ):
+            raise ValueError("disabled HTTP body capture cannot contain bodies")
 
 
 _current_capture: ContextVar[ModelClientRequestRecorder | None] = ContextVar(
@@ -87,7 +94,10 @@ class ModelClientRequestRecorder:
     and authorization remain the caller's responsibility.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, record_http_bodies: bool = False) -> None:
+        if not isinstance(record_http_bodies, bool):
+            raise ValueError("record_http_bodies must be a boolean")
+        self.record_http_bodies = record_http_bodies
         self._requests: list[ModelClientRequest] = []
         self._token: Token[ModelClientRequestRecorder | None] | None = None
         self._entered = False
@@ -167,6 +177,10 @@ class _ClientRequestEntry:
     index: int
 
     @property
+    def record_http_bodies(self) -> bool:
+        return self.recorder.record_http_bodies
+
+    @property
     def active(self) -> bool:
         return self.recorder._token is not None
 
@@ -176,12 +190,19 @@ class _ClientRequestEntry:
             requests[self.index] = replace(requests[self.index], response=response)
 
 
+def _record_http_bodies() -> bool:
+    capture = _current_capture.get()
+    return capture is not None and capture._token is not None and capture.record_http_bodies
+
+
 def _record_client_request(
     api: str, body: bytes | None, *, capture_error: str | None = None,
 ) -> _ClientRequestEntry | None:
     capture = _current_capture.get()
     if capture is not None and capture._token is not None:
-        capture._requests.append(ModelClientRequest(api, body, capture_error))
+        capture._requests.append(ModelClientRequest(
+            api, body, capture_error, record_http_bodies=capture.record_http_bodies,
+        ))
         return _ClientRequestEntry(capture, len(capture._requests) - 1)
     return None
 

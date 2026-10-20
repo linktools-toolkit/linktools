@@ -4,10 +4,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import cast
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from typing import Any, cast
 
 from linktools.core import environ
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart
+from pydantic_ai.models import ModelRequestContext, ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RequestUsage
 from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
 )
@@ -18,9 +27,81 @@ from pydantic_ai_harness.planning import (
 from ..capability import ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ._plan import PlanItem, RuntimePlanStore
+from ._message import project_provider_messages, without_history_system_prompts
 
 _logger = environ.get_logger("ai.runtime.harness")
 
+
+
+class SummaryProviderModel(WrapperModel):
+    """Keep SDK persistence separate from the provider's supported part union."""
+
+    async def request(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        return await self.wrapped.request(
+            project_provider_messages(messages), model_settings, model_request_parameters,
+        )
+
+    async def count_tokens(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> RequestUsage:
+        return await self.wrapped.count_tokens(
+            project_provider_messages(messages), model_settings, model_request_parameters,
+        )
+
+    async def compact_messages(
+        self, request_context: ModelRequestContext, *, instructions: str | None = None,
+    ) -> ModelResponse:
+        return await self.wrapped.compact_messages(
+            replace(request_context, messages=project_provider_messages(request_context.messages)),
+            instructions=instructions,
+        )
+
+    @asynccontextmanager
+    async def request_stream(
+        self, messages: list[ModelMessage], model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        async with self.wrapped.request_stream(
+            project_provider_messages(messages), model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
+
+
+class ReinjectRuntimeSystemPrompt(AbstractCapability[Any]):
+    """Refresh authority through public SDK hooks without erasing context summaries."""
+
+    id = "linktools.ai.reinject-system-prompt"
+
+    async def before_model_request(
+        self, ctx: RunContext[Any], request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        if ctx.agent is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        messages = without_history_system_prompts(request_context.messages)
+        current = await ctx.agent.system_prompt_parts(
+            deps=ctx.deps, model=ctx.model, message_history=messages,
+            prompt=ctx.prompt, usage=ctx.usage, model_settings=ctx.model_settings,
+        )
+        ctx.messages[:] = _prepend_system_parts(
+            without_history_system_prompts(ctx.messages), current,
+        )
+        request_context.messages = _prepend_system_parts(messages, current)
+        return request_context
+
+
+def _prepend_system_parts(
+    messages: list[ModelMessage], parts: Sequence[SystemPromptPart],
+) -> list[ModelMessage]:
+    if not parts:
+        return messages
+    if messages and isinstance(messages[0], ModelRequest):
+        return [replace(messages[0], parts=[*parts, *messages[0].parts]), *messages[1:]]
+    return [ModelRequest(parts=list(parts)), *messages]
 
 
 class HarnessPlanStoreAdapter:
@@ -173,5 +254,7 @@ def _plan_item_id(index: int) -> str:
 
 
 __all__ = [
+    "ReinjectRuntimeSystemPrompt",
+    "SummaryProviderModel",
     "HarnessPlanStoreAdapter",
 ]

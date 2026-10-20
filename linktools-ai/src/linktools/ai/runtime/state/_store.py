@@ -13,9 +13,10 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ...core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
+from ._archive_read import ArchiveFrontierReader, ArchiveNodeRead
 
 ValueT = TypeVar("ValueT")
 
@@ -34,6 +35,7 @@ class _ActiveStateScope:
     task: "asyncio.Task[object]"
     transactions: Mapping["StateStore", "StateTransaction"]
     writable: bool
+    record_reader: "GroupRecordReader | None" = None
 
 
 _active_state_scope: ContextVar[_ActiveStateScope | None] = ContextVar(
@@ -118,6 +120,7 @@ def bind_state_scope(
     transactions: Mapping["StateStore", "StateTransaction"],
     *,
     writable: bool = True,
+    record_reader: "GroupRecordReader | None" = None,
 ) -> Token:
     task = asyncio.current_task()
     if task is None:
@@ -130,7 +133,7 @@ def bind_state_scope(
             for store, transaction in transactions.items()
         }
     )
-    return _active_state_scope.set(_ActiveStateScope(group, task, bound, writable))
+    return _active_state_scope.set(_ActiveStateScope(group, task, bound, writable, record_reader))
 
 
 class _BoundStateGroupTransaction:
@@ -149,6 +152,26 @@ class _BoundStateGroupTransaction:
             return self._transactions[store]
         except KeyError as error:
             raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+
+
+class _BoundGroupRecordReader(_BoundStateGroupTransaction):
+    def __init__(
+        self,
+        group: "StateStorageGroup",
+        transactions: Mapping["StateStore", "StateTransaction"],
+        reader: "GroupRecordReader",
+    ) -> None:
+        super().__init__(group, transactions)
+        self._reader = reader
+
+    async def get_records(
+        self, requests: Mapping["StateStore", Sequence[bytes]],
+    ) -> Mapping["StateStore", Mapping[bytes, "StoredRecord"]]:
+        active_state_group_transaction(self._group, tuple(requests), writable=False)
+        active = active_state_scope()
+        if active is None or active.record_reader is not self._reader:
+            raise StateTransactionNestingError("group record reader is outside its transaction")
+        return await self._reader.get_records(requests)
 
 
 def active_state_group_transaction(
@@ -178,6 +201,8 @@ def active_state_group_transaction(
             raise StateTransactionNestingError(
                 "store was not enlisted in the StateStorageGroup transaction"
             )
+    if active.record_reader is not None:
+        return _BoundGroupRecordReader(group, active.transactions, active.record_reader)
     return _BoundStateGroupTransaction(group, active.transactions)
 
 
@@ -599,6 +624,16 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         return await self._transaction.get_records(keys)
 
+    async def read_archive_frontiers(
+        self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
+        content_keys: Sequence[bytes] = (),
+    ) -> Mapping[bytes, StoredRecord] | None:
+        if isinstance(self._transaction, ArchiveFrontierReader):
+            return await self._transaction.read_archive_frontiers(
+                scope_digest=scope_digest, requests=requests, content_keys=content_keys,
+            )
+        return None
+
     async def guard_record(
         self,
         key: bytes,
@@ -806,7 +841,47 @@ class StateGroupTransaction(Protocol):
     def transaction(self, store: "StateStore") -> StateTransaction: ...
 
 
+@runtime_checkable
+class GroupRecordReader(Protocol):
+    """Optional exact-key reads across enlisted stores in the current callback.
+
+    Returned mappings contain found records only. Requested but absent keys are
+    observed misses, not unsupported reads. Implementations reuse each store's
+    transaction-local read view and preserve its updates after own writes.
+    Parameter limits may require multiple statements; this operation does not
+    strengthen the backend's transaction isolation or bound returned bytes.
+    """
+
+    async def get_records(
+        self, requests: Mapping["StateStore", Sequence[bytes]],
+    ) -> Mapping["StateStore", Mapping[bytes, StoredRecord]]: ...
+
+
+@runtime_checkable
 class StateStorageGroup(Protocol):
+    async def open_archive(
+        self, *, create: bool = False,
+    ) -> tuple[str, "StateStore"] | None:
+        """Open group-owned archive metadata and its stable opaque key scope.
+
+        Open outside state callbacks, before preparing or publishing owners.
+        Read-only opens never create identity or provision storage. Restoring the
+        original resource preserves its scope; independent clones must import
+        and retain content into a new resource. Identity does not grant GC
+        exclusivity and cannot detect manually copied resources. Once opened,
+        this store is automatically enlisted in subsequent group callbacks so
+        owner and archive writes share one physical commit.
+        """
+        ...
+
+    async def scan_stores(self) -> tuple["StateStore", ...]:
+        """Enumerate all persisted group partitions, not just active routes.
+
+        Destructive collection still requires externally proven offline
+        exclusivity for every writer's prepare-through-publication window.
+        """
+        ...
+
     async def read(self, store: "StateStore", fn: StateCallback[ValueT]) -> ValueT: ...
 
     async def read_many(
@@ -1010,6 +1085,7 @@ def _validate_limit(limit: int | None) -> None:
 __all__ = [
     "FactQuery",
     "FactScanCursor",
+    "GroupRecordReader",
     "Observed",
     "OperationQuery",
     "OperationScanCursor",

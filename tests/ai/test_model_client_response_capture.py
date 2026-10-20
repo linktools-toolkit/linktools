@@ -113,7 +113,7 @@ async def test_model_client_response_keeps_received_bytes_and_encoding(
     })
     model, _clients = _model(monkeypatch, lambda request: response)
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             await _invoke(model, streaming)
     captured = recorder.requests[0].response
     assert captured is not None
@@ -137,7 +137,7 @@ async def test_model_client_response_completion_requires_observed_sse_terminator
         200, headers={"content-type": "text/event-stream"}, stream=source,
     ))
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             await _invoke(model, True)
     captured = recorder.requests[0].response
     assert captured is not None and captured.body == _EVENT + ending
@@ -158,7 +158,7 @@ async def test_model_client_response_preserves_sdk_tail_consumption(
             200, headers={"content-type": "text/event-stream"}, stream=source,
             extensions={"http_version": http_version.encode()},
         ))
-        recorder = ModelClientRequestRecorder()
+        recorder = ModelClientRequestRecorder(record_http_bodies=True)
         async with model:
             with recorder if capture else nullcontext():
                 await _invoke(model, True)
@@ -188,7 +188,7 @@ async def test_model_client_response_format_is_only_a_content_type_hint(
         400, headers={"content-type": content_type}, stream=_Stream([body]),
     ))
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             with pytest.raises(ModelHTTPError):
                 await _invoke(model, False)
     captured = recorder.requests[0].response
@@ -212,7 +212,7 @@ async def test_model_client_response_replaces_frozen_snapshots_and_binds_retry_a
 
     model, _clients = _model(monkeypatch, handler, retries=1)
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             await _invoke(model, True)
     first, second = recorder.requests
     assert first.response.status_code == 429 and first.response.body == failure
@@ -237,7 +237,7 @@ async def test_model_client_response_cancellation_retains_partial_body(
     model, _clients = _model(monkeypatch, lambda request: httpx2.Response(
         200, headers={"content-type": "text/event-stream", "content-encoding": encoding}, stream=source,
     ))
-    recorder = ModelClientRequestRecorder()
+    recorder = ModelClientRequestRecorder(record_http_bodies=True)
 
     async def invoke() -> None:
         with recorder:
@@ -263,7 +263,7 @@ async def test_model_client_response_complete_body_does_not_imply_valid_json(
         200, headers={"content-type": "application/json"}, stream=_Stream([body]),
     ))
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             with pytest.raises(ModelAPIError):
                 await _invoke(model, False)
     captured = recorder.requests[0].response
@@ -281,7 +281,7 @@ async def test_model_client_response_preserves_read_and_close_errors(
             200, headers={"content-type": "text/event-stream"}, stream=source,
         ))
         async with model:
-            with ModelClientRequestRecorder() as recorder:
+            with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
                 with pytest.raises(RuntimeError if error_on_close else ModelAPIError) as caught:
                     await _invoke(model, True)
         if error_on_close:
@@ -300,7 +300,7 @@ async def test_model_client_response_buffered_transport_content_is_already_decod
         headers={"content-type": "application/json", "content-encoding": "gzip"},
     ))
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             await _invoke(model, False)
     captured = recorder.requests[0].response
     assert captured is not None and captured.body == _JSON
@@ -327,11 +327,11 @@ async def test_model_client_response_binding_survives_overlapping_requests_and_s
 
     model, _clients = _model(monkeypatch, handler)
     async with model:
-        with ModelClientRequestRecorder() as outer:
+        with ModelClientRequestRecorder(record_http_bodies=True) as outer:
             first = asyncio.create_task(_request(model, "first"))
             await asyncio.wait_for(first_dispatched.wait(), 3)
             if nested:
-                with ModelClientRequestRecorder() as inner:
+                with ModelClientRequestRecorder(record_http_bodies=True) as inner:
                     await _request(model, "second")
             else:
                 await _request(model, "second")
@@ -357,7 +357,7 @@ async def test_model_client_response_does_not_change_a_closed_recorder(
 
     model, _clients = _model(monkeypatch, handler)
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             task = asyncio.create_task(_request(model, "prompt"))
             await asyncio.wait_for(dispatched.wait(), 3)
         before = recorder.requests
@@ -376,7 +376,7 @@ async def test_model_client_response_decoding_failure_retains_bytes_and_request_
         200, headers={"content-type": "text/event-stream", "content-encoding": "gzip"}, stream=source,
     ))
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             with pytest.raises(ModelAPIError):
                 await _invoke(model, True)
     captured = recorder.requests[0].response
@@ -423,7 +423,7 @@ async def test_model_client_response_capture_failures_preserve_sdk_outcome(
     model, _clients = _model(monkeypatch, lambda request: httpx2.Response(
         200, headers={"content-type": "text/event-stream"}, stream=source,
     ))
-    recorder = ModelClientRequestRecorder()
+    recorder = ModelClientRequestRecorder(record_http_bodies=True)
 
     async def invoke() -> None:
         with recorder:
@@ -475,7 +475,7 @@ async def test_model_client_response_closed_scope_stops_accumulating_body(
     response = httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=PausedStream())
     model, _clients = _model(monkeypatch, lambda request: response)
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             task = asyncio.create_task(_invoke(model, True))
             await asyncio.wait_for(first_consumed.wait(), 3)
             capture_stream = response.stream
@@ -539,7 +539,7 @@ async def test_model_client_response_iterator_finalization_matches_plain_client(
             ))
 
             async def invoke() -> None:
-                with ModelClientRequestRecorder() if capture else nullcontext():
+                with ModelClientRequestRecorder(record_http_bodies=True) if capture else nullcontext():
                     await _invoke(model, True)
 
             error = None

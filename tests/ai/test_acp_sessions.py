@@ -85,8 +85,9 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("coordination", ("stream", "combined", "none"))
+@pytest.mark.parametrize("retain_history", (False, True))
 async def test_acp_workspace_uses_explicit_execution_coordination(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, coordination: str,
+    tmp_path, monkeypatch: pytest.MonkeyPatch, coordination: str, retain_history: bool,
 ) -> None:
     from pydantic_ai.models.test import TestModel
 
@@ -103,7 +104,7 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
     streams = _CountingStreamBackend()
     declaration = (
         None if coordination == "none" else ExecutionCapability(
-            coordination=streams if coordination == "stream" else cache,
+            retain_history=retain_history, coordination=streams if coordination == "stream" else cache,
         )
     )
     application = ACPApplication.for_workspace(
@@ -118,6 +119,11 @@ async def test_acp_workspace_uses_explicit_execution_coordination(
         session = await agent._runtime.agents.get().create_session("acp-session")
         result = await session.run("hello", timeout_seconds=5)
         assert result.result.status is ExecutionStatus.SUCCEEDED
+        record = await agent._runtime._state.execution.executions.get(
+            result.result.execution_id, tenant_id=agent._runtime.tenant_id,
+        )
+        assert record is not None
+        assert record.conversation is (True if declaration is None else retain_history)
         assert (await agent._runtime.sessions.get(
             session.session_id, principal=agent._principal,
         )).session_id == session.session_id

@@ -44,7 +44,7 @@ _CANONICAL_QUERY_FIELDS = frozenset(
     {"source_namespace", "tenant_id", "status", "error_code"}
 )
 _RESERVED_PREFIX = "linktools."
-_DEFAULT_COMMIT = CommitPolicy.batch(batch_size=128, flush_interval=60.0)
+_DEFAULT_COMMIT = CommitPolicy.batch()
 _MAX_RECORD_BATCH = 256
 _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 
@@ -52,6 +52,7 @@ _MAX_RECORD_BATCH_CANONICAL_BYTES = 16 * 1024 * 1024
 class Metrics:
     """Close-free dataset; each recorder owns its batching lifetime.
 
+    Omitted batch timing resolves to 128 entries and 60 seconds at construction.
     A batch commit policy uses its explicit buffer to flush at its threshold
     or interval from the first pending observation, whichever comes first.
     Sync policies, explicit writes and buffer-free recording await persistence.
@@ -62,7 +63,7 @@ class Metrics:
         commit: CommitPolicy = _DEFAULT_COMMIT,
     ) -> None:
         self._validate_commit(commit)
-        self._commit = commit
+        self._commit = commit.resolve_batch(batch_size=128, flush_interval=60.0)
         self._store = store
         self._namespace = validate_persistence_namespace(namespace)
 
@@ -126,7 +127,7 @@ class Metrics:
             raise TypeError("commit must be CommitPolicy")
         if commit.mode == "terminal":
             raise ValueError("Metrics does not support terminal commit policy")
-        if commit.mode == "batch" and commit.batch_size > _MAX_RECORD_BATCH:
+        if commit.mode == "batch" and commit.batch_size is not None and commit.batch_size > _MAX_RECORD_BATCH:
             raise ValueError(f"Metrics batch_size must not exceed {_MAX_RECORD_BATCH}")
 
     async def define(self, definition: MetricDefinition) -> MetricDefinition:

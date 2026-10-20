@@ -53,7 +53,7 @@ async def test_close_persists_queued_projection_referencing_external_transcript(
         store.stage_transcript("run", StagedTranscript((message,)))
         await store.flush_execution_projection("run", execution_id="execution", producer_generation=1)
         archive = store.read_store(RuntimeDomain.TRACE)
-        objects = storage.object_store(RuntimeDomain.TRACE)
+        objects = storage.archive_object_store(RuntimeDomain.TRACE)
         assert isinstance(objects, ObjectStoreInspection)
         assert [item async for item in objects.list_objects()]
 

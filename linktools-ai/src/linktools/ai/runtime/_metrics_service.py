@@ -129,13 +129,14 @@ class MetricsService:
 
     def status(self) -> MetricRecorderStatus:
         status = self._recorder.status()
+        last_failure_code = self._last_failure_code
         if self._failure_baseline != (
             status.rejected, status.unconfirmed, status.write_failures, status.last_failure_code,
         ):
-            self._last_failure_code = None
+            last_failure_code = None
         return replace(
             status, rejected=status.rejected + self._rejected,
-            last_failure_code=self._last_failure_code or status.last_failure_code,
+            last_failure_code=last_failure_code or status.last_failure_code,
         )
 
     async def flush(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult:
@@ -327,16 +328,6 @@ def _capture_storage_operation(
             ),
         ),
     )
-
-
-async def _record_execution_terminal(
-    recorder: MetricRecorder | None, *, source_namespace: str, tenant_id: str,
-    result: ExecutionTerminalCommitResult, session_id: str | None,
-) -> None:
-    await _record_metric_observation(recorder, _capture_execution_terminal(
-        recorder, source_namespace=source_namespace, tenant_id=tenant_id,
-        result=result, session_id=session_id,
-    ))
 
 
 async def _record_storage_operation(

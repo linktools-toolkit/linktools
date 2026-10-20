@@ -20,7 +20,7 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition
 
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -363,7 +363,7 @@ async def test_anonymous_native_capabilities_remain_distinct_in_combined_runtime
 async def test_reopened_session_and_historical_retry_use_current_host_runtime_capability(tmp_path: Path) -> None:
     first_backend, next_backend = _Backend(), _Backend()
     models = _Models(_UsageFunctionModel(_immediate))
-    first_features = _policies(_group(), _GlobalPolicy(first_backend), ConversationCapability())
+    first_features = _policies(_group(), _GlobalPolicy(first_backend), ExecutionCapability(retain_history=True))
     async with Runtime.open(
         "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
         features=first_features,
@@ -376,7 +376,7 @@ async def test_reopened_session_and_historical_retry_use_current_host_runtime_ca
     current.id = "host.replacement"
     async with Runtime.open(
         "runtime_capability-reopen", models=models, storage=RuntimeStorage.filesystem(tmp_path),
-        features=_policies(_group(), current, ConversationCapability()),
+        features=_policies(_group(), current, ExecutionCapability(retain_history=True)),
     ) as runtime:
         historical = await runtime.executions.get(first.execution_id)
         retry = await historical.retry("retry")

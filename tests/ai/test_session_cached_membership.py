@@ -224,7 +224,10 @@ async def test_cached_canonical_page_projects_live_pending_without_freezing_prog
         pending = replace(pending, status=ExecutionStatus.CANCELLING, safe_error_details={"progress": "new"})
         statements.clear()
         changed = await service.refresh("session", principal=_PRINCIPAL, max_age=3, limit=limit)
-        assert statements == []
+        # An independent writer can commit while a live coordination lease and
+        # this reader's cached absence remain. Pending pages verify canonical
+        # membership at the source before reusing the cached presentation.
+        assert len(statements) == 1
         assert changed.timeline.items[-1].status is ExecutionStatus.CANCELLING
         assert changed.timeline.items[-1].safe_error_details == {"progress": "new"}
         assert len(changed.timeline.items) == min(limit, 2 if with_history else 1)

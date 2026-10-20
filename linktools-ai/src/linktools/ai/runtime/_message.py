@@ -6,7 +6,7 @@ import binascii
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -48,6 +48,44 @@ _RESPONSE_STATES = frozenset({"complete", "incomplete", "suspended", "interrupte
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_call", "error"})
 _TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted"})
 _ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
+
+
+@dataclass
+class SummaryPromptPart(SystemPromptPart):
+    """Runtime-owned compaction provenance, serialized outside the SDK union."""
+
+
+def without_history_system_prompts(
+    messages: Sequence[ModelMessage],
+) -> list[ModelMessage]:
+    """Project current context without replacing trusted summaries or source data."""
+    values: list[ModelMessage] = []
+    for message in messages:
+        if isinstance(message, ModelRequest):
+            parts = [
+                part for part in message.parts
+                if not isinstance(part, SystemPromptPart)
+                or isinstance(part, SummaryPromptPart)
+            ]
+            if not parts:
+                continue
+            message = replace(message, parts=parts)
+        values.append(message)
+    return values
+
+
+def project_provider_messages(
+    messages: Sequence[ModelMessage],
+) -> list[ModelMessage]:
+    """Lower Runtime summaries only in the outbound provider view."""
+    return [
+        replace(message, parts=[
+            SystemPromptPart(part.content, timestamp=part.timestamp, dynamic_ref=part.dynamic_ref)
+            if isinstance(part, SummaryPromptPart) else part
+            for part in message.parts
+        ]) if isinstance(message, ModelRequest) else message
+        for message in messages
+    ]
 
 
 def _portable_json(value: object) -> JsonValue:
@@ -302,7 +340,8 @@ def _decode_message(value: object) -> ModelMessage:
 def _encode_request_part(part: object) -> dict[str, JsonValue]:
     if isinstance(part, SystemPromptPart):
         return {
-            "part_kind": "system-prompt",
+            "part_kind": ("runtime-summary-prompt" if isinstance(part, SummaryPromptPart)
+                          else "system-prompt"),
             "content": part.content,
             "timestamp": _encode_datetime(part.timestamp),
             "dynamic_ref": part.dynamic_ref,
@@ -345,9 +384,10 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
 def _decode_request_part(value: object) -> object:
     part = _part_mapping(value)
     kind = part.get("part_kind")
-    if kind == "system-prompt":
+    if kind in {"system-prompt", "runtime-summary-prompt"}:
         _require_keys(part, {"part_kind", "content", "timestamp", "dynamic_ref"})
-        return SystemPromptPart(
+        part_type = SummaryPromptPart if kind == "runtime-summary-prompt" else SystemPromptPart
+        return part_type(
             _required_string(part["content"]),
             timestamp=_required_datetime(part["timestamp"]),
             dynamic_ref=_optional_string(part["dynamic_ref"]),
@@ -881,6 +921,9 @@ def _require_keys(
 
 
 __all__ = [
+    "SummaryPromptPart",
+    "without_history_system_prompts",
+    "project_provider_messages",
     "binary_content_usage",
     "decode_model_messages",
     "encode_model_messages",

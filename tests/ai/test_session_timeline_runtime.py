@@ -10,7 +10,7 @@ import pytest
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Page, Runtime, RuntimeHistory, SessionTurn
 from linktools.ai.runtime.state import RuntimeStorage
 
@@ -20,7 +20,7 @@ from ._runtime_test_helpers import RuntimeUsageModels
 @pytest.mark.asyncio
 async def test_in_memory_session_run_restores_timeline() -> None:
     application = RuntimeFeatures("application")
-    application.capability(ConversationCapability(), scope="runtime")
+    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
 
     async with Runtime.open(
@@ -61,7 +61,7 @@ async def test_session_timeline_fork_reads_match_live_and_reopened_history(
     tmp_path: Path, backend: str,
 ) -> None:
     application = RuntimeFeatures("application")
-    application.capability(ConversationCapability(), scope="runtime")
+    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     application.agent("default", model="default", allow_tools=())
     storage = (
         RuntimeStorage.in_memory()

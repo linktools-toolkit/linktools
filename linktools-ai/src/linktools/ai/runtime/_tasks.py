@@ -407,13 +407,5 @@ class TaskEngine(Generic[AppT]):
             tuple(self._expanders.values()),
         )
 
-    @property
-    def _task_definitions(self) -> Mapping[tuple[str, int], Task[AppT, Any]]:
-        return self._tasks
-
-    @property
-    def _expander_definitions(self) -> Mapping[tuple[str, int], TaskExpander]:
-        return self._expanders
-
 
 __all__ = ["RuntimeTasks", "TaskEngine"]

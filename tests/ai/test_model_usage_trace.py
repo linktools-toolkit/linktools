@@ -16,7 +16,7 @@ from linktools.ai.runtime._run_hooks import (
 from linktools.ai.runtime._history_projection import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
-from linktools.ai.runtime._message import decode_model_messages
+from linktools.ai.runtime._model_interaction import StagedContextSpan
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
@@ -166,14 +166,14 @@ async def _assert_recorded_responses(
     assert transcript is not None
     assert tuple(message for message in transcript.messages if isinstance(message, ModelResponse)) == expected
     interactions = await store.list_model_interactions(agent_run_id=agent_run_id)
-    responses = tuple(
-        message
-        for interaction in interactions
-        if interaction.response_context is not None
-        for item in interaction.response_context.items
-        for message in decode_model_messages(store.staged_payload(agent_run_id, item.payload_digest))
-    )
-    assert responses == expected
+    responses: list[ModelMessage] = []
+    for interaction in interactions:
+        if interaction.response_context is not None:
+            for item in interaction.response_context.items:
+                assert isinstance(item, StagedContextSpan)
+                assert item.end <= len(transcript.messages)
+                responses.extend(transcript.messages[item.start:item.end])
+    assert tuple(responses) == expected
 
 
 @pytest.mark.asyncio

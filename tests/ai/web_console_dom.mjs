@@ -49,6 +49,8 @@ for(const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)){
 const handlers=new Map();
 globalThis.document={getElementById:id=>nodes.get(id)?.isConnected?nodes.get(id):null,createElement:tag=>new Element(tag),querySelectorAll:selector=>all.filter(node=>Object.hasOwn(node.dataset,selector.slice(6,-1)))};
 globalThis.window={addEventListener:(name,handler)=>{if(!handlers.has(name))handlers.set(name,[]);handlers.get(name).push(handler);}};
+globalThis.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),0);
+globalThis.cancelAnimationFrame=clearTimeout;
 let hash='',hashChanged=Promise.resolve();
 globalThis.location={get hash(){return hash;},set hash(value){hash=value;hashChanged=Promise.resolve().then(()=>Promise.all(handlers.get('hashchange')?.map(handler=>handler()) || []));}};
 let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
@@ -73,7 +75,7 @@ globalThis.fetch=async(path,options={})=>{
   calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
   if(networkFailures.has(method+' '+key))throw new Error('Runtime read unavailable');
   if(delays.has(method+' '+key)){const pending=delays.get(method+' '+key);pending.started();return pending.promise;}
-  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
+  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',runtime:{namespace:'actual-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
   if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
@@ -155,6 +157,68 @@ assert.match(node('conversation').textContent,/a answer/);
 assert.doesNotMatch(node('conversation').textContent,/Original request timeline/);
 assert.equal(node('request-context')?.hidden ?? true,true);
 assert.equal(node('native-mode').className.includes('active'),false);
+if(process.argv[3]==='streaming') {
+  const frames=new Map();let frameId=0,copied;
+  globalThis.requestAnimationFrame=callback=>{const id=++frameId;frames.set(id,callback);return id;};
+  globalThis.cancelAnimationFrame=id=>frames.delete(id);
+  const flushFrame=()=>{const pending=[...frames.values()];frames.clear();pending.forEach(callback=>callback(performance.now()));};
+  Object.defineProperty(globalThis,'navigator',{value:{clipboard:{writeText:async value=>{copied=value;}}},configurable:true});
+  const id='smooth-preview';sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
+  await select('#session=a');const stream=streamBlocks.get(id);await until('streaming preview opened',()=>Boolean(stream.controller));
+  const emit=(event_type,text,fragmented=false)=>{
+    const bytes=new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:id,depth:0,event:{event_type,payload:{text}}}})+'\n\n');
+    if(fragmented)for(const byte of bytes)stream.controller.enqueue(new Uint8Array([byte]));else stream.controller.enqueue(bytes);
+  };
+  emit('ASSISTANT_TEXT_DELTA','**Hello ');emit('ASSISTANT_TEXT_DELTA','你好🌱**',true);
+  await until('queued live update',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(frames.size,1,'Incoming deltas share a pending frame');assert.doesNotMatch(node('live').textContent,/Hello/);
+  flushFrame();let expected='**Hello 你好🌱**';
+  const message=node('live').children.find(item=>item.className.split(' ').includes('message')),body=message.children[0],original=message.children[1],copy=original.children[1];
+  original.open=true;copy.focus();emit('ASSISTANT_TEXT_DELTA','\n\n- one');emit('ASSISTANT_THINKING_DELTA','thinking');
+  await until('next live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n\n- one';
+  assert.equal(message.parentElement,node('live'));assert.equal(original.open,true);assert.equal(document.activeElement,copy);
+  const thinking=node('live').children.find(item=>item.className==='tool-message');thinking.open=true;
+  emit('ASSISTANT_THINKING_DELTA',' continued');emit('ASSISTANT_TEXT_DELTA','\n- two');
+  await until('thinking and Markdown frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected+='\n- two';
+  assert.equal(thinking.open,true);assert.match(thinking.textContent,/thinking continued/);await copy.click();assert.equal(copied,expected);
+  const {renderMarkdown}=await import(messageURL);assert.equal(body.innerHTML,renderMarkdown(expected));
+  // A paused/background animation frame keeps only current accumulated text.
+  for(const part of ['\n\n[ref]', '[ref]: https://example.test\n', '\nfinal'])emit('ASSISTANT_TEXT_DELTA',part);
+  await until('paused live frame',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));assert.equal(frames.size,1);
+  expected+='\n\n[ref][ref]: https://example.test\n\nfinal';flushFrame();assert.equal(body.innerHTML,renderMarkdown(expected));
+  // Exercise the measured-cost fallback without depending on host parsing speed.
+  const descriptor=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+  Object.defineProperty(body,'innerHTML',{get(){return descriptor.get.call(this);},set(value){const end=performance.now()+20;while(performance.now()<end){}descriptor.set.call(this,value);},configurable:true});
+  for(let i=0;i<2;i++){emit('ASSISTANT_TEXT_DELTA',' costly');await until('costly frame',()=>frames.size>0);flushFrame();expected+=' costly';}delete body.innerHTML;
+  emit('ASSISTANT_TEXT_DELTA',' bounded');await new Promise(resolve=>setImmediate(resolve));assert.equal(frames.size,0,'Expensive parsing is not rescheduled immediately on every frame');
+  await until('bounded expensive render',()=>frames.size>0);flushFrame();expected+=' bounded';
+  node('conversation').clientHeight=1;node('conversation').scrollTop=0;copy.focus();
+  emit('ASSISTANT_TEXT_DELTA',' discarded');emit('STREAM_RESET','');emit('ASSISTANT_TEXT_DELTA','**Restart 你好🌱**',true);
+  await until('reset coalesced with latest text',()=>frames.size>0);await new Promise(resolve=>setImmediate(resolve));flushFrame();expected='**Restart 你好🌱**';
+  assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(original.open,true);assert.equal(document.activeElement,copy);assert.equal(thinking.isConnected,false);
+  assert.equal(node('conversation').scrollTop,0,'Streaming respects a reader away from the bottom');node('conversation').clientHeight=300;
+  await copy.click();assert.equal(copied,expected);
+  // A final snapshot flushes pending text even while animation frames are paused.
+  const release=deferred(`GET /api/executions/${id}`);emit('ASSISTANT_TEXT_DELTA',' terminal');expected+=' terminal';
+  executions.set(id,info(id,'a'));sessions.get('a').active_execution_id=null;
+  timelineOverrides.set('a',{items:[{...timeline('a').items[0],execution_id:id,items:[{item_kind:'assistant',content:expected}]}],next_cursor:null});
+  stream.controller.enqueue(new TextEncoder().encode('event: snapshot\ndata: '+JSON.stringify(info(id,'a'))+'\n\n'));stream.controller.close();
+  await release.requested;assert.equal(body.innerHTML,renderMarkdown(expected));assert.equal(frames.size,0);release(info(id,'a'));
+  await until('canonical final Markdown',()=>node('connection').textContent==='Observation: Complete');assert.equal(node('live').textContent,'');assert.match(node('conversation').textContent,/terminal/);
+  // Navigation cancels an old pending preview instead of repainting it elsewhere.
+  const next='smooth-next';sessions.get('a').active_execution_id=next;executions.set(next,{...info(next,'a'),status:'STARTED'});streamBlocks.set(next,{});
+  await select('#session=a');await until('next stream opened',()=>Boolean(streamBlocks.get(next).controller));
+  streamBlocks.get(next).controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:next,depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'stale navigation text'}}}})+'\n\n'));
+  await until('old selection frame',()=>frames.size>0);await select('#session=b');assert.equal(frames.size,0);flushFrame();assert.doesNotMatch(node('conversation').textContent,/stale navigation text/);
+  const standalone='smooth-standalone';executions.set(standalone,{...info(standalone,null),status:'STARTED'});streamBlocks.set(standalone,{});
+  await select('#execution='+standalone);await until('standalone stream opened',()=>Boolean(streamBlocks.get(standalone).controller));
+  const standaloneStream=streamBlocks.get(standalone).controller;
+  standaloneStream.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:standalone,depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'standalone final text'}}}})+'\n\n'));
+  await until('standalone final frame pending',()=>frames.size>0);executions.set(standalone,info(standalone,null));standaloneStream.close();
+  await until('terminal readback after missing snapshot',()=>node('connection').textContent==='Observation: SUCCEEDED');
+  assert.match(node('execution-live').textContent,/standalone final text/);assert.equal(frames.size,0,'Terminal readback flushes a paused frame without a snapshot');
+  console.log('Live rendering contracts passed: coalescing, Unicode, stable controls, full Markdown, background resume, cost budget, final flush and navigation');process.exit(0);
+}
 if(process.argv[3]==='resume') {
   for(const transport of ['local','shared']) {
     const id=`${transport}-preview`;
@@ -1196,7 +1260,28 @@ await refresh();assert.equal(scans(),1);
 assert.equal(node('list-action').value,'paged');assert.equal(node('filter-session').disabled,false);
 node('filter-session').value=opaque;node('filter-form').requestSubmit();await until('session filter results',()=>node('execution-filter-summary').textContent.includes('1 applied'));
 assert.equal(calls.filter(call=>call.key==='/api/executions').at(-1).query.session_id,opaque);assert.match(node('execution-filter-summary').textContent,/1 applied/);
-node('settings').click();assert.match(node('settings-content').textContent,/Asset root\/workspace\/\.linktools/);node('settings-dialog').close();
+const configReads=calls.filter(call=>call.key==='/api/config').length;
+await node('settings').click();
+assert.equal(calls.filter(call=>call.key==='/api/config').length,configReads+1);
+assert.match(node('settings-content').textContent,/Asset root\/workspace\/\.linktools/);
+assert.match(node('settings-content').textContent,/Namespaceactual-runtime/);
+assert.match(node('settings-content').textContent,/Inspect Runtime status/);node('settings-dialog').close();
+
+// Repeated Settings clicks share the pending read, even after another view updates controls.
+const settingsReads=calls.filter(call=>call.key==='/api/config').length;
+const pendingSettings=deferred('GET /api/config'),openingSettings=node('settings').click();await pendingSettings.requested;
+await select('#session=b');
+const repeatedSettings=node('settings').click();
+assert.equal(calls.filter(call=>call.key==='/api/config').length,settingsReads+1);
+pendingSettings({runtime:{namespace:'fresh-runtime',tenant_id:'actual-tenant',storage:[],metrics:{enabled:false}},read_only:readOnly,capabilities:[]});
+await openingSettings;assert.match(node('settings-content').textContent,/Namespacefresh-runtime/);
+node('settings-dialog').close();await repeatedSettings;await settle();
+assert.equal(node('settings-dialog').open,false,'Completing a repeated click cannot reopen dismissed Settings');
+assert.match(node('settings-content').textContent,/Namespacefresh-runtime/);
+networkFailures.add('GET /api/config');await node('settings').click();networkFailures.delete('GET /api/config');
+assert.equal(node('settings-dialog').open,false);assert.match(node('notice').textContent,/Runtime read unavailable/);
+await node('settings').click();assert.equal(node('settings-dialog').open,true);
+assert.match(node('settings-content').textContent,/Namespaceactual-runtime/);node('settings-dialog').close();
 
 // Unavailable history cannot hide readable metadata or make refresh show stale values.
 unavailableTimelines.add('a');sessions.set('a',{...sessions.get('a'),revision:3,cwd:'old/path',history_quality:'partial',active_execution_id:null});

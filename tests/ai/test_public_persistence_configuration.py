@@ -14,7 +14,7 @@ from pydantic_ai.models.function import FunctionModel
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeHistory, RuntimeSnapshot, RuntimeStorage
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state import SnapshotLimits
@@ -53,7 +53,7 @@ async def test_module_filesystem_routes_reopen_history_without_models_or_hooks(
         for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.CHECKPOINT, RuntimeDomain.TRACE)
     }
     features = await _features(
-        ConversationCapability(),
+        ExecutionCapability(retain_history=True),
         CheckpointCapability(storage=routes[RuntimeDomain.CHECKPOINT]),
         TraceCapability(storage=routes[RuntimeDomain.TRACE]),
     ).capture()
@@ -128,7 +128,7 @@ async def test_module_resource_cache_inherits_or_explicitly_overrides_root(
     trace = (TraceCapability() if trace_cache_mode == "inherit" else TraceCapability(
         storage=state.plan.route(RuntimeDomain.TRACE).with_cache(trace_cache),
     ))
-    features = _features(ConversationCapability(), trace)
+    features = _features(ExecutionCapability(retain_history=True), trace)
     async with Runtime.open("module-cache", storage=state, models=_FeatureModels(), features=features) as runtime:
         before_root = (root_cache.reads, root_cache.writes)
         before_module = (module_cache.reads, module_cache.writes)
@@ -188,8 +188,8 @@ async def test_split_conversation_route_uses_durable_admission_with_shared_cache
     state = RuntimeStorage.sqlite(tmp_path / "execution.db", cache=cache)
     route = StorageRoute.sqlite(tmp_path / "conversation.db")
     state = RuntimeStorage(replace(state.plan, conversation=route))
-    features = _features(ConversationCapability())
-    features.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    features = _features()
+    features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     async with Runtime.open(
         "split-conversation", storage=state,
         models=_FeatureModels(FunctionModel(stream_function=model)), features=features,

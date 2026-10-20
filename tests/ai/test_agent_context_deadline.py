@@ -5,7 +5,7 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from pathlib import Path
-from linktools.ai.capability import ConversationCapability, CheckpointCapability
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability
 
 import pytest
 from pydantic_ai import RunContext
@@ -36,7 +36,7 @@ def _group(contexts: list[AgentContext[None]]) -> RuntimeFeatures[None]:
     group: RuntimeFeatures[None] = RuntimeFeatures("deadline")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     group.capability(_Capture(contexts), scope="runtime")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     return group
 
 

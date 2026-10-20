@@ -24,6 +24,7 @@ from linktools.ai.runtime._factory import _borrowed_runtime_history
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._step_archive import StateStepArchive
+from linktools.ai.runtime.state._archive import PreparedArchive
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryObjectStore, ObjectRef, StoredPayload, StorageReadCache
 
 from .test_runtime_history_public import _ResultExecutions, _TaskResults
@@ -134,11 +135,23 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
         repository = archive.transcript_repository
         messages = (ModelResponse(parts=[TextPart("compressed body " * 2048)]),)
         await repository.create_head("run")
-        chunks = await repository.prepare_chunks("run", messages, first_message_index=0)
+        prepared = PreparedArchive()
+        chunks = await repository.prepare_chunks(
+            "run", messages, first_message_index=0, prepared=prepared,
+        )
         assert len(chunks) == 1
         chunk = chunks[0]
-        assert chunk.codec == "zlib" and chunk.content.payload.kind == "object"
-        await archive.state_store.mutate(lambda transaction: repository.append_chunks(transaction, "run", chunks))
+        async def publish(transaction):
+            await repository.publish_archive(prepared)
+            await repository.append_chunks(transaction, "run", chunks)
+
+        await archive.state_store.mutate(publish)
+        contents = await repository.content_archive()
+        identities = await contents.content_ids(chunk.content)
+        records = await contents.content_records(identities)
+        assert len(records) == 1
+        content = records[0]
+        assert content.compression == "zlib" and content.payload.kind == "object"
 
         assert await repository.load_messages("run") == messages
         assert await repository.load_messages("run") == messages
@@ -156,10 +169,10 @@ async def test_composed_transcript_archives_cache_verified_compressed_bytes(
             pytest.fail("fresh verified compressed body must stay hot")
 
         compressed = await StorageReadCache(cache).get(key, unexpected_origin)
-        assert hashlib.sha256(compressed).hexdigest() == chunk.content.payload.digest
-        assert len(compressed) == chunk.content.payload.size
+        assert hashlib.sha256(compressed).hexdigest() == content.payload.digest
+        assert len(compressed) == content.payload.size
         assert zlib.decompress(compressed) == encode_model_messages(messages)
-        assert chunk.raw_digest != chunk.content.payload.digest
+        assert chunk.raw_digest != content.payload.digest
 
         await cache.put(key, b"corrupt cached body")
         assert await repository.load_messages("run") == messages

@@ -622,3 +622,136 @@ async def test_producer_guard_batch_preserves_fail_closed_checks(
         assert raised.value.code is expected
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("command", ("cancel_intent", "tool_resolution"))
+async def test_recovery_write_failure_rolls_back_its_operation_receipt(
+    tmp_path: "Path", monkeypatch: pytest.MonkeyPatch, backend: str, command: str,
+) -> None:
+    from .test_incremental_projection_boundaries import _storage
+
+    state = RuntimeState(_storage(backend, tmp_path))
+    await state.initialize(namespace="recovery-write-rollback", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    execution = replace(_execution(now), status=ExecutionStatus.RECOVERY_REQUIRED)
+    tool = _tool(now)
+    try:
+        await state.execution.executions.create_with_history_head(execution)
+        await state.recovery.tools.reserve(tool)
+        commands = _commands(state)
+        if command == "cancel_intent":
+            operation = replace(
+                _resolution_operation(now),
+                operation_id="cancel-operation",
+                resource_kind=ResourceKind.EXECUTION,
+                resource_id=execution.execution_id,
+                operation_kind=OperationKind.EXECUTION_CANCEL,
+                status=OperationStatus.PENDING,
+                result_ref=None,
+                result_digest=None,
+            )
+            repository = state.execution.executions
+            ledger = state.execution.operations
+        else:
+            operation = _resolution_operation(now)
+            repository = state.recovery.tools
+            ledger = state.recovery.operations
+        group = repository.state_store.storage_group
+        original = type(group).mutate
+        reached_write = False
+
+        async def fail_write(current_group, stores, callback):
+            async def mutate(transactions):
+                transaction = transactions.transaction(repository.state_store)
+
+                async def reject(*args, **kwargs):
+                    nonlocal reached_write
+                    reached_write = True
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(
+                        transaction,
+                        "insert_facts" if command == "cancel_intent" else "replace_record",
+                        reject,
+                    )
+                    return await callback(transactions)
+            return await original(current_group, stores, mutate)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(type(group), "mutate", fail_write)
+            with pytest.raises(AIError) as failed:
+                if command == "cancel_intent":
+                    await commands.commit_cancel_intent(execution, operation)
+                else:
+                    await commands.resolve_tool_effect(
+                        operation, expected_fence=3,
+                        target_status=ToolOperationStatus.PENDING,
+                    )
+        assert reached_write
+        assert failed.value.code is ErrorCode.STORAGE_UNAVAILABLE
+        assert await ledger.get(operation.operation_id, tenant_id="tenant") is None
+        assert await state.execution.executions.get("execution", tenant_id="tenant") == execution
+        assert await state.recovery.tools.get_operation("tool-operation", tenant_id="tenant") == tool
+        assert not (await state.execution.events.list(
+            "execution", tenant_id="tenant", after_event_seq=0, limit=10,
+        )).items
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+@pytest.mark.parametrize("command", ("cancel_intent", "tool_resolution"))
+async def test_recovery_repository_rejects_stale_state_before_receipt_admission(
+    tmp_path: "Path", backend: str, command: str,
+) -> None:
+    from linktools.ai.core import OperationLedgerRecord
+    from .test_incremental_projection_boundaries import _storage
+
+    state = RuntimeState(_storage(backend, tmp_path))
+    await state.initialize(namespace="recovery-admission-fence", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    execution = replace(_execution(now), status=ExecutionStatus.RECOVERY_REQUIRED)
+    tool = _tool(now)
+    admission_attempted = False
+
+    async def admit_operation() -> OperationLedgerRecord:
+        nonlocal admission_attempted
+        admission_attempted = True
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    try:
+        await state.execution.executions.create_with_history_head(execution)
+        await state.recovery.tools.reserve(tool)
+        with pytest.raises(AIError) as conflict:
+            if command == "cancel_intent":
+                repository = state.execution.executions
+                await repository.state_store.mutate(
+                    lambda transaction: repository.record_recovery_cancel_in_transaction(
+                        transaction, replace(execution, revision=execution.revision + 1),
+                        operation_id="cancel-operation", admit_operation=admit_operation,
+                    )
+                )
+            else:
+                repository = state.recovery.tools
+                await repository.state_store.mutate(
+                    lambda transaction: repository.resolve_effect_in_transaction(
+                        transaction, tool.tool_operation_id,
+                        execution_id=tool.execution_id, expected_fence=tool.fence - 1,
+                        target_status=ToolOperationStatus.PENDING,
+                        result_payload=None, error_code=None, error_payload=None,
+                        admit_operation=admit_operation,
+                    )
+                )
+        assert conflict.value.code is (
+            ErrorCode.STORAGE_CONFLICT if command == "cancel_intent"
+            else ErrorCode.TOOL_OPERATION_CONFLICT
+        )
+        assert not admission_attempted
+        assert await state.execution.executions.get("execution", tenant_id="tenant") == execution
+        assert await state.recovery.tools.get_operation("tool-operation", tenant_id="tenant") == tool
+    finally:
+        await state.close()

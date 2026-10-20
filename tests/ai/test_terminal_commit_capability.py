@@ -11,7 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability, CombinedCapability
 from linktools.ai.capability import AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import TraceCapability, CheckpointCapability, ConversationCapability
+from linktools.ai.capability import TraceCapability, CheckpointCapability, ExecutionCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -28,7 +28,7 @@ from .test_runtime_binding_contract import _execution
 
 
 def _conversation_feature(combined: bool) -> AbstractCapability[AgentContext[None]]:
-    capability = ConversationCapability()
+    capability = ExecutionCapability(retain_history=True)
     assert isinstance(capability, AbstractCapability)
     return CombinedCapability([capability]) if combined else capability
 
@@ -44,7 +44,7 @@ async def test_conversation_uses_native_runtime_registration(combined: bool) -> 
     assert contribution.scope == "runtime"
     captured: list[AbstractCapability[object]] = []
     contribution.value.apply(captured.append)
-    assert any(isinstance(value, ConversationCapability) for value in captured)
+    assert any(isinstance(value, ExecutionCapability) for value in captured)
 
 
 @pytest.mark.asyncio
@@ -66,7 +66,7 @@ async def test_conversation_rejects_duplicate_native_id_across_contributions() -
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     for policy_id in ("first-policy", "second-policy"):
         group.capability(
-            CombinedCapability([ConversationCapability()]),
+            CombinedCapability([ExecutionCapability(retain_history=True)]),
             id=policy_id, scope="runtime",
         )
     with pytest.raises(AIError) as invalid:
@@ -143,7 +143,7 @@ async def test_admitted_policy_preserves_stronger_durability(
     group.agent("default", model="default", allow_capabilities=())
     policies: list[AbstractCapability[AgentContext[None]]] = []
     if conversation:
-        policies.append(ConversationCapability())
+        policies.append(ExecutionCapability(retain_history=True))
     if restart:
         policies.append(CheckpointCapability())
     if trace:
@@ -173,7 +173,7 @@ async def test_task_admission_keeps_conversation_disabled() -> None:
 
     task = Task("answer", answer, effect_policy="none")
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = RuntimeStorage.in_memory()
     async with Runtime.open(
         "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
@@ -200,7 +200,7 @@ async def test_reopening_cannot_reinterpret_admitted_conversation(
         group: RuntimeFeatures[None] = RuntimeFeatures("application")
         group.agent("default", model="default", allow_capabilities=())
         if enabled:
-            group.capability(ConversationCapability(), scope="runtime")
+            group.capability(ExecutionCapability(retain_history=True), scope="runtime")
         storage = RuntimeStorage.sqlite(database)
         async with Runtime.open(
             "conversation-feature", models=RuntimeUsageModels(), storage=storage, features=group,
@@ -224,7 +224,7 @@ async def test_current_execution_record_retains_conversation_through_recovery(
 
     group: RuntimeFeatures[None] = RuntimeFeatures("application")
     group.capability(CheckpointCapability(), scope="runtime")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage_path = tmp_path / "runtime"
     storage = RuntimeStorage.filesystem(storage_path)
     encode = _repository_common._encode_persisted_domain

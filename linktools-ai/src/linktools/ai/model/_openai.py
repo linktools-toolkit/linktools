@@ -29,7 +29,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request
+from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request, _record_http_bodies
 from ._contract import ModelBinding
 from ._input import expand_input_types, validate_model_inputs
 
@@ -40,23 +40,32 @@ _CLIENT_REQUEST_ENTRY = "linktools.model.client_request_entry"
 async def _capture_chat_request(request: Request) -> None:
     if request.method != "POST" or not request.url.path.endswith("/chat/completions"):
         return
-    try:
-        body = request.content
-    except RequestNotRead:
-        entry = _record_client_request("openai-chat", None, capture_error="body_unavailable")
+    if not _record_http_bodies():
+        entry = _record_client_request("openai-chat", None)
     else:
-        entry = _record_client_request("openai-chat", body)
+        try:
+            body = request.content
+        except RequestNotRead:
+            entry = _record_client_request("openai-chat", None, capture_error="body_unavailable")
+        else:
+            entry = _record_client_request("openai-chat", body)
     if entry is not None:
         request.extensions[_CLIENT_REQUEST_ENTRY] = entry
 
 
 def _chat_response_snapshot(
     response: Response, body: bytes | None, *, content_encoding: str | None, eof: bool,
+    record_http_bodies: bool = True,
 ) -> ModelClientResponse:
     content_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
     format = "sse" if content_type == "text/event-stream" else (
         "json" if content_type == "application/json" or content_type.endswith("+json") else "unknown"
     )
+    if not record_http_bodies:
+        return ModelClientResponse(
+            body=None, status_code=response.status_code, format=format,
+            content_encoding=content_encoding, complete=False,
+        )
     complete = eof and body is not None
     capture_error = "response_capture_failed" if body is None else None
     if format == "sse" and body is not None:
@@ -139,6 +148,12 @@ class _CapturedChatResponseStream(AsyncByteStream):
 async def _capture_chat_response(response: Response) -> None:
     entry = response.request.extensions.pop(_CLIENT_REQUEST_ENTRY, None)
     if entry is None or not entry.active:
+        return
+    if not entry.record_http_bodies:
+        entry.record_response(_chat_response_snapshot(
+            response, None, content_encoding=response.headers.get("content-encoding") or None,
+            eof=False, record_http_bodies=False,
+        ))
         return
     capture = _CapturedChatResponseStream(response, entry)
     if response.is_stream_consumed:

@@ -22,7 +22,7 @@ def test_capability_import_does_not_initialize_runtime_package() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; from linktools.ai.capability import ConversationCapability, "
+            "import sys; from linktools.ai.capability import ExecutionCapability, "
             "CheckpointCapability, TraceCapability; "
             "assert 'linktools.ai.runtime' not in sys.modules",
         ],
@@ -34,7 +34,7 @@ def test_runtime_has_no_duplicate_capability_exports() -> None:
     import linktools.ai.runtime as runtime
 
     for name in (
-        "ConversationCapability",
+        "ExecutionCapability",
         "CheckpointCapability",
         "TraceCapability",
         "MetricsCapability",
@@ -43,6 +43,7 @@ def test_runtime_has_no_duplicate_capability_exports() -> None:
         assert not hasattr(runtime, name)
     import linktools.ai.capability as capability
     assert not hasattr(capability, "MetricsCapability")
+    assert not hasattr(capability, "ConversationCapability")
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 """Canonical versioned codecs for Runtime persistence values."""
 
 from ...storage import StorageRetentionMode
+from ._archive import ArchiveRoot, ArchiveSlice
 
 import base64
 import binascii
@@ -169,8 +170,7 @@ from ._contracts import (
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     InlineContextBlock,
-    LoadedContextMessage,
-    LoadedModelContext,
+    ArchivedContextBlock,
     MemoryRecord,
     ModelClientBodyRef,
     ModelClientRequestRef,
@@ -337,11 +337,12 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("stored_payload", StoredPayload),
     ("history_quality", HistoryQuality),
     ("inline_context_block", InlineContextBlock),
-    ("loaded_context_message", LoadedContextMessage),
-    ("loaded_model_context", LoadedModelContext),
+    ("archived_context_block", ArchivedContextBlock),
     ("runtime_payload_ref", RuntimePayloadRef),
     ("stored_user_input", StoredUserInput),
     ("task_binding_contract", TaskBindingContract),
+    ("archive_root", ArchiveRoot),
+    ("archive_slice", ArchiveSlice),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),
@@ -1644,23 +1645,6 @@ def iter_runtime_object_refs(
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     """Yield object references without depending on a storage backend."""
     yield from _iter_runtime_object_refs(value, default_domain, _CURRENT_CODEC)
-
-
-def _iter_enveloped_runtime_object_refs(
-    value: Mapping[str, JsonValue],
-    *,
-    default_domain: RuntimeDomain,
-) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
-    """Traverse object references using the envelope's own version codec."""
-    envelope = decode_envelope(value)
-    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
-    codec = _VERSION_CODECS.get(envelope.version)
-    if codec is None:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    payload = envelope.value.get("payload")
-    if payload is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    yield from _iter_runtime_object_refs(payload, default_domain, codec)
 
 
 def iter_runtime_object_dependencies(

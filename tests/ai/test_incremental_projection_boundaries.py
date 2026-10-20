@@ -285,7 +285,6 @@ async def test_recovery_restores_context_without_assuming_public_checkpoint_ackn
 
     from linktools.ai.core import HmacCursorSigner, agent_conversation_id, agent_run_id
     from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
-    from linktools.ai.storage import StorageRetentionMode
     from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
     from linktools.ai.runtime.state._step_contracts import StepEvent
     from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
@@ -308,9 +307,6 @@ async def test_recovery_restores_context_without_assuming_public_checkpoint_ackn
             StagingAgentRunStore(), execution_repository=repository, tenant_id="tenant",
             conversation_archive=restored.read_store(RuntimeDomain.CONVERSATION),
             execution_archive=public, recovery_archive=restored.read_store(RuntimeDomain.CHECKPOINT),
-            conversation_retention=StorageRetentionMode.VOLATILE,
-            execution_retention=StorageRetentionMode.VOLATILE,
-            recovery_retention=StorageRetentionMode.VOLATILE,
         )
         await old.initialize()
         old.bind_execution_producer(run_id, execution_id="execution", producer_generation=1)

@@ -38,6 +38,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..session import SessionPendingExecutionLookup
 from ..observe import Metrics
 from ..model import ModelRegistry
 from ..spec import (
@@ -64,12 +65,14 @@ from ._evaluation import RuntimeEvaluations
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
+from .state._contracts import ExecutionRecord
 from ._shared_stream import SharedStreamPublisher
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history_projection import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
 from ._input_capture import RuntimeInputCaptures
+from ._context_archive import ExecutionContextArchive
 from ._local import LocalExecutionBackend
 from ._pending_coordination import _PendingTurnCoordination
 from ._memory import MemoryStore, RuntimeMemoryStore
@@ -79,7 +82,6 @@ from ._capabilities import runtime_feature_leaves
 from ..storage import StorageRoute
 from .persistence import CapabilityPersistence
 from ._capability_writes import RuntimeCapabilityWrites
-from linktools.ai.capability import ConversationCapability
 from ._metrics_service import MetricsService
 from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
 from linktools.ai.capability import TraceCapability, CheckpointCapability
@@ -140,42 +142,20 @@ async def compose_runtime_components(
     resolved_namespace = validate_persistence_namespace(namespace)
     if not isinstance(storage, RuntimeStorage):
         raise TypeError("storage must be RuntimeStorage")
-    sources = () if features is None else (features,)
-    if any(
-        not isinstance(source, (RuntimeFeatures, RuntimeFeaturesCapture))
-        for source in sources
-    ):
-        raise TypeError(
-            "features must be RuntimeFeatures or RuntimeFeaturesCapture"
-        )
-    captures: list[RuntimeFeaturesCapture[AppT]] = []
-    for source in sources:
-        capture = (
-            await source.capture()
-            if isinstance(source, RuntimeFeatures)
-            else source
-        )
-        await capture.verify_source_revision()
-        captures.append(capture)
-    groups = tuple(captures)
-    selected_limits = PromptLimits() if not groups else groups[0].limits
-    authorization = None if not groups else groups[0].authorization
+    if features is not None and not isinstance(features, (RuntimeFeatures, RuntimeFeaturesCapture)):
+        raise TypeError("features must be RuntimeFeatures or RuntimeFeaturesCapture")
+    captured = await features.capture() if isinstance(features, RuntimeFeatures) else features
+    if captured is not None:
+        await captured.verify_source_revision()
+    selected_limits = PromptLimits() if captured is None else captured.limits
+    authorization = None if captured is None else captured.authorization
     execution_capability = ExecutionCapability()
     execution_declared = False
     session_capability = SessionCapability()
     session_declared = False
     tool_responses: ToolResponseFixture | None = None
-    group_ids = tuple(group.group_id for group in groups)
-    if len(group_ids) != len(set(group_ids)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    workspace_groups = tuple(group for group in groups if group.workspace is not None)
-    if len(workspace_groups) > 1:
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    sandbox_groups = tuple(group for group in groups if group.sandbox is not None)
-    if len(sandbox_groups) > 1:
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    workspace = None if not workspace_groups else workspace_groups[0].workspace
-    sandbox = sandbox_groups[0].sandbox if sandbox_groups else LocalSandbox()
+    workspace = None if captured is None else captured.workspace
+    sandbox = LocalSandbox() if captured is None or captured.sandbox is None else captured.sandbox
     if workspace is not None:
         workspace.policy.validate()
 
@@ -187,10 +167,10 @@ async def compose_runtime_components(
     try:
         candidates: list[CapabilityContribution[object]] = []
         asset_sources: dict[str, AssetStoreReader] = {}
-        for group in groups:
-            candidates.extend(group.contributions)
-            if group.asset_reader is not None:
-                asset_sources[group.group_id] = group.asset_reader
+        if captured is not None:
+            candidates.extend(captured.contributions)
+            if captured.asset_reader is not None:
+                asset_sources[captured.group_id] = captured.asset_reader
         _validate_candidate_uniqueness(candidates)
         def require_runtime_feature_scope(capability: AbstractCapability[object]) -> None:
             if isinstance(capability, CapabilityPersistence):
@@ -198,7 +178,6 @@ async def compose_runtime_components(
             if isinstance(capability, (
                 CheckpointCapability,
                 TraceCapability,
-                ConversationCapability,
                 ToolResponsesCapability,
                 SessionCapability,
                 ExecutionCapability,
@@ -226,7 +205,7 @@ async def compose_runtime_components(
                 if execution_declared:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 execution_capability, execution_declared = capability, True
-                return None
+                return capability
             if isinstance(capability, SessionCapability):
                 if session_declared:
                     raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -286,6 +265,8 @@ async def compose_runtime_components(
             selected = candidate.value.visit_and_replace(capture_persistence)
             if selected is not None:
                 runtime_capability_values.append(selected)
+        if not execution_declared:
+            runtime_capability_values.append(execution_capability)
         runtime_capabilities = tuple(runtime_capability_values)
         runtime_ids: set[str] = set()
 
@@ -304,18 +285,9 @@ async def compose_runtime_components(
         )
         candidates = [candidate for candidate in candidates if candidate.scope == "agent"]
         skill_sources = SkillSourceRegistry(
-            tuple(
-                AssetSkillSource(group.group_id, reader)
-                for group in groups
-                if (reader := group.asset_reader) is not None
-            )
+            tuple(AssetSkillSource(group_id, reader) for group_id, reader in asset_sources.items())
         )
-        instruction_documents = tuple(
-            document
-            for group in groups
-            for document in group.instructions.documents
-        )
-        rules = RepositoryInstructions(instruction_documents)
+        rules = RepositoryInstructions(() if captured is None else captured.instructions.documents)
         agents = {
             candidate.id: candidate.value
             for candidate in candidates
@@ -331,7 +303,7 @@ async def compose_runtime_components(
             else:
                 agents["default"] = AgentSpec("default")
         compiler = AgentCompiler(
-            defaults=(captures[0].defaults if captures else None),
+            defaults=None if captured is None else captured.defaults,
             model_resolver=resolver,
             candidates=tuple(
                 candidate
@@ -339,7 +311,7 @@ async def compose_runtime_components(
                 if candidate.kind != "agent"
             ),
             agents=agents,
-            capability_filter=captures[0].filter if captures else None,
+            capability_filter=None if captured is None else captured.filter,
         )
         root_agents = {
             agent_id: compiler.compile(agents[agent_id])
@@ -368,8 +340,8 @@ async def compose_runtime_components(
             )
         selected_state.run_store.capability_revisions = capability_revisions
         initialized = True
-        for group in groups:
-            await group.verify_source_revision()
+        if captured is not None:
+            await captured.verify_source_revision()
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = (
                 RuleInstructionResolver(rules)
@@ -449,15 +421,15 @@ async def compose_runtime_components(
             tool_responses=tool_responses,
         )
         try:
-            for capture in groups:
-                await capture.verify_source_revision()
+            if captured is not None:
+                await captured.verify_source_revision()
         except BaseException as primary_error:
             try:
                 await components.close_callback()
             except BaseException as cleanup_error:
                 raise primary_error from cleanup_error
             raise
-        _logger.info("runtime capability captures admitted: groups=%s", group_ids)
+        _logger.info("runtime capability capture admitted: group=%s", None if captured is None else captured.group_id)
         return components
     except BaseException:
         if not ownership_transferred:
@@ -691,7 +663,8 @@ async def _build_local_components(
             isinstance(value, TraceCapability) for value in persistence_capabilities
         )
         conversation = any(
-            isinstance(value, ConversationCapability) for value in persistence_capabilities
+            isinstance(value, ExecutionCapability) and value.retain_history
+            for value in persistence_capabilities
         )
         batch_scopes = BatchWriteScope.scoped_factory()
         state.run_store.trace_persistence.bind_batch_scopes(batch_scopes)
@@ -712,12 +685,13 @@ async def _build_local_components(
                 stream_cache, namespace, tenant_id,
             )
         ))
+        pending_observer = runtime_bridge.pending_turns.coordination
         history_service = DefaultExecutionHistoryService(
             state.execution.executions,
             authorization,
             history_reader,
             HmacCursorSigner("execution", runtime_token_seed),
-            pending_execution=runtime_bridge.pending_turns.read_execution,
+            pending_execution=None if pending_observer is None else pending_observer.read_execution,
         )
         binding_resolver = _AgentBindingResolver(
             catalog,
@@ -748,6 +722,12 @@ async def _build_local_components(
             durable_trace=durable_trace,
             conversation=conversation,
             terminal_commit=commit.mode == "terminal",
+            context_archive=ExecutionContextArchive(
+                state.execution.executions.state_store,
+                state.archive_object_store(RuntimeDomain.EXECUTION),
+                namespace=namespace, tenant_id=tenant_id,
+                object_reader=lambda reference: state.read_archive_object(RuntimeDomain.EXECUTION, reference),
+            ),
         )
         execution_tree_broker = ExecutionTreeBroker()
         dispatcher = SubagentDispatcher(
@@ -820,6 +800,8 @@ async def _build_local_components(
             state.run_store,
             executor,
             catalog,
+            archive_objects=state.archive_object_store(RuntimeDomain.EXECUTION),
+            archive_object_reader=lambda reference: state.read_archive_object(RuntimeDomain.EXECUTION, reference),
             restore_binding=compiler.restore,
             tenant_id=tenant_id,
             workspace=workspace,
@@ -895,6 +877,12 @@ async def _build_local_components(
             object_stores={domain: state.object_store(domain) for domain in RuntimeDomain},
             execution_retention=state.plan.route(RuntimeDomain.EXECUTION).retention,
             task_retention=state.plan.route(RuntimeDomain.TASK).retention,
+            context_archive=ExecutionContextArchive(
+                state.execution.executions.state_store,
+                state.archive_object_store(RuntimeDomain.EXECUTION),
+                namespace=namespace, tenant_id=tenant_id,
+                object_reader=lambda reference: state.read_archive_object(RuntimeDomain.EXECUTION, reference),
+            ),
             prepare_pending_capture=prepare_pending_capture,
         )
         task_graph_binding_captures = TaskGraphBindingCaptureStore(
@@ -993,6 +981,10 @@ async def _build_local_components(
         history = _borrowed_runtime_history(
             history_service, tenant_id=tenant_id, state=state,
             authorization=authorization, artifact=artifact,
+            pending_session_execution=(
+                None if pending_observer is None else pending_observer.read_session_execution
+            ),
+            pending_execution=None if pending_observer is None else pending_observer.read_execution,
         )
         evaluation = RuntimeEvaluations(
             namespace, authorization, execution, graph_service,
@@ -1024,6 +1016,7 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
+        await state.run_store.prepare_archives()
         if auto_recover and RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,
@@ -1077,6 +1070,8 @@ def _borrowed_runtime_history(
     state: RuntimeState,
     authorization: object,
     artifact: DefaultArtifactService,
+    pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
+    pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
 ) -> "RuntimeHistory":
     return RuntimeHistory(
         service,
@@ -1086,6 +1081,12 @@ def _borrowed_runtime_history(
         sessions=state.conversation.sessions,
         conversation=state.conversation,
         session_transcript_store=state.run_store.conversation_persistence,
+        pending_session_execution=pending_session_execution,
+        pending_execution=pending_execution,
+        cache=(state.plan.route(RuntimeDomain.CONVERSATION).cache if all(
+            state.plan.route(domain).retention is StorageRetentionMode.DURABLE
+            for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION)
+        ) else None),
         tasks=state.task.tasks,
         authorization=authorization,
         namespace=state.namespace,

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from pydantic_ai.messages import ModelMessage
+
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from ...errors import AIError, ErrorCode
@@ -34,6 +36,7 @@ from ._step_archive import (
     _encode_step,
     _validate_interaction_page,
 )
+from ._archive import PreparedArchive
 from ._store import (
     RecordQuery,
     RecordReplacement,
@@ -55,6 +58,8 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         *,
         local_message_base: int = 0,
         local_message_count: int = 0,
+        local_messages: Sequence[ModelMessage] = (),
+        prepared: PreparedArchive | None = None,
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
@@ -122,6 +127,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         checkpoints: Sequence[AgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
+        archive: PreparedArchive | None = None,
     ) -> None:
         fresh: list[ModelInteractionRecord] = []
         seen: set[int] = set()
@@ -151,6 +157,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
             checkpoints=checkpoints,
             interactions=fresh,
             execution_id=execution_id,
+            archive=archive,
         )
 
     async def list_model_interactions(
@@ -192,23 +199,6 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await super().resolve_model_interactions(
             records, include_client_requests=include_client_requests, include_content=include_content,
-        )
-
-    async def prepare_interactions(
-        self,
-        run: AgentRunRecord,
-        interactions: Sequence[StagedModelInteraction],
-        payload: Callable[[str], bytes],
-        *,
-        local_message_base: int = 0,
-        local_message_count: int = 0,
-    ) -> tuple[ModelInteractionRecord, ...]:
-        return await super().prepare_interactions(
-            run,
-            interactions,
-            payload,
-            local_message_base=local_message_base,
-            local_message_count=local_message_count,
         )
 
     def _interaction_key(self, agent_run_id: str, model_request_seq: int) -> bytes:

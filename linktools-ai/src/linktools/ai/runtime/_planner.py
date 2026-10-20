@@ -1462,7 +1462,19 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             candidates.append((node, node_state, execution))
 
         for node, node_state, execution in candidates:
-            await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+            node_state = await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+            assert self._recovery_backend is not None
+            if (
+                node_state.status is TaskStatus.RECOVERY_REQUIRED
+                and node_state.error_code == ErrorCode.STORAGE_RECOVERY_REQUIRED.value
+                and node_state.error_origin == "execution"
+                and node_state.safe_error_details.get("phase") == "task_invocation_capture_cancel"
+                and execution.status is ExecutionStatus.STARTED
+                and self._recovery_backend.owns_execution(execution.execution_id, tenant_id=tenant_id)
+            ):
+                # Only an unfinished invocation-capture handoff may reattach its
+                # live owner. Other explicit graph recovery still requires takeover.
+                continue
             now = datetime.now(timezone.utc)
             deadline = RuntimeAgentTaskRunner.deadline_policy(
                 node, execution.started_at, self._budget_scopes.get(graph_id),
@@ -1517,7 +1529,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         node: TaskNode,
         node_state: TaskNodeView,
         tenant_id: str,
-    ) -> None:
+    ) -> TaskNodeView:
         state = await self._task_state.graph_state(graph_id, tenant_id=tenant_id)
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1532,6 +1544,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             or current.fence != node_state.fence
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return current
 
     def validate_recovery(self, graph_state: TaskGraphState) -> None:
         for node, node_state in zip(

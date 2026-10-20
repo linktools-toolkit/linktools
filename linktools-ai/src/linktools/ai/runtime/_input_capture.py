@@ -31,6 +31,7 @@ from ._input import (
     captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
 )
 from ._execution_context import ExecutionInputContext
+from ._context_archive import ExecutionContextArchive
 from ..model import MaterializedUserContent
 from ._object import read_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
@@ -101,6 +102,7 @@ class RuntimeInputCaptures:
         execution_repositories: ExecutionRepositories,
         task_repositories: TaskRepositories,
         object_stores: Mapping[RuntimeDomain, ObjectStore],
+        context_archive: ExecutionContextArchive,
         execution_retention: StorageRetentionMode,
         task_retention: StorageRetentionMode,
         prepare_pending_capture: Callable[[str, Principal], Awaitable[None]] | None = None,
@@ -110,6 +112,7 @@ class RuntimeInputCaptures:
         self._execution_repositories = execution_repositories
         self._task_repositories = task_repositories
         self._object_stores = object_stores
+        self._context_archive = context_archive
         self._execution_retention = execution_retention
         self._task_retention = task_retention
         self._authorization = authorization
@@ -432,7 +435,7 @@ class RuntimeInputCaptures:
         context = None
         if is_agent and request.context_policy == "captured":
             if record.input_context is not None:
-                context = ExecutionInputContext.from_payload(await self._payload(record.input_context.payload, RuntimeDomain.EXECUTION))
+                context = await self._context_archive.load(record.input_context)
                 if context.unavailable_reason is not None:
                     raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": context.unavailable_reason})
             elif any(value is not None for value in (record.session_id, record.memory_scope, record.previous_execution_id, record.fork_base_execution_id)):

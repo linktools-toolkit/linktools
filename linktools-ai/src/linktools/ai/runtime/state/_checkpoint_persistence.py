@@ -6,7 +6,10 @@ from collections.abc import Sequence
 
 from ...errors import AIError, ErrorCode
 from .._model_interaction import StagedModelInteraction
+from ._archive import PreparedArchive
 from ._contracts import ModelInteractionRecord
+from ._model_client import resolve_client_requests
+from ._plan import RuntimeDomain
 from ._step_archive import (
     PreparedAgentRunCheckpoint, StagingAgentRunStore, StateStepArchive,
     _materialize_checkpoint,
@@ -59,13 +62,21 @@ class CheckpointPersistence:
             )
             if any(not isinstance(value, ModelInteractionRecord) or value.status == "RUNNING" for value in archived):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            missing = await archive.prepare_relocated_interactions(
-                archived, await source.resolve_model_interactions(archived, include_client_requests=True),
-            )
+            projections = await source.resolve_model_interactions(archived)
+            resolved = tuple([
+                (*projection[:3], await resolve_client_requests(
+                    interaction.client_requests, RuntimeDomain.CHECKPOINT, include_bodies=False,
+                ))
+                for interaction, projection in zip(archived, projections, strict=True)
+            ])
+            missing = await archive.prepare_relocated_interactions(archived, resolved, prepared=prepared.archive)
         interactions = missing + await archive.prepare_interactions(
             run, staged,
             lambda digest: self._staging.staged_payload(run.agent_run_id, digest),
             local_message_count=len(checkpoint.messages),
+            local_messages=checkpoint.messages, prepared=prepared.archive,
+            **({"baseline": prepared.projection}
+               if type(archive).prepare_interactions is StateStepArchive.prepare_interactions else {}),
         )
         return prepared, interactions, sequence
 
@@ -119,6 +130,7 @@ class CheckpointPersistence:
                     (checkpoint,),
                     head.message_count,
                 )
+                content_write = PreparedArchive()
                 prepared = await archive.prepare_interactions(
                     run,
                     tuple(interactions),
@@ -128,12 +140,16 @@ class CheckpointPersistence:
                     ),
                     local_message_base=local_base,
                     local_message_count=local_count,
+                    local_messages=checkpoint.messages,
+                    prepared=content_write,
+                    replay=True,
                 )
                 await archive.sync_projection(
                     run,
                     events=(),
                     checkpoints=(),
                     interactions=prepared,
+                    archive=content_write,
                 )
 
 

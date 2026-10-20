@@ -33,6 +33,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import RequestUsage, UsageLimitExceeded
 
 from ..capability import AgentContext
+from ._trace_capture import record_http_bodies_enabled
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder, model_binding_error
@@ -395,7 +396,9 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             output_retry_index=None if ctx.retry <= 0 else ctx.retry,
         )
         model_request_seq = fact.model_request_seq
-        with ModelClientRequestRecorder() as client_recorder:
+        with ModelClientRequestRecorder(
+            record_http_bodies=record_http_bodies_enabled(ctx.capabilities.values()),
+        ) as client_recorder:
             self._client_recorders[model_request_seq] = client_recorder
             try:
                 self._stage_request(fact, request_context)

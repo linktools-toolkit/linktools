@@ -68,12 +68,18 @@ class _RecoveryBackend:
         self.operations = []
         self.claims = {}
         self.fail_execution = None
+        self.owned = set()
+
+    def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
+        return tenant_id == "default" and execution_id in self.owned
 
     async def recover_execution(
         self, execution_id: str, *, tenant_id: str, expected_revision: int,
         recovery_operation: OperationLedgerInput | None = None,
     ) -> ExecutionRecord:
         assert recovery_operation is not None
+        if self.owns_execution(execution_id, tenant_id=tenant_id):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         operation = recovery_operation
         self.operations.append(operation)
         current = await self.storage.execution.executions.get(execution_id, tenant_id=tenant_id)
@@ -96,6 +102,9 @@ async def _graph_recovery(
     node_ids: tuple[str, ...] = ("agent",),
     *,
     live_status: TaskStatus | None = None,
+    capture_phase: str | None = None,
+    capture_status: ExecutionStatus = ExecutionStatus.STARTED,
+    error_origin: str = "node",
 ) -> AsyncIterator[tuple[Runtime, RuntimeStorage, DefaultTaskGraphService, _RecoveryBackend, _Launcher, _GraphAuthorization]]:
     authorization = _GraphAuthorization()
     storage = RuntimeStorage.in_memory()
@@ -120,15 +129,16 @@ async def _graph_recovery(
         binding = AgentBindingContract.from_payload(task.contract["config"]["binding_contract"])
         leases = []
         for node_id in node_ids:
+            status = (capture_status if capture_phase is not None else
+                      ExecutionStatus.STARTED if node_id == "live" and live_status is not None
+                      else ExecutionStatus.RECOVERY_REQUIRED)
             record = replace(
                 _execution(datetime.now(timezone.utc)),
                 execution_id=f"execution-{node_id}", root_execution_id=f"execution-{node_id}",
                 binding=binding, principal_id=_ORIGIN.principal_id,
                 principal_kind=_ORIGIN.kind, requires_task_invocation_capture=True,
-                status=(ExecutionStatus.STARTED if node_id == "live" and live_status is not None
-                        else ExecutionStatus.RECOVERY_REQUIRED),
-                error_code=(None if node_id == "live" and live_status is not None
-                            else ErrorCode.STORAGE_RECOVERY_REQUIRED.value),
+                status=status,
+                error_code=None if status is ExecutionStatus.STARTED else ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
             )
             await runtime._state.execution.executions.create_with_history_head(record)
             leases.append(await runtime._state.task.tasks.claim(
@@ -149,8 +159,12 @@ async def _graph_recovery(
                 lease, tenant_id="default", execution_id=f"execution-{lease.node_id}",
                 error_code=ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
                 error_digest=canonical_sha256({"node": lease.node_id}),
+                error_origin=error_origin,
+                safe_error_details={} if capture_phase is None else {"phase": capture_phase},
             )
         backend = _RecoveryBackend(runtime._state)
+        if capture_phase is not None:
+            backend.owned.update(f"execution-{node_id}" for node_id in node_ids)
         runner._recovery_backend = backend
         launcher = _Launcher()
         service = DefaultTaskGraphService(
@@ -160,6 +174,70 @@ async def _graph_recovery(
         authorization.setup = False
         authorization.calls.clear()
         yield runtime, runtime._state, service, backend, launcher, authorization
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase,status,origin,reattach", (
+    ("task_invocation_capture_cancel", ExecutionStatus.STARTED, "execution", True),
+    ("unrelated_storage_failure", ExecutionStatus.STARTED, "execution", False),
+    ("task_invocation_capture_cancel", ExecutionStatus.RECOVERY_REQUIRED, "execution", False),
+    ("task_invocation_capture_cancel", ExecutionStatus.STARTED, "node", False),
+))
+async def test_live_owner_reattachment_requires_retained_capture_handoff(
+    phase: str, status: ExecutionStatus, origin: str, reattach: bool,
+) -> None:
+    async with _graph_recovery(capture_phase=phase, capture_status=status, error_origin=origin) as (
+        _runtime, storage, service, backend, launcher, _authorization,
+    ):
+        before = await storage.execution.executions.get("execution-agent", tenant_id="default")
+        request = RecoverGraphRequest(_ACTOR, "recover-capture-handoff")
+        if reattach:
+            await service.recover("bound-graph", request)
+            assert len(launcher.launches) == 1
+        else:
+            with pytest.raises(AIError) as raised:
+                await service.recover("bound-graph", request)
+            assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+            assert launcher.launches == []
+        assert await storage.execution.executions.get("execution-agent", tenant_id="default") == before
+        assert backend.claims == {}
+        assert backend.operations == []
+
+
+@pytest.mark.asyncio
+async def test_capture_handoff_reattachment_rechecks_recovery_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _graph_recovery(capture_phase="task_invocation_capture_cancel", error_origin="execution") as (
+        _runtime, storage, service, backend, launcher, _authorization,
+    ):
+        get_execution = storage.execution.executions.get
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def paused_get(execution_id, *, tenant_id):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await get_execution(execution_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(storage.execution.executions, "get", paused_get)
+        pending = asyncio.create_task(service.recover(
+            "bound-graph", RecoverGraphRequest(_ACTOR, "recover-cleared-handoff"),
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await storage.task.tasks.recover_graph("bound-graph", tenant_id="default")
+            release.set()
+            with pytest.raises(AIError) as raised:
+                await asyncio.wait_for(pending, 5)
+            assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+            assert backend.claims == {}
+            assert launcher.launches == []
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio

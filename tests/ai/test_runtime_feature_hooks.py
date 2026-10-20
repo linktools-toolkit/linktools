@@ -12,7 +12,7 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext
 
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 
 from .test_explicit_runtime_features import _FeatureModels, _features
@@ -39,7 +39,7 @@ async def test_wrapped_features_keep_native_order_and_isolate_concurrent_runs(ne
     events: list[tuple[str, str, str]] = []
     trace = TraceCapability()
     inner = _ObservedWrapper(trace, label="inner", events=events)
-    tree = (_ObservedWrapper(CombinedCapability([inner, CheckpointCapability(), ConversationCapability()]),
+    tree = (_ObservedWrapper(CombinedCapability([inner, CheckpointCapability(), ExecutionCapability(retain_history=True)]),
                              id="wrapped.features", label="outer", events=events) if nested else inner)
     features = _features(tree)
     state = RuntimeStorage.in_memory()
@@ -80,7 +80,7 @@ class _RequiresFeatureTypes(AbstractCapability):
     id: str | None = "test.requires-features"
 
     def get_ordering(self) -> CapabilityOrdering:
-        features = (ConversationCapability, CheckpointCapability, TraceCapability)
+        features = (ExecutionCapability, CheckpointCapability, TraceCapability)
         return CapabilityOrdering(requires=features, wraps=features)
 
     async def before_run(self, ctx: RunContext) -> None:
@@ -92,7 +92,7 @@ async def test_bound_features_preserve_public_types_and_subclass_hooks_for_nativ
     events: list[tuple[str, str]] = []
     trace = _ObservedTrace(events=events)
     checkpoint = CheckpointCapability()
-    conversation = ConversationCapability()
+    conversation = ExecutionCapability(retain_history=True)
     features = _features(trace, checkpoint, conversation, _RequiresFeatureTypes(events=events))
     async with Runtime.open("type-ordering", models=_FeatureModels(), storage=RuntimeStorage.in_memory(),
                             features=features) as runtime:

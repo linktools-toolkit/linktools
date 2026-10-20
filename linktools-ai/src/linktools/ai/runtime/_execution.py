@@ -3,7 +3,6 @@
 """Execution query API and the persistence-backed default service."""
 
 import asyncio
-import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -82,7 +81,7 @@ from ..storage import (
     payload_fits_inline,
 )
 from ._conversation_service import ConversationService
-from ._execution_context import ExecutionInputContext
+from ._context_archive import ExecutionContextArchive, PreparedExecutionContext
 from ..capability import ToolResponseFixture
 from ._tool_response_fixture import _load_tool_response_fixture
 from ..core import HandoffGate, HandoffState
@@ -486,6 +485,7 @@ class DefaultExecutionService:
         durable_trace: bool = False,
         conversation: bool = False,
         terminal_commit: bool = False,
+        context_archive: ExecutionContextArchive | None = None,
     ) -> None:
         if any(not isinstance(value, bool) for value in (
             restart_checkpoints, durable_trace, conversation, terminal_commit,
@@ -496,6 +496,7 @@ class DefaultExecutionService:
         self._conversation = conversation
         self._terminal_commit = terminal_commit
         self._state = state
+        self._context_archive = context_archive
         self._object_store = object_store
         self._object_reader = object_reader
         self._sessions = sessions
@@ -2411,11 +2412,15 @@ class DefaultExecutionService:
         request = context.request
 
         input_context = None
+        prepared_context = None
         repository_instructions = None
         if request.input_context is not None:
             if session_id is not None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            input_context = await self._materialize_repository_instructions(request.input_context, tenant_id=request.principal.tenant_id)
+            if self._context_archive is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            prepared_context = await self._context_archive.prepare(request.input_context)
+            input_context = prepared_context.reference
             if request.input_context.repository_instructions is not None:
                 from ..spec import RepositoryInstructions
                 repository_instructions = await self._materialize_repository_instructions(
@@ -2514,6 +2519,7 @@ class DefaultExecutionService:
         )
         return await self._admit_execution_start(
             request, proposed_reservation, binding, session,
+            prepared_context=prepared_context,
             prepare_local_stream=prepare_local_stream,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
@@ -2528,6 +2534,7 @@ class DefaultExecutionService:
         binding: AgentBinding,
         session: "SessionRecord | None",
         *,
+        prepared_context: PreparedExecutionContext | None = None,
         prepare_local_stream: bool,
         dependency_hold_id: str | None,
         requires_task_invocation_capture: bool,
@@ -2578,6 +2585,7 @@ class DefaultExecutionService:
                         return ExecutionHandle(pending_id)
                 return await self._reserve_and_launch_start(
                     request, proposed_reservation, binding,
+                    prepared_context=prepared_context,
                     prepare_local_stream=prepare_local_stream,
                     dependency_hold_id=dependency_hold_id,
                     requires_task_invocation_capture=requires_task_invocation_capture,
@@ -2672,6 +2680,7 @@ class DefaultExecutionService:
         proposed_reservation: ExecutionStartReservation,
         binding: AgentBinding,
         *,
+        prepared_context: PreparedExecutionContext | None = None,
         prepare_local_stream: bool,
         dependency_hold_id: str | None,
         requires_task_invocation_capture: bool,
@@ -2682,7 +2691,13 @@ class DefaultExecutionService:
         scope = identity.scope
         idempotency_key_digest = identity.idempotency_key_digest
         request_digest = identity.request_digest
-        reservation = await self._state.executions.reserve_start(proposed_reservation)
+        if prepared_context is None:
+            reservation = await self._state.executions.reserve_start(proposed_reservation)
+        else:
+            reservation = await self._state.executions.reserve_start(
+                proposed_reservation,
+                input_context_write=(prepared_context.archive, prepared_context.records),
+            )
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -3381,13 +3396,9 @@ class DefaultExecutionService:
         if previous.context_imported:
             if previous.input_context is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            payload = previous.input_context.payload
-            value = (
-                payload.decode()
-                if payload.kind == "inline"
-                else json.loads(await read_runtime_object(self._object_store, payload.ref))
-            )
-            input_context = ExecutionInputContext.from_payload(value)
+            if self._context_archive is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            input_context = await self._context_archive.load(previous.input_context)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,

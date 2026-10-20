@@ -19,9 +19,9 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeHistory
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime._message import decode_model_messages
-from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, StagedModelInteraction
+from linktools.ai.runtime._model_interaction import StagedContextInline, StagedContextProjection, StagedContextSpan, StagedModelInteraction
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._archive import PreparedArchive
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.capability import TraceCapability
@@ -47,7 +47,9 @@ async def test_running_public_metadata_does_not_read_prepared_request_payloads(t
             raise AssertionError(f"running observation read a prepared body: {digest}")
 
         archive = state.run_store.read_store(RuntimeDomain.TRACE)
-        values = await archive.prepare_interactions(AgentRunRecord("run"), (prepared,), read_payload)
+        values = await archive.prepare_interactions(
+            AgentRunRecord("run"), (prepared,), read_payload, prepared=PreparedArchive(),
+        )
         assert len(values) == 1
         assert values[0].request_context is None and values[0].request_envelope is None
         assert values[0].model == prepared.model
@@ -90,7 +92,8 @@ async def test_failed_replayed_request_keeps_every_received_raw_response_part() 
         interaction, = await store.list_model_interactions(agent_run_id="run")
         assert interaction.model_request_seq == second.model_request_seq
         payload, = interaction.response_context.items
-        response, = decode_model_messages(store.staged_payload("run", payload.payload_digest))
+        assert isinstance(payload, StagedContextSpan)
+        response, = resumed.transcript_messages()[payload.start:payload.end]
         assert response.state == "interrupted"
         assert response.parts == [call, TextPart("unfinished response")]
     finally:

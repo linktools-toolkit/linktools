@@ -13,7 +13,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ConversationCapability, CheckpointCapability, ExecutionCapability, TraceCapability, RuntimeFeatures, AgentContext
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability, RuntimeFeatures, AgentContext
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
@@ -54,8 +54,7 @@ async def _run_observed(path: Path, backend: str, policy: CommitPolicy, monkeypa
     features.tool(lookup, effect_policy="none")
     features.agent("default", model="default", allow_tools=("lookup",))
     for capability in (
-        ExecutionCapability(commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=65536)),
-        ConversationCapability(),
+        ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=InMemoryCacheBackend(max_bytes=65536)),
         TraceCapability(commit=policy, storage=StorageRoute.sqlite(path / "trace.db") if split else None),
         *((CheckpointCapability(),) if checkpoint else ()),
     ):

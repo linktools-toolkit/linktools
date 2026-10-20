@@ -4,7 +4,7 @@
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
@@ -32,14 +32,20 @@ from ._input import stored_user_input_view
 from .service_api import SessionTurn, SessionTurnItem
 from .state._contracts import (
     ConversationRepositories,
+    ConversationHistoryRecord,
+    ConversationHistoryRepository,
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
     SessionTurnCommit,
     SessionTurnRef,
+    TranscriptHeadRecord,
 )
-from .state._conversation_repositories import SessionRepositoryImpl
+from .state._conversation_persistence import ConversationPersistence
+from .state._conversation_repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._model_interaction_store import ModelInteractionStateStepArchive
+from .state._step_archive import StateStepArchive
 from .state._store import StateGroupTransaction
 from .state._views import project_session_history_message
 
@@ -48,6 +54,14 @@ _TIMELINE_CURSOR_KIND = "SESSION_TIMELINE"
 
 
 class SessionTimelineTranscriptStore(Protocol):
+    async def committed_conversation_message_count(
+        self,
+        *,
+        history_id: str | None,
+        agent_run_id: str,
+        tenant_id: str,
+    ) -> int: ...
+
     async def read_conversation_payload(self, payload: StoredPayload) -> bytes: ...
 
     def iter_conversation_message_range(
@@ -244,6 +258,7 @@ class SessionTimelineCapture:
     executions: Mapping[str, ExecutionRecord]
     commits: dict[tuple[str, int], SessionTurnCommit]
     pending_execution: ExecutionRecord | None = None
+    histories: Mapping[str, tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord]] = field(default_factory=dict)
 
 
 class _ActiveSessionAdmission(Exception):
@@ -251,7 +266,7 @@ class _ActiveSessionAdmission(Exception):
         self.record = record
 
 
-async def _capture_timeline_state(
+async def capture_session_timeline(
     conversation: ConversationRepositories,
     executions: ExecutionRepository,
     session_id: str,
@@ -263,6 +278,7 @@ async def _capture_timeline_state(
     pending_execution: ExecutionRecord | None = None,
     authorized_header: ResourceRef | None = None,
     refresh_phase: Literal["initial", "final"] | None = None,
+    include_active: bool = False,
     transcript_store: SessionTimelineTranscriptStore | None = None,
     validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None] | None = None,
 ) -> SessionTimelineCapture:
@@ -322,7 +338,7 @@ async def _capture_timeline_state(
             ref.execution_id for _record, refs in blocks for ref in refs
             if (ref.session_id, ref.turn_seq) not in commits
         )
-        if refresh_phase is not None and root.active_execution_id is not None:
+        if (include_active or refresh_phase is not None) and root.active_execution_id is not None:
             ids += (root.active_execution_id,)
         ids = tuple(dict.fromkeys(ids))
         # Only the synthetic newest turn may omit canonical membership.
@@ -369,9 +385,50 @@ async def _capture_timeline_state(
     if session_store.storage_group is execution_store.storage_group:
         async def read(_group: StateGroupTransaction) -> SessionTimelineCapture:
             root, blocks, next_coordinate = await read_blocks()
+            histories = conversation.histories
+            capture_histories = (
+                type(histories) is ConversationHistoryRepositoryImpl
+                and histories.state_store is session_store
+                and type(transcript_store) is ConversationPersistence
+                and type(transcript_store.archive) in (StateStepArchive, ModelInteractionStateStepArchive)
+                and transcript_store.archive.state_store is session_store
+                and transcript_store.archive.transcript_repository.accepts_history_capture(histories)
+            )
+            transaction = _group.transaction(session_store)
+            if capture_histories:
+                keys: list[bytes] = []
+                for record, refs in blocks:
+                    if not refs:
+                        continue
+                    keys.extend(conversation.sessions.timeline_commit_record_keys(
+                        record.session_id, start_turn_seq=refs[0].turn_seq,
+                        end_turn_seq=refs[-1].turn_seq + 1,
+                    ))
+                    if record.history_id is not None and record.continuation is not None:
+                        keys.extend(histories.history_record_keys(record.history_id))
+                if keys:
+                    await transaction.get_records(tuple(dict.fromkeys(keys)))
             commits = await commit_records(blocks)
             records = await execution_records(root, blocks, commits)
-            return SessionTimelineCapture(root, blocks, next_coordinate, records, commits, pending_execution)
+            history_captures: dict[str, tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord]] = {}
+            if capture_histories:
+                for record, refs in blocks:
+                    if (record.history_id is None or record.continuation is None
+                            or not any(
+                                (commit := commits.get((record.session_id, ref.turn_seq))) is not None
+                                and commit.end_message_index > commit.start_message_index
+                                for ref in refs
+                            )):
+                        continue
+                    captured = await histories.get_with_head_in_transaction(
+                        transaction, record.history_id, tenant_id=histories.tenant_id,
+                    )
+                    if captured is None:
+                        raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+                    history_captures[record.history_id] = histories, *captured
+            return SessionTimelineCapture(
+                root, blocks, next_coordinate, records, commits, pending_execution, history_captures,
+            )
 
         return await session_store.storage_group.read_many(
             (session_store, execution_store), read,
@@ -405,7 +462,7 @@ async def capture_session_refresh(
 ) -> SessionTimelineCapture:
     """Capture authorized metadata, reconciling terminal admission outside read scopes."""
     try:
-        return await _capture_timeline_state(
+        return await capture_session_timeline(
             conversation, executions, session_id, tenant_id=tenant_id,
             cursor=cursor, cursor_signer=cursor_signer, limit=limit,
             pending_execution=pending_execution, authorized_header=authorized_header,
@@ -414,7 +471,7 @@ async def capture_session_refresh(
         )
     except _ActiveSessionAdmission as admission:
         await reconcile(admission.record)
-    return await _capture_timeline_state(
+    return await capture_session_timeline(
         conversation, executions, session_id, tenant_id=tenant_id,
         cursor=cursor, cursor_signer=cursor_signer, limit=limit,
         pending_execution=pending_execution, authorized_header=authorized_header,
@@ -444,11 +501,12 @@ async def project_session_timeline(
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
     pending = None if pending_session_execution is None else await pending_session_execution(header)
-    state = await _capture_timeline_state(
+    state = await capture_session_timeline(
         conversation, executions, session_id,
         tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
         limit=limit, pending_execution=pending,
         authorized_header=header,
+        transcript_store=transcript_store,
     )
     return await project_captured_session_timeline(
         state, transcript_store, cursor_signer, session_id=session_id,
@@ -488,18 +546,26 @@ async def project_captured_session_timeline(
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         range_start = min(item.start_message_index for item in committed)
         range_end = max(item.end_message_index for item in committed)
+        history_capture = state.histories.get(record.history_id)
+        if history_capture is not None and type(transcript_store) is ConversationPersistence:
+            source = transcript_store.iter_conversation_message_range(
+                history_id=record.history_id,
+                agent_run_id=record.continuation.agent_run_id,
+                tenant_id=transcript_tenant_id, start=range_start, end=range_end,
+                history_capture=history_capture,
+            )
+        else:
+            source = transcript_store.iter_conversation_message_range(
+                history_id=record.history_id,
+                agent_run_id=record.continuation.agent_run_id,
+                tenant_id=transcript_tenant_id, start=range_start, end=range_end,
+            )
         loaded = cast(
             tuple[ModelMessage, ...],
             tuple(
                 [
                     item
-                    async for item in transcript_store.iter_conversation_message_range(
-                        history_id=record.history_id,
-                        agent_run_id=record.continuation.agent_run_id,
-                        tenant_id=transcript_tenant_id,
-                        start=range_start,
-                        end=range_end,
-                    )
+                    async for item in source
                 ]
             ),
         )
@@ -596,6 +662,7 @@ __all__ = [
     "SessionTimelineCapture",
     "SessionTimelineTranscriptStore",
     "capture_session_refresh",
+    "capture_session_timeline",
     "project_captured_session_timeline",
     "project_session_timeline",
 ]

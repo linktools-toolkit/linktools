@@ -66,9 +66,9 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
     monkeypatch.setattr(Runtime, 'open', tracked_open)
     monkeypatch.setattr(web_command, '_local_runtime_models', lambda *_: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, 'Server', Server)
-    for extra in ([], ['--read-only']):
+    for _ in range(2):
         args = web_command.command.create_parser().parse_args([
-            '--project', str(tmp_path), '--model', 'fake', '--proxy', *extra,
+            '--project', str(tmp_path), '--model', 'fake',
         ])
         assert web_command.command.run(args) == 0
 

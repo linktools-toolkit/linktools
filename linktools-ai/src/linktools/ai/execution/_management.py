@@ -282,12 +282,18 @@ class ExecutionManager:
                 except AIError as error:
                     if error.code is not ErrorCode.STORAGE_CONFLICT:
                         raise
-                    resolved = await self._resolve_cancel_race(
-                        execution_id, request.principal.tenant_id, operation
+                    current = await self._port.read_execution(
+                        execution_id, tenant_id=request.principal.tenant_id,
                     )
-                    if resolved is not None:
-                        return resolved
-                    raise
+                    if current is not None and current.status is ExecutionStatus.CANCELLING:
+                        cancelling = current
+                    else:
+                        resolved = await self._resolve_cancel_race(
+                            execution_id, request.principal.tenant_id, operation
+                        )
+                        if resolved is not None:
+                            return resolved
+                        raise
             if cancelling.status is not ExecutionStatus.CANCELLING:
                 resolved = await self._resolve_cancel_race(
                     execution_id,

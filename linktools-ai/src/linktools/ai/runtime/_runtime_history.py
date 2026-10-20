@@ -5,11 +5,16 @@
 from ..storage import StorageRetentionMode
 
 import json
+import math
+import time
 import heapq
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import cast
+
+from pydantic_ai.messages import ModelMessage
 
 from linktools.core import environ
 
@@ -27,16 +32,19 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    SessionStatus,
     TaskStatus,
     TenantAuthorizationPolicy,
     canonical_sha256,
     normalize_json_value,
+    principal_identity_payload,
     validate_page_limit,
     validate_persistence_namespace,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..storage import ObjectRef, ObjectStore, StoredPayload, read_object
+from ..storage import CacheBackend, ObjectRef, ObjectStore, StoredPayload, read_object
+from ..session import SessionDetail, SessionManager, SessionPendingExecutionLookup
 from ..spec import CapabilityRef
 from ..task import (
     TaskEvent,
@@ -45,7 +53,8 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
-from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration
+from ._persistence_configuration import persistence_storage_configuration, capability_storage_configuration, execution_configuration
+from ._pending_coordination import _PendingTurnCoordination
 from .state._object_router import runtime_object_source_reads
 from ._event import project_event_payload
 from ..core import decode_cursor as decode_runtime_cursor
@@ -54,9 +63,12 @@ from ._history_projection import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService, _read_model_interaction_updates
 from ._runtime_identity import token_seed
 from ._transient_history import TransientExecutionHistoryStore
+from ._session_display_cache import SessionDisplayCache
+from .state._store import active_state_scope
 from ._session_timeline import (
     SessionTimelineTranscriptStore,
-    project_session_timeline,
+    capture_session_timeline,
+    project_captured_session_timeline,
 )
 from .service_api import (
     AttachmentFact,
@@ -80,6 +92,7 @@ from .service_api import (
 )
 from .state import RuntimeDomain, RuntimeStorage, RuntimeState
 from .state._execution_repositories import ExecutionRepositoryImpl
+from .state._conversation_repositories import SessionRepositoryImpl
 from .state._step_archive import StagingAgentRunStore
 from .state._contracts import (
     ConversationRepositories,
@@ -257,6 +270,9 @@ class RuntimeHistory:
         artifacts: "ArtifactService | None" = None,
         conversation: "ConversationRepositories | None" = None,
         session_transcript_store: "SessionTimelineTranscriptStore | None" = None,
+        pending_session_execution: SessionPendingExecutionLookup[ExecutionRecord] | None = None,
+        pending_execution: Callable[..., Awaitable[ExecutionRecord | None]] | None = None,
+        cache: CacheBackend | None = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
@@ -275,21 +291,30 @@ class RuntimeHistory:
         self._artifacts = artifacts
         self._conversation = conversation
         self._session_transcript_store = session_transcript_store
+        self._pending_session_execution = pending_session_execution
+        self._pending_execution = pending_execution
+        self._session_cursor_signer = (cursor_signer if namespace is None else
+                                       HmacCursorSigner("session", token_seed(namespace)))
+        self._display_cache = (
+            None if conversation is None or executions is None or self._session_cursor_signer is None
+            else SessionDisplayCache(conversation, executions, session_transcript_store,
+                                     self._session_cursor_signer, cache, now=lambda: time.time())
+        )
 
     @property
     def tenant_id(self) -> str:
         return self._tenant_id
 
     async def inspect_execution(
-        self, execution_id: str, *, principal: Principal
+        self, execution_id: str, *, principal: Principal, include_usage: bool = True
     ) -> ExecutionInfo:
+        if not isinstance(include_usage, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         record = await self._authorized_record(execution_id, principal)
         return _project_execution_info(
             record,
-            usage=await self._service.usage(
-                execution_id,
-                principal=principal,
-            ),
+            usage=(await self._service.usage(execution_id, principal=principal)
+                   if include_usage else None),
         )
 
     async def result(
@@ -763,6 +788,161 @@ class RuntimeHistory:
             unrecorded_executions=unrecorded,
         )
 
+    async def list_sessions(
+        self,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> Page[SessionView]:
+        """Read one metadata page in repository order, without loading a Runtime.
+
+        Cursors retain the repository snapshot. Authorization may yield a short
+        or empty page with a next cursor; callers must follow that cursor.
+        """
+        limit = validate_page_limit(limit)
+        sessions, authorization = self._require_session_reader()
+        signer = self._cursor_signer
+        if signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await authorization.authorize(
+            principal, AuthorizationAction.SESSION_READ,
+            ResourceRef(ResourceKind.SESSION, "list", principal.tenant_id),
+        )
+        digest = canonical_sha256({"principal": principal_identity_payload(principal)})
+        position = None
+        snapshot = None
+        if cursor is not None:
+            decoded = decode_runtime_cursor(
+                cursor, signer, tenant_id=principal.tenant_id,
+                resource_kind="HISTORY_SESSIONS", filter_digest=digest,
+            )
+            position, snapshot = decoded.position, decoded.revision
+        snapshot, page = await sessions.list_page(
+            tenant_id=principal.tenant_id,
+            owner_principal_id=principal.principal_id,
+            cursor=position, limit=limit, snapshot=snapshot,
+        )
+        active_ids = tuple(dict.fromkeys(record.active_execution_id for record in page.items
+                                         if record.active_execution_id is not None))
+        active_records = {}
+        if active_ids:
+            executions, _ = self._require_direct_reader()
+            active_records = await executions.get_many(active_ids, tenant_id=principal.tenant_id)
+        values: list[SessionView] = []
+        for record in page.items:
+            try:
+                await authorization.authorize(
+                    principal, AuthorizationAction.SESSION_READ,
+                    ResourceRef(ResourceKind.SESSION, record.session_id,
+                                principal.tenant_id, record.owner_principal_id),
+                )
+            except AIError as error:
+                if error.code is ErrorCode.AUTHORIZATION_DENIED:
+                    continue
+                raise
+            values.append(await self._observed_session_view(record, principal, active_records=active_records))
+        next_cursor = None if page.next_cursor is None else encode_runtime_cursor(
+            signer, tenant_id=principal.tenant_id,
+            resource_kind="HISTORY_SESSIONS", filter_digest=digest,
+            position=page.next_cursor, revision=snapshot,
+        )
+        return Page(tuple(values), next_cursor)
+
+    async def messages(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> Page[ModelMessage]:
+        """Read retained raw messages, oldest first, including all message parts.
+
+        The first page fixes a committed prefix; later appends are excluded.
+        Compression changes the model's working context, not this transcript.
+        Pending or paused staging is excluded. Failed/cancelled turns expose
+        only their committed messages; zero-message outcomes remain available
+        through ``session_timeline``.
+        """
+        limit = validate_page_limit(limit)
+        sessions, authorization = self._require_session_reader()
+        signer, store = self._cursor_signer, self._session_transcript_store
+        if signer is None or store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        header = await sessions.get_header(session_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+        record = await sessions.get(session_id, tenant_id=principal.tenant_id)
+        if (record is None or record.owner_principal_id != header.owner_principal_id
+                or header.id != record.session_id or header.tenant_id != principal.tenant_id):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if record.history_quality == "unavailable":
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        digest = canonical_sha256({
+            "session_id": session_id,
+            "principal": principal_identity_payload(principal),
+        })
+        continuation = record.continuation
+        if continuation is None:
+            if cursor is not None:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            return Page((), None)
+        history_id = continuation.history_id or record.history_id
+        agent_run_id = continuation.agent_run_id
+        start = 0
+        if cursor is None:
+            high_water = continuation.message_count
+            if high_water is None:
+                high_water = await store.committed_conversation_message_count(
+                    history_id=history_id, agent_run_id=agent_run_id,
+                    tenant_id=principal.tenant_id,
+                )
+        else:
+            decoded = decode_runtime_cursor(
+                cursor, signer, tenant_id=principal.tenant_id,
+                resource_kind="SESSION_MESSAGES", filter_digest=digest,
+            )
+            try:
+                coordinate = json.loads(decoded.position)
+            except (ValueError, TypeError) as error:
+                raise AIError(ErrorCode.CURSOR_INVALID) from error
+            if (
+                decoded.revision != 0 or not isinstance(coordinate, list)
+                or len(coordinate) != 4 or coordinate[0] != history_id
+                or not isinstance(coordinate[1], str) or not coordinate[1]
+                or any(isinstance(value, bool) or not isinstance(value, int)
+                       for value in coordinate[2:])
+                or coordinate[2] < 0 or not 0 <= coordinate[3] <= coordinate[2]
+            ):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            _, agent_run_id, high_water, start = coordinate
+            if history_id is None and agent_run_id != continuation.agent_run_id:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            if continuation.message_count is not None and high_water > continuation.message_count:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+        if isinstance(high_water, bool) or not isinstance(high_water, int) or high_water < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        end = min(start + limit, high_water)
+        if start == end:
+            return Page((), None)
+        messages = tuple([
+            message async for message in store.iter_conversation_message_range(
+                history_id=history_id, agent_run_id=agent_run_id,
+                tenant_id=principal.tenant_id, start=start, end=end,
+            )
+        ])
+        if len(messages) != end - start:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        next_cursor = None if end == high_water else encode_runtime_cursor(
+            signer, tenant_id=principal.tenant_id,
+            resource_kind="SESSION_MESSAGES", filter_digest=digest,
+            position=json.dumps([history_id, agent_run_id, high_water, end],
+                                separators=(",", ":")),
+        )
+        return Page(cast(tuple[ModelMessage, ...], messages), next_cursor)
+
     async def recent_sessions(
         self,
         *,
@@ -812,6 +992,158 @@ class RuntimeHistory:
         recent.sort(key=lambda value: (value[0], value[1]), reverse=True)
         return tuple(value[2] for value in recent)
 
+    async def _observed_session_view(
+        self, record: SessionRecord, principal: Principal,
+        *, active_records: Mapping[str, ExecutionRecord] | None = None,
+    ) -> SessionView:
+        header = ResourceRef(ResourceKind.SESSION, record.session_id,
+                             principal.tenant_id, record.owner_principal_id)
+        pending = (await self._pending_session(header)
+                   if record.status is SessionStatus.OPEN and record.active_execution_id is None else None)
+
+        async def read() -> SessionView:
+            current = record
+            if pending is not None:
+                sessions, _ = self._require_session_reader()
+                current = await sessions.get(record.session_id, tenant_id=principal.tenant_id)
+                if current is None or current.owner_principal_id != header.owner_principal_id:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            active = current.active_execution_id
+            if active is not None:
+                executions, _ = self._require_direct_reader()
+                execution = (active_records.get(active) if active_records is not None and pending is None
+                             else await executions.get(active, tenant_id=principal.tenant_id))
+                observed = SessionManager.validate_admission(current, execution)
+                active = None if observed is None else observed.execution_id
+            elif (pending is not None and current.status is SessionStatus.OPEN
+                  and pending.created_at >= current.created_at):
+                executions, _ = self._require_direct_reader()
+                if isinstance(executions, ExecutionRepositoryImpl):
+                    records = await executions.get_many_fresh(
+                        (pending.execution_id,), tenant_id=principal.tenant_id,
+                    )
+                    canonical = records.get(pending.execution_id)
+                else:
+                    canonical = await executions.get(pending.execution_id, tenant_id=principal.tenant_id)
+                if canonical is None:
+                    active = pending.execution_id
+                else:
+                    sessions, _ = self._require_session_reader()
+                    current = (await sessions.state_store.read(
+                        lambda _transaction: sessions.get(record.session_id, tenant_id=principal.tenant_id)
+                    ) if isinstance(sessions, SessionRepositoryImpl) else
+                        await sessions.get(record.session_id, tenant_id=principal.tenant_id))
+                    if current is None or current.owner_principal_id != header.owner_principal_id:
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    observed = SessionManager.validate_admission(
+                        current, canonical if current.active_execution_id == canonical.execution_id else None,
+                    )
+                    active = None if observed is None else observed.execution_id
+            return replace(_project_session_view(current), active_execution_id=active)
+
+        if pending is None or self._display_cache is not None and self._display_cache.supported():
+            return await read()
+        sessions, _ = self._require_session_reader()
+        executions, _ = self._require_direct_reader()
+        if (type(sessions) is SessionRepositoryImpl and type(executions) is ExecutionRepositoryImpl
+                and sessions.state_store.storage_group is executions.state_store.storage_group):
+            return await sessions.state_store.storage_group.read_many(
+                (sessions.state_store, executions.state_store), lambda _group: read(),
+            )
+        return await read()
+
+    async def _pending_session(self, header: ResourceRef) -> ExecutionRecord | None:
+        if self._pending_session_execution is None:
+            return None
+        pending = await self._pending_session_execution(header.id, tenant_id=header.tenant_id)
+        if (pending is None or pending.session_id != header.id
+                or pending.principal_id != header.owner_principal_id
+                or pending.parent_execution_id is not None or pending.result is not None
+                or pending.status not in {ExecutionStatus.PENDING_START, ExecutionStatus.STARTED,
+                                          ExecutionStatus.CANCELLING}):
+            return None
+        return pending
+
+    async def session_detail(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+        max_age: float = 0,
+    ) -> SessionDetail:
+        """Read a coherent display with live coordination observations, without writes.
+
+        Durable admission and terminal commits take precedence over observations.
+        Positive max_age reuses the shared display cache with current authorization
+        and membership checks; zero forces an authoritative metadata capture.
+        """
+        if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not math.isfinite(max_age) or max_age < 0:
+            raise ValueError("max_age must be finite and non-negative")
+        started = time.time()
+        validate_page_limit(limit)
+        if self._conversation is None or self._session_transcript_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        signer = self._session_cursor_signer
+        if signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        executions, authorization = self._require_direct_reader()
+        sessions = self._conversation.sessions
+        header = await sessions.get_header(session_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
+        pending = await self._pending_session(header)
+        cache_key = None
+        display_cache = self._display_cache
+        if (display_cache is not None and display_cache.supported()
+                and max_age > 0 and active_state_scope() is None
+                and (pending is None or cursor is None)):
+            cacheable = True
+            if cursor is not None:
+                try:
+                    cacheable = json.loads(signer.decode(cursor).position)[0] == session_id
+                except (AIError, TypeError, ValueError, IndexError, KeyError):
+                    cacheable = False
+            if cacheable:
+                cache_key = "session-display:v1:" + canonical_sha256({
+                    "namespace": sessions.namespace,
+                    "principal": [principal.tenant_id, principal.principal_id, principal.kind],
+                    "session_id": session_id, "cursor": cursor, "limit": limit,
+                })
+                cached = await display_cache.read(
+                    cache_key, header, principal, cursor=cursor, max_age=max_age, pending=pending,
+                )
+                if cached is not None:
+                    return cached
+        state = await capture_session_timeline(
+            self._conversation, executions, session_id,
+            tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=signer,
+            limit=limit, pending_execution=pending, authorized_header=header,
+            include_active=True,
+            transcript_store=self._session_transcript_store,
+        )
+        record = state.root
+        active = SessionManager.validate_admission(
+            record, None if record.active_execution_id is None
+            else state.executions.get(record.active_execution_id),
+        )
+        view = replace(_project_session_view(record), active_execution_id=(
+            state.pending_execution.execution_id if state.pending_execution is not None
+            else None if active is None else active.execution_id
+        ))
+        with runtime_object_source_reads():
+            timeline = await project_captured_session_timeline(
+                state, self._session_transcript_store, signer,
+                session_id=session_id, tenant_id=principal.tenant_id,
+                transcript_tenant_id=sessions.tenant_id,
+            )
+        detail = SessionDetail(view, timeline)
+        if cache_key is not None and record.timeline_parent_session_id is None:
+            await display_cache.write(cache_key, state, detail, started, max_age)
+        return detail
+
     async def session_timeline(
         self,
         session_id: str,
@@ -820,23 +1152,9 @@ class RuntimeHistory:
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> Page[SessionTurn]:
-        if self._conversation is None or self._session_transcript_store is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        signer = self._cursor_signer
-        if signer is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        executions, authorization = self._require_direct_reader()
-        return await project_session_timeline(
-            self._conversation,
-            executions,
-            authorization,
-            signer,
-            self._session_transcript_store,
-            session_id,
-            principal=principal,
-            cursor=cursor,
-            limit=limit,
-        )
+        return (await self.session_detail(
+            session_id, principal=principal, cursor=cursor, limit=limit,
+        )).timeline
 
     async def inspect_session(
         self,
@@ -862,7 +1180,7 @@ class RuntimeHistory:
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        return _project_session_view(record)
+        return await self._observed_session_view(record, principal)
 
     @classmethod
     def open(
@@ -1126,26 +1444,36 @@ class RuntimeHistory:
         *, committed: bool = False,
     ) -> ExecutionRecord:
         executions, authorization = self._require_direct_reader()
-        header = await executions.get_header(
-            execution_id,
-            tenant_id=principal.tenant_id,
-        )
+        pending = (None if self._pending_execution is None else
+                   await self._pending_execution(execution_id, tenant_id=principal.tenant_id))
+        header = await executions.get_header(execution_id, tenant_id=principal.tenant_id)
+        if header is None and pending is not None:
+            header = ResourceRef(ResourceKind.EXECUTION, execution_id,
+                                 principal.tenant_id, pending.principal_id)
+        if header is None and isinstance(executions, ExecutionRepositoryImpl):
+            # A remote terminal commit may have removed its coordination entry
+            # while this reader still caches the earlier canonical absence.
+            header = await executions.get_header_fresh(execution_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await authorization.authorize(
-            principal,
-            AuthorizationAction.EXECUTION_READ,
-            header,
-        )
+        await authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
         record = (
             await executions.state_store.read(
                 lambda _transaction: executions.get(execution_id, tenant_id=principal.tenant_id)
             )
-            if committed else await executions.get(execution_id, tenant_id=principal.tenant_id)
+            if committed or pending is not None and isinstance(executions, ExecutionRepositoryImpl)
+            else await executions.get(execution_id, tenant_id=principal.tenant_id)
         )
-        if record is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        return record
+        if record is not None:
+            if header.owner_principal_id is not None and record.principal_id != header.owner_principal_id:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            return record
+        if pending is not None:
+            if header.owner_principal_id is not None and pending.principal_id != header.owner_principal_id:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            return pending
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
 
 
 @asynccontextmanager
@@ -1170,6 +1498,10 @@ async def _open_runtime_history(
         await captured.verify_source_revision()
     capabilities = () if captured is None else tuple(
         item.value for item in captured.contributions if item.scope == "runtime"
+    )
+    execution_policy = execution_configuration(capabilities)
+    pending_coordination = _PendingTurnCoordination.select(
+        execution_policy.coordination, namespace=resolved_namespace, tenant_id=effective_tenant_id,
     )
     module_routes = persistence_storage_configuration(capabilities)
     capability_routes = capability_storage_configuration(
@@ -1221,6 +1553,7 @@ async def _open_runtime_history(
             effective_authorization,
             reader,
             cursor_signer=HmacCursorSigner("execution", token_seed(resolved_namespace)),
+            pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
         )
         artifacts = DefaultArtifactService(
             selected_state.artifact,
@@ -1247,6 +1580,13 @@ async def _open_runtime_history(
             ),
             conversation=selected_state.conversation,
             session_transcript_store=selected_state.run_store.conversation_persistence,
+            pending_session_execution=(None if pending_coordination is None
+                                       else pending_coordination.read_session_execution),
+            pending_execution=None if pending_coordination is None else pending_coordination.read_execution,
+            cache=(selected_state.plan.route(RuntimeDomain.CONVERSATION).cache if all(
+                selected_state.plan.route(domain).retention is StorageRetentionMode.DURABLE
+                for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION)
+            ) else None),
         )
     except BaseException as error:
         body_error = error

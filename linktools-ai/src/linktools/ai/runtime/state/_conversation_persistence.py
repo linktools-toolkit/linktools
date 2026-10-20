@@ -8,7 +8,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
-from ._contracts import LoadedContextMessage, LoadedModelContext
+from ._contracts import ConversationHistoryRecord, ConversationHistoryRepository, LoadedContextMessage, LoadedModelContext, TranscriptHeadRecord
 from ._step_archive import InMemoryStepArchive, StateStepArchive
 from ._step_contracts import AgentRunStore
 
@@ -79,6 +79,19 @@ class ConversationPersistence:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
 
+    async def committed_conversation_message_count(
+        self, *, history_id: str | None, agent_run_id: str, tenant_id: str,
+    ) -> int:
+        archive = self.archive
+        if isinstance(archive, StateStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await archive.committed_session_message_count(history_id,
+                agent_run_id=agent_run_id, tenant_id=tenant_id)
+        if isinstance(archive, InMemoryStepArchive):
+            return await archive.transcript_message_count(agent_run_id)
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
     async def conversation_message_count(
         self,
         *,
@@ -107,6 +120,7 @@ class ConversationPersistence:
         tenant_id: str,
         start: int,
         end: int,
+        history_capture: tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord] | None = None,
     ) -> AsyncIterator[object]:
         return self._iter_conversation_message_range(
             history_id=history_id,
@@ -114,6 +128,7 @@ class ConversationPersistence:
             tenant_id=tenant_id,
             start=start,
             end=end,
+            history_capture=history_capture,
         )
 
 
@@ -125,17 +140,22 @@ class ConversationPersistence:
         tenant_id: str,
         start: int,
         end: int,
+        history_capture: tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord] | None = None,
     ) -> AsyncIterator[object]:
         archive = self.archive
         if isinstance(archive, StateStepArchive):
             if history_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            async for message in archive.iter_session_message_range(
-                history_id,
-                tenant_id=tenant_id,
-                start=start,
-                end=end,
-            ):
+            source = (
+                archive.iter_session_message_range(
+                    history_id, tenant_id=tenant_id, start=start, end=end,
+                ) if history_capture is None else
+                archive.transcript_repository.iter_session_message_range(
+                    history_id, tenant_id=tenant_id, start=start, end=end,
+                    history_capture=history_capture,
+                )
+            )
+            async for message in source:
                 yield message
             return
         if isinstance(archive, InMemoryStepArchive):

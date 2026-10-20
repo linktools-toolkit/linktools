@@ -66,6 +66,95 @@ may provide both capabilities, but each use is explicitly configured.
 `ExecutionCapability(coordination=...)` separately supplies turn ownership and
 live streams, including the non-authoritative pending-turn view.
 
+### Owner defaults for batch writes
+
+Provide only the batch settings you want to override. A buffer-only declaration
+uses Trace's 128-entry / 3-second defaults or Metrics' 128-entry / 60-second
+defaults:
+
+```python
+from linktools.ai.capability import TraceCapability
+from linktools.ai.core import CommitPolicy
+from linktools.ai.observe import Metrics
+
+trace = TraceCapability(commit=CommitPolicy.batch(buffer=write_buffer))
+metrics = Metrics.sql(engine, commit=CommitPolicy.batch(buffer=write_buffer))
+```
+
+Here `write_buffer` is a host-provided `WriteBufferBackend` and `engine` is the
+host's provisioned SQL engine. Omit `buffer` for synchronous source writes,
+without a hidden queue. Explicit `batch_size` and `flush_interval` always win;
+for example, `CommitPolicy.batch(buffer=write_buffer, batch_size=32)` changes
+only the size and retains the receiving owner's interval.
+
+`None` for either timing field means an omitted authoring value. Trace and
+Metrics resolve those fields once in their constructors and retain a complete,
+immutable policy before any Runtime capture, recorder or write scope uses it.
+The input policy is not mutated, so it can be reused by owners with different
+defaults. The generic policy has no universal batch interval.
+
+A custom `CapabilityPersistence` owner chooses its own defaults in its
+constructor with the same public operation:
+
+```python
+self._commit = commit.resolve_batch(batch_size=32, flush_interval=5.0)
+```
+
+Expose that complete policy through the capability's `commit` property before
+registering it. Runtime rejects custom batch policies that still omit either
+timing field rather than guessing defaults. `resolve_batch` leaves sync and
+terminal policies unchanged and preserves explicit batch settings and the
+borrowed buffer. It does not change safety writes, transaction grouping, or
+flush/close ownership.
+
+### Runtime archive routes and defaults
+
+`CheckpointCapability(storage=None)` and `TraceCapability(storage=None)` inherit
+Runtime's execution route, including its hot-read cache. Neither `None` disables
+the capability; registration enables it. An explicit archive route must remain
+in the same `StateStorageGroup` as Execution and Recovery, because their safety
+and terminal boundaries require atomic writes. Runtime validates this when it
+opens. Routes share a group when they use the same SQLite path, the same SQL
+engine instance, or the same filesystem transaction root; memory routes share
+one binding-local group. Separate SQL engine instances targeting the same database do not
+establish a shared SQL group.
+
+For a per-archive hot cache, derive the execution route rather than selecting
+an unrelated database. This current API example keeps Checkpoint's inherited
+cache while disabling Trace's hot cache:
+
+```python
+from linktools.ai.capability import (
+    CheckpointCapability, RuntimeFeatures, TraceCapability,
+)
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
+
+storage = RuntimeStorage.from_root("state", cache=hot_cache)
+execution_route = storage.plan.route(RuntimeDomain.EXECUTION)
+features = RuntimeFeatures("app")
+features.capability(CheckpointCapability())
+features.capability(TraceCapability(
+    storage=execution_route.with_cache(None),
+))
+async with Runtime.open(
+    "app", models=models, storage=storage, features=features,
+) as runtime:
+    ...
+```
+
+Here `hot_cache` is a host-provided `CacheBackend` and `models` is the configured
+`ModelRegistry`. `with_cache(None)` changes only the hot-read resource, preserving
+the route's transaction identity. It does not disable Trace publication or
+Checkpoint safety writes. To choose a different Trace hot cache, pass that
+backend to `with_cache` instead.
+
+Missing write buffers make batch policies await source publication without an
+implicit queue. `ExecutionCapability` is optional: when omitted, Runtime uses
+sync commit with no borrowed coordination resource. A terminal preference must
+be declared explicitly and remains subject to coordination and safety rules.
+Runtime drains its own work on close, but never closes borrowed hot caches,
+write buffers, coordination resources, SQL engines, or Metrics datasets.
+
 Adapters implement complete method groups: `get`/`put`/`delete` for hot content,
 `append`/`read_batch`/`ack` for pending writes, and `open_stream`/`read_stream`
 for previews. A write-only adapter is valid as a policy buffer, not as a
@@ -121,8 +210,8 @@ Automatic Agent and Task observations, including evaluation work in a Runtime,
 require `Runtime.open(..., metrics=dataset)`. Runtime owns one isolated recorder;
 explicit application recording uses the dataset independently.
 
-All Metrics constructors and factories accept `commit`, defaulting
-to `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
+All Metrics constructors and factories accept `commit`. Their effective default
+is `CommitPolicy.batch(batch_size=128, flush_interval=60.0)`. Use
 `CommitPolicy.sync()` for immediate writes; Metrics supports sync and batch
 policies. A Metrics batch policy requires an integer `batch_size`
 from 1 to 256 and a finite positive `flush_interval` in seconds; booleans are
@@ -632,3 +721,37 @@ cross-owner immediate visibility or act as an authorization cache. Native SQL
 batching, transaction-local record reuse, CAS and atomic Runtime commands stay
 with the authoritative store. No execution control state is moved into this
 best-effort buffer merely because it shares a database.
+
+### Optional grouped record reads
+
+Custom state backends do not need to implement SQL query optimizations. The
+required `StateStorageGroup` and `StateGroupTransaction` contracts are unchanged.
+`GroupRecordReader`, exported by `linktools.ai.runtime.state`, is an optional
+operation on a supporting storage group and its active callback:
+
+```python
+async def get_records(
+    requests: Mapping[StateStore, Sequence[bytes]],
+) -> Mapping[StateStore, Mapping[bytes, StoredRecord]]:
+    ...
+```
+
+Keys belong to explicitly enlisted stores. Call the operation only inside that
+group's existing `read_many` or `mutate` callback, from the owning task. Calling
+it on the group does not open a new transaction. Unsupported backends keep the
+original repository read path; they are not required to emulate an extra
+prefetch. Empty per-store results mean observed absence, not unsupported access.
+
+The SQL implementation combines bounded key lookups across partitions and
+updates the existing transaction-local record cache, including missing keys.
+Subsequent inserts, replacements, guards and deletions update that same view.
+The operation neither caches across transactions nor replaces domain CAS,
+unique insertion, content integrity or publication checks. Large requests split
+at the backend's parameter budget; fewer SELECT statements are not a guarantee
+of one network round trip or a transaction-wide snapshot on READ COMMITTED.
+
+Archive preparation may reuse a completed metadata observation for its exact
+requested content keys. Existing object bytes are still verified outside the
+metadata callback, and publication checks source records again inside the owner
+mutation. This observation is separate from prepared writes and verified-body
+receipts and is discarded after consumption or preparation failure.

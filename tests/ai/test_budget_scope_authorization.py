@@ -12,7 +12,7 @@ from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import ExecutionRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state._codec import _decode_enveloped_domain, encode_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import ExecutionRecord
@@ -29,7 +29,7 @@ _TASK = TaskBindingContract("adapter.task", 1, "none", {}, None, 1, 0)
 @pytest_asyncio.fixture
 async def budget_runtime() -> AsyncIterator[_BudgetRuntime]:
     group = RuntimeFeatures("scope-authorization")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()
     async with Runtime.open("scope-authorization", models=RuntimeUsageModels(),

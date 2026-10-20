@@ -27,7 +27,6 @@ from linktools.ai.runtime._model_interaction import (
     project_public_messages,
 )
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.storage import StorageRetentionMode
 from linktools.ai.runtime.state._contracts import TranscriptSpanRef
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
@@ -126,9 +125,6 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
-        conversation_retention=StorageRetentionMode.VOLATILE,
-        execution_retention=StorageRetentionMode.VOLATILE,
-        recovery_retention=StorageRetentionMode.VOLATILE,
     )
     await store.initialize()
     try:
@@ -153,9 +149,6 @@ async def test_runtime_run_store_continues_recovery_interaction_high_water() -> 
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=recovery,
-        conversation_retention=StorageRetentionMode.VOLATILE,
-        execution_retention=StorageRetentionMode.VOLATILE,
-        recovery_retention=StorageRetentionMode.VOLATILE,
     )
     await store.initialize()
     try:
@@ -228,6 +221,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
             lambda digest: payloads[digest],
             local_message_base=4,
             local_message_count=1,
+            local_messages=(source,),
         )
 
         assert len(prepared) == 1

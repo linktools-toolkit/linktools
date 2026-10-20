@@ -1371,6 +1371,7 @@ class StepExecutionHistoryReader:
             iterator = self._iter_history_source(
                 source, tenant_id=tenant_id, start_message_index=start_message_index,
                 end_message_index=message_high_water, event_high_water=event_high_water,
+                message_batch_size=limit + 1,
                 start_item_offset=start_item_offset, from_cursor=source is cursor_source,
                 tail_keys=tail_keys, tool_call_id=tool_call_id,
                 model_request_seq=model_request_seq, step_index=step_index,
@@ -1393,6 +1394,7 @@ class StepExecutionHistoryReader:
         start_message_index: int,
         end_message_index: int,
         event_high_water: int,
+        message_batch_size: int,
         start_item_offset: int,
         from_cursor: bool,
         tail_keys: tuple[str, ...],
@@ -1423,6 +1425,7 @@ class StepExecutionHistoryReader:
             agent_run_id,
             start=start_message_index,
             end=range_end,
+            batch_size=message_batch_size,
             from_cursor=from_cursor,
             capture=source.capture,
             store=self._store_for(source.record),
@@ -1586,14 +1589,16 @@ class StepExecutionHistoryReader:
 
     async def _message_range(
         self, agent_run_id: str, *, store: _ExecutionHistoryStore, start: int, end: int,
-        from_cursor: bool, capture: AgentRunHistoryCapture,
+        from_cursor: bool, capture: AgentRunHistoryCapture, batch_size: int,
     ) -> AsyncIterator[object]:
         if start < 0 or end < start or end > capture.message_count or from_cursor and start == end:
             raise AIError(ErrorCode.CURSOR_INVALID)
         complete_end = min(end, capture.transcript_message_count)
-        if start < complete_end:
+        # The caller stops after enough projected items; do not materialize the
+        # remaining transcript before its first page can be returned.
+        for offset in range(start, complete_end, batch_size):
             async for message in store.iter_message_range(
-                agent_run_id=agent_run_id, start=start, end=complete_end,
+                agent_run_id=agent_run_id, start=offset, end=min(offset + batch_size, complete_end),
             ):
                 yield message
         if end > capture.transcript_message_count:
@@ -1681,6 +1686,7 @@ class StepExecutionHistoryReader:
             agent_run_id,
             start=message_index,
             end=high_water,
+            batch_size=limit + 1,
             from_cursor=cursor is not None,
             capture=capture,
             store=self._store_for(record),

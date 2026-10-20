@@ -10,7 +10,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
-from linktools.ai.capability import ConversationCapability, CheckpointCapability
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend, _write_cache
@@ -38,7 +38,7 @@ async def test_committed_results_and_next_turn_ignore_remote_observation_cache(
 
     group = RuntimeFeatures("committed-read")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     # This test observes a source-admitted execution through a stale reader.
     group.capability(CheckpointCapability(), scope="runtime")
     database = tmp_path / "runtime.db"
@@ -91,7 +91,7 @@ async def test_terminal_consumption_reuses_confirmed_status_for_handoff(
 
     group = RuntimeFeatures("terminal-consumption")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "terminal-consumption", models=_Models(FunctionModel(stream_function=model)),
         storage=RuntimeStorage.sqlite(tmp_path / "runtime.db"), features=group,

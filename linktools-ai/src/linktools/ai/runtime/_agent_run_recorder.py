@@ -94,6 +94,7 @@ class AgentRunRecorder:
         self._restored_tool_calls: dict[str, ToolCallPart] = {}
         self._restored_pending = False
         self._model_request_seq_by_tool_call: dict[str, int] = {}
+        self._model_responses: dict[int, tuple[int, tuple[int, ...]]] = {}
         self.context_projection = RunContextProjection(agent_run_id, initial_messages, initial_context)
         self.model_interactions = ModelInteractionCapture(
             cast(TraceStagingPort, store), agent_run_id, self.context_projection, initial_attachments,
@@ -570,6 +571,15 @@ class AgentRunRecorder:
         usage: object | None,
         client_requests: tuple[ModelClientRequest, ...] | None = None,
     ) -> None:
+        response_message_index = None
+        response_error = None
+        if status == "SUCCEEDED" and fact.purpose == "agent" and response is not None:
+            try:
+                response_message_index, _ = self._capture_model_response(fact, response)
+                response = cast(ModelResponse, self._transcript_messages[response_message_index])
+            except AIError as error:
+                # Invalid tool calls remain inspectable without entering the transcript.
+                response_error = error
         if status in {"FAILED", "CANCELLED"} and fact.purpose == "agent":
             if response is None and self._pending_parts:
                 first = next(iter(self._pending_parts.values()))
@@ -579,11 +589,42 @@ class AgentRunRecorder:
                     ])
             if response is not None:
                 response = replace(response, state="interrupted")
-                self.append_transcript_message(response)
+                response = cast(ModelResponse, self.append_transcript_message(response))
+                response_message_index = len(self._transcript_messages) - 1
         self.model_interactions.finish_model_interaction(
             fact, model=model, response=response, status=status, error_code=error_code,
             duration_ns=duration_ns, usage=usage, client_requests=client_requests,
+            response_message_index=response_message_index,
         )
+        if response_error is not None:
+            raise response_error
+
+    def _capture_model_response(
+        self, fact: ModelRequestFact, response: ModelResponse,
+    ) -> tuple[int, tuple[int, ...]]:
+        captured = self._model_responses.get(fact.model_request_seq)
+        if captured is not None:
+            return captured
+        replayed_indices: list[int] = []
+        seen_call_ids: set[str] = set()
+        for part_index, part in enumerate(response.parts):
+            if not isinstance(part, ToolCallPart):
+                continue
+            call_id = part.tool_call_id
+            if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen_call_ids.add(call_id)
+            if call_id in self._model_request_seq_by_tool_call:
+                previous_call = self._restored_tool_calls.get(call_id)
+                if previous_call is None or not self._same_tool_call(previous_call, part):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                replayed_indices.append(part_index)
+            else:
+                self._model_request_seq_by_tool_call[call_id] = fact.model_request_seq
+        self.append_transcript_message(response)
+        captured = (len(self._transcript_messages) - 1, tuple(replayed_indices))
+        self._model_responses[fact.model_request_seq] = captured
+        return captured
 
     def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
         return self._model_request_seq_by_tool_call.get(tool_call_id)
@@ -609,35 +650,18 @@ class AgentRunRecorder:
         event_type = event_types.get(phase)
         if event_type is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        replayed_indices: list[int] = []
-        if (
-            fact.purpose == "agent"
-            and phase == "completed"
-            and response is not None
-        ):
-            seen_call_ids: set[str] = set()
-            for part_index, part in enumerate(response.parts):
-                if not isinstance(part, ToolCallPart):
-                    continue
-                call_id = part.tool_call_id
-                if not isinstance(call_id, str) or not call_id or call_id in seen_call_ids:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                seen_call_ids.add(call_id)
-                if call_id in self._model_request_seq_by_tool_call:
-                    previous_call = self._restored_tool_calls.get(call_id)
-                    if previous_call is None or not self._same_tool_call(previous_call, part):
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    replayed_indices.append(part_index)
-                else:
-                    self._model_request_seq_by_tool_call[call_id] = fact.model_request_seq
+        captured_response = None
+        if fact.purpose == "agent" and phase == "completed" and response is not None:
+            captured_response = self._capture_model_response(fact, response)
+            response = cast(ModelResponse, self._transcript_messages[captured_response[0]])
         metadata = fact.metadata(
             include_observation=include_observation and fact.duration_ns is not None
         )
-        if replayed_indices:
-            metadata[REPLAYED_TOOL_CALL_INDICES_METADATA_KEY] = json.dumps(replayed_indices)
-        if fact.purpose == "agent" and phase == "completed" and response is not None:
-            self.append_transcript_message(response)
-            metadata[MESSAGE_SEQ_METADATA_KEY] = str(len(self._transcript_messages))
+        if captured_response is not None:
+            message_index, replayed_indices = captured_response
+            if replayed_indices:
+                metadata[REPLAYED_TOOL_CALL_INDICES_METADATA_KEY] = json.dumps(replayed_indices)
+            metadata[MESSAGE_SEQ_METADATA_KEY] = str(message_index + 1)
         if not include_observation:
             metadata.pop(DURATION_NS_METADATA_KEY, None)
         if response is not None:
@@ -664,6 +688,7 @@ class AgentRunRecorder:
             timestamp=timestamp,
         )
         await self.commit_history_boundary()
+        self._model_responses.pop(fact.model_request_seq, None)
 
 
 

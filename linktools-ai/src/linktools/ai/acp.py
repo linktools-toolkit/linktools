@@ -241,13 +241,11 @@ class ACPApplication:
         return cls(workspace, models, storage, execution)
 
     async def serve(self, *, memory_scope: str) -> None:
-        from linktools.ai.capability import ConversationCapability
-
         features = RuntimeFeatures("workspace")
         features.capability(WorkspaceCapability(self.workspace))
-        features.capability(ConversationCapability())
-        if self.execution is not None:
-            features.capability(self.execution)
+        features.capability(
+            ExecutionCapability(retain_history=True) if self.execution is None else self.execution
+        )
         async with Runtime.open(
             "default",
             models=self.models,
