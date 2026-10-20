@@ -70,8 +70,8 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
         # source reads, so both paths must recapture metadata after body I/O.
         assert domain_counts == ([3, 3] if existing == "prefix" else [2, 1])
         assert counts == {
-            "absent": [3, 2], "empty": [3, 2], "prefix": [6, 6],
-            "head_without_run": [4, 3],
+            "absent": [3, 2], "empty": [3, 2], "prefix": [5, 5],
+            "head_without_run": [3, 2],
         }[existing]
         expected_start = 1 if existing in {"prefix", "head_without_run"} else 0
         assert batches[1].checkpoints[0].chunks[0].first_message_index == expected_start
