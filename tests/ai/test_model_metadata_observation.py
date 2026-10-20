@@ -385,7 +385,7 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
     storage = RuntimeStorage.filesystem(storage_path)
     group = RuntimeFeatures("scheduled-history")
     group.capability(TraceCapability(storage=storage.plan.route(RuntimeDomain.TRACE), commit=CommitPolicy.batch(
-        buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=3.0,
+        buffer=InMemoryCacheBackend(max_bytes=65536), batch_size=128, flush_interval=0.1,
     )), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(

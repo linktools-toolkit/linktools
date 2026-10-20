@@ -5,7 +5,7 @@
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2052,7 +2052,7 @@ async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
 
 @pytest.mark.asyncio
 async def test_idempotent_replay_does_not_claim_active_tool_execution(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "active-claim-replay.db"
     effect_log = tmp_path / "active-claim-replay-effects.txt"
@@ -2108,9 +2108,19 @@ async def test_idempotent_replay_does_not_claim_active_tool_execution(
             ) == before_head
             assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
             assert tools[0].lease_expires_at is not None
-            await asyncio.sleep(max(0.0, (tools[0].lease_expires_at - datetime.now(timezone.utc)).total_seconds()) + 0.01)
-            with pytest.raises(AIError) as raised:
-                await same.recover()
+            # Keep real expiry coverage in the dedicated restart test; this
+            # case exercises the replay-then-recover sequence at the same boundary.
+            async def after_lease_expiry(session):
+                del session
+                return tools[0].lease_expires_at + timedelta(seconds=1)
+
+            with monkeypatch.context() as clock:
+                clock.setattr(
+                    runtime._state.recovery.tools.state_store.context.dialect,
+                    "database_now", after_lease_expiry,
+                )
+                with pytest.raises(AIError) as raised:
+                    await same.recover()
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
 
             recovered = await runtime._state.execution.executions.get(
