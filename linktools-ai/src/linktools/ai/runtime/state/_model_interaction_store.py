@@ -201,29 +201,6 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             records, include_client_requests=include_client_requests, include_content=include_content,
         )
 
-    async def prepare_interactions(
-        self,
-        run: AgentRunRecord,
-        interactions: Sequence[StagedModelInteraction],
-        payload: Callable[[str], bytes],
-        *,
-        local_message_base: int = 0,
-        local_message_count: int = 0,
-        local_messages: Sequence[ModelMessage] = (),
-        prepared: PreparedArchive,
-        replay: bool = False,
-    ) -> tuple[ModelInteractionRecord, ...]:
-        return await super().prepare_interactions(
-            run,
-            interactions,
-            payload,
-            local_message_base=local_message_base,
-            local_message_count=local_message_count,
-            local_messages=local_messages,
-            prepared=prepared,
-            replay=replay,
-        )
-
     def _interaction_key(self, agent_run_id: str, model_request_seq: int) -> bytes:
         return record_key_digest(
             self._namespace,

@@ -612,16 +612,24 @@ class ContentArchive:
 
     async def content_ids_many(self, roots: Sequence[ArchiveRoot], *,
                                prepared: PreparedArchive | None = None) -> tuple[tuple[str, ...], ...]:
+        if prepared is not None or not roots:
+            resolved = await self._resolve_ranges(None, roots, prepared=prepared)
+            if resolved is not None:
+                return resolved[0]
+
         async def capture(transaction: StateTransaction):
-            groups, _ = await self._resolve_ranges(transaction, roots, prepared=prepared)
-            return groups
+            resolved = await self._resolve_ranges(transaction, roots, prepared=prepared)
+            assert resolved is not None
+            return resolved[0]
         return await self.store.read(capture)
 
     async def _resolve_ranges(
-        self, transaction: StateTransaction, roots: Sequence[ArchiveRoot], *,
+        self, transaction: StateTransaction | None, roots: Sequence[ArchiveRoot], *,
         prepared: PreparedArchive | None = None, include_content: bool = False,
         append_frontiers: dict[ArchiveRoot, tuple[StoredRecord, ...]] | None = None,
-    ) -> tuple[tuple[tuple[str, ...], ...], dict[str, ContentRecord]]:
+    ) -> tuple[tuple[tuple[str, ...], ...], dict[str, ContentRecord]] | None:
+        # A prepared-only probe stops before its first durable dependency. The
+        # caller then resolves all dependent reads in the original single scope.
         prepared = PreparedArchive() if prepared is None else prepared
         self._bind(prepared)
         nodes: dict[str, ImmutableSequenceNode] = {}
@@ -718,6 +726,8 @@ class ContentArchive:
                 requests[identity] = ArchiveNodeRead(key, previous.metadata_slots,
                                                      previous.content_slots | ArchiveNodeSlot.SELF)
             if requests:
+                if transaction is None:
+                    return None
                 rows = await self._frontiers(transaction, tuple(requests.values()))
                 for key, record in rows.items():
                     if key != record.key_digest or record.scope_digest != bytes.fromhex(self.content_scope):
@@ -800,8 +810,10 @@ class ContentArchive:
         frontiers = {} if append_frontiers is not None else None
 
         async def capture(transaction: StateTransaction):
-            return await self._resolve_ranges(transaction, roots, include_content=True,
-                                              append_frontiers=frontiers)
+            resolved = await self._resolve_ranges(transaction, roots, include_content=True,
+                                                  append_frontiers=frontiers)
+            assert resolved is not None
+            return resolved
 
         groups, records = await self.store.read(capture)
         decoded: dict[str, bytes] = {}

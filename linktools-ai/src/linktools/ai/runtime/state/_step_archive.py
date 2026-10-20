@@ -1410,6 +1410,7 @@ class StateStepArchive(AgentRunStore):
         local_messages: Sequence[ModelMessage] = (),
         prepared: PreparedArchive,
         replay: bool = False,
+        baseline: ContextProjection | None = None,
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(
             replace(value, request_context=None, request_envelope_digest=None)
@@ -1473,7 +1474,8 @@ class StateStepArchive(AgentRunStore):
                 if projection is not None
             ))
             stored_interactions = {value.model_request_seq: value for value in existing}
-        previous_projection = await self._history.load_projection(run.agent_run_id)
+        previous_projection = (baseline if baseline is not None and not replay
+                               else await self._history.load_projection(run.agent_run_id))
 
         async def prepare_context(
             projection: StagedContextProjection, *, extend: bool,
@@ -2168,16 +2170,6 @@ class StateStepArchive(AgentRunStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             delta = incoming[max(before, target_message_count - archive_base):]
-            chunks = await self._prepare_captured_chunks(
-                owner_id,
-                TranscriptCapture(
-                    target_message_count,
-                    delta,
-                    (TranscriptOrigin.RAW,) * len(delta),
-                    head.quality,
-                ),
-                prepared=archive,
-            )
             raw_sources = tuple(
                 TranscriptMessageRef(
                     self._runtime_domain,
@@ -2215,6 +2207,16 @@ class StateStepArchive(AgentRunStore):
                 projection_messages, archive, baseline=previous_projection, baseline_frontier=frontier,
             )
             previous_projection = projection
+            chunks = await self._prepare_captured_chunks(
+                owner_id,
+                TranscriptCapture(
+                    target_message_count,
+                    delta,
+                    (TranscriptOrigin.RAW,) * len(delta),
+                    head.quality,
+                ),
+                prepared=archive,
+            )
             prepared.append(
                 PreparedAgentRunCheckpoint(
                     owner_id,

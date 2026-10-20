@@ -75,6 +75,8 @@ class CheckpointPersistence:
             lambda digest: self._staging.staged_payload(run.agent_run_id, digest),
             local_message_count=len(checkpoint.messages),
             local_messages=checkpoint.messages, prepared=prepared.archive,
+            **({"baseline": prepared.projection}
+               if type(archive).prepare_interactions is StateStepArchive.prepare_interactions else {}),
         )
         return prepared, interactions, sequence
 

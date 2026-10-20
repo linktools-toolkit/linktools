@@ -2138,44 +2138,9 @@ class RuntimeStateCommands:
         if expected_session is not None:
             assert archive is not None and conversation_agent_run is not None and conversation_checkpoint is not None
             assert next_cursor is not None and self._conversation_history is not None
-            history_owner = self._conversation_history
-            preparation_keys = None
-            if (type(history_owner) is ConversationHistoryRepositoryImpl
-                    and history_owner.namespace == self._namespace and history_owner.tenant_id == self._tenant_id
-                    and history_owner.state_store is self._conversation.state_store
-                    and history_owner.state_store is archive.state_store):
-                preparation_keys = await archive.conversation_preparation_record_keys(
-                    conversation_agent_run, conversation_checkpoint,
-                )
-            if preparation_keys is None:
-                _checkpoint, prepared = await archive.prepare_conversation_checkpoint(
-                    conversation_agent_run, conversation_checkpoint,
-                )
-                history = await history_owner.get(next_cursor.history_id, tenant_id=self._tenant_id)
-            else:
-                requests = dict(preparation_keys)
-                requests[history_owner.state_store] = tuple(dict.fromkeys((
-                    *requests.get(history_owner.state_store, ()),
-                    history_owner.history_record_key(next_cursor.history_id),
-                )))
-
-                async def capture_preparation(group: StateGroupTransaction):
-                    if not isinstance(group, GroupRecordReader):
-                        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-                    captured = await group.get_records(requests)
-                    descriptor = await history_owner.get_in_transaction(
-                        group.transaction(history_owner.state_store), next_cursor.history_id, tenant_id=self._tenant_id,
-                    )
-                    observed = {store: {key: captured[store].get(key) for key in keys}
-                                for store, keys in preparation_keys.items()}
-                    return descriptor, observed
-
-                history, observed_records = await archive.state_store.storage_group.read_many(
-                    tuple(requests), capture_preparation,
-                )
-                _checkpoint, prepared = await archive.prepare_conversation_checkpoint(
-                    conversation_agent_run, conversation_checkpoint, observed_records=observed_records,
-                )
+            _checkpoint, prepared, history = await self._prepare_conversation_checkpoint(
+                archive, conversation_agent_run, conversation_checkpoint, next_cursor.history_id,
+            )
             if prepared[0].owner_id != next_cursor.history_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if history is None or history.session_id != expected_session.session_id:
@@ -2314,6 +2279,52 @@ class RuntimeStateCommands:
             if capability_prefix is not None:
                 await capability_prefix.abort()
 
+    async def _prepare_conversation_checkpoint(
+        self,
+        owner: StateStepArchive,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+        history_id: str,
+        *,
+        archive: PreparedArchive | None = None,
+    ) -> tuple[AgentRunCheckpoint, PreparedAgentRunCheckpointBatch, ConversationHistoryRecord | None]:
+        history_owner = self._conversation_history
+        if history_owner is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        preparation_keys = None
+        if (type(history_owner) is ConversationHistoryRepositoryImpl
+                and history_owner.namespace == self._namespace and history_owner.tenant_id == self._tenant_id
+                and history_owner.state_store is self._conversation.state_store
+                and history_owner.state_store is owner.state_store):
+            preparation_keys = await owner.conversation_preparation_record_keys(run, checkpoint)
+        if preparation_keys is None:
+            relocated, prepared = await owner.prepare_conversation_checkpoint(run, checkpoint, archive=archive)
+            history = await history_owner.get(history_id, tenant_id=self._tenant_id)
+        else:
+            requests = dict(preparation_keys)
+            requests[history_owner.state_store] = tuple(dict.fromkeys((
+                *requests.get(history_owner.state_store, ()), history_owner.history_record_key(history_id),
+            )))
+
+            async def capture_preparation(group: StateGroupTransaction):
+                if not isinstance(group, GroupRecordReader):
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                captured = await group.get_records(requests)
+                descriptor = await history_owner.get_in_transaction(
+                    group.transaction(history_owner.state_store), history_id, tenant_id=self._tenant_id,
+                )
+                observed = {store: {key: captured[store].get(key) for key in keys}
+                            for store, keys in preparation_keys.items()}
+                return descriptor, observed
+
+            history, observed_records = await owner.state_store.storage_group.read_many(
+                tuple(requests), capture_preparation,
+            )
+            relocated, prepared = await owner.prepare_conversation_checkpoint(
+                run, checkpoint, archive=archive, observed_records=observed_records,
+            )
+        return relocated, prepared, history
+
     async def commit_terminal_checkpoint(
         self,
         commit: ExecutionTerminalCommit,
@@ -2412,35 +2423,22 @@ class RuntimeStateCommands:
                 )
             )) if same_content_scope else None
         prepared_conversation = ()
+        timeline_history = None
         if (
             self._conversation_run_store is not None
             and conversation_agent_run is not None
             and conversation_checkpoint is not None
         ):
-            conversation_checkpoint, prepared_conversation = (
-                await self._conversation_run_store.prepare_conversation_checkpoint(
-                    conversation_agent_run,
-                    conversation_checkpoint,
-                    archive=shared_archive,
-                )
+            if next_cursor is None or next_cursor.history_id is None or self._conversation_history is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            conversation_checkpoint, prepared_conversation, timeline_history = await self._prepare_conversation_checkpoint(
+                self._conversation_run_store, conversation_agent_run, conversation_checkpoint,
+                next_cursor.history_id, archive=shared_archive,
             )
         timeline_range: tuple[int, int] | None = conversation_message_range
         if prepared_conversation:
-            if (
-                session_id is None
-                or next_cursor is None
-                or next_cursor.history_id is None
-                or self._conversation_history is None
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            timeline_history = await self._conversation_history.get(
-                next_cursor.history_id,
-                tenant_id=self._tenant_id,
-            )
-            if (
-                timeline_history is None
-                or timeline_history.session_id != session_id
-            ):
+            if (session_id is None or next_cursor is None or timeline_history is None
+                    or timeline_history.session_id != session_id):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             timeline_range = _timeline_turn_message_range(
                 timeline_history,
@@ -2521,9 +2519,43 @@ class RuntimeStateCommands:
             ) if self._capability_writes is not None else None)
             if prepared is not None:
                 stores.extend(prepared.stores)
+            fresh_record_keys: dict[StateStore, tuple[bytes, ...]] = {}
+            if (shared_archive is not None
+                    and isinstance(stores[0].storage_group, GroupRecordReader)
+                    and type(self._execution) is ExecutionRepositoryImpl
+                    and type(self._conversation) is SessionRepositoryImpl
+                    and type(self._conversation_history) is ConversationHistoryRepositoryImpl
+                    and type(self._recovery) is RecoveryCheckpointRepositoryImpl
+                    and type(self._conversation_run_store) in {StateStepArchive, ModelInteractionStateStepArchive}
+                    and conversation_agent_run is not None and prepared_conversation
+                    and session_id is not None and next_cursor is not None):
+                content = await terminal_archives[0].transcript_repository.content_archive(create=True)
+                entries = [
+                    (self._execution.state_store, self._execution.terminal_record_keys(
+                        commit.execution, include_history_seal=seal is not None,
+                    )),
+                    (content.store, content.publication_record_keys(shared_archive)),
+                    (self._conversation.state_store, (
+                        self._conversation.session_record_key(session_id),
+                        self._conversation_history.history_record_key(next_cursor.history_id),
+                    )),
+                    *(await self._conversation_run_store.checkpoint_publication_record_keys(
+                        conversation_agent_run, prepared_conversation[0],
+                    )).items(),
+                ]
+                if recovery_checkpoint is not None:
+                    entries.append((self._recovery.state_store, (
+                        self._recovery.checkpoint_record_key(recovery_checkpoint.execution_id),
+                    )))
+                if all(store.storage_group is stores[0].storage_group for store, _keys in entries):
+                    for store, keys in entries:
+                        fresh_record_keys[store] = tuple(dict.fromkeys((*fresh_record_keys.get(store, ()), *keys)))
+                    stores = list(_dedupe_stores((*stores, *fresh_record_keys)))
             try:
                 async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                     nonlocal effective_commit
+                    if fresh_record_keys and isinstance(group, GroupRecordReader):
+                        await group.get_records(fresh_record_keys)
                     execution_transaction = group.transaction(self._execution.state_store)
                     closed_result = None
                     if (type(self._execution) is ExecutionRepositoryImpl

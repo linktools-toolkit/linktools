@@ -439,6 +439,7 @@ async def test_terminal_cold_replay_rejects_changed_facts_and_missing_context(
             replayed = await archive.prepare_interactions(
                 run, (staged,), lambda _: envelope, local_message_count=3,
                 local_messages=current_messages, prepared=content_write, replay=True,
+                baseline=original[0].request_context,
             )
             await archive.sync_projection(
                 run, events=(), checkpoints=(), interactions=replayed, archive=content_write,

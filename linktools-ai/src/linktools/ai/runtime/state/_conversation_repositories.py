@@ -45,6 +45,10 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     def history_record_key(self, history_id: str) -> bytes:
         return self._key("conversation_history", history_id)
 
+    def history_record_keys(self, history_id: str) -> tuple[bytes, bytes]:
+        """Keys for capturing a branch descriptor with its canonical local head."""
+        return self.history_record_key(history_id), self._key("transcript_head", history_id)
+
     async def create(
         self, record: ConversationHistoryRecord
     ) -> ConversationHistoryRecord:
@@ -138,10 +142,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
         """Read display membership with the store's bounded record freshness."""
         _require_repository_tenant(tenant_id, self._tenant_id)
-        records = await self._store.read_records((
-            self._key("conversation_history", history_id),
-            self._key("transcript_head", history_id),
-        ))
+        records = await self._store.read_records(self.history_record_keys(history_id))
         return await self._decode_with_head(records, history_id)
 
     async def get_with_head_fresh(
@@ -149,10 +150,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
         """Confirm a newer display's history membership and repair older facts."""
         _require_repository_tenant(tenant_id, self._tenant_id)
-        records = await self._refresh_records((
-            self._key("conversation_history", history_id),
-            self._key("transcript_head", history_id),
-        ))
+        records = await self._refresh_records(self.history_record_keys(history_id))
         return await self._decode_with_head(records, history_id)
 
     async def get_with_head_in_transaction(
@@ -164,16 +162,13 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
     ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
         """Read a branch descriptor and its canonical local head together."""
         _require_repository_tenant(tenant_id, self._tenant_id)
-        history_key = self._key("conversation_history", history_id)
-        head_key = self._key("transcript_head", history_id)
-        records = await transaction.get_records((history_key, head_key))
+        records = await transaction.get_records(self.history_record_keys(history_id))
         return await self._decode_with_head(records, history_id)
 
     async def _decode_with_head(
         self, records: Mapping[bytes, StoredRecord], history_id: str,
     ) -> tuple[ConversationHistoryRecord, TranscriptHeadRecord] | None:
-        history_key = self._key("conversation_history", history_id)
-        head_key = self._key("transcript_head", history_id)
+        history_key, head_key = self.history_record_keys(history_id)
         record = records.get(history_key)
         if record is None:
             return None
@@ -951,15 +946,25 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if start_turn_seq == end_turn_seq:
             return ()
         sequences = tuple(range(start_turn_seq, end_turn_seq))
-        keys = tuple(
-            self._timeline_commit_key(session_id, sequence)
-            for sequence in sequences
+        keys = self.timeline_commit_record_keys(
+            session_id, start_turn_seq=start_turn_seq, end_turn_seq=end_turn_seq,
         )
         records = await self._store.read_records(keys)
         return tuple(
             self._decode_timeline_commit(session_id, sequence, records[key])
             for sequence, key in zip(sequences, keys)
             if key in records
+        )
+
+    def timeline_commit_record_keys(
+        self, session_id: str, *, start_turn_seq: int, end_turn_seq: int,
+    ) -> tuple[bytes, ...]:
+        """Keys for capturing an already selected bounded timeline page."""
+        if start_turn_seq < 1 or end_turn_seq < start_turn_seq:
+            raise ValueError("session timeline range is invalid")
+        return tuple(
+            self._timeline_commit_key(session_id, sequence)
+            for sequence in range(start_turn_seq, end_turn_seq)
         )
 
     async def commit_timeline_turn_in_transaction(

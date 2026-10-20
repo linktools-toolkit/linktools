@@ -23,6 +23,7 @@ from ._codec import (
 )
 from ._contracts import (
     ContextProjection,
+    ConversationHistoryRecord,
     ConversationHistoryRepository,
     HistoryQuality,
     InlineContextBlock,
@@ -244,6 +245,17 @@ class TranscriptRepository:
     @property
     def runtime_domain(self) -> RuntimeDomain:
         return self._runtime_domain
+
+    def accepts_history_capture(self, repository: ConversationHistoryRepository) -> bool:
+        """Bind captured branch metadata to this transcript's logical store owner."""
+        return (
+            type(repository) is ConversationHistoryRepositoryImpl
+            and repository is self._history_repository
+            and repository.state_store is self._store
+            and repository.namespace == self._namespace
+            and repository.tenant_id == self._tenant_id
+            and self._runtime_domain is RuntimeDomain.CONVERSATION
+        )
 
     @property
     def _owner_domain(self) -> TranscriptOwnerDomain:
@@ -1028,12 +1040,13 @@ class TranscriptRepository:
                     and block.root.scope_id == archive.scope_id
                     and block.root.content_scope == archive.content_scope):
                 previous_root = block.root
-                prefix = encode_model_messages(messages[:block.root.count])
-                if block.root.count <= len(messages) and len(prefix) == block.raw_size and hashlib.sha256(prefix).hexdigest() == block.raw_digest:
-                    root = block.root
-                    start = block.root.count
-                    if baseline_frontier and start < len(messages):
-                        archive.reuse_frontier(root, baseline_frontier, prepared)
+                if block.root.count <= len(messages):
+                    prefix = raw if block.root.count == len(messages) else encode_model_messages(messages[:block.root.count])
+                    if len(prefix) == block.raw_size and hashlib.sha256(prefix).hexdigest() == block.raw_digest:
+                        root = block.root
+                        start = block.root.count
+                        if baseline_frontier and start < len(messages):
+                            archive.reuse_frontier(root, baseline_frontier, prepared)
         encoded = tuple(("model-message", encode_model_messages((message,))) for message in messages[start:])
         if previous_root is not None and not start and previous_root.count:
             root = await archive.rewrite(previous_root, encoded, prepared)
@@ -1473,6 +1486,7 @@ class TranscriptRepository:
         tenant_id: str,
         start: int,
         end: int,
+        history_capture: tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord] | None = None,
     ) -> AsyncIterator[ModelMessage]:
         require_no_run_history_lock(
             "TranscriptRepository.iter_session_message_range"
@@ -1484,6 +1498,7 @@ class TranscriptRepository:
             tenant_id=tenant_id,
             start=start,
             end=end,
+            history_capture=history_capture,
         )
         expected = end - start
         emitted = 0
@@ -1919,6 +1934,7 @@ class TranscriptRepository:
         tenant_id: str,
         start: int,
         end: int,
+        history_capture: tuple[ConversationHistoryRepository, ConversationHistoryRecord, TranscriptHeadRecord] | None = None,
     ) -> _HistoryResolution:
         """Resolve only the visible transcript segments touched by a range."""
         require_no_run_history_lock(
@@ -1932,7 +1948,15 @@ class TranscriptRepository:
         async def read(
             transaction: StateTransaction,
         ) -> _HistoryResolution:
-            if (
+            if history_capture is not None:
+                owner, record, captured_head = history_capture
+                if tenant_id != self._tenant_id or not self.accepts_history_capture(owner):
+                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if record.history_id != history_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                transcript_head = self._validate_observed_head(history_id, captured_head)
+                local_messages = transcript_head.message_count
+            elif (
                 type(self._history_repository) is ConversationHistoryRepositoryImpl
                 and self._history_repository.namespace == self._namespace
                 and self._history_repository.tenant_id == self._tenant_id

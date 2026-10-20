@@ -1282,6 +1282,9 @@ class RuntimeAgentRunStore(AgentRunStore):
                                 local_message_count=local_count,
                                 local_messages=() if staged_transcript is None else staged_transcript.messages,
                                 prepared=interaction_archive,
+                                **({"baseline": batch.checkpoints[-1].projection}
+                                   if batch.checkpoints and type(archive).prepare_interactions is StateStepArchive.prepare_interactions
+                                   else {}),
                             )
                         ),
                         durable_head.interaction_count

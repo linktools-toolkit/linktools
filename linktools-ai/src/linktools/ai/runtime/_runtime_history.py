@@ -1122,6 +1122,7 @@ class RuntimeHistory:
             tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=signer,
             limit=limit, pending_execution=pending, authorized_header=header,
             include_active=True,
+            transcript_store=self._session_transcript_store,
         )
         record = state.root
         active = SessionManager.validate_admission(

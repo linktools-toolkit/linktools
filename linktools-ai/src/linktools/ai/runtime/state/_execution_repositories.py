@@ -199,6 +199,16 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             values[execution_id] = value
         return values
 
+    def terminal_record_keys(
+        self, execution: ExecutionRecord, *, include_history_seal: bool,
+    ) -> tuple[bytes, ...]:
+        """Identify control records checked by terminal publication."""
+        _require_tenant(execution, self._tenant_id)
+        kinds = ("execution", "execution_history_head")
+        if include_history_seal:
+            kinds = (*kinds, "execution_history_seal")
+        return tuple(self._key(kind, execution.execution_id) for kind in kinds)
+
     async def observe_execution_control(
         self, execution_id: str, *, tenant_id: str,
     ) -> tuple[ExecutionRecord | None, ExecutionHistoryHeadRecord | None]:
