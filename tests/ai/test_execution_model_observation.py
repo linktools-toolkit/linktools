@@ -258,7 +258,7 @@ async def test_facade_forwards_metadata_mode() -> None:
 @pytest.mark.parametrize("durable_trace", [False, True])
 async def test_real_execution_metadata_live_and_final_handoff(backend, durable_trace, tmp_path) -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.capability import TraceCapability
     from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
     from linktools.ai.storage import StorageRoute
@@ -623,7 +623,7 @@ async def test_reopened_model_update_cutoff_uses_admitted_and_routed_durability(
 @pytest.mark.asyncio
 async def test_transient_task_model_observation_keeps_canonical_success_after_staging_release() -> None:
     from pydantic_ai.messages import ModelResponse, TextPart
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import TaskStatus
     from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage, RuntimeStoragePlan
     from linktools.ai.storage import StorageRoute
@@ -665,3 +665,238 @@ async def test_transient_task_model_observation_keeps_canonical_success_after_st
         assert result.observation_error is not None
         assert result.observation_error.origin == "stream"
         assert (await graph.wait()).result.status is TaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_read", ["tree_capture", "metadata_read"])
+@pytest.mark.parametrize("outcome", ["complete", "close", "error"])
+async def test_live_events_do_not_wait_for_metadata_reconciliation(
+    blocked_read: str, outcome: str,
+) -> None:
+    from .test_unified_wait_contract import _execution_event
+
+    bundle = _bundle()
+    history = bundle.runtime.history
+    initial = replace(history.rows[0], status="RUNNING", started_at=datetime.now(timezone.utc))
+    history.rows[0] = initial
+    history.durable = False
+    events = asyncio.Queue()
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    failure = AIError(ErrorCode.AUTHORIZATION_DENIED)
+    captured_positions = []
+
+    async def tree(*args, ready=None, **kwargs):
+        if ready is not None:
+            ready.set()
+        while True:
+            yield await events.get()
+
+    run = replace(bundle.execution_run, _watch_tree=tree)
+    stream = run.watch(include_model_interactions=True)
+    pending = None
+    try:
+        first = await anext(stream)
+        assert isinstance(first.event, TaskModelProjection)
+        if blocked_read == "tree_capture":
+            original = bundle.tree.capture
+
+            async def capture(*args, **kwargs):
+                positions = kwargs["after_event_seqs"]
+                entered.set()
+                try:
+                    await release.wait()
+                    captured_positions.append(dict(positions))
+                    if outcome == "error":
+                        raise failure
+                    return await original(*args, **kwargs)
+                finally:
+                    finished.set()
+
+            bundle.tree.capture = capture
+        else:
+            original = history.read_model_interaction_metadata
+
+            async def read(*args, **kwargs):
+                entered.set()
+                try:
+                    await release.wait()
+                    if outcome == "error":
+                        raise failure
+                    return await original(*args, **kwargs)
+                finally:
+                    finished.set()
+
+            history.read_model_interaction_metadata = read
+        history.update(replace(initial, status="SUCCEEDED"))
+        pending = asyncio.create_task(anext(stream))
+        if blocked_read == "tree_capture":
+            # A notification may be delivered before the periodic tree capture.
+            update = await asyncio.wait_for(pending, 1)
+            assert update.event.item.status == "SUCCEEDED"
+            pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(entered.wait(), 2)
+        events.put_nowait(_execution_event(1))
+        delivered = await asyncio.wait_for(pending, 0.5)
+        pending = None
+        assert isinstance(delivered.event, ExecutionTreeEvent)
+        assert _positions(delivered.cursor) == {"execution": 1}
+        assert not release.is_set() and not finished.is_set()
+        if outcome == "close":
+            await stream.aclose()
+            assert finished.is_set()
+        else:
+            release.set()
+            pending = asyncio.create_task(anext(stream))
+            if outcome == "error":
+                with pytest.raises(AIError) as caught:
+                    await asyncio.wait_for(pending, 1)
+                assert caught.value is failure
+            elif blocked_read == "metadata_read":
+                update = await asyncio.wait_for(pending, 1)
+                assert update.event.item.status == "SUCCEEDED"
+                assert _positions(update.cursor) == {"execution": 1}
+            else:
+                await asyncio.wait_for(finished.wait(), 1)
+                assert captured_positions == [{}]
+                events.put_nowait(_execution_event(2))
+                delivered = await asyncio.wait_for(pending, 1)
+                assert _positions(delivered.cursor) == {"execution": 2}
+            pending = None
+    finally:
+        release.set()
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await stream.aclose()
+    assert all(subscription.closed for subscription in history.subscriptions)
+    assert not bundle.runtime._observation_sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_error", [False, True])
+async def test_tree_completion_drains_metadata_reader_before_final_coverage(cleanup_error: bool) -> None:
+    from .test_unified_wait_contract import _execution_event
+
+    bundle = _bundle()
+    history = bundle.runtime.history
+    initial = replace(history.rows[0], status="RUNNING", started_at=datetime.now(timezone.utc))
+    history.rows[0] = initial
+    events = asyncio.Queue()
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    failure = AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    async def tree(*args, ready=None, **kwargs):
+        if ready is not None:
+            ready.set()
+        while True:
+            event = await events.get()
+            if event is None:
+                return
+            yield event
+
+    run = replace(bundle.execution_run, _watch_tree=tree)
+    stream = run.watch(include_model_interactions=True)
+    pending = None
+    try:
+        await anext(stream)
+        original = history.read_model_interaction_metadata
+
+        async def read(*args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+                    if cleanup_error:
+                        raise failure
+            assert cancelled.is_set()
+            return await original(*args, **kwargs)
+
+        history.read_model_interaction_metadata = read
+        history.update(replace(initial, status="SUCCEEDED"))
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(entered.wait(), 1)
+        events.put_nowait(_execution_event(1))
+        delivered = await asyncio.wait_for(pending, 1)
+        pending = None
+        assert _positions(delivered.cursor) == {"execution": 1}
+        assert not cancelled.is_set()
+        events.put_nowait(None)
+        if cleanup_error:
+            with pytest.raises(AIError) as caught:
+                await asyncio.wait_for(anext(stream), 1)
+            assert caught.value is failure
+        else:
+            final = await asyncio.wait_for(anext(stream), 1)
+            assert isinstance(final.event, TaskModelProjection)
+            assert final.event.item.status == "SUCCEEDED"
+            assert final.event.visibility == "durable_history"
+            assert _positions(final.cursor) == {"execution": 1}
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(stream), 1)
+        assert cancelled.is_set()
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await stream.aclose()
+    assert all(subscription.closed for subscription in history.subscriptions)
+    assert not bundle.runtime._observation_sessions
+
+
+@pytest.mark.asyncio
+async def test_new_child_text_triggers_metadata_discovery_and_final_compensation() -> None:
+    from linktools.ai.core import ExecutionLineageKind
+    from .test_unified_wait_contract import _execution_event
+
+    bundle = _bundle()
+    history = bundle.runtime.history
+    original = history.read_model_interaction_metadata
+    events = asyncio.Queue()
+
+    async def read(execution_id, **kwargs):
+        rows = await original(execution_id, **kwargs)
+        return tuple(replace(row, execution_id=execution_id) for row in rows)
+
+    history.read_model_interaction_metadata = read
+
+    async def tree(*args, ready=None, **kwargs):
+        if ready is not None:
+            ready.set()
+        while True:
+            event = await events.get()
+            if event is None:
+                return
+            yield event
+
+    run = replace(bundle.execution_run, _watch_tree=tree)
+    stream = run.watch(include_model_interactions=True)
+    try:
+        assert (await anext(stream)).event.item.execution_id == "execution"
+        root = _execution_event(1)
+        child = replace(
+            root, execution_id="child", lineage_kind=ExecutionLineageKind.SUBAGENT,
+            parent_execution_id="execution", parent_invocation_id="invocation", depth=1,
+            event=replace(root.event, execution_id="child"),
+        )
+        events.put_nowait(child)
+        text = await asyncio.wait_for(anext(stream), 1)
+        assert isinstance(text.event, ExecutionTreeEvent)
+        assert text.event.execution_id == "child"
+        assert _positions(text.cursor) == {"child": 1}
+        metadata = await asyncio.wait_for(anext(stream), 1)
+        assert isinstance(metadata.event, TaskModelProjection)
+        assert metadata.event.item.execution_id == "child"
+        assert metadata.event.item.depth == 1
+        assert metadata.event.parent_execution_id == "execution"
+        assert _positions(metadata.cursor) == {"child": 1}
+        events.put_nowait(None)
+        remaining = [value async for value in stream]
+        assert {value.event.item.execution_id for value in remaining} == {"execution", "child"}
+        assert all(value.event.visibility == "durable_history" for value in remaining)
+        assert all(_positions(value.cursor) == {"child": 1} for value in remaining)
+    finally:
+        await stream.aclose()
+    assert all(subscription.closed for subscription in history.subscriptions)
+    assert not bundle.runtime._observation_sessions

@@ -11,7 +11,8 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import AssetCapability, RuntimeFeatures
+from linktools.ai.capability import AssetCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext

@@ -8,7 +8,8 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures, TraceCapability
+from linktools.ai.capability import AgentContext, TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder

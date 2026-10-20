@@ -141,6 +141,7 @@ from ...task import (
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
+from .._agent_task_node import AgentTaskNode
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
@@ -383,7 +384,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("step_event", StepEvent),
 )
 _V1_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
+    {**{target: wire_id for wire_id, target in _V1_WIRE_TYPES}, AgentTaskNode: _TASK_NODE_WIRE_ID}
 )
 _V1_DOMAIN_TYPES = MappingProxyType(
     {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
@@ -455,6 +456,7 @@ def _encode_v1_task_node_fields(
             value.dependencies, codec, persisted=persisted
         ),
         "input": _encode_domain(value.input, codec, persisted=persisted),
+        "input_semantics": "agent-task-input-v1" if isinstance(value, AgentTaskNode) else "json-v1",
         "budget_cost": _encode_domain(
             value.budget_cost, codec, persisted=persisted
         ),
@@ -504,6 +506,8 @@ def _encode_v1_task_node(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
         raise TypeError("V1 task_node encoder received the wrong type")
+    if isinstance(value, AgentTaskNode):
+        value.to_mapping()
     return _encode_v1_task_node_fields(value, codec, persisted)
 
 
@@ -518,6 +522,7 @@ def _decode_v1_task_node(
             "task",
             "dependencies",
             "input",
+            "input_semantics",
             "budget_cost",
             "expander",
             "dependency_policy",
@@ -601,7 +606,13 @@ def _decode_v1_task_node(
         or not isinstance(failure_policy, str)
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return TaskNode.from_resolved(
+    semantics = raw_fields["input_semantics"]
+    if not isinstance(semantics, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if semantics not in {"json-v1", "agent-task-input-v1"}:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    node_type = AgentTaskNode if semantics == "agent-task-input-v1" else TaskNode
+    node = node_type.from_resolved(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
             _decode_domain(
@@ -655,6 +666,9 @@ def _decode_v1_task_node(
         dependency_policy=dependency_policy,
         failure_policy=failure_policy,
     )
+    if isinstance(node, AgentTaskNode):
+        node.to_mapping()
+    return node
 
 
 def _encode_v1_task_graph_view(
@@ -987,6 +1001,45 @@ def _decode_v1_object_ref(
 
 
 
+def _encode_v1_stored_payload(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, StoredPayload):
+        raise TypeError("V1 stored_payload encoder received the wrong type")
+    return {
+        "kind": _encode_domain(value.kind, codec, persisted=persisted),
+        "encoding": _encode_domain(value.encoding, codec, persisted=persisted),
+        "digest": _encode_domain(value.digest, codec, persisted=persisted),
+        "size": _encode_domain(value.size, codec, persisted=persisted),
+        "value": _encode_domain(value.value, codec, persisted=persisted),
+        "ref": _encode_domain(value.ref, codec, persisted=persisted),
+    }
+
+
+def _decode_v1_stored_payload(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> StoredPayload:
+    _require_required_keys(
+        raw_fields, frozenset({"kind", "encoding", "digest", "size", "value", "ref"}),
+    )
+    return StoredPayload(
+        kind=cast(str, _decode_domain(raw_fields["kind"], str, codec, persisted=persisted)),
+        encoding=cast(str | None, _decode_domain(
+            raw_fields["encoding"], str | None, codec, persisted=persisted,
+        )),
+        digest=cast(str, _decode_domain(raw_fields["digest"], str, codec, persisted=persisted)),
+        size=cast(int, _decode_domain(raw_fields["size"], int, codec, persisted=persisted)),
+        value=cast(JsonValue, _decode_domain(raw_fields["value"], JsonValue, codec, persisted=persisted)),
+        ref=cast(ObjectRef | None, _decode_domain(
+            raw_fields["ref"], ObjectRef | None, codec, persisted=persisted,
+        )),
+    )
+
+
 def _encode_v1_stored_user_input(
     value: object,
     codec: "_VersionCodec",
@@ -1073,26 +1126,63 @@ def _decode_v1_execution_start_reservation(
     )
 
 
+def _encode_v1_slot_disposition_view(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, SlotDispositionView):
+        raise TypeError("V1 evaluation_slot_disposition_view encoder received the wrong type")
+    return {
+        "kind": value.kind,
+        "reason_code": value.reason_code,
+        "terminal": value.terminal,
+        "retryable": value.retryable,
+        "created_at": _encode_domain(value.created_at, codec, persisted=persisted),
+    }
+
+
+def _decode_v1_slot_disposition_view(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> SlotDispositionView:
+    _require_required_keys(
+        raw_fields, frozenset({"kind", "reason_code", "terminal", "retryable", "created_at"}),
+    )
+    return SlotDispositionView(
+        kind=_decode_domain(raw_fields["kind"], str, codec, persisted=persisted),
+        reason_code=_decode_domain(raw_fields["reason_code"], str, codec, persisted=persisted),
+        terminal=_decode_domain(raw_fields["terminal"], bool, codec, persisted=persisted),
+        retryable=_decode_domain(raw_fields["retryable"], bool, codec, persisted=persisted),
+        created_at=_decode_domain(raw_fields["created_at"], datetime, codec, persisted=persisted),
+    )
+
+
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v1_object_ref,
+        "stored_payload": _encode_v1_stored_payload,
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _encode_v1_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
         "execution_start_reservation": _encode_v1_execution_start_reservation,
+        "evaluation_slot_disposition_view": _encode_v1_slot_disposition_view,
     }
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
         "object_ref": _decode_v1_object_ref,
+        "stored_payload": _decode_v1_stored_payload,
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _decode_v1_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
         "execution_start_reservation": _decode_v1_execution_start_reservation,
+        "evaluation_slot_disposition_view": _decode_v1_slot_disposition_view,
     }
 )
 
@@ -1483,8 +1573,6 @@ def _encode_domain(
         return {"$bytes": base64.b64encode(value).decode("ascii")}
     if type(value) in codec.external_schema_types:
         return _encode_external(value, codec)
-    if isinstance(value, StoredPayload):
-        value.to_json()
     if is_dataclass(value):
         wire_id = codec.wire_ids.get(type(value))
         if wire_id is None:
@@ -1757,7 +1845,7 @@ def _iter_runtime_object_refs(
             task_input = node.input
             prompt = task_input.get("prompt")
             if (
-                task_input.get("kind") == "agent-task-input"
+                isinstance(node, AgentTaskNode)
                 and isinstance(prompt, Mapping)
                 and prompt.get("kind") == "stored-user-content-v1"
             ):
@@ -2098,7 +2186,7 @@ def _decode_dataclass(
     expected_target = codec.domain_types.get(wire_id)
     if expected_target is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if expected_target is not target:
+    if codec.wire_ids.get(target) != wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_fields = value.get("fields")
     if not isinstance(raw_fields, Mapping):
@@ -2114,7 +2202,10 @@ def _decode_dataclass(
     decoder = codec.dataclass_decoders.get(wire_id)
     if decoder is not None:
         try:
-            return decoder(raw_fields, codec, persisted)
+            decoded = decoder(raw_fields, codec, persisted)
+            if not isinstance(decoded, target):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return decoded
         except AIError:
             raise
         except (KeyError, TypeError, ValueError) as error:

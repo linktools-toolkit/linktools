@@ -124,9 +124,8 @@ an unrelated database. This current API example keeps Checkpoint's inherited
 cache while disabling Trace's hot cache:
 
 ```python
-from linktools.ai.capability import (
-    CheckpointCapability, RuntimeFeatures, TraceCapability,
-)
+from linktools.ai.capability import CheckpointCapability, TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 
 storage = RuntimeStorage.from_root("state", cache=hot_cache)

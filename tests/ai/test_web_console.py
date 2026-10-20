@@ -14,7 +14,7 @@ pytest.importorskip("uvicorn")
 
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.web import create_app

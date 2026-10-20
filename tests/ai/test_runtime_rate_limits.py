@@ -19,7 +19,8 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 

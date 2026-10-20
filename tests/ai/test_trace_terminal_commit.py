@@ -13,7 +13,8 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability, RuntimeFeatures, AgentContext
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability, AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database

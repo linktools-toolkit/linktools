@@ -18,7 +18,14 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from ..core import canonical_sha256, JsonValue, WorkspaceFileInput, normalize_json_value, validate_user_prompt
+from ..core import (
+    ImmutableJsonMapping,
+    JsonValue,
+    WorkspaceFileInput,
+    canonical_sha256,
+    normalize_json_value,
+    validate_user_prompt,
+)
 from ..errors import AIError, ErrorCode
 from ..storage import StoredPayload
 
@@ -62,7 +69,7 @@ class MaterializedUserContent(tuple):
         view: Mapping[str, JsonValue],
     ) -> "MaterializedUserContent":
         value = super().__new__(cls, items)
-        value.view = dict(view)
+        value.view = ImmutableJsonMapping(view, allow_empty_keys=True)
         return value
 
     def append_text(self, text: str) -> "MaterializedUserContent":
@@ -168,10 +175,10 @@ class StoredUserInput:
             if not isinstance(self.view, Mapping) or self.view.get("version") != 1:
                 raise ValueError("stored user input view is invalid")
             try:
-                canonical_sha256(self.view)
+                view = ImmutableJsonMapping(self.view, allow_empty_keys=True)
             except (TypeError, ValueError) as error:
                 raise ValueError("stored user input view is invalid") from error
-            object.__setattr__(self, "view", dict(self.view))
+            object.__setattr__(self, "view", view)
 
     @property
     def digest(self) -> str:

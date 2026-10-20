@@ -6,14 +6,13 @@ from ._persistence import CheckpointCapability, TraceCapability
 from ._tool_responses import ToolResponseFixture, ToolResponsesCapability
 from ._asset import AssetCapability
 from ._context import AgentContext
-from ._declaration import AgentDeclarationLoader
+from ._declaration import AgentDeclarationLoader, capture_contributions
 from ._resource_path import (
     mcp_resource_path,
     validate_resource_path,
     validate_resource_tree,
 )
 from ._contribution import CapabilityContribution
-from ._group import RuntimeFeatures, RuntimeFeaturesCapture
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
@@ -72,9 +71,8 @@ __all__ = [
     "is_tool_effect_policy",
     "AgentContext",
     "AgentDeclarationLoader",
+    "capture_contributions",
     "CapabilityContribution",
-    "RuntimeFeatures",
-    "RuntimeFeaturesCapture",
     "CapabilityLoadContext",
     "CapabilityLoadEntry",
     "CapabilityLoader",

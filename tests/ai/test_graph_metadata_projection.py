@@ -12,7 +12,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionDeltaType, JsonValue, TaskStatus
 from linktools.ai.runtime import (
     AgentTaskInput, ExecutionTreeEvent, Runtime, RuntimeStorage,

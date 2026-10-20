@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
 from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage

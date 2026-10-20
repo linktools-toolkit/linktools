@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.core import CommitPolicy
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page, Principal, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation

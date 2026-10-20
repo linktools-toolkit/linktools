@@ -762,6 +762,19 @@ The default human wait deadline is 86,400 seconds; configure
   idempotency_key=...)`. Bind matching current definitions first; same-revision
   contract drift is rejected before work can resume
 
+`SlotDispositionView.kind` owns the disposition state. `recoverable_blocked`
+is retryable and nonterminal; `permanent_unavailable`, `permanent_invalid`, and
+`cancelled` are terminal and not retryable. The `terminal` and `retryable`
+attributes are derived, read-only properties. Construct from `kind`,
+`reason_code`, and `created_at=...`; the original five positional arguments
+remain accepted, but any supplied boolean flags must agree with `kind`.
+Omitted flags or `None` leave their meaning to `kind`. Replacing a disposition's
+kind therefore updates both properties without copying stale flags.
+
+Report JSON and Runtime wire values continue to include both derived flags.
+The current wire reader requires boolean flags consistent with the kind and
+rejects contradictory or malformed values as storage-integrity errors.
+
 ## Storage, limits, and retention
 
 Evaluation registers a launch intent before materializing Task input. Cancellation

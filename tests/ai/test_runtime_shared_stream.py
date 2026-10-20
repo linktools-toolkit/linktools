@@ -11,12 +11,26 @@ import pytest
 from linktools.ai.core import CommitPolicy
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeDomain
 from linktools.ai.storage import InMemoryCacheBackend, InMemoryStreamBackend
 from ._runtime_test_helpers import _Models
+
+
+@pytest.fixture
+def authority_clock(monkeypatch):
+    """Advance only the event service's authority clock, not asyncio timers."""
+    from types import SimpleNamespace
+    from linktools.ai.runtime import _event
+
+    clock = SimpleNamespace(now=0.0)
+    event_asyncio = SimpleNamespace(**vars(asyncio))
+    event_asyncio.get_running_loop = lambda: SimpleNamespace(time=lambda: clock.now)
+    monkeypatch.setattr(_event, "asyncio", event_asyncio)
+    return clock
 
 
 class _CountingStreamBackend(InMemoryStreamBackend):
@@ -277,7 +291,7 @@ async def test_missing_stream_replays_durable_tail_after_bounded_open_grace() ->
 
 
 @pytest.mark.asyncio
-async def test_buffered_batch_cannot_postpone_terminal_authority_check() -> None:
+async def test_buffered_batch_cannot_postpone_terminal_authority_check(authority_clock) -> None:
     from types import SimpleNamespace
     from linktools.ai.core import canonical_json_bytes
     from linktools.ai.runtime._shared_stream import stream_key
@@ -289,7 +303,8 @@ async def test_buffered_batch_cannot_postpone_terminal_authority_check() -> None
     stream = service._stream_shared("execution", principal=_principal(), after_event_seq=0)
     assert (await anext(stream)).payload["text"] == "1"
     executions.head.state = SimpleNamespace(value="sealed")
-    await asyncio.sleep(1.01)
+    assert executions.reads == 1
+    authority_clock.now = 1.01
     assert (await anext(stream)).event_type == "STREAM_RESET"
     assert executions.reads == 2
     await stream.aclose()
@@ -607,7 +622,7 @@ async def test_marker_batch_corrupt_tail_preserves_valid_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_marker_batch_prefetched_tail_respects_authority_deadline() -> None:
+async def test_marker_batch_prefetched_tail_respects_authority_deadline(authority_clock) -> None:
     from types import SimpleNamespace
 
     stream, executions, events = await _marker_batch_stream([
@@ -619,7 +634,8 @@ async def test_marker_batch_prefetched_tail_respects_authority_deadline() -> Non
         executions.head = SimpleNamespace(
             producer_generation=1, producer_claim_id="claim", state=SimpleNamespace(value="sealed"),
         )
-        await asyncio.sleep(1.05)
+        assert executions.reads == 1
+        authority_clock.now = 1.05
         assert (await anext(stream)).event_type == "STREAM_RESET"
         assert executions.reads == 2
     finally:

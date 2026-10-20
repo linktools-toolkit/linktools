@@ -451,7 +451,7 @@ async def test_graph_input_capture_has_one_owner(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_graph_case_preserves_template_options_and_checks_prompt_owner(tmp_path: Path) -> None:
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import AgentTaskInputContext
     from .test_evaluation_consumers import FixtureModels
 

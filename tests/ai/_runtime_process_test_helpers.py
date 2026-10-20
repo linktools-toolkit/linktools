@@ -10,7 +10,7 @@ import traceback
 
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute

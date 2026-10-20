@@ -269,7 +269,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     from pydantic_ai.messages import BinaryContent, FilePart, TextPart
     from pydantic_ai.models import CompletedStreamedResponse
     from pydantic_ai.models.function import FunctionModel
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
     from linktools.ai.runtime import Runtime
     from .test_live_history_readback_integration import _Models

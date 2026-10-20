@@ -12,7 +12,8 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, Page
 from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
 

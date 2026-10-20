@@ -22,7 +22,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from linktools.ai.agent import AgentInputCaptureRef
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionStatus, JsonValue, OperationKind, OperationLedgerRecord, OperationStatus, Principal,
     TaskStatus, canonical_sha256, service_principal,

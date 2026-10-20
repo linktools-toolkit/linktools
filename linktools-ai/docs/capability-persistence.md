@@ -14,7 +14,8 @@ from hashlib import sha256
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, JsonValue, canonical_json_bytes
 from linktools.ai.runtime.persistence import CapabilityWriter
 from linktools.ai.runtime.state import StateTransaction, StoredRecord

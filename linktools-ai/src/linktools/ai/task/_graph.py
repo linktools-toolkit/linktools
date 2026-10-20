@@ -386,21 +386,6 @@ class TaskNode(Generic[_ResultT]):
     def to_mapping(self) -> dict[str, JsonValue]:
         """Project the resolved node semantics used by TaskGraph identity."""
         node_input = dict(self.input)
-        prompt = node_input.get("prompt")
-        if (
-            self.task is not None
-            and node_input.get("kind") == "agent-task-input"
-            and isinstance(prompt, Mapping)
-        ):
-            if prompt.get("kind") == "stored-user-content-v1":
-                intent_digest = prompt.get("source_intent_digest")
-            else:
-                intent_digest = canonical_sha256(prompt)
-            if isinstance(intent_digest, str):
-                node_input["prompt"] = {
-                    "kind": "task-prompt-intent-v1",
-                    "digest": intent_digest,
-                }
         value: dict[str, JsonValue] = {
             "node_id": self.node_id,
             "dependencies": sorted(self.dependencies),

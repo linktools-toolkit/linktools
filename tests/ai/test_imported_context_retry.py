@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai import capture_run_messages
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionInputContext, Runtime, RuntimeStorage

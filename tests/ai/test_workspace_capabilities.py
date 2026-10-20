@@ -13,12 +13,12 @@ from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
     CapabilityContribution,
-    RuntimeFeatures,
     ToolCallFailed,
     tool_class_from_metadata,
     workspace_capabilities,
     workspace_tool_declarations,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.spec import (

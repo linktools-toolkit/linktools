@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import AgentContext, ExecutionCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryCacheBackend

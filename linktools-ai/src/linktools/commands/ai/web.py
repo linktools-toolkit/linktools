@@ -42,7 +42,8 @@ class Command(BaseCommand):
         model = args.model or workspace.config.get("model") or os.getenv("OPENAI_MODEL", "").strip()
 
         async def serve() -> int:
-            from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
+            from linktools.ai.capability import AssetCapability, WorkspaceCapability
+            from linktools.ai.runtime import RuntimeFeatures
             from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
             from linktools.ai.runtime import Runtime
 

@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 from linktools import ai
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin
-from linktools.ai.capability import CapabilityContribution, RuntimeFeatures, SkillDefinition
+from linktools.ai.capability import CapabilityContribution, SkillDefinition
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
@@ -38,7 +39,7 @@ def test_top_level_public_surface_is_exact() -> None:
 
     expected = {
         "Agent": runtime.Agent,
-        "RuntimeFeatures": capability.RuntimeFeatures,
+        "RuntimeFeatures": runtime.RuntimeFeatures,
         "Execution": runtime.Execution,
         "AgentContext": capability.AgentContext,
         "Runtime": runtime.Runtime,
@@ -52,6 +53,33 @@ def test_top_level_public_surface_is_exact() -> None:
     imported: dict[str, object] = {}
     exec("from linktools.ai import *", imported)
     assert {name: imported[name] for name in ai.__all__} == expected
+
+
+@pytest.mark.parametrize("first", ["capability", "agent", "runtime"])
+def test_runtime_feature_annotations_resolve_in_any_import_order(first: str) -> None:
+    import subprocess
+    import sys
+
+    code = f"""
+import importlib
+from typing import get_type_hints
+importlib.import_module('linktools.ai.{first}')
+from linktools.ai import RuntimeFeatures as RootFeatures
+from linktools.ai.runtime import RuntimeFeatures, RuntimeFeaturesCapture
+from linktools.ai.capability import CapabilityContribution, capture_contributions
+assert RootFeatures is RuntimeFeatures
+assert get_type_hints(RuntimeFeatures.capture)['return'].__origin__ is RuntimeFeaturesCapture
+assert get_type_hints(RuntimeFeaturesCapture)['contributions'].__args__[0].__origin__ is CapabilityContribution
+for owner in (RuntimeFeatures, RuntimeFeaturesCapture):
+    for name, value in vars(owner).items():
+        if isinstance(value, property):
+            value = value.fget
+        if callable(value) and (not name.startswith('_') or name == '__init__'):
+            assert get_type_hints(value)
+assert get_type_hints(capture_contributions)['return'].__origin__ is tuple
+assert get_type_hints(CapabilityContribution.validate_revision)['value'] is int
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
 
 
 def test_agent_binding_contract_persists_binding_inputs() -> None:

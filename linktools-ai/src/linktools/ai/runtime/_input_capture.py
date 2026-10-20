@@ -26,6 +26,7 @@ from ..task import (
     TaskInvocationInputContract, TaskInvocationInputRef, TaskNode,
     TaskNodeInvocation, TaskNodeResultRef, TaskRef, TaskResultRef,
 )
+from ._agent_task_node import AgentTaskNode
 from ._input import (
     CanonicalUserInput, ExecutionInputMaterializer, UserPromptInput,
     captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
@@ -467,7 +468,8 @@ class RuntimeInputCaptures:
         if is_agent:
             prompt = await self._materializer.restore(record.stored_user_input)
             instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
-            payload = {"prompt": task_prompt_draft(prompt), "input_view": record.stored_user_input.view, "binding": record.binding.to_payload(),
+            input_view = record.stored_user_input.view
+            payload = {"prompt": task_prompt_draft(prompt), "input_view": None if input_view is None else dict(input_view), "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),
                        "source_execution_id": execution_id, "source_invocation_id": record.parent_invocation_id,
                        "repository_instructions": instructions,
@@ -786,7 +788,8 @@ class RuntimeInputCaptures:
                                                        {"contract": encode_domain(contract)})
                 input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, source_id)
                 body = {}
-            captured_nodes.append(TaskNode.from_resolved(node.node_id, node.dependencies, task=node.task, input=body,
+            node_type = AgentTaskNode if declaration.get("type") == "agent" else TaskNode
+            captured_nodes.append(node_type.from_resolved(node.node_id, node.dependencies, task=node.task, input=body,
                 input_capture=input_capture, original_input=original_input, budget_cost=node.budget_cost,
                 expander=None if request.mode == "materialized_graph" else node.expander,
                 input_refs=input_refs, timeout_seconds=node.timeout_seconds, max_attempts=node.max_attempts,

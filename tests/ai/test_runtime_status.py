@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import RuntimeFeatures, TraceCapability
+from linktools.ai.capability import TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.migrate import provision_database
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage

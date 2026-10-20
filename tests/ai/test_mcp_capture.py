@@ -19,9 +19,9 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetCapability,
     CapabilityContribution,
-    RuntimeFeatures,
     CapabilityLoadContext,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import MCPServerSpec, MCPServerSpecAdapter, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay

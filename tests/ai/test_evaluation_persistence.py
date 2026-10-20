@@ -5,7 +5,7 @@
 from linktools.ai.runtime.state import RuntimeState
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,13 +15,16 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateContract, CaseContract, CaseRef, DatasetContract, DatasetRef,
     DimensionContract, EvaluationManifest, EvaluationPolicy, ScorerContract,
-    ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan,
+    ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan, TrialView,
+    evaluation_completion,
 )
 from linktools.ai.runtime._evaluation import RuntimeEvaluations
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.state._contracts import IdempotencyRecord
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.runtime.state._codec import (
+    _decode_enveloped_domain, _encode_persisted_domain, decode_domain, encode_domain,
+)
 from linktools.ai.runtime.state._evaluation_records import (
     EvaluationCleanupRecord, EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
     EvaluationTombstone,
@@ -166,5 +169,146 @@ async def test_dataset_publication_and_slot_arbitration_are_backend_atomic(backe
         assert all(item.slot_id != rejected.slot_id for item in final.intents)
         assert final.manifest.trials == experiment().manifest.trials
         assert await repository.reserve_experiment(experiment()) == final
+    finally:
+        await storage.close()
+
+
+@pytest.mark.parametrize("kind", (
+    "permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked",
+))
+def test_disposition_kind_owns_flags_and_completion(kind: str) -> None:
+    retryable = kind == "recoverable_blocked"
+    disposition = SlotDispositionView(kind, "reason", not retryable, retryable, NOW)
+    assert disposition == SlotDispositionView(kind=kind, reason_code="reason", created_at=NOW)
+    assert disposition == replace(
+        SlotDispositionView("recoverable_blocked", "reason", False, True, NOW), kind=kind,
+    )
+    assert disposition.terminal is not retryable
+    assert disposition.retryable is retryable
+    changed = replace(disposition, kind="cancelled" if retryable else "recoverable_blocked")
+    assert changed.terminal is retryable
+    assert changed.retryable is not retryable
+    trial = TrialView(TargetTrialRef("experiment", "trial"), CaseRef("dataset", "case", 1),
+                      "target", 1, disposition=disposition)
+    assert trial.terminal is not retryable
+    assert trial.needs_attention is retryable
+    assert evaluation_completion((trial,), ()) == ("needs_attention" if retryable else "complete")
+    with pytest.raises(ValueError):
+        SlotDispositionView(kind, "reason", retryable, retryable, NOW)
+    with pytest.raises(ValueError):
+        SlotDispositionView(kind, "reason", not retryable, not retryable, NOW)
+
+
+@pytest.mark.parametrize("kind,terminal,retryable", (
+    ("unknown", True, False),
+    ("cancelled", 1, False),
+    ("recoverable_blocked", False, "true"),
+))
+def test_disposition_rejects_unknown_kind_and_non_boolean_flags(
+    kind: str, terminal: object, retryable: object,
+) -> None:
+    with pytest.raises(ValueError):
+        SlotDispositionView(kind, "reason", terminal, retryable, NOW)
+
+
+@pytest.mark.parametrize("persisted", (False, True))
+@pytest.mark.parametrize("kind", (
+    "permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked",
+))
+def test_disposition_wire_preserves_validated_derived_flags(kind: str, persisted: bool) -> None:
+    retryable = kind == "recoverable_blocked"
+    disposition = SlotDispositionView(kind, "reason", not retryable, retryable, NOW)
+    expected = {"$dataclass": "evaluation_slot_disposition_view", "fields": {
+        "kind": kind, "reason_code": "reason", "terminal": not retryable,
+        "retryable": retryable, "created_at": {"$datetime": NOW.isoformat()},
+    }}
+    if persisted:
+        expected["schema"] = 1
+        encoded = _encode_persisted_domain(disposition)
+
+        def decode(payload: dict[str, object]) -> SlotDispositionView:
+            return _decode_enveloped_domain({"v": 1, "value": {
+                "type": "evaluation_slot_disposition_view", "payload": payload,
+            }}, SlotDispositionView)
+    else:
+        encoded = encode_domain(disposition)
+
+        def decode(payload: dict[str, object]) -> SlotDispositionView:
+            return decode_domain(payload, SlotDispositionView)
+
+    assert encoded == expected
+    assert decode(encoded) == disposition
+    encoded["fields"]["additional_projection"] = {"ordinary": "field"}
+    assert decode(encoded) == disposition
+    for name in ("terminal", "retryable"):
+        for corrupt in (not getattr(disposition, name), 1, None):
+            invalid = {**encoded, "fields": {**encoded["fields"], name: corrupt}}
+            with pytest.raises(AIError) as raised:
+                decode(invalid)
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        invalid = {**encoded, "fields": dict(encoded["fields"])}
+        del invalid["fields"][name]
+        with pytest.raises(AIError) as raised:
+            decode(invalid)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    invalid = {**encoded, "fields": {**encoded["fields"], "kind": "unknown"}}
+    with pytest.raises(AIError) as raised:
+        decode(invalid)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+@pytest.mark.parametrize("kind", (
+    "permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked",
+))
+async def test_disposition_recovery_and_terminal_arbitration_persist(
+    backend: str, kind: str, tmp_path: Path,
+) -> None:
+    storage = RuntimeState(storage_for(backend, tmp_path))
+    await storage.initialize(namespace="evaluation", tenant_id="tenant")
+    try:
+        repository = storage.evaluation.records
+        await repository.reserve_experiment(experiment())
+        pending = intent()
+        blocked = EvaluationSlotDisposition(pending.slot_id,
+            SlotDispositionView("recoverable_blocked", "retry", False, True, NOW))
+        await repository.append_slot_disposition("experiment", blocked)
+        restored = await repository.get("experiment", tenant_id="tenant")
+        assert restored.dispositions == (blocked,)
+        disposition = EvaluationSlotDisposition(pending.slot_id,
+            SlotDispositionView(kind, "reason", kind != "recoverable_blocked",
+                                kind == "recoverable_blocked", NOW))
+        await repository.append_slot_disposition("experiment", disposition)
+        restored = await repository.get("experiment", tenant_id="tenant")
+        assert restored.dispositions == (disposition,)
+        await repository.append_slot_disposition("experiment", blocked)
+        registered = await repository.register_launch_intent("experiment", pending, capacity=1)
+        if kind == "recoverable_blocked":
+            assert registered.intents == (pending,)
+            assert registered.dispositions == ()
+        else:
+            assert registered.intents == ()
+            assert registered.dispositions == (disposition,)
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "mixed"))
+async def test_content_purge_persists_terminal_disposition_projections(backend: str, tmp_path: Path) -> None:
+    storage = RuntimeState(storage_for(backend, tmp_path))
+    await storage.initialize(namespace="evaluation", tenant_id="tenant")
+    try:
+        repository = storage.evaluation.records
+        await repository.reserve_experiment(replace(experiment(), gate="closed_cancel",
+            content_expires_at=NOW, metadata_expires_at=NOW + timedelta(days=1)))
+        await repository.purge("experiment", now=NOW)
+        record = await repository.get("experiment", tenant_id="tenant")
+        assert record.content_deleted_at == NOW
+        assert {item.slot_id for item in record.dispositions} == {"target:trial", "score:trial:score"}
+        assert all(item.disposition == SlotDispositionView(
+            "permanent_unavailable", "evidence_deleted", True, False, NOW,
+        ) for item in record.dispositions)
     finally:
         await storage.close()

@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import (
-    RuntimeFeatures,
     ToolCallRetry,
     workspace_capabilities,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
 

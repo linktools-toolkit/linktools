@@ -9,7 +9,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.spec import AgentSpec
 

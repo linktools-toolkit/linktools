@@ -70,6 +70,7 @@ from ..task import (
 from ._input_capture import RuntimeInputCaptures
 from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInput
+from ._agent_task_node import AgentTaskNode
 from ._input import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
@@ -613,6 +614,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         graph: TaskGraph,
     ) -> TaskGraph:
         tasks, expanders = self._definitions_for(admission.graph_id)
+        for node in graph.nodes:
+            task = None if node.task is None else tasks.get((node.task.id, node.task.revision))
+            agent_input = task is not None and isinstance(task.runner, RuntimeAgentTaskRunner)
+            if isinstance(node, AgentTaskNode) != agent_input:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "task_input_owner_changed"})
         binding_capture = await self._binding_capture_store.capture(
             admission,
             graph,
@@ -681,7 +687,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             body["files"] = list(
                 await materializer.canonicalize_files(task_input.files)
             )
-            return TaskNode.from_resolved(
+            return AgentTaskNode.from_resolved(
                 node.node_id,
                 node.dependencies,
                 task=node.task,
@@ -716,7 +722,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             "value": encode_domain(stored),
         }
         _logger.info("task input resolved: node=%s", node.node_id)
-        return TaskNode.from_resolved(
+        return AgentTaskNode.from_resolved(
             node.node_id,
             node.dependencies,
             task=node.task,
@@ -1211,12 +1217,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 request=True,
                 node_id=node.node_id,
             )
+        agent_input = isinstance(handler, _TaskRunnerAdapter) and isinstance(handler.runner, RuntimeAgentTaskRunner)
+        if isinstance(node, AgentTaskNode) and not agent_input:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "task_input_owner_changed"})
         try:
             normalized = {} if node.input_capture is not None else (body if node.original_input is not None else handler.normalize(body))
             canonical_body = _normalize_handler_body(normalized)
             if (
-                isinstance(handler, _TaskRunnerAdapter)
-                and isinstance(handler.runner, RuntimeAgentTaskRunner)
+                agent_input
                 and node.input_capture is None
                 and AgentTaskInput.from_mapping(canonical_body).stored_prompt
                 is not None
@@ -1255,7 +1263,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     "reason": "task_output_contract_invalid",
                 },
             ) from error
-        return TaskNode.from_resolved(
+        node_type = AgentTaskNode if agent_input else TaskNode
+        return node_type.from_resolved(
             node.node_id,
             node.dependencies,
             task=node.task,
@@ -1660,7 +1669,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "task_revision": task_revision,
                     },
                 ) from error
-            canonical = TaskNode.from_resolved(
+            agent_input = isinstance(handler, _TaskRunnerAdapter) and isinstance(handler.runner, RuntimeAgentTaskRunner)
+            if isinstance(node, AgentTaskNode) != agent_input:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details={"reason": "task_input_owner_changed"})
+            node_type = AgentTaskNode if agent_input else TaskNode
+            canonical = node_type.from_resolved(
                 node.node_id,
                 node.dependencies,
                 task=node.task,
@@ -1715,7 +1728,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 body = _normalize_handler_body(handler.normalize(contract.input))
             if contract.input.get("capture_context") is not None:
                 body = {**body, "capture_context": contract.input["capture_context"]}
-            restored = TaskNode.from_resolved(node.node_id, node.dependencies, task=node.task,
+            node_type = AgentTaskNode if isinstance(handler, _TaskRunnerAdapter) and isinstance(handler.runner, RuntimeAgentTaskRunner) else TaskNode
+            restored = node_type.from_resolved(node.node_id, node.dependencies, task=node.task,
                 input=body, original_input=contract.original_input, budget_cost=node.budget_cost, expander=node.expander,
                 input_refs=node.input_refs, timeout_seconds=node.timeout_seconds, max_attempts=node.max_attempts,
                 retry_delay_seconds=node.retry_delay_seconds, output_contract=node.output_contract,

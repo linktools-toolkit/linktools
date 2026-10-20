@@ -22,12 +22,12 @@ from linktools.ai.capability import (
     AssetCapability,
     AgentDeclarationLoader,
     CapabilityContribution,
-    RuntimeFeatures,
     CapabilityLoadContext,
     SkillDefinition,
     SkillResource,
     SkillSourceRef,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import validate_logical_id as validate_core_logical_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database

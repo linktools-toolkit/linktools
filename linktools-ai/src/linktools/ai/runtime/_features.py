@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability groups capture runtime candidate definitions before execution."""
+"""Runtime feature declarations and their immutable captured composition."""
 
 import functools
 import inspect
@@ -28,29 +28,22 @@ from ..spec import (
 )
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
-from ._asset import AssetCapability
-from ._context import AgentContext
-from ._contribution import (
+from ..capability import (
+    AgentContext,
+    AssetCapability,
     CapabilityContribution,
-    _freeze_contribution,
-    _validate_external_capability_id,
-    _validate_revision,
-)
-from ._declaration import (
-    _bind_mcp_contribution,
-)
-from ._loading import CapabilityLoadContext
-from ._tool_metadata import (
+    CapabilityLoadContext,
     ToolEffectPolicy,
+    ToolResponsesCapability,
+    WorkspaceCapability,
+    capture_contributions,
     is_tool_effect_policy,
     tool_metadata,
-    validate_tool_metadata,
+    workspace_tool_declarations,
 )
-from ._workspace import WorkspaceCapability, workspace_tool_declarations
-from ._tool_responses import ToolResponsesCapability
 
 AppT = TypeVar("AppT")
-_logger = environ.get_logger("ai.capability.group")
+_logger = environ.get_logger("ai.runtime.features")
 
 
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
@@ -174,7 +167,6 @@ class RuntimeFeatures(Generic[AppT]):
         plan_safe: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
-        _validate_revision(revision)
         _validate_tool_effect_policy(effect_policy, plan_safe)
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
@@ -211,9 +203,7 @@ class RuntimeFeatures(Generic[AppT]):
         """
         if not isinstance(capability, AbstractCapability):
             raise TypeError("capability must be an AbstractCapability")
-        _validate_revision(revision)
         capability_id = _capability_registration_id(capability, id)
-        _validate_external_capability_id(capability_id)
         contribution = CapabilityContribution.from_opaque(
             "capability", capability_id, capability, revision=revision,
             config=config, scope=scope,
@@ -300,7 +290,7 @@ class RuntimeFeatures(Generic[AppT]):
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
         """Register one declarative Agent before Runtime.open()."""
-        _validate_revision(revision)
+        CapabilityContribution.validate_revision(revision)
         values = (instructions,) if isinstance(instructions, str) else tuple(instructions)
         spec = AgentSpec(
             id=name,
@@ -347,24 +337,10 @@ class RuntimeFeatures(Generic[AppT]):
                     contributions.append(value)
             source_revision = context.source_revision
             asset_reader = context.asset_reader
-        captured_items = tuple(
-            _freeze_contribution(
-                _bind_mcp_contribution(item, context)
-                if item.kind == "mcp"
-                else item
-            )
-            for item in contributions
-        )
-        _validate_unique(captured_items)
-        generic = [item for item in captured_items if item.kind == "capability"]
-        declarations = sorted(
-            (item for item in captured_items if item.kind != "capability"),
-            key=lambda item: (item.kind, item.id, item.revision),
-        )
-        capture_contributions = tuple((*declarations, *generic))
+        captured_items = capture_contributions(contributions, context=context)
         capture = RuntimeFeaturesCapture(
             self._id,
-            capture_contributions,
+            captured_items,
             source_revision,
             self._workspace,
             RepositoryInstructions(tuple(instruction_documents)),
@@ -379,7 +355,7 @@ class RuntimeFeatures(Generic[AppT]):
             "capability group captured: group=%s contributions=%d instructions=%d "
             "source_revision=%s",
             self._id,
-            len(capture_contributions),
+            len(captured_items),
             len(instruction_documents),
             None if source_revision is None else source_revision.value,
         )
@@ -479,14 +455,6 @@ def _validate_tool_effect_policy(effect_policy: str, plan_safe: bool) -> None:
     if not isinstance(plan_safe, bool):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-
-def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
-    seen: set[tuple[str, str, int]] = set()
-    for value in values:
-        identity = (value.kind, value.id, value.revision)
-        if identity in seen:
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        seen.add(identity)
 
 
 __all__ = ["RuntimeFeatures", "RuntimeFeaturesCapture"]

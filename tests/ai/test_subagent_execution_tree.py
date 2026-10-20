@@ -1143,3 +1143,91 @@ async def test_tree_broker_discovers_descendants_after_parent_stream_ends() -> N
     }
     assert len(values) == 4
     assert not broker._subscriptions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discovery_source", ["poll", "notification"])
+@pytest.mark.parametrize("outcome", ["complete", "close", "error"])
+async def test_existing_tree_events_continue_during_child_discovery(
+    discovery_source: str, outcome: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.runtime import _execution_tree
+
+    monkeypatch.setattr(_execution_tree, "_DISCOVERY_BACKOFF_INITIAL", 0.01)
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    ready = asyncio.Event()
+    events = asyncio.Queue()
+    broker = ExecutionTreeBroker()
+    failure = AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    class Reader(_RootOnlyExecutionReader):
+        async def blocked(self):
+            entered.set()
+            try:
+                await release.wait()
+                if outcome == "error":
+                    raise failure
+            finally:
+                finished.set()
+
+        async def list_children(self, execution_id, *, principal):
+            if ready.is_set() and execution_id == "root" and discovery_source == "poll":
+                await self.blocked()
+                return (self.child,)
+            return ()
+
+        async def inspect(self, execution_id, *, principal):
+            if execution_id == "child" and discovery_source == "notification":
+                await self.blocked()
+            return await super().inspect(execution_id, principal=principal)
+
+    class Events:
+        def stream(self, execution_id, *, principal, after_event_seq=0):
+            async def values():
+                if execution_id == "child":
+                    yield ExecutionStreamEvent(execution_id, 1, "PROGRESS", {})
+                    return
+                while True:
+                    event = await events.get()
+                    if event is None:
+                        return
+                    yield event
+            return values()
+
+    stream = ExecutionTreeStreamer(Reader(), Events(), broker).stream(
+        "root", principal=Principal("owner", "tenant"), ready=ready,
+    )
+    pending = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(ready.wait(), 1)
+        if discovery_source == "notification":
+            broker.publish("root", "child")
+        await asyncio.wait_for(entered.wait(), 1)
+        events.put_nowait(ExecutionStreamEvent("root", 1, "PROGRESS", {}))
+        delivered = await asyncio.wait_for(pending, 0.5)
+        pending = None
+        assert delivered.execution_id == "root" and delivered.event.durable_seq == 1
+        assert not release.is_set() and not finished.is_set()
+        if outcome == "close":
+            await stream.aclose()
+            assert finished.is_set()
+        else:
+            release.set()
+            pending = asyncio.create_task(anext(stream))
+            if outcome == "error":
+                with pytest.raises(AIError) as caught:
+                    await asyncio.wait_for(pending, 1)
+                assert caught.value is failure
+            else:
+                child = await asyncio.wait_for(pending, 1)
+                assert child.execution_id == "child" and child.depth == 1
+                events.put_nowait(None)
+                assert [event async for event in stream] == []
+            pending = None
+    finally:
+        release.set()
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await stream.aclose()
+    assert not broker._subscriptions

@@ -332,7 +332,7 @@ async def test_native_runtime_consumes_fixture_through_durable_mcp_operation(
     from pydantic_ai.toolsets import FunctionToolset
 
     from linktools.ai.asset import AssetMaterializer
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.core import ExecutionStatus, JsonValue, ToolOperationStatus
     from linktools.ai.runtime import Runtime, RuntimeStorage
     from linktools.ai.runtime._mcp import _MCPModelToolset, prepare_mcp_projections

@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import InMemoryStreamBackend, StreamBatch, StreamWriter
 from ._runtime_test_helpers import _Models

@@ -804,7 +804,7 @@ async def test_storage_exposes_borrowed_cache_without_closing_it():
 @pytest.mark.parametrize("retention", ("durable", "volatile", "transient"))
 async def test_runtime_factory_borrows_display_cache_only_for_durable_domains(tmp_path, retention):
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime, RuntimeContext
     from ._runtime_test_helpers import _Models
 
@@ -907,7 +907,7 @@ async def test_display_cache_rejects_execution_dependencies_outside_authorized_t
 @pytest.mark.parametrize("cancel_read", (False, True))
 async def test_runtime_close_drains_display_io_after_close_waiter_cancellation(tmp_path, monkeypatch, phase, cancel_read):
     from pydantic_ai.models.test import TestModel
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import Runtime, RuntimeContext
     from ._runtime_test_helpers import _Models
 

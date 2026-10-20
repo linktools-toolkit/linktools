@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output
-from linktools.ai.capability import CapabilityContribution, RuntimeFeatures
+from linktools.ai.capability import CapabilityContribution
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     AuthorizationAction,
     ExecutionStatus,

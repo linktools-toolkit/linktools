@@ -21,7 +21,8 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.tools import RunContext
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from linktools.ai.capability import AgentContext, ExecutionCapability, RuntimeFeatures, TraceCapability
+from linktools.ai.capability import AgentContext, ExecutionCapability, TraceCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import CommitPolicy, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database

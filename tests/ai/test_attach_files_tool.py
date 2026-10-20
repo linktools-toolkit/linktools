@@ -12,10 +12,10 @@ from pydantic_ai.messages import BinaryContent, ToolReturn
 from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.capability import (
-    RuntimeFeatures,
     ToolCallRetry,
     workspace_capabilities,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.model import ModelBinding, ModelRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (

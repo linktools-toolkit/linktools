@@ -19,7 +19,7 @@ from pydantic_ai.messages import ModelMessage
 from linktools.core import environ
 
 from ..agent import AgentBindingContract
-from ..capability import RuntimeFeatures, RuntimeFeaturesCapture
+from ._features import RuntimeFeatures, RuntimeFeaturesCapture
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,

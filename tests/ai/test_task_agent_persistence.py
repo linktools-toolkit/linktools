@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import TaskStatus
 from linktools.ai.capability import TraceCapability, CheckpointCapability
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage

@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.capability import ExecutionCapability, RuntimeFeatures, ToolResponseFixture, ToolResponsesCapability
+from linktools.ai.capability import ExecutionCapability, ToolResponseFixture, ToolResponsesCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage

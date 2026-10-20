@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import PromptLimits, RuntimeContext, RuntimeHistory, RuntimeStorage

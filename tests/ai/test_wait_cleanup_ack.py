@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionEventType, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Execution, Runtime, RuntimeStorage

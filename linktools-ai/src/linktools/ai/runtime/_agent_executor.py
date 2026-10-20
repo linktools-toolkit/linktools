@@ -921,9 +921,8 @@ async def _materialize_agent(
     workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
     compaction_policy = CompactionPolicy()
     for candidate in compiled_agent.selected_tools:
-        source_tool = candidate.value
         metadata = _bound_tool_metadata(candidate)
-        tool = _tool_with_metadata(source_tool, metadata)
+        tool = candidate.materialize_tool()
         tool_class = tool_class_from_metadata(metadata)
         if tool_class is None:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -1207,31 +1206,6 @@ def _bound_tool_metadata(
         require_tool_class=True,
     )
     return metadata
-
-
-def _tool_with_metadata(
-    tool: "Tool[AgentContext[object]]",
-    metadata: Mapping[str, object],
-) -> "Tool[AgentContext[object]]":
-    return Tool(
-        tool.function,
-        takes_ctx=tool.takes_ctx,
-        max_retries=tool.max_retries,
-        name=tool.name,
-        description=tool.description,
-        prepare=tool.prepare,
-        args_validator=tool.args_validator,
-        docstring_format=tool.docstring_format,
-        require_parameter_descriptions=tool.require_parameter_descriptions,
-        strict=tool.strict,
-        sequential=tool.sequential,
-        requires_approval=tool.requires_approval,
-        metadata=dict(metadata),
-        timeout=tool.timeout,
-        defer_loading=tool.defer_loading,
-        include_return_schema=tool.include_return_schema,
-        function_schema=tool.function_schema,
-    )
 
 
 def _plan_mode_prepare(

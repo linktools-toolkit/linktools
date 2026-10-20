@@ -15,7 +15,8 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import ExecutionCapability, AgentContext, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import CheckpointCapability, TraceCapability
@@ -92,8 +93,16 @@ async def test_minimal_runtime_supports_sessions_without_retained_model_context(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cache_kind", ("none", "unsupported", "full"))
-@pytest.mark.parametrize("evidence", ("none", "checkpoint", "trace"))
+# Isolate each admission precondition instead of multiplying independent
+# rejection reasons. A complete coordinator is needed to exercise either
+# evidence veto; absent/unsupported coordination already prevents pending mode.
+@pytest.mark.parametrize(("evidence", "cache_kind"), (
+    ("none", "none"),
+    ("none", "unsupported"),
+    ("none", "full"),
+    ("checkpoint", "full"),
+    ("trace", "full"),
+))
 async def test_conversation_pending_requires_complete_coordination(tmp_path, monkeypatch, cache_kind, evidence):
     entered, release = asyncio.Event(), asyncio.Event()
     async def model(messages, info):

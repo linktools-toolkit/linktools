@@ -21,7 +21,7 @@ from ._watch_cursor import (
     decode_execution_observation_cursor, encode_execution_observation_cursor,
     encode_execution_watch_cursor,
 )
-from .service_api import ExecutionObservationEvent, ExecutionTreeEvent, ExecutionView, _ExecutionStreamFailure
+from .service_api import ExecutionObservationEvent, ExecutionTreeEvent, ExecutionView, TaskModelProjection, _ExecutionStreamFailure
 
 if TYPE_CHECKING:
     from ._agent import _ExecutionTreeWatcher
@@ -75,7 +75,7 @@ class _ExecutionModelObservation:
 
     async def capture(self, *, subscribe: bool = True) -> tuple[tuple[ExecutionView, int, int], ...]:
         captured = await self.runtime._capture_execution_tree(
-            self.execution_id, principal=self.principal, after_event_seqs=self.sequences,
+            self.execution_id, principal=self.principal, after_event_seqs=ExecutionWatchPositions(self.sequences, self.previews),
         )
         for view, depth, _ in captured:
             await self.models.add(self.execution_id, view, depth, subscribe=subscribe)
@@ -88,6 +88,32 @@ class _ExecutionModelObservation:
                 self.cursor = self.checkpoint()
                 yield ExecutionObservationEvent(projection, self.cursor)
 
+    async def reconcile(self, discovered: asyncio.Event) -> AsyncIterator[TaskModelProjection]:
+        tick = asyncio.create_task(asyncio.sleep(1.0))
+        discovery = asyncio.create_task(discovered.wait())
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {tick, discovery, *self.models.waits.values()},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                dirty = self.models.changed(done)
+                if tick in done or discovery in done:
+                    discovered.clear()
+                    await self.capture()
+                    dirty.update(self.models.views)
+                    if tick in done:
+                        tick.result()
+                        tick = asyncio.create_task(asyncio.sleep(1.0))
+                    if discovery in done:
+                        discovery.result()
+                        discovery = asyncio.create_task(discovered.wait())
+                for execution_id in sorted(dirty):
+                    async for _, projection in self.models.refresh(execution_id):
+                        yield projection
+        finally:
+            await _drain_stream_tasks((tick, discovery))
+
     async def live(self, ready: asyncio.Event | None) -> AsyncIterator[ExecutionObservationEvent]:
         tree_ready = asyncio.Event()
         stream = self.watch_tree(
@@ -96,7 +122,9 @@ class _ExecutionModelObservation:
         )
         pending = asyncio.create_task(stream.__anext__())
         prepared = asyncio.create_task(tree_ready.wait())
-        tick: asyncio.Task[None] | None = None
+        discovered = asyncio.Event()
+        reconciliation = self.reconcile(discovered)
+        metadata: asyncio.Task[TaskModelProjection] | None = None
         try:
             done, _ = await asyncio.wait({pending, prepared}, return_when=asyncio.FIRST_COMPLETED)
             if pending in done:
@@ -108,21 +136,17 @@ class _ExecutionModelObservation:
                 ready.set()
             async for event in self.refresh(self.models.views):
                 yield event
-            tick = asyncio.create_task(asyncio.sleep(1.0))
+            metadata = asyncio.create_task(reconciliation.__anext__())
             while pending is not None:
-                tasks = {pending, tick, *self.models.waits.values()}
-                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    {pending, metadata}, return_when=asyncio.FIRST_COMPLETED,
+                )
                 for task in done:
                     if task.cancelled():
                         task.result()
                     error = task.exception()
                     if error is not None and not isinstance(error, (StopAsyncIteration, _ExecutionStreamFailure)):
                         raise error
-                dirty = self.models.changed(done)
-                if tick in done:
-                    await self.capture()
-                    dirty.update(self.models.views)
-                    tick = asyncio.create_task(asyncio.sleep(1.0))
                 if pending in done:
                     task = pending
                     pending = None
@@ -133,14 +157,14 @@ class _ExecutionModelObservation:
                             self.finalizing.set()
                     else:
                         if event.execution_id not in self.models.views:
-                            await self.capture()
-                            if event.execution_id not in self.models.views:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            dirty.add(event.execution_id)
+                            discovered.set()
                         yield self.tree_event(event)
                         pending = asyncio.create_task(stream.__anext__())
-                async for event in self.refresh(dirty):
-                    yield event
+                if metadata in done:
+                    projection = metadata.result()
+                    self.cursor = self.checkpoint()
+                    yield ExecutionObservationEvent(projection, self.cursor)
+                    metadata = asyncio.create_task(reconciliation.__anext__())
         except _ExecutionStreamFailure as failure:
             cause = failure.cause
             raise ObservationError(
@@ -155,10 +179,10 @@ class _ExecutionModelObservation:
                 tasks = [prepared, *self.models.waits.values()]
                 if pending is not None:
                     tasks.append(pending)
-                if tick is not None:
-                    tasks.append(tick)
+                if metadata is not None:
+                    tasks.append(metadata)
                 errors = await _drain_stream_tasks(tasks)
-                for close in (self.models.close, stream.aclose):
+                for close in (reconciliation.aclose, self.models.close, stream.aclose):
                     try:
                         await close()
                     except BaseException as error:

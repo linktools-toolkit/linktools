@@ -17,7 +17,8 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .capability import ExecutionCapability, RuntimeFeatures, WorkspaceCapability
+from .capability import ExecutionCapability, WorkspaceCapability
+from .runtime import RuntimeFeatures
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,

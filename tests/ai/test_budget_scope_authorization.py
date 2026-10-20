@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, Principal, RunBudget
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ExecutionCapability

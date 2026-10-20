@@ -8,7 +8,8 @@ import inspect
 import pytest
 from pydantic_ai.capabilities import CombinedCapability, PrefixTools
 
-from linktools.ai.capability import RuntimeFeatures, ToolResponsesCapability
+from linktools.ai.capability import ToolResponsesCapability
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import AuthorizationAction, PromptLimits, ResourceKind, ResourceRef, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry

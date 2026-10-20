@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TypeVar
 
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
@@ -25,7 +25,7 @@ from ..spec import (
     SkillSpecAdapter,
     RepositoryInstructionDocument,
 )
-from ._contribution import CapabilityContribution
+from ._contribution import CapabilityContribution, _freeze_contribution
 from ._resource_path import (
     SKILL_DECLARATION_FILES,
     mcp_resource_path,
@@ -35,8 +35,9 @@ from ._resource_path import (
 from ._skill import SkillDefinition
 from ._skill_source import SkillResource, SkillSourceRef
 
-if TYPE_CHECKING:
-    from ._loading import CapabilityLoadContext, CapabilityLoadEntry
+from ._loading import CapabilityLoadContext, CapabilityLoadEntry
+
+AppT = TypeVar("AppT")
 
 _DECLARATION_SUFFIXES = {
     "agent": ("/AGENT.md",),
@@ -44,6 +45,31 @@ _DECLARATION_SUFFIXES = {
     "mcp": ("/mcp.json", "/mcp.yaml"),
     "rule": (".md",),
 }
+
+
+def capture_contributions(
+    contributions: Sequence[CapabilityContribution[AppT]],
+    *,
+    context: CapabilityLoadContext | None = None,
+) -> tuple[CapabilityContribution[AppT], ...]:
+    """Freeze candidate contracts, binding MCP resources to the captured source."""
+    captured = tuple(
+        _freeze_contribution(
+            _bind_mcp_contribution(item, context) if item.kind == "mcp" else item
+        )
+        for item in contributions
+    )
+    identities: set[tuple[str, str, int]] = set()
+    for item in captured:
+        identity = (item.kind, item.id, item.revision)
+        if identity in identities:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        identities.add(identity)
+    declarations = sorted(
+        (item for item in captured if item.kind != "capability"),
+        key=lambda item: (item.kind, item.id, item.revision),
+    )
+    return (*declarations, *(item for item in captured if item.kind == "capability"))
 
 
 class AgentDeclarationLoader:
@@ -393,5 +419,6 @@ def _inside_package(identifier: str, roots: Sequence[str]) -> bool:
 
 __all__ = [
     "AgentDeclarationLoader",
+    "capture_contributions",
     "BuiltinDeclarationLoader",
 ]

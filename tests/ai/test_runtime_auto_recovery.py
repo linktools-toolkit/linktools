@@ -10,7 +10,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.model import ModelRegistry

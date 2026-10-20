@@ -76,7 +76,7 @@ def test_task_node_projection_preserves_capture_scope_and_provenance() -> None:
     assert decode_domain(encode_domain(node), TaskNode).to_mapping() == node.to_mapping()
 
 
-def test_task_node_projection_keeps_prompt_intent_independent_of_storage() -> None:
+def test_task_node_projection_does_not_interpret_ordinary_prompt_shapes() -> None:
     prompt = {"kind": "text", "text": "hello"}
     direct = TaskNode("worker", task=TaskRef("worker.task", 1),
                       input={"kind": "agent-task-input", "prompt": prompt})
@@ -86,7 +86,9 @@ def test_task_node_projection_keeps_prompt_intent_independent_of_storage() -> No
             "physical_object_id": "one",
         },
     })
-    assert direct.to_mapping() == stored.to_mapping()
+    assert direct.to_mapping()["input"] == direct.input
+    assert stored.to_mapping()["input"] == stored.input
+    assert direct.to_mapping() != stored.to_mapping()
 
 
 def test_task_graph_template_projection_round_trips_all_semantics() -> None:

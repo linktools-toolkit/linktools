@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingContract
-from linktools.ai.capability import RuntimeFeatures, ToolCallFailed
+from linktools.ai.capability import ToolCallFailed
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,

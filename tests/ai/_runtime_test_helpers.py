@@ -21,7 +21,8 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RequestUsage, RunUsage
 
 from linktools.ai.asset import AssetStore
-from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability, tool_metadata
+from linktools.ai.capability import AssetCapability, WorkspaceCapability, tool_metadata
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import TraceCapability, CheckpointCapability

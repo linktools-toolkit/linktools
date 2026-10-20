@@ -77,7 +77,7 @@ async def test_capture_permission_denied_by_default() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import AgentTaskInput
 
     group = RuntimeFeatures("capture")
@@ -184,7 +184,7 @@ async def test_capture_preserves_failed_dependency_states(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) -> None:
-    from linktools.ai.capability import RuntimeFeatures
+    from linktools.ai.runtime import RuntimeFeatures
     from linktools.ai.runtime import AgentTaskInput, ExecutionRequest
 
     group = RuntimeFeatures("capture-child")

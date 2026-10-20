@@ -16,12 +16,12 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetCapability,
     CapabilityContribution,
-    RuntimeFeatures,
     CapabilityLoadContext,
     SkillDefinition,
     SkillResource,
     SkillSourceRef,
 )
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, SkillSpec
 from linktools.ai.storage import (

@@ -32,6 +32,7 @@ from ..workspace import (
 from ._context_archive import ExecutionContextArchive
 from ._agent_executor import (
     AgentExecutor,
+    _AgentRunScope,
     DurableBoundary,
     LiveDelta,
 )
@@ -203,11 +204,6 @@ class _SubagentDispatcher(Protocol):
 
 
 from ._agent_run import (
-    _AgentRunInput,
-    _AgentRunRunner,
-    _AgentRunCancelled,
-    _AgentRunDeferred,
-    _AgentRunFailed,
     _AgentRunLifecycle,
     _WorkerFailure,
 )
@@ -308,7 +304,6 @@ class LocalExecutionBackend:
         self._namespace = namespace
         self._run_store = run_store
         self._executor = executor
-        self._agent_run_runner = _AgentRunRunner(executor)
         self._catalog = catalog
         self._restore_binding = restore_binding
         self._workspace = workspace
@@ -3762,8 +3757,8 @@ class LocalExecutionBackend:
                 owner_id=current.session_id or current.execution_id,
             )
             try:
-                agent_run_result = await self._agent_run_runner.run(
-                    _AgentRunInput(
+                result = await self._executor.execute(
+                    _AgentRunScope(
                         binding=binding,
                         context=public_context,
                         workspace=self._workspace,
@@ -3826,15 +3821,6 @@ class LocalExecutionBackend:
                         repository_instruction_boundary=repository_boundary,
                         deferred_tool_results=deferred_tool_results,
                     )
-                )
-                if isinstance(agent_run_result, _AgentRunCancelled):
-                    raise asyncio.CancelledError
-                if isinstance(agent_run_result, _AgentRunFailed):
-                    raise agent_run_result.error
-                result = (
-                    agent_run_result.requests
-                    if isinstance(agent_run_result, _AgentRunDeferred)
-                    else agent_run_result.result
                 )
             except Exception as error:
                 if isinstance(error, AIError) and error.code is ErrorCode.EXECUTION_CANCELLED:

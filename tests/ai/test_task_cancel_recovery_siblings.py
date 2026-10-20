@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.capability import AgentContext, RuntimeFeatures
+from linktools.ai.capability import AgentContext
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage

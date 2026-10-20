@@ -11,7 +11,7 @@ from linktools.ai.capability import TraceCapability
 import pytest
 from pydantic_ai.messages import ModelResponse, RetryPromptPart, TextPart, ToolCallPart
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage

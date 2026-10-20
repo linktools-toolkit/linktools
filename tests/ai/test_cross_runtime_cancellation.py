@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage

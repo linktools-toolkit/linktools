@@ -24,7 +24,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
-from linktools.ai.capability import RuntimeFeatures
+from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
 
@@ -140,12 +140,16 @@ async def test_model_client_request_capture_matches_dispatch_and_retains_retries
     assert all(item.api == "openai-chat" and item.capture_error is None for item in capture.requests)
     body = json.loads(capture.requests[0].body)
     assert body["metadata"] == {"after_mapping": True}
+    # Raw capture must match dispatch above; SDK JSON whitespace is not semantic.
+    function = body["messages"][3]["tool_calls"][0]["function"]
+    assert isinstance(function["arguments"], str)
+    function["arguments"] = json.loads(function["arguments"])
     assert body["messages"] == [
         {"role": "system", "content": "system"},
         {"role": "system", "content": "instruction"},
         {"role": "user", "content": "原始\nmessage"},
         {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1",
-            "type": "function", "function": {"name": "lookup", "arguments": '{"value": 1}'}}]},
+            "type": "function", "function": {"name": "lookup", "arguments": {"value": 1}}}]},
         {"role": "tool", "tool_call_id": "call_1", "content": "result\ntext"},
     ]
     assert all(b"connection-secret" not in item.body for item in capture.requests)
