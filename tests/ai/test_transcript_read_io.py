@@ -16,7 +16,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state import _history
+from linktools.ai.runtime.state import _archive, _history
 from linktools.ai.runtime.state._store import FactQuery, active_state_scope
 
 from .test_incremental_projection_boundaries import _storage
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.parametrize("reader", ("owner", "session", "raw_context", "spans"))
 async def test_bounded_transcript_read_has_a_metadata_io_budget(
-    tmp_path: Path, reader: str,
+    tmp_path: Path, reader: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'transcript.db'}")
     await provision_database(engine)
@@ -40,6 +40,18 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
         await _materialize(state, "run", ("one", "two"))
         archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         repository = archive.transcript_repository
+        contents = await repository.content_archive()
+        domain_partition = archive.state_store.store_digest.hex()
+        archive_partition = contents.store.store_digest.hex()
+        body_ids: list[str] = []
+        read_content = contents._read_content
+
+        async def read_body(content):
+            assert active_state_scope() is None
+            body_ids.append(content.identity)
+            return await read_content(content)
+
+        monkeypatch.setattr(contents, "_read_content", read_body)
         statements: list[tuple[str, object]] = []
         listener = _listen_sql(engine, statements)
         begins: list[object] = []
@@ -70,11 +82,32 @@ async def test_bounded_transcript_read_has_a_metadata_io_budget(
             assert [message.parts[0].content for message in messages] == [
                 "one", "answer:one", "two", "answer:two",
             ]
-            # A range from zero needs no seek; session descriptor/head share one batch.
-            assert len(_record_selects(statements)) <= 1
-            # Bounded metadata, seek, and the first fact page share one checkout/transaction.
-            assert len(begins) <= 1
-            assert sum("FROM ai_state_facts" in statement for statement, _ in statements) <= 1
+            # Domain head and fact discovery remain one bounded read snapshot.
+            domain_records = [item for item in _record_selects(statements)
+                              if domain_partition in item[1]]
+            archive_records = [item for item in _record_selects(statements)
+                               if archive_partition in item[1]]
+            assert len(domain_records) == 1
+            assert sum("FROM ai_state_facts" in statement for statement, _ in statements) == 1
+            scopes: dict[str, set[int]] = {domain_partition: set(), archive_partition: set()}
+            scope_index = 0
+            for statement, parameters in statements:
+                if statement == "BEGIN":
+                    scope_index += 1
+                if statement.lstrip().upper().startswith("SELECT"):
+                    for partition in scopes:
+                        if partition in parameters:
+                            scopes[partition].add(scope_index)
+            assert len(scopes[domain_partition]) == len(scopes[archive_partition]) == 1
+            assert scopes[domain_partition].isdisjoint(scopes[archive_partition])
+            # Exact canonical content uses two bounded fixed-slot index levels.
+            assert len(archive_records) == 2
+            assert all("LEFT OUTER JOIN" in statement and "KEY_DIGEST" in statement
+                       for statement, _ in archive_records)
+            assert len(body_ids) == len(set(body_ids)) == 4
+            # Keep the aggregate cost visible alongside the domain-only budget.
+            assert len(_record_selects(statements)) == 3
+            assert len(begins) == 2
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", listener)
             event.remove(engine.sync_engine, "begin", capture_begin)
@@ -174,6 +207,7 @@ async def test_transcript_payload_and_yield_release_state_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     backend: str, reader: str, finish: str,
 ) -> None:
+    monkeypatch.setattr(_archive, "PAYLOAD_COMPRESS_MINIMUM", 0)
     state = RuntimeState(_storage(backend, tmp_path))
     await state.initialize(namespace="transcript-payload-scope", tenant_id="tenant")
     task = None
@@ -184,8 +218,12 @@ async def test_transcript_payload_and_yield_release_state_scope(
         archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         repository = archive.transcript_repository
         latest = await repository.latest_chunk(session.history_id)
-        assert latest is not None and latest.content.payload.kind == "object"
-        objects = repository._object_store
+        assert latest is not None
+        contents = await repository.content_archive()
+        identities = await contents.content_ids(latest.content)
+        records = await contents.content_records(identities)
+        assert all(record.payload.kind == "object" for record in records)
+        objects = contents._objects
         assert objects is not None
         original_open = objects.open
         reading = asyncio.Event()
@@ -338,7 +376,7 @@ async def test_session_transcript_store_fallback_does_not_overlap_history_scope(
 
     state = RuntimeState(RuntimeStorage.in_memory())
     await state.initialize(namespace="transcript-separate-store", tenant_id="tenant")
-    other = InMemoryStateStore()
+    other = InMemoryStateStore(state.conversation.histories.state_store.storage_group)
     await other.initialize()
     try:
         session = await state.conversation.sessions.create(_session())

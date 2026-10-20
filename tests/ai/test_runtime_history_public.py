@@ -485,10 +485,19 @@ class _Sessions:
 @pytest.mark.asyncio
 async def test_runtime_history_projects_owned_sessions_without_runtime_open() -> None:
     sessions = _Sessions()
+
+    async def read_execution(execution_id: str, *, tenant_id: str):
+        assert execution_id == "execution" and tenant_id == "tenant"
+        return SimpleNamespace(
+            execution_id=execution_id, session_id="newer", parent_execution_id=None,
+            status=ExecutionStatus.STARTED,
+        )
+
     history = RuntimeHistory(
         SimpleNamespace(),
         tenant_id="tenant",
         sessions=sessions,  # type: ignore[arg-type]
+        executions=SimpleNamespace(get=read_execution),  # type: ignore[arg-type]
         authorization=TenantAuthorizationPolicy("tenant"),
     )
     principal = Principal(

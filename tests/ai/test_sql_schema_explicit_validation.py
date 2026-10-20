@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime SQL initialization does not perform deployment schema diagnostics."""
 
+import asyncio
 import hashlib
 from collections.abc import Iterator
 from pathlib import Path
@@ -185,3 +186,41 @@ async def test_read_only_missing_sqlite_does_not_create_a_database(tmp_path: Pat
         await state.initialize(namespace="reader", tenant_id="tenant", read_only=True)
     assert error.value.code is ErrorCode.STORAGE_NOT_FOUND
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_archive_preparation_is_explicit_and_preserves_scope_on_read_only_reopen(
+    tmp_path: Path, schema_reads: list[str],
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'archives.db'}")
+    state = RuntimeState(RuntimeStorage.sql(engine))
+    reader = RuntimeState(RuntimeStorage.sql(engine))
+    other = RuntimeState(RuntimeStorage.sql(engine))
+    try:
+        await provision_database(engine)
+        schema_reads.clear()
+        await state.initialize(namespace="archives", tenant_id="tenant")
+        group = state.execution.executions.state_store.storage_group
+        assert await group.open_archive() is None
+        await other.initialize(namespace="other", tenant_id="other")
+        await asyncio.gather(state.run_store.prepare_archives(), other.run_store.prepare_archives())
+        opened = await group.open_archive()
+        assert opened is not None
+        other_group = other.execution.executions.state_store.storage_group
+        assert (await other_group.open_archive())[0] == opened[0]
+        await state.run_store.prepare_archives()
+        assert await group.open_archive() == opened
+        await state.close()
+
+        await reader.initialize(namespace="archives", tenant_id="tenant", read_only=True)
+        reader_group = reader.execution.executions.state_store.storage_group
+        assert (await reader_group.open_archive())[0] == opened[0]
+        with pytest.raises(AIError) as error:
+            await reader.run_store.prepare_archives()
+        assert error.value.code is ErrorCode.STORAGE_READ_ONLY
+        assert schema_reads == []
+    finally:
+        await other.close()
+        await reader.close()
+        await state.close()
+        await engine.dispose()

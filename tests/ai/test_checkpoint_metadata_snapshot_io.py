@@ -131,7 +131,7 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
         # Run/head metadata, chunk facts, immutable nodes and content; the
         # unbatched path also rereads the head discarded by its wrapper.
         assert domain_counts == [4, 2]
-        assert counts == [6, 4]
+        assert counts == [5, 3]
     finally:
         await state.close()
 

@@ -232,6 +232,23 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._preflight = False
         self._initialized = True
 
+    async def prepare_archives(self) -> None:
+        """Prepare writable execution resources before admitting any turns.
+
+        This reads and writes group metadata in an already provisioned store;
+        storage composition and read-only history do not call it.
+        """
+        await self._ensure_business()
+        groups = dict.fromkeys(
+            archive.state_store.storage_group
+            for archive in self._archives.values()
+            if isinstance(archive, StateStepArchive)
+        )
+        if isinstance(self._execution_repository, ExecutionRepositoryImpl):
+            groups.setdefault(self._execution_repository.state_store.storage_group)
+        for group in groups:
+            await group.open_archive(create=True)
+
     async def validate_integrity(self) -> None:
         await self._ensure_business()
         for archive in self._archives.values():

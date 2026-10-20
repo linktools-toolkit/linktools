@@ -112,8 +112,9 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("release_before_recovery", [False, True])
 async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_before_recovery: bool,
 ) -> None:
     models = _ControlledModels()
     storage = RuntimeStorage.filesystem(tmp_path)
@@ -151,8 +152,14 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
             monkeypatch.setattr(objects, "put", original_put)
             monkeypatch.setattr(runtime._execution_service, "cancel", original_cancel)
+            with pytest.raises(AIError) as active:
+                await runtime.executions.recover(execution.execution_id, principal=principal)
+            assert active.value.code is ErrorCode.STORAGE_CONFLICT
+            if release_before_recovery:
+                models.release.set()
+            await asyncio.wait_for(run.recover(idempotency_key="recover"), 5)
+            assert models.requests == 1
             models.release.set()
-            await run.recover(idempotency_key="recover")
             assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert (await run.execution("agent")).execution_id == execution.execution_id
             assert await run.result("agent") == {"text": "completed"}

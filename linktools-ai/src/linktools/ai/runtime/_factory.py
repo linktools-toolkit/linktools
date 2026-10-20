@@ -1016,6 +1016,7 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
+        await state.run_store.prepare_archives()
         if auto_recover and RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile(
                 allow_active_recovery=exclusive_execution_writer,

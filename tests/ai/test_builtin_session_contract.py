@@ -158,8 +158,8 @@ class _ClaimCache(InMemoryCacheBackend):
 @pytest.mark.asyncio
 async def test_coordination_does_not_opt_default_execution_into_terminal_admission(tmp_path):
     cache = _ClaimCache()
-    features = _features(retain=True)
-    features.capability(ExecutionCapability(coordination=cache), scope="runtime")
+    features = _features()
+    features.capability(ExecutionCapability(retain_history=True, coordination=cache), scope="runtime")
     storage = _storage(tmp_path, cache=cache)
     entered, finish = asyncio.Event(), asyncio.Event()
 

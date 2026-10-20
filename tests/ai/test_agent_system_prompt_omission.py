@@ -131,7 +131,7 @@ async def test_openai_http_capture_preserves_only_configured_system_content(
     if case != "omitted":
         options["system_prompt"] = system_prompt
     group.agent("default", **options)
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     async with Runtime.open("http-system", models=registry, storage=RuntimeStorage.filesystem(tmp_path),
                             features=group) as runtime:
         execution = await runtime.agents.get().start("question")

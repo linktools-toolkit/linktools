@@ -1463,6 +1463,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
         for node, node_state, execution in candidates:
             await self._validate_recovery_node_binding(graph_id, node, node_state, tenant_id)
+            assert self._recovery_backend is not None
+            if self._recovery_backend.owns_execution(execution.execution_id, tenant_id=tenant_id):
+                # A failed graph handoff can leave its execution running. Reattach
+                # that owner instead of attempting a competing execution recovery.
+                continue
             now = datetime.now(timezone.utc)
             deadline = RuntimeAgentTaskRunner.deadline_policy(
                 node, execution.started_at, self._budget_scopes.get(graph_id),

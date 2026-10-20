@@ -870,16 +870,17 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
             raw_digest="0" * 64 if corruption == "raw-digest" else content.raw_digest,
             raw_size=content.raw_size + 1 if corruption == "raw-size" else content.raw_size,
         )
-        read_records = contents.store.read_records
         content_key = contents._key("archive_content", identity)
 
-        async def corrupt_content(keys):
-            records = dict(await read_records(keys))
-            if content_key in records:
-                records[content_key] = replace(records[content_key], data=changed.to_json())
-            return records
+        async def corrupt_content(transaction):
+            stored = await transaction.get_record(content_key)
+            assert stored is not None
+            assert await transaction.replace_record(
+                replace(stored, data=changed.to_json(), storage_revision=stored.storage_revision + 1),
+                expected_storage_revision=stored.storage_revision,
+            )
 
-        monkeypatch.setattr(contents.store, "read_records", corrupt_content)
+        await contents.store.mutate(corrupt_content)
         history = RuntimeHistory(
             DefaultExecutionHistoryService(
                 state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state),
