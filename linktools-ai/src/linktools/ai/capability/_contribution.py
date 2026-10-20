@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """Capability contribution contracts and deterministic serialization."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import Generic, Literal, TypeAlias, TypeVar
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from typing import Generic, Literal, TypeAlias, TypeVar, cast
 
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
@@ -172,10 +172,17 @@ class CapabilityContribution(Generic[AppT]):
     def contract(self) -> "dict[str, JsonValue]":
         return _contribution_contract(self.kind, self.id, self.value)
 
+    def materialize_tool(self) -> "Tool[AgentContext[AppT]]":
+        """Create an execution-local tool from this contribution's contract."""
+        return _freeze_contribution(self).materialize_tool()
+
 
 @dataclass(frozen=True, slots=True)
 class _ContractContribution(CapabilityContribution[AppT]):
     _contract: Mapping[str, JsonValue] = field(repr=False, compare=False)
+    _tool_materializer: (
+        "Callable[[str, Mapping[str, JsonValue]], Tool[AgentContext[AppT]]] | None"
+    ) = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         try:
@@ -184,10 +191,72 @@ class _ContractContribution(CapabilityContribution[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         object.__setattr__(self, "_contract", contract)
         CapabilityContribution.__post_init__(self)
+        if self.kind == "tool":
+            object.__setattr__(
+                self, "_tool_materializer", _capture_tool_materializer(self.value),
+            )
 
     @property
     def contract(self) -> "dict[str, JsonValue]":
         return dict(self._contract)
+
+    def materialize_tool(self) -> "Tool[AgentContext[AppT]]":
+        if self._tool_materializer is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return self._tool_materializer(self.id, self.contract)
+
+
+def _capture_tool_materializer(
+    tool: "Tool[AgentContext[AppT]]",
+) -> "Callable[[str, Mapping[str, JsonValue]], Tool[AgentContext[AppT]]]":
+    # Retain implementation references, not the authoring Tool or its semantics.
+    schema = replace(
+        tool.function_schema,
+        name="",
+        description=None,
+        json_schema={},
+        return_schema={},
+        positional_fields=list(tool.function_schema.positional_fields),
+    )
+    function = tool.function
+    prepare = tool.prepare
+    args_validator = tool.args_validator
+    docstring_format = tool.docstring_format
+    require_parameter_descriptions = tool.require_parameter_descriptions
+
+    def materialize(
+        name: str,
+        contract: Mapping[str, JsonValue],
+    ) -> "Tool[AgentContext[AppT]]":
+        description = cast("str | None", contract["description"])
+        function_schema = replace(
+            schema,
+            name=name,
+            description=description,
+            json_schema=cast("dict[str, JsonValue]", contract["parameters"]),
+            return_schema=cast("dict[str, JsonValue]", contract["return_schema"]),
+            positional_fields=list(schema.positional_fields),
+        )
+        return Tool(
+            function,
+            name=name,
+            description=description,
+            max_retries=cast("int | None", contract.get("max_retries")),
+            prepare=prepare,
+            args_validator=args_validator,
+            docstring_format=docstring_format,
+            require_parameter_descriptions=require_parameter_descriptions,
+            strict=cast("bool | None", contract["strict"]),
+            sequential=cast(bool, contract.get("sequential", False)),
+            requires_approval=contract.get("kind", "function") == "unapproved",
+            metadata=cast("dict[str, JsonValue]", contract["metadata"]),
+            timeout=cast("float | None", contract.get("timeout")),
+            defer_loading=cast(bool, contract.get("defer_loading", False)),
+            include_return_schema=cast("bool | None", contract.get("include_return_schema")),
+            function_schema=function_schema,
+        )
+
+    return materialize
 
 
 def _freeze_contribution(

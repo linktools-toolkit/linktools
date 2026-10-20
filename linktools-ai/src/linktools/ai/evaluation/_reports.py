@@ -20,7 +20,7 @@ from ._contracts import (
     EvaluationManifest, ScorerContract, TargetTrialRef,
 )
 from ._evidence import EvidenceRef, ScoreBundle, ScoreNotApplicable
-from ._views import ScoreAttemptView, TrialView, evaluation_completion
+from ._views import ScoreAttemptView, SlotDispositionView, TrialView, evaluation_completion
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,6 +668,14 @@ def _gate(
 
 
 def _json(value: object) -> JsonValue:
+    if isinstance(value, SlotDispositionView):
+        return {
+            "kind": value.kind,
+            "reason_code": value.reason_code,
+            "terminal": value.terminal,
+            "retryable": value.retryable,
+            "created_at": value.created_at.isoformat(),
+        }
     if isinstance(value, ScoreBundle):
         return value.to_mapping()
     if isinstance(value, ScoreNotApplicable):

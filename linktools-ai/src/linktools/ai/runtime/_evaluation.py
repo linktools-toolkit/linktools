@@ -1048,7 +1048,7 @@ class RuntimeEvaluations:
     ) -> None:
         item = EvaluationSlotDisposition(slot, SlotDispositionView(
             "recoverable_blocked" if retryable else "cancelled" if cancelled else "permanent_unavailable",
-            reason, not retryable, retryable, _now()))
+            reason, created_at=_now()))
         await self._state.append_slot_disposition(experiment_id, item)
 
     async def _tick(

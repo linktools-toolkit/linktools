@@ -13,13 +13,42 @@ from ._contracts import CaseRef, DatasetRef, TargetTrialRef
 from ._evidence import EvidenceRef, ExecutionSubjectRef, GraphSubjectRef, ScoreBundle
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class SlotDispositionView:
     kind: Literal["permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked"]
     reason_code: str
-    terminal: bool
-    retryable: bool
     created_at: datetime
+
+    __match_args__ = ("kind", "reason_code", "terminal", "retryable", "created_at")
+
+    def __init__(
+        self,
+        kind: Literal["permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked"],
+        reason_code: str,
+        terminal: bool | None = None,
+        retryable: bool | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Accept optional flag assertions while kind owns the disposition."""
+        if kind not in ("permanent_unavailable", "permanent_invalid", "cancelled", "recoverable_blocked"):
+            raise ValueError("unknown slot disposition kind")
+        if not isinstance(created_at, datetime):
+            raise ValueError("slot disposition requires created_at")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "reason_code", reason_code)
+        object.__setattr__(self, "created_at", created_at)
+        if terminal is not None and terminal is not self.terminal:
+            raise ValueError("terminal must match the slot disposition kind")
+        if retryable is not None and retryable is not self.retryable:
+            raise ValueError("retryable must match the slot disposition kind")
+
+    @property
+    def terminal(self) -> bool:
+        return not self.retryable
+
+    @property
+    def retryable(self) -> bool:
+        return self.kind == "recoverable_blocked"
 
 
 @dataclass(frozen=True, slots=True)

@@ -430,6 +430,36 @@ def test_recoverable_disposition_requires_attention_in_pure_report() -> None:
     assert report.completion == "needs_attention"
 
 
+
+@pytest.mark.parametrize("kind,counts,completion", (
+    ("permanent_unavailable", (0, 0, 6), "complete"),
+    ("permanent_invalid", (6, 0, 0), "complete"),
+    ("cancelled", (0, 6, 0), "complete"),
+    ("recoverable_blocked", (0, 0, 0), "needs_attention"),
+))
+def test_disposition_kind_projects_report_completion_and_export(
+    kind: str, counts: tuple[int, int, int], completion: str,
+) -> None:
+    from linktools.ai.evaluation import SlotDispositionView
+
+    manifest = _manifest("disposition")
+    retryable = kind == "recoverable_blocked"
+    trials = tuple(replace(trial, execution_status=None, disposition=SlotDispositionView(
+        kind, "reason", not retryable, retryable, NOW,
+    )) for trial in _trials(manifest))
+    report = build_evaluation_report(manifest, CASES, trials,
+        _scores(manifest, (None,) * len(trials), status="not_attempted"), cutoff=_cutoff(manifest),
+        report_id="disposition-report", created_at=NOW)
+    assert report.completion == completion
+    candidate, = report.candidates
+    assert (candidate.failed, candidate.cancelled, candidate.unavailable) == counts
+    exported = json.loads(export_report(report))
+    assert all(trial["disposition"] == {
+        "kind": kind, "reason_code": "reason", "terminal": not retryable,
+        "retryable": retryable, "created_at": NOW.isoformat(),
+    } for trial in exported["trials"])
+
+
 def test_successful_trial_with_graph_recovery_blocks_reports_and_comparison() -> None:
     left, right = _manifest("base"), _manifest("candidate")
     trials = tuple(replace(trial, graph_status=TaskStatus.RECOVERY_REQUIRED) for trial in _trials(right))

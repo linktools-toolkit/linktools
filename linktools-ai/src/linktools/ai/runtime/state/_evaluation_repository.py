@@ -558,7 +558,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
                          *("score:" + trial_id + ":" + scorer.slot_id for _, trial_id in target_trials
                            for scorer in record.manifest.scorers))
                 dispositions = tuple(EvaluationSlotDisposition(slot,
-                    SlotDispositionView("permanent_unavailable", "evidence_deleted", True, False, now)) for slot in slots)
+                    SlotDispositionView("permanent_unavailable", "evidence_deleted", created_at=now)) for slot in slots)
                 candidates = tuple(replace(candidate, graph_template=replace(candidate.graph_template, template=None))
                     if candidate.graph_template is not None else candidate for candidate in record.manifest.candidates)
                 changed = replace(record, manifest=replace(record.manifest, candidates=candidates),
