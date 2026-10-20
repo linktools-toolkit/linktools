@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 from ..core import (
     ExecutionStatus,
@@ -75,7 +76,7 @@ class _PendingTurnCoordination:
             "owner_id": coordination.owner_id,
             "principal_id": record.principal_id,
             "principal_kind": record.principal_kind,
-            "record": encode_domain(record),
+            "record": encode_domain(replace(record, input_context=None)),
         }
         await self._cache.put(self._record_key(coordination), canonical_json_bytes(envelope))
         if record.session_id is not None:

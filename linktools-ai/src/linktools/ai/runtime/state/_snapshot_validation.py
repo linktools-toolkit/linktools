@@ -1082,7 +1082,6 @@ def _fact_storage_identity(
                 or chunk.owner_id != owner.owner_id
                 or chunk.first_message_index > owner.message_count
                 or chunk.message_count != 1
-                or chunk.content.source_domain is not domain
                 or chunk.origin is not TranscriptOrigin.RAW
                 or fact.subject_digest is not None
                 or fact.state is not None

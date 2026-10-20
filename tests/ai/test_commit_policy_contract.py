@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from linktools.ai.capability import ConversationCapability, ExecutionCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.core import DEFAULT_TRACE_BATCH_SIZE, DEFAULT_TRACE_FLUSH_INTERVAL
 from linktools.ai.core import CommitPolicy
 
@@ -43,12 +43,13 @@ def test_persistence_owners_reject_unsupported_policy_modes_and_removed_argument
     with pytest.raises(ValueError):
         ExecutionCapability(commit=CommitPolicy.batch(batch_size=2, flush_interval=1))
     assert TraceCapability(commit=CommitPolicy.terminal()).commit == CommitPolicy.terminal()
+    assert ExecutionCapability(
+        retain_history=True, commit=CommitPolicy.sync(),
+    ).retain_history is True
     with pytest.raises(TypeError):
-        ConversationCapability(commit=CommitPolicy.sync())
+        ExecutionCapability(cache=None)
     with pytest.raises(TypeError):
-        ConversationCapability(cache=None)
-    with pytest.raises(TypeError):
-        ConversationCapability(storage=None)
+        ExecutionCapability(storage=None)
     with pytest.raises(TypeError):
         TraceCapability(batch_size=2)
     with pytest.raises(TypeError):

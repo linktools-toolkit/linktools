@@ -306,12 +306,25 @@ class RuntimeState:
             )
         return self._objects.object_store(domain)
 
+    def archive_object_store(self, domain: RuntimeDomain) -> ObjectStore:
+        self._require_ready()
+        if self._objects is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._objects.archive_object_store(domain)
+
     async def read_object(self, domain: RuntimeDomain, reference: ObjectRef) -> bytes:
         """Read a referenced object through this storage's content cache."""
         self._require_ready()
         if self._objects is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._objects.read_object(domain, reference)
+
+    async def read_archive_object(self, domain: RuntimeDomain, reference: ObjectRef) -> bytes:
+        """Read a referenced object through this storage's content cache."""
+        self._require_ready()
+        if self._objects is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._objects.read_archive_object(domain, reference)
 
     def working_object_store(
         self,
@@ -358,6 +371,7 @@ class RuntimeState:
             durable_domains=self.plan.durable_domains, stores=self._stores,
             object_stores={domain: self.object_store(domain) for domain in RuntimeDomain
                            if runtime_domain_uses_object_store(domain)},
+            archive_object_stores={domain: self.archive_object_store(domain) for domain in RuntimeDomain},
             read_only=self.read_only,
             portable_export=not self.durable_capability_ids,
         )

@@ -5,7 +5,7 @@
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ConversationCapability, ExecutionCapability, RuntimeFeatures, SessionCapability
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures, SessionCapability, TraceCapability
 from linktools.ai.core import CommitPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeStorage
@@ -83,7 +83,7 @@ async def test_same_captured_declarations_bind_two_runtimes_without_owner_leakag
     execution_policy = ExecutionCapability(commit=CommitPolicy.sync())
     features = _features(session_policy, execution_policy)
     capture = await features.capture()
-    features.capability(ConversationCapability(), scope='runtime')
+    features.capability(TraceCapability(), scope='runtime')
     models = _models()
     first_storage = RuntimeStorage.sqlite(tmp_path / 'first.db')
     second_storage = RuntimeStorage.sqlite(tmp_path / 'second.db')

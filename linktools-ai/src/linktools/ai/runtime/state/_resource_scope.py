@@ -96,6 +96,7 @@ class StorageResourceScope:
             raise ValueError("storage resource request names must be unique")
         resources: dict[int, MemoryResource | FilesystemResource | SqlResource] = {}
         memory = MemoryResource(InMemoryStateStorageGroup(read_only=read_only))
+        self._close_actions.append(memory.group.close)
         filesystem_groups: dict[Path, list[int]] = {}
         sql_groups: dict[tuple[str, object], list[int]] = {}
         member_roots: dict[str, Path] = {}
@@ -130,13 +131,11 @@ class StorageResourceScope:
             members = {requests[index].name: member_roots[requests[index].name] for index in indices}
             if read_only and any(not path.is_dir() for path in members.values()):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            standalone = route.transaction_root is None and len(indices) == 1
             group = FilesystemStateStorageGroup(
-                members[requests[indices[0]].name] if standalone else root,
+                root,
                 namespace=namespace,
                 tenant_id=tenant_id,
-                scope_digest=_filesystem_group_scope(namespace, tenant_id, root, members),
-                standalone=standalone,
+                scope_digest=_filesystem_group_scope(namespace, tenant_id),
                 read_only=read_only,
             )
             self._close_actions.append(group.close)
@@ -291,8 +290,9 @@ def _validate_filesystem_member_roots(
                     f"{left_name}={left} {right_name}={right}"
                 )
     reserved_roots = tuple(
-        root / ".state-groups"
+        root / reserved
         for root in dict.fromkeys(group_roots)
+        for reserved in (".state-groups", ".state-archive", ".state-archive-objects")
     )
     for name, member in ordered:
         for reserved in reserved_roots:
@@ -307,26 +307,10 @@ def _validate_filesystem_member_roots(
                 )
 
 
-def _filesystem_group_scope(
-    namespace: str,
-    tenant_id: str,
-    transaction_root: Path,
-    member_roots: Mapping[str, Path],
-) -> str:
-    members = tuple(
-        (
-            name,
-            member_roots[name].relative_to(transaction_root).as_posix(),
-        )
-        for name in sorted(member_roots)
-    )
-    return canonical_sha256(
-        {
-            "namespace": namespace,
-            "tenant_id": tenant_id,
-            "members": members,
-        }
-    )[:32]
+def _filesystem_group_scope(namespace: str, tenant_id: str) -> str:
+    # The physical transaction root already scopes this metadata locator.
+    # Opening fewer domain routes must not create a new persistent group.
+    return canonical_sha256({"namespace": namespace, "tenant_id": tenant_id})[:32]
 
 
 __all__ = ["reject_filesystem_capability_partitions", "StorageResourceRequest", "StorageResourceScope", "MemoryResource", "FilesystemResource", "SqlResource"]

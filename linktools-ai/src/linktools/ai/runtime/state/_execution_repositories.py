@@ -9,6 +9,7 @@ from linktools.core import environ
 from ...core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, JsonValue, OperationLedgerRecord, Page, ResourceKind
 from ...errors import AIError, ErrorCode
 from ...task import TaskBindingContract
+from ._archive import ContentArchive, PreparedArchive
 from ._budget import BudgetRepositoryImpl
 from ._contracts import ExecutionCandidate, ExecutionCandidatePage, ExecutionCancelRequestCommit, ExecutionEventAppend, ExecutionEventRecord, ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState, ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord
 from ._contracts import RuntimePayloadRef
@@ -538,7 +539,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return values[0] if values else None
 
     async def reserve_start(
-        self, reservation: ExecutionStartReservation
+        self, reservation: ExecutionStartReservation, *,
+        input_context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
@@ -611,6 +613,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     await self._budgets.ensure_in_transaction(
                         transaction, scope_id, reservation.budget,
                     )
+            if input_context_write is not None:
+                archive, prepared = input_context_write
+                if archive.store.storage_group is not self._store.storage_group:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await archive.store.mutate(lambda tx: archive.publish(tx, prepared))
             head = ExecutionHistoryHeadRecord(
                 reservation.execution.execution_id,
                 ExecutionHistoryState.OPEN,
@@ -1468,6 +1475,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 or current.result_digest != execution.result.output.digest):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         return ExecutionTerminalCommitResult(execution, execution.result)
+
+    def pending_turn_record_keys(self, reservation: ExecutionStartReservation) -> tuple[bytes, ...]:
+        _require_tenant(reservation.idempotency, self._tenant_id)
+        identity = self._idempotency._identity_key(
+            reservation.idempotency.scope, reservation.idempotency.idempotency_key_digest,
+        )
+        return (self._idempotency._key("idempotency", identity),)
 
     async def insert_pending_turn_in_transaction(
         self, transaction: StateTransaction, reservation: ExecutionStartReservation,

@@ -48,6 +48,14 @@ _TIMELINE_CURSOR_KIND = "SESSION_TIMELINE"
 
 
 class SessionTimelineTranscriptStore(Protocol):
+    async def committed_conversation_message_count(
+        self,
+        *,
+        history_id: str | None,
+        agent_run_id: str,
+        tenant_id: str,
+    ) -> int: ...
+
     async def read_conversation_payload(self, payload: StoredPayload) -> bytes: ...
 
     def iter_conversation_message_range(
@@ -251,7 +259,7 @@ class _ActiveSessionAdmission(Exception):
         self.record = record
 
 
-async def _capture_timeline_state(
+async def capture_session_timeline(
     conversation: ConversationRepositories,
     executions: ExecutionRepository,
     session_id: str,
@@ -263,6 +271,7 @@ async def _capture_timeline_state(
     pending_execution: ExecutionRecord | None = None,
     authorized_header: ResourceRef | None = None,
     refresh_phase: Literal["initial", "final"] | None = None,
+    include_active: bool = False,
     transcript_store: SessionTimelineTranscriptStore | None = None,
     validate_active: Callable[[SessionRecord, ExecutionRecord | None], ExecutionRecord | None] | None = None,
 ) -> SessionTimelineCapture:
@@ -322,7 +331,7 @@ async def _capture_timeline_state(
             ref.execution_id for _record, refs in blocks for ref in refs
             if (ref.session_id, ref.turn_seq) not in commits
         )
-        if refresh_phase is not None and root.active_execution_id is not None:
+        if (include_active or refresh_phase is not None) and root.active_execution_id is not None:
             ids += (root.active_execution_id,)
         ids = tuple(dict.fromkeys(ids))
         # Only the synthetic newest turn may omit canonical membership.
@@ -405,7 +414,7 @@ async def capture_session_refresh(
 ) -> SessionTimelineCapture:
     """Capture authorized metadata, reconciling terminal admission outside read scopes."""
     try:
-        return await _capture_timeline_state(
+        return await capture_session_timeline(
             conversation, executions, session_id, tenant_id=tenant_id,
             cursor=cursor, cursor_signer=cursor_signer, limit=limit,
             pending_execution=pending_execution, authorized_header=authorized_header,
@@ -414,7 +423,7 @@ async def capture_session_refresh(
         )
     except _ActiveSessionAdmission as admission:
         await reconcile(admission.record)
-    return await _capture_timeline_state(
+    return await capture_session_timeline(
         conversation, executions, session_id, tenant_id=tenant_id,
         cursor=cursor, cursor_signer=cursor_signer, limit=limit,
         pending_execution=pending_execution, authorized_header=authorized_header,
@@ -444,7 +453,7 @@ async def project_session_timeline(
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     await authorization.authorize(principal, AuthorizationAction.SESSION_READ, header)
     pending = None if pending_session_execution is None else await pending_session_execution(header)
-    state = await _capture_timeline_state(
+    state = await capture_session_timeline(
         conversation, executions, session_id,
         tenant_id=principal.tenant_id, cursor=cursor, cursor_signer=cursor_signer,
         limit=limit, pending_execution=pending,
@@ -596,6 +605,7 @@ __all__ = [
     "SessionTimelineCapture",
     "SessionTimelineTranscriptStore",
     "capture_session_refresh",
+    "capture_session_timeline",
     "project_captured_session_timeline",
     "project_session_timeline",
 ]

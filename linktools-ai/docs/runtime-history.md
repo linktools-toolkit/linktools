@@ -7,9 +7,9 @@ at Runtime scope; storage retention alone does not select it. Without this
 capability, the owning Runtime exposes its existing live staging content while
 retained locally. Final results follow execution retention. Session management is supplied by the default `SessionCapability`; retained
 conversation content and model context for subsequent turns require
-`ConversationCapability()` and follows conversation retention. An unretained
+`ExecutionCapability(retain_history=True)` and follow conversation retention. An unretained
 completed turn makes subsequent resume/fork fail with
-`SESSION_HISTORY_UNAVAILABLE`; it cannot be repaired by enabling Conversation
+`SESSION_HISTORY_UNAVAILABLE`; it cannot be repaired by enabling history retention
 later. See
 [optional execution persistence](runtime-capabilities.md#optional-execution-persistence).
 
@@ -39,8 +39,9 @@ stays with the active request. Separately enabled restart checkpoints preserve
 recovery context without publishing public trace.
 Completion or a controlled abnormal end publishes the actual prepared input and
 any received response. Requesting content early does not force a write or provider completion.
-Complete outgoing raw input may already be captured before provider completion;
-the deferred body rule excludes half-received response fragments. Model metadata
+With `TraceCapability(record_http_bodies=True)`, complete outgoing raw HTTP
+input may be captured before provider completion; the deferred body rule excludes
+half-received response fragments. Raw HTTP body capture is disabled by default. Model metadata
 may be refined during preparation without changing request identity or start time.
 
 With shared retained backing storage, independently opened
@@ -206,8 +207,11 @@ Agent response capture reuses the same archive's canonical transcript range
 for model-interaction content, including received interrupted responses. This
 avoids storing another response body while keeping metadata-only reads free of
 body loads. Compaction and responses rejected by tool-call integrity checks
-retain independent response evidence. Request settings and raw client
-request/response capture are unchanged. Archive relocation may materialize
+retain independent response evidence. Request settings and attempt metadata
+remain available. Original HTTP request/response bodies are recorded only with
+`TraceCapability(record_http_bodies=True)`; this diagnostic option can duplicate
+full prompts and may contain sensitive content. Disabling it does not remove
+canonical model messages, tool evidence or usage facts. Archive relocation may materialize
 content again; Trace, Checkpoint, and Conversation retain their own lifecycle
 roots rather than depending on another capability's retained history.
 
@@ -243,7 +247,7 @@ form; reconcile by exact logical identity and lifecycle state. A non-null event
 coordinate certifies that event's persistence, not a newer transcript or model
 interaction read boundary. None of these coordinates are interchangeable.
 
-With `ConversationCapability`, each admitted completed session turn retains its canonical
+With `ExecutionCapability`, each admitted completed session turn retains its canonical
 user input and public final output alongside the transcript range. `SessionTurn.output`
 is the committed execution output, including structured JSON or JSON null; it is
 not reconstructed from model text parts. Check `status` to distinguish successful
@@ -256,7 +260,7 @@ in the Conversation object store before publishing the turn. Runtime close and
 session close do not delete durable conversation history; existing offline object
 cleanup uses the retained turn references as roots. Forks retain the selected
 parent turn prefix. Model context compaction does not rewrite the canonical input
-or final output. Without `ConversationCapability`, standalone execution results
+or final output. Without `ExecutionCapability`, standalone execution results
 retain their existing execution-scoped lifetime.
 
 A same-group terminal commit publishes execution and conversation together. With
@@ -481,7 +485,7 @@ namespace-wide database lock. Eligible deferred turns use the optional cache
 turn-coordination lease while a turn has no database record; see
 [independent commit boundaries](runtime-capabilities.md#independent-commit-boundaries).
 
-With `ConversationCapability()` and non-transient conversation storage,
+With `ExecutionCapability(retain_history=True)` and non-transient conversation storage,
 successful standalone executions retain
 their actual final model context for
 `execution.fork`, including imported history and tool calls and returns, even
@@ -491,8 +495,7 @@ it does not retain the full intermediate trace or enable restart checkpoints.
 An execution without the admitted conversation guarantee cannot gain fork support
 from trace or checkpoint data: fork reports `CAPABILITY_REQUIRED_MISSING`.
 
-With `ConversationCapability()` and explicit
-`ExecutionCapability(commit=CommitPolicy.terminal())`, eligible
+With `ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal())`, eligible
 terminal-only source turns retain this context in the existing final
 owner batch in one database write transaction. Object bodies still have their
 own I/O. Fork and retry executions retain their existing durable-path admission

@@ -6,9 +6,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, SessionStatus
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._execution_context import ExecutionInputContext
 from linktools.ai.runtime._local import LocalExecutionBackend
@@ -30,7 +31,7 @@ async def test_changes_after_launch_are_observed_before_provider(
         return ModelResponse(parts=[TextPart("answer")])
 
     group = RuntimeFeatures("launch-change")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / "state.db")
@@ -66,7 +67,15 @@ async def test_changes_after_launch_are_observed_before_provider(
             assert result.status is ExecutionStatus.SUCCEEDED
             assert len(calls) == 1
             current = await first._state.execution.executions.get(execution.execution_id, tenant_id=first.tenant_id)
-            context = ExecutionInputContext.from_payload(current.input_context.payload.decode())
+            from linktools.ai.runtime._context_archive import ExecutionContextArchive
+            context = await ExecutionContextArchive(
+                first._state.execution.executions.state_store,
+                first._state.archive_object_store(RuntimeDomain.EXECUTION),
+                namespace=first.namespace, tenant_id=first.tenant_id,
+                object_reader=lambda reference: first._state.read_archive_object(
+                    RuntimeDomain.EXECUTION, reference,
+                ),
+            ).load(current.input_context)
             assert context.session_metadata == {"marker": "after"}
         else:
             assert result.status is ExecutionStatus.CANCELLED
@@ -91,7 +100,7 @@ async def test_other_runtime_claims_before_delayed_worker_without_duplicate_prov
         return ModelResponse(parts=[TextPart("answer")])
 
     group = RuntimeFeatures("launch-winner")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     models = _Models(_UsageFunctionModel(model))
     first_state = RuntimeStorage.sqlite(tmp_path / "state.db")

@@ -17,7 +17,6 @@ from sqlalchemy import event
 from linktools.ai.capability import ExecutionCapability, AgentContext, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, agent_run_id
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
 from linktools.ai.runtime import ExecutionInputContext, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._step_archive import _decode_step, _encode_step
@@ -58,7 +57,7 @@ async def test_standalone_fork_preserves_actual_tools_and_imported_context_after
     group = RuntimeFeatures("standalone-fork")
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", system_prompt="Keep the original system message", allow_tools=("lookup",))
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     imported = ExecutionInputContext.from_messages((
         ModelRequest(parts=[UserPromptPart("imported question")]),
         ModelResponse(parts=[TextPart("imported answer")]),
@@ -111,10 +110,9 @@ async def test_terminal_standalone_tool_context_joins_one_physical_write_transac
 
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024)
     group = RuntimeFeatures("one-fork-boundary")
-    group.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     group.tool(lookup, effect_policy="none")
     group.agent("default", model="default", allow_tools=("lookup",))
-    group.capability(ConversationCapability(), scope="runtime")
     state = RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache)
     async with Runtime.open("one-fork-boundary", storage=state, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         transactions = set()
@@ -188,7 +186,7 @@ async def test_reopened_standalone_fork_rejects_mismatched_checkpoint_binding(
 
     group = RuntimeFeatures("corrupt-fork")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None)
     async with Runtime.open("corrupt-fork", storage=storage, models=models, features=group) as runtime:
@@ -221,9 +219,8 @@ async def test_standalone_fork_keeps_actual_file_result_after_file_changes(tmp_p
     workspace = Workspace.load(tmp_path)
     cache = InMemoryCacheBackend(max_bytes=4 * 1024 * 1024) if cached else None
     group = workspace_features("file-fork", workspace=workspace)
-    group.capability(ExecutionCapability(commit=CommitPolicy.terminal() if cached else CommitPolicy.sync(), coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if cached else CommitPolicy.sync(), coordination=cache), scope="runtime")
     group.agent("default", model="default", allow_tools=("read_file",))
-    group.capability(ConversationCapability(), scope="runtime")
     async with Runtime.open("file-fork", storage=RuntimeStorage.sqlite(tmp_path / "state.db", cache=cache), models=_Models(_UsageFunctionModel(model)), features=group) as runtime:
         with capture_run_messages() as messages:
             source = await runtime.agents.get().start("read")
@@ -250,7 +247,7 @@ async def test_unfinished_standalone_run_never_publishes_a_complete_fork_seed(tm
 
     group = RuntimeFeatures("incomplete-fork")
     group.agent("default", model="default", allow_tools=())
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     storage = RuntimeStorage.sqlite(tmp_path / "state.db", cache=InMemoryCacheBackend(max_bytes=4 * 1024 * 1024))
     with pytest.raises(AIError) as raised:
         async with Runtime.open("incomplete-fork", storage=storage, models=_Models(_UsageFunctionModel(model)), features=group) as runtime:

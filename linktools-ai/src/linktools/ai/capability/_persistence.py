@@ -28,42 +28,6 @@ from ._context import AgentContext
 AppT = TypeVar("AppT")
 
 
-class ConversationCapability(AbstractCapability[AgentContext[AppT]]):
-    """Retain actual context for continuation and execution forks.
-
-    Runtime confirms the candidate projection with the terminal execution.
-    A complete configured cache may support a pending turn; the core owns
-    admission eligibility, effects, fencing and durable reconciliation."""
-
-    id = "runtime.conversation"
-    _service: AbstractCapability[AgentContext[AppT]] | None = None
-
-    def bind(
-        self, service: AbstractCapability[AgentContext[AppT]]
-    ) -> ConversationCapability[AppT]:
-        bound = copy(self)
-        bound._service = service
-        return bound
-
-    def _bound_service(self) -> AbstractCapability[AgentContext[AppT]]:
-        if self._service is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return self._service
-
-    async def after_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[AppT]],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        return await self._bound_service().after_run(ctx, result=result)
-
-    async def on_run_error(
-        self, ctx: PydanticRunContext[AgentContext[AppT]], *, error: BaseException
-    ) -> AgentRunResult[Any]:
-        return await self._bound_service().on_run_error(ctx, error=error)
-
-
 class CheckpointCapability(AbstractCapability[AgentContext[AppT]]):
     """Confirm recovery context at model and tool safety boundaries.
 
@@ -152,13 +116,22 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
     def __init__(
         self, *, storage: StorageRoute | None = None,
         commit: CommitPolicy = CommitPolicy.batch(),
+        record_http_bodies: bool = False,
     ) -> None:
+        if not isinstance(record_http_bodies, bool):
+            raise TypeError("record_http_bodies must be bool")
+        self._record_http_bodies = record_http_bodies
         if not isinstance(commit, CommitPolicy) or commit.mode not in {"sync", "batch", "terminal"}:
             raise ValueError("Trace requires sync, batch or terminal commit")
         self._commit = commit.resolve_batch(
             batch_size=DEFAULT_TRACE_BATCH_SIZE, flush_interval=DEFAULT_TRACE_FLUSH_INTERVAL,
         )
         self._storage = storage
+
+    @property
+    def record_http_bodies(self) -> bool:
+        """Whether supported HTTP attempts retain their unredacted wire bodies."""
+        return self._record_http_bodies
 
     @property
     def storage(self) -> StorageRoute | None:
@@ -238,4 +211,4 @@ class TraceCapability(AbstractCapability[AgentContext[AppT]]):
         )
 
 
-__all__ = ["ConversationCapability", "CheckpointCapability", "TraceCapability"]
+__all__ = ["CheckpointCapability", "TraceCapability"]

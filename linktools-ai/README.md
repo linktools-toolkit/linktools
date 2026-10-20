@@ -127,10 +127,10 @@ state and request/usage metadata. See [Runtime-wide capabilities](docs/runtime-c
 for a runnable RPM/TPM example, streaming/cancellation behavior, quota accounting
 and provider retry boundaries.
 
-Conversation, interrupted-run recovery and detailed trace are explicit,
-independent Runtime-scoped capabilities: `ConversationCapability`,
-`CheckpointCapability`, and `TraceCapability`. Durable storage alone enables none
-of them. `Runtime.open(..., metrics=dataset)` independently enables automatic
+Context retention, interrupted-run recovery and detailed trace are independent
+Runtime-scoped opt-ins: `ExecutionCapability(retain_history=True)`,
+`CheckpointCapability()`, and `TraceCapability()`. Durable storage alone enables
+none of these optional guarantees. `Runtime.open(..., metrics=dataset)` independently enables automatic
 Agent and Task observations, including evaluation work in that Runtime. The
 shared dataset remains caller-owned. Task, Evaluation and Artifact remain
 services and need no capability wrappers. Session metadata and display history
@@ -726,13 +726,13 @@ The binding contract does not persist Python output import paths or duplicate id
 
 Session metadata and a first turn are available through the default Session capability.
 An unretained completed turn makes its Session context unavailable for later
-resume or fork. To retain model context across resumed turns, register `ConversationCapability()` at Runtime scope before
+resume or fork. To retain model context across resumed turns, register `ExecutionCapability(retain_history=True)` at Runtime scope before
 opening the Runtime:
 
 ```python
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 
-application.capability(ConversationCapability())
+application.capability(ExecutionCapability(retain_history=True))
 # Open with Runtime.open(..., features=application) after registration.
 ```
 
@@ -930,6 +930,22 @@ page = await runtime.executions.list(
 history projections without loading a ModelRegistry or compiling Agents. Pass the
 same `features=` declaration or capture when capabilities configure custom storage
 routes or caches; read-only opening does not activate hooks or metrics recording.
+Use `list_sessions(principal=..., cursor=..., limit=...)` for a paginated session
+list. `messages(session_id, principal=..., cursor=..., limit=...)` returns an ordered
+`Page[ModelMessage]` from a fixed committed history prefix, including system,
+user, assistant, tool and attachment parts. It does not filter messages into UI
+text, include uncommitted staging, or inherit a fork parent's later suffix.
+The reader resolves stored content references in batches rather than asking the
+caller to join Trace, Execution and object storage.
+
+`session_detail(session_id, principal=..., max_age=0)` returns a coherent
+`SessionDetail` containing session metadata and timeline entries, including
+canonical structured output and authorized pending-turn coordination. Set
+`max_age` to reuse the shared session-display cache policy. To inspect status
+without loading usage, use `inspect_execution(..., include_usage=False)`;
+configured coordination also supplies pending executions. These reads do not
+initialize models or assets or activate recovery writes.
+
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
 or raw error diagnostics. Its optional `ExecutionInfo.capability_refs` contains

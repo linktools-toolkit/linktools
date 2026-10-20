@@ -318,6 +318,9 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         record = await transaction.get_record(self._key(self._KIND, execution_id))
         return None if record is None else await self._decode(record, RecoveryCheckpoint)
 
+    def checkpoint_record_key(self, execution_id: str) -> bytes:
+        return self._key(self._KIND, execution_id)
+
     async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint:
         return await self._store.mutate(
             lambda transaction: self.admit_in_transaction(transaction, record)

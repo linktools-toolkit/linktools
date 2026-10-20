@@ -50,7 +50,7 @@ from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
-from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 
 
 class _TextModelBinding:
@@ -106,7 +106,7 @@ async def test_session_projections_do_not_copy_previous_response_bodies(
     database = tmp_path / "state.db"
     sizes = []
     features = _agent_group()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "response-growth", storage=RuntimeStorage.sqlite(database),
         models=_TextModels(), features=features,

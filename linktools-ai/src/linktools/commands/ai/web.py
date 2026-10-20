@@ -43,7 +43,7 @@ class Command(BaseCommand):
 
         async def serve() -> int:
             from linktools.ai.capability import AssetCapability, RuntimeFeatures, WorkspaceCapability
-            from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+            from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
             from linktools.ai.runtime import Runtime
 
             models = _local_runtime_models(workspace, args)
@@ -57,7 +57,7 @@ class Command(BaseCommand):
                 features = RuntimeFeatures("workspace")
                 features.capability(AssetCapability(assets))
                 features.capability(WorkspaceCapability(workspace))
-                features.capability(ConversationCapability())
+                features.capability(ExecutionCapability(retain_history=True))
                 features.capability(CheckpointCapability())
                 features.capability(TraceCapability())
                 metrics = await _local_metrics(workspace)

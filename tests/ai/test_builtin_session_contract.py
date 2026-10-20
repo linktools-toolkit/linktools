@@ -8,7 +8,7 @@ from copy import deepcopy
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
 
-from linktools.ai.capability import ExecutionCapability, ConversationCapability, RuntimeFeatures
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.core import Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ListSessionRequest, Runtime, RuntimeContext, RuntimeStorage, RuntimeStoragePlan
@@ -26,7 +26,7 @@ def _features(*, retain=False):
     features = RuntimeFeatures('builtin-session')
     features.agent('default', model='default', allow_tools=())
     if retain:
-        features.capability(ConversationCapability(), scope='runtime')
+        features.capability(ExecutionCapability(retain_history=True), scope='runtime')
     return features
 
 
@@ -356,11 +356,10 @@ async def test_sync_peer_coordinates_with_terminal_owner_before_pending_publicat
         return ModelResponse(parts=[TextPart('answer')])
 
     terminal = RuntimeFeatures('builtin-session')
-    terminal.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    terminal.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     terminal.agent('default', model='default', allow_tools=())
-    terminal.capability(ConversationCapability(), scope='runtime')
-    sync = _features(retain=True)
-    sync.capability(ExecutionCapability(coordination=cache), scope="runtime")
+    sync = _features()
+    sync.capability(ExecutionCapability(retain_history=True, coordination=cache), scope="runtime")
     models = _Models(_UsageFunctionModel(model))
     storage = _storage(tmp_path, cache=cache)
     async with Runtime.open('builtin-session', storage=storage, models=models,

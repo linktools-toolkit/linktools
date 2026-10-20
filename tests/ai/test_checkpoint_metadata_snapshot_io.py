@@ -13,6 +13,8 @@ from sqlalchemy import event
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain
 from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state._archive import PreparedArchive
+from linktools.ai.runtime.state._step_archive import PreparedAgentRunCheckpointBatch, StateStepArchive
 from linktools.ai.runtime.state._sql import _SqlTransaction
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.runtime.state._store import active_state_scope
@@ -32,6 +34,33 @@ def _checkpoint(count: int) -> AgentRunCheckpoint:
     )
 
 
+async def _assert_prepared_values_equal(
+    archive: StateStepArchive,
+    left: PreparedAgentRunCheckpointBatch,
+    right: PreparedAgentRunCheckpointBatch,
+) -> None:
+    # Pending bundles may repeat an already durable immutable node. Compare the
+    # resulting record values as well as the roots and checkpoint facts.
+    def facts(batch: PreparedAgentRunCheckpointBatch) -> PreparedAgentRunCheckpointBatch:
+        return replace(batch, checkpoints=tuple(
+            replace(checkpoint, archive=PreparedArchive()) for checkpoint in batch.checkpoints
+        ))
+
+    assert facts(left) == facts(right)
+    content = await archive.transcript_repository.content_archive()
+    pending = [
+        {key: record for checkpoint in batch.checkpoints
+         for key, record in checkpoint.archive.records.items()}
+        for batch in (left, right)
+    ]
+    durable = await content.store.read_records(tuple(pending[0].keys() | pending[1].keys()))
+    resolved = [{**durable, **records} for records in pending]
+    assert resolved[0].keys() == resolved[1].keys()
+    for key in resolved[0]:
+        # Physical CAS revisions are not part of immutable content semantics.
+        assert replace(resolved[0][key], storage_revision=0) == replace(resolved[1][key], storage_revision=0)
+
+
 async def test_checkpoint_metadata_batches_reads_without_changing_prepared_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -41,9 +70,12 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements: list[str] = []
+    select_stores: list[str] = []
 
     def capture(_connection, _cursor, statement, _parameters, _context, _many):
         statements.append(statement.split()[0].upper())
+        if statement.startswith("SELECT"):
+            select_stores.append(_parameters[0])
 
     async def without_prefetch(transaction, keys):
         records = [await transaction.get_record(key) for key in keys]
@@ -55,10 +87,13 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
         kwargs.pop("observed_head", None)
         return await load(*args, **kwargs)
 
+    # Resolve the shared scope once so neither side pays a one-time cold lookup.
+    await archive.transcript_repository.content_archive(create=True)
     try:
-        results, counts = [], []
+        results, counts, domain_counts = [], [], []
         for baseline in (True, False):
             statements.clear()
+            select_stores.clear()
             with monkeypatch.context() as patch:
                 if baseline:
                     patch.setattr(_SqlTransaction, "get_records", without_prefetch)
@@ -69,13 +104,17 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
                     event.remove(engine, "before_cursor_execute", capture)
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
-        assert results[0] == results[1]
-        assert counts == [2, 1]
+            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
+        await _assert_prepared_values_equal(archive, results[0], results[1])
+        # Three domain metadata keys plus one content lookup, batched to two reads.
+        assert domain_counts == [3, 1]
+        assert counts == [4, 2]
 
         await archive.materialize_checkpoint(run, _checkpoint(1))
-        results, counts = [], []
+        results, counts, domain_counts = [], [], []
         for baseline in (True, False):
             statements.clear()
+            select_stores.clear()
             with monkeypatch.context() as patch:
                 if baseline:
                     patch.setattr(_SqlTransaction, "get_records", without_prefetch)
@@ -87,8 +126,12 @@ async def test_checkpoint_metadata_batches_reads_without_changing_prepared_value
                     event.remove(engine, "before_cursor_execute", capture)
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
+            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
         assert results[0] == results[1]
-        assert counts == [4, 2]
+        # Run/head metadata, chunk facts, immutable nodes and content; the
+        # unbatched path also rereads the head discarded by its wrapper.
+        assert domain_counts == [4, 2]
+        assert counts == [6, 4]
     finally:
         await state.close()
 

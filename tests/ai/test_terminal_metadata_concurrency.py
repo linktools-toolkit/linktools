@@ -3,7 +3,7 @@
 """Terminal ownership preserves concurrent dependency retention metadata."""
 
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -141,7 +141,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
     state = _storage(tmp_path, backend, split_session)
     group.capability(TraceCapability(), scope="runtime")
     if split_session:
-        group.capability(ConversationCapability(), scope="runtime")
+        group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "terminal-metadata",
         models=FixtureModels(),

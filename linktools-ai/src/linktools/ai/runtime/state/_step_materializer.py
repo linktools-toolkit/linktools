@@ -5,6 +5,7 @@
 from ...storage import StorageRetentionMode
 
 from collections.abc import Mapping
+from functools import partial
 
 from ._contracts import ConversationHistoryRepository, ExecutionRepository
 from ._model_interaction_store import (
@@ -51,6 +52,8 @@ def build_runtime_agent_run_store(
         archives[domain] = ModelInteractionStateStepArchive(
             stores[domain],
             object_store=objects.object_store(domain),
+            archive_object_store=objects.archive_object_store(domain),
+            archive_object_reader=partial(objects.read_archive_object, domain),
             object_reader=objects.read_object,
             namespace=namespace,
             tenant_id=tenant_id,

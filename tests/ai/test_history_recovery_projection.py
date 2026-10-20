@@ -32,6 +32,7 @@ from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
+from linktools.ai.runtime.state._archive import PreparedArchive
 from linktools.ai.runtime.state._step_contracts import (
     AgentRunCheckpoint,
     AgentRunRecord,
@@ -455,8 +456,9 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
         published_request = None
         if published_state is not None:
             source = await recovery.list_model_interactions(agent_run_id=run_id)
+            prepared = PreparedArchive()
             relocated = await public.prepare_relocated_interactions(
-                source, await recovery.resolve_model_interactions(source)
+                source, await recovery.resolve_model_interactions(source), prepared=prepared,
             )
             unfinished = replace(
                 relocated[0],
@@ -474,6 +476,7 @@ async def test_recovery_backfill_is_atomic_but_does_not_invent_missing_associati
                 checkpoints=(),
                 interactions=(unfinished,),
                 execution_id="execution",
+                archive=prepared,
             )
         root_store.bind_execution_producer(
             run_id, execution_id="execution", producer_generation=1

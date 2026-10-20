@@ -16,7 +16,7 @@ from linktools.ai.asset import (
 from linktools.ai.capability import AssetCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.storage import StorageOverlay
@@ -48,7 +48,7 @@ class _RecordingLocalSandbox:
 @pytest.mark.asyncio
 async def test_workspace_less_runtime_runs_session_and_history() -> None:
     features = RuntimeFeatures("conversation")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
@@ -67,7 +67,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
 @pytest.mark.asyncio
 async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
     features = RuntimeFeatures("conversation")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
@@ -232,7 +232,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
     storage_root = tmp_path / "runtime"
 
     features = workspace_features("workspace", workspace=workspace)
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
@@ -245,7 +245,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         )
 
     features = RuntimeFeatures("conversation")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]

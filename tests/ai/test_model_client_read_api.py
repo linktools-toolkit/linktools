@@ -21,6 +21,8 @@ from linktools.ai.runtime._model_interaction import StagedContextInline, StagedC
 from linktools.ai.runtime._transient_history import TransientExecutionHistoryStore
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._archive import PreparedArchive
+from linktools.ai.runtime.state._archive_closure import iter_archive_roots
 from linktools.ai.runtime.state._codec import _encode_persisted_domain, iter_runtime_object_refs
 from linktools.ai.runtime.state._contracts import ContextProjection, RuntimePayloadRef
 from linktools.ai.runtime.state._model_interaction_store import ModelInteractionInMemoryStepArchive
@@ -71,8 +73,9 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
                    replace(staged, model_request_seq=4, status="INTERRUPTED", response_context=None,
                            duration_ns=None, finished_at=None, client_requests=(original[1],)))
         archive = storage.run_store.read_store(RuntimeDomain.TRACE)
-        records = await archive.prepare_interactions(run, entries, payloads.__getitem__)
-        await archive.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution")
+        bundle = PreparedArchive()
+        records = await archive.prepare_interactions(run, entries, payloads.__getitem__, prepared=bundle)
+        await archive.sync_projection(run, events=(), checkpoints=(), interactions=records, execution_id="execution", archive=bundle)
         service = DefaultExecutionHistoryService(
             storage.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(storage),
             HmacCursorSigner("client-read", b"client-read-key"),
@@ -80,23 +83,35 @@ async def test_public_client_reads_are_independent_authorized_and_cursor_bound(
         history = RuntimeHistory(service, tenant_id="tenant")
         principal = Principal("reader", "tenant")
         objects = storage.object_store(RuntimeDomain.TRACE)
-        original_open = objects.open
         opened = []
 
-        async def track_open(key):
-            opened.append(key)
-            async for chunk in original_open(key):
-                yield chunk
 
-        monkeypatch.setattr(objects, "open", track_open)
 
-        def object_keys(value):
-            return {ref.key for _, ref in iter_runtime_object_refs(
-                _encode_persisted_domain(value), default_domain=RuntimeDomain.TRACE,
+        object_stores = {id(objects): objects}
+        archive_objects = storage.archive_object_store(RuntimeDomain.TRACE)
+        object_stores[id(archive_objects)] = archive_objects
+        for object_store in object_stores.values():
+            async def track_open(key, original_open=object_store.open):
+                opened.append(key)
+                async for chunk in original_open(key):
+                    yield chunk
+            monkeypatch.setattr(object_store, "open", track_open)
+
+        async def object_keys(value):
+            encoded = _encode_persisted_domain(value)
+            keys = {ref.key for _, ref in iter_runtime_object_refs(
+                encoded, default_domain=RuntimeDomain.TRACE,
             )}
+            roots = tuple(iter_archive_roots(encoded))
+            if roots:
+                contents = await archive.transcript_repository.content_archive()
+                ids = await contents.content_ids_many(roots)
+                values = await contents.content_records(tuple(identity for group in ids for identity in group))
+                keys.update(content.payload.ref.key for content in values if content.payload.ref is not None)
+            return keys
 
-        sdk_keys = object_keys(replace(records[0], client_requests=None))
-        raw_keys = object_keys(records[0]) - sdk_keys
+        sdk_keys = await object_keys(replace(records[0], client_requests=None))
+        raw_keys = await object_keys(records[0]) - sdk_keys
         if backend != "memory":
             assert sdk_keys and raw_keys and sdk_keys.isdisjoint(raw_keys)
 
@@ -213,12 +228,12 @@ async def test_existing_custom_readers_and_services_keep_default_call_shape() ->
 @pytest.mark.asyncio
 async def test_raw_only_volatile_reads_do_not_require_sdk_checkpoint_or_payload() -> None:
     original = _requests()
-    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.CHECKPOINT)
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.TRACE)
     await archive.initialize()
     try:
         record, = await archive.prepare_interactions(AgentRunRecord("run"), (_staged(original),), lambda _: b"{}")
         pending_sdk = replace(record, request_context=ContextProjection(()), request_envelope=RuntimePayloadRef(
-            StoredPayload.inline_bytes(b"{}"), RuntimeDomain.CHECKPOINT,
+            StoredPayload.inline_bytes(b"{}"), RuntimeDomain.TRACE,
         ))
         assert await archive.resolve_model_interactions(
             (pending_sdk,), include_client_requests=True, include_content=False,

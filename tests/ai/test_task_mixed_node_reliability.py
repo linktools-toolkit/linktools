@@ -34,7 +34,7 @@ from ._task_test_helpers import (
     task_result,
 )
 from linktools.ai.agent import restore_output
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.core import (
     JsonValue,
     OperationKind,
@@ -4029,7 +4029,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     (workspace_root / "context.txt").write_text("context", encoding="utf-8")
     workspace = Workspace.load(workspace_root)
     application = workspace_features("application", workspace=workspace, features_type=RuntimeFeatures)
-    application.capability(ConversationCapability(), scope="runtime")
+    application.capability(ExecutionCapability(retain_history=True), scope="runtime")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect_policy="none")
     application.task_expander(_ApplicationGraphExpander(handler))

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Model responses share their canonical transcript without losing trace evidence."""
+"""Shared response content preserves independent evidence and ordered occurrences."""
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,9 +20,12 @@ from linktools.ai.core import agent_run_id, canonical_json_bytes
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import ModelInteractionRecord, TranscriptSpanRef
-from linktools.ai.runtime.state._store import RecordQuery, StateTransaction
-from linktools.ai.storage import ObjectStat
+from linktools.ai.runtime.state._archive import ContentArchive, ContentRecord
+from linktools.ai.runtime.state._contracts import ArchivedContextBlock, ContextProjection, ModelInteractionRecord
+from linktools.ai.runtime.state._history import encode_model_messages
+from linktools.ai.runtime.state._step_archive import StateStepArchive
+from linktools.ai.runtime.state._store import FactQuery, RecordQuery, StateTransaction
+from linktools.ai.storage import ObjectStat, SqlObjectStore
 
 from .test_explicit_runtime_features import _FeatureFunctionModel, _FeatureModels
 
@@ -53,6 +57,26 @@ def _features() -> RuntimeFeatures:
     return features
 
 
+def _archived_block(projection: ContextProjection | None) -> ArchivedContextBlock:
+    assert projection is not None and len(projection.items) == 1
+    block, = projection.items
+    assert isinstance(block, ArchivedContextBlock)
+    return block
+
+
+async def _transcript_content_ids(archive: StateStepArchive, run_id: str) -> tuple[str, ...]:
+    transcript = archive.transcript_repository
+    facts = await archive.state_store.read(
+        lambda transaction: transaction.list_facts(FactQuery(transcript.transcript_stream(run_id))),
+    )
+    chunks = tuple(transcript.decode_chunk(fact) for fact in facts)
+    content = await transcript.content_archive()
+    groups = await content.content_ids_many(tuple(chunk.content for chunk in chunks))
+    ids = tuple(identity for group in groups for identity in group)
+    assert len(ids) == await transcript.transcript_message_count(run_id)
+    return ids
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite", "sql"))
 @pytest.mark.parametrize("size", (32, 65536), ids=("short", "long"))
@@ -69,15 +93,29 @@ async def test_trace_response_payload_storage_and_metadata_reads(
             "response-dedup", storage=storage, features=_features(),
             models=_FeatureModels(_FeatureFunctionModel(model)),
         ) as runtime:
-            objects = runtime._state.object_store(RuntimeDomain.TRACE)
-            original_put = objects.put
-            puts: list[tuple[str, int]] = []
+            objects = runtime._state.archive_object_store(RuntimeDomain.TRACE)
+            domain_objects = runtime._state.object_store(RuntimeDomain.TRACE)
+            sources = {"archive": objects}
+            if domain_objects is not objects:
+                sources["domain"] = domain_objects
+            # SQL routes can wrap one physical object table in distinct Python instances.
+            physical_sources = {}
+            for label, source in sources.items():
+                identity = ((id(source._context.engine), source.store_id) if isinstance(source, SqlObjectStore)
+                            else (id(source),))
+                physical_sources.setdefault(identity, (label, source))
+            puts: list[tuple[str, str, int]] = []
 
-            async def put(key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str) -> ObjectStat:
-                puts.append((key, expected_size))
-                return await original_put(key, chunks, expected_size=expected_size, expected_digest=expected_digest)
+            for label, source in sources.items():
+                original_put = source.put
 
-            monkeypatch.setattr(objects, "put", put)
+                async def put(key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str,
+                              label: str = label, original_put=original_put) -> ObjectStat:
+                    result = await original_put(key, chunks, expected_size=expected_size, expected_digest=expected_digest)
+                    puts.append((label, key, expected_size))
+                    return result
+
+                monkeypatch.setattr(source, "put", put)
             execution = await runtime.agents.get().start("question")
             assert (await execution.wait(timeout_seconds=10)).result.status == "SUCCEEDED"
             run_id = agent_run_id(
@@ -87,22 +125,50 @@ async def test_trace_response_payload_storage_and_metadata_reads(
             archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert len(records) == 1 and isinstance(records[0], ModelInteractionRecord)
-            assert records[0].response_context.items == (
-                TranscriptSpanRef(RuntimeDomain.TRACE, run_id, 1, 2),
-            )
+            block = _archived_block(records[0].response_context)
+            assert block.root.count == 1
+            content_archive = await archive.transcript_repository.content_archive()
+            response_ids = await content_archive.content_ids(block.root)
+            transcript_ids = await _transcript_content_ids(archive, run_id)
+            assert transcript_ids[1:2] == response_ids
+            response_content, = await content_archive.content_records(response_ids)
+            response_records = await content_archive.store.read(lambda transaction: transaction.list_records(
+                RecordQuery(kind="archive_content", sort_key_prefix=response_content.identity),
+            ))
+            assert len(response_records) == 1
+            assert ContentRecord.from_json(response_records[0].data) == response_content
             persisted = await archive.state_store.read(
                 lambda transaction: transaction.list_records(RecordQuery(kind="model_interaction")),
             )
-            stats = [item async for item in objects.list_objects()]
+            archive_records = await content_archive.store.read(lambda transaction: transaction.scan_records())
+            stats = [(label, item) for label, source in physical_sources.values()
+                     async for item in source.list_objects()]
             actual_bytes = 0
-            for item in stats:
-                actual_bytes += len(b"".join([chunk async for chunk in objects.open(item.key)]))
-            assert actual_bytes == sum(item.size for item in stats)
+            for label, item in stats:
+                raw = b"".join([chunk async for chunk in sources[label].open(item.key)])
+                assert len(raw) == item.size and hashlib.sha256(raw).hexdigest() == item.digest
+                actual_bytes += len(raw)
+            assert actual_bytes == sum(item.size for _, item in stats)
+            if size == 32:
+                assert response_content.payload.ref is None
+            else:
+                response_ref = response_content.payload.ref
+                assert response_ref is not None
+                assert [label for label, item in stats if item.key == response_ref.key] == ["archive"]
+                assert [(label, count) for label, key, count in puts if key == response_ref.key] == [
+                    ("archive", response_ref.size),
+                ]
             report = {
                 "backend": backend, "response_chars": size,
                 "interaction_metadata_bytes": sum(len(canonical_json_bytes(item.data)) for item in persisted),
                 "object_count": len(stats), "object_bytes": actual_bytes,
-                "object_puts": len(puts), "object_put_bytes": sum(size for _, size in puts),
+                "object_puts": len(puts), "object_put_bytes": sum(size for _, _, size in puts),
+                "archive_object_count": sum(item.key.startswith("v1/archive/") for _, item in stats),
+                "domain_object_count": sum(not item.key.startswith("v1/archive/") for _, item in stats),
+                "physical_store_count": len(physical_sources),
+                "archive_metadata_bytes": sum(len(canonical_json_bytes(item.data)) for item in archive_records),
+                "response_content_records": len(response_records),
+                "response_payload_bytes": response_content.payload.size,
             }
 
             async def reject_content(key: str) -> AsyncIterator[bytes]:
@@ -110,7 +176,13 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 yield b""
 
             with monkeypatch.context() as patch:
-                patch.setattr(objects, "open", reject_content)
+                for source in sources.values():
+                    patch.setattr(source, "open", reject_content)
+
+                async def reject_body(*args: object, **kwargs: object) -> bytes:
+                    raise AssertionError("metadata read decoded archived message content")
+
+                patch.setattr(ContentArchive, "_read_content", reject_body)
 
                 async def reject_projection(*args: object, **kwargs: object) -> None:
                     raise AssertionError("metadata read resolved full model context")
@@ -122,19 +194,22 @@ async def test_trace_response_payload_storage_and_metadata_reads(
                 assert not page.items[0].content_included
                 assert page.items[0].request == {} and page.items[0].response is None
                 assert await archive.resolve_model_interactions(records, include_content=False) == [(None, None, None, None)]
-            opens: list[str] = []
-            original_open = objects.open
-
-            async def count_open(key: str) -> AsyncIterator[bytes]:
-                opens.append(key)
-                async for chunk in original_open(key):
-                    yield chunk
-
+            opens: list[tuple[str, str]] = []
             with monkeypatch.context() as patch:
-                patch.setattr(objects, "open", count_open)
+                for label, source in sources.items():
+                    original_open = source.open
+
+                    async def count_open(key: str, *, label: str = label, original_open=original_open) -> AsyncIterator[bytes]:
+                        opens.append((label, key))
+                        async for chunk in original_open(key):
+                            yield chunk
+
+                    patch.setattr(source, "open", count_open)
                 public = await execution.model_interactions(include_content=True)
                 assert public.items[0].response is not None
             report["full_content_object_opens"] = len(opens)
+            report["full_content_archive_opens"] = sum(label == "archive" for label, _ in opens)
+            report["metadata_content_loads"] = 0
             print("TRACE_RESPONSE_STORAGE " + json.dumps(report, sort_keys=True))
             resolved = await archive.resolve_model_interactions(records)
             assert resolved[0][1][0].parts[0].content == content
@@ -178,10 +253,15 @@ async def test_compaction_response_retains_independent_evidence(
     tmp_path: Path, backend: str,
 ) -> None:
     from linktools.ai.runtime import ExecutionInputContext
-    from linktools.ai.runtime.state._contracts import InlineContextBlock
+
+    responses: list[ModelResponse] = []
 
     async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        return ModelResponse(parts=[TextPart("retained summary")])
+        response = ModelResponse(parts=[TextPart("retained summary")], timestamp=datetime(
+            2026, 1, 1, second=len(responses), tzinfo=timezone.utc,
+        ))
+        responses.append(response)
+        return response
 
     history: list[ModelMessage] = []
     for index in range(20):
@@ -205,8 +285,14 @@ async def test_compaction_response_retains_independent_evidence(
             archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
             records = await archive.list_model_interactions(agent_run_id=run_id)
             assert [record.purpose for record in records] == ["compaction", "agent"]
-            assert isinstance(records[0].response_context.items[0], InlineContextBlock)
-            assert isinstance(records[1].response_context.items[0], TranscriptSpanRef)
+            blocks = tuple(_archived_block(record.response_context) for record in records)
+            assert all(block.root.count == 1 for block in blocks)
+            content_archive = await archive.transcript_repository.content_archive()
+            summary_ids, answer_ids = await content_archive.content_ids_many(tuple(block.root for block in blocks))
+            transcript_ids = await _transcript_content_ids(archive, run_id)
+            assert summary_ids[0] not in transcript_ids
+            assert answer_ids[0] in transcript_ids
+            assert await content_archive.read_contents(summary_ids, codec="model-message")
             resolved = await archive.resolve_model_interactions(records)
             assert [value[1][0].parts[0].content for value in resolved] == ["retained summary"] * 2
             public = await execution.model_interactions(include_content=True)
@@ -268,16 +354,30 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
                 await state.initialize(namespace="response-checkpoint", tenant_id="tenant")
             archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
             records = await archive.list_model_interactions(agent_run_id="run")
-            assert [record.response_context.items for record in records] == [
-                (TranscriptSpanRef(RuntimeDomain.CHECKPOINT, "run", 1, 2),),
-                (TranscriptSpanRef(RuntimeDomain.CHECKPOINT, "run", 3, 4),),
-            ]
+            assert [record.model_request_seq for record in records] == [1, 2]
+            blocks = tuple(_archived_block(record.response_context) for record in records)
+            assert all(block.root.count == 1 for block in blocks)
+            content_archive = await archive.transcript_repository.content_archive()
+            first_ids, second_ids = await content_archive.content_ids_many(tuple(block.root for block in blocks))
+            assert len(first_ids) == 1 and first_ids == second_ids
+            transcript_ids = await _transcript_content_ids(archive, "run")
+            assert len(transcript_ids) == 4
+            assert transcript_ids[0] != transcript_ids[2]
+            assert transcript_ids[1:2] == transcript_ids[3:4] == first_ids
+            response_content, = await content_archive.content_records(first_ids)
+            raw = encode_model_messages((response,))
+            assert response_content.raw_digest == hashlib.sha256(raw).hexdigest()
+            assert response_content.raw_size == len(raw)
+            response_records = await content_archive.store.read(lambda transaction: transaction.list_records(
+                RecordQuery(kind="archive_content", sort_key_prefix=response_content.identity),
+            ))
+            assert len(response_records) == 1
             checkpoint = await archive.latest_checkpoint(agent_run_id="run")
             assert len(checkpoint.messages) == 4
             assert checkpoint.messages[1] == checkpoint.messages[3] == response
             resolved = await archive.resolve_model_interactions(records)
             assert [value[1] for value in resolved] == [(response,), (response,)]
-            objects = state.object_store(RuntimeDomain.CHECKPOINT)
+            objects = state.archive_object_store(RuntimeDomain.CHECKPOINT)
             candidates = tuple([(RuntimeDomain.CHECKPOINT, ObjectRef(
                 objects.store_id, item.key, item.digest, item.size,
             )) async for item in objects.list_objects()])
@@ -286,18 +386,37 @@ async def test_identical_responses_keep_occurrences_through_checkpoint_reopen_an
             assert set(protected.retained) == set(candidates)
             assert await archive.resolve_model_interactions(records) == resolved
             await archive.release_agent_run("run")
+            assert await archive.list_model_interactions(agent_run_id="run") == []
+            assert await archive.latest_checkpoint(agent_run_id="run") is None
             retained = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
             assert set(retained.retained) == set(candidates)
             assert await archive.transcript_repository.load_messages("run") == tuple(checkpoint.messages)
 
-            # A retained transcript is a separate owner after the run is released.
-            # Remove this fixture's remaining metadata to exercise orphan reclamation.
+            # Releasing the run leaves transcript roots; only this fixture's owners may be removed.
+            transcript = archive.transcript_repository
+            await transcript.create_head("unrelated")
+            unrelated_head = await transcript.get_head("unrelated")
+
             async def remove_retained_history(transaction: StateTransaction) -> None:
-                remaining = await transaction.scan_records()
-                await transaction.delete_records(tuple(item.key_digest for item in remaining))
+                head_key = transcript.head_key("run")
+                children = await transaction.list_records(RecordQuery(parent_digest=head_key))
+                await transaction.delete_records((
+                    *(item.key_digest for item in children),
+                    transcript.projection_key("run"), head_key,
+                ))
 
             await archive.state_store.mutate(remove_retained_history)
+            assert await transcript.get_head("run") is None
+            assert await transcript.load_projection("run") is None
+            assert await transcript.get_head("unrelated") == unrelated_head
+            assert await archive.state_store.read(lambda transaction: transaction.list_facts(
+                FactQuery(transcript.transcript_stream("run")),
+            )) == ()
             deleted = await state.purge_unreferenced_objects(candidates, exclusive=Offline())
+            assert await content_archive.store.read(lambda transaction: transaction.list_records(
+                RecordQuery(kind="archive_content", sort_key_prefix=response_content.identity),
+            )) == ()
+            assert await transcript.get_head("unrelated") == unrelated_head
             if isinstance(objects, ObjectStoreMaintenance):
                 assert set(deleted.deleted) == set(candidates)
             else:
@@ -342,7 +461,12 @@ async def test_interrupted_partial_response_shares_retained_transcript(
             archive = runtime._state.run_store.read_store(RuntimeDomain.TRACE)
             record, = await archive.list_model_interactions(agent_run_id=run_id)
             assert record.status == outcome
-            assert record.response_context.items == (TranscriptSpanRef(RuntimeDomain.TRACE, run_id, 1, 2),)
+            block = _archived_block(record.response_context)
+            assert block.root.count == 1
+            content_archive = await archive.transcript_repository.content_archive()
+            response_ids = await content_archive.content_ids(block.root)
+            transcript_ids = await _transcript_content_ids(archive, run_id)
+            assert transcript_ids[1:2] == response_ids
             request, response, envelope, requests = await archive.resolve_model_interaction(record)
             assert response[0].parts[0].content == content
             assert response[0].state == "interrupted"

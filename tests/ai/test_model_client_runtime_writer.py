@@ -50,7 +50,7 @@ async def test_client_recorder_binds_model_dispatch_in_preexisting_task(
         return _response(request)
 
     model, _clients = _model(monkeypatch, handler)
-    recorder = ModelClientRequestRecorder()
+    recorder = ModelClientRequestRecorder(record_http_bodies=True)
     wrapped = recorder.wrap_model(model)
     ready = asyncio.Event()
 
@@ -114,7 +114,7 @@ async def test_runtime_records_compaction_and_agent_dispatches_separately(
         ))
     storage = RuntimeStorage.in_memory()
     features = _agents()
-    features.capability(TraceCapability(), scope="runtime")
+    features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     async with Runtime.open("default", models=models, storage=storage, features=features) as runtime:
         execution = await runtime.agents.get("default").start(
             "continue", input_context=ExecutionInputContext.from_messages(history),
@@ -169,7 +169,7 @@ async def test_runtime_flushes_original_attempts_only_at_request_completion(
     models, _clients = _registry(monkeypatch, handler, retries=int(outcome == "retry"))
     storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.sqlite(tmp_path / "state.db")
     features = _agents()
-    features.capability(TraceCapability(), scope="runtime")
+    features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     async with Runtime.open("default", models=models, storage=storage, features=features) as runtime:
         execution = await runtime.agents.get("default").start("original prompt")
         if outcome == "cancel":
@@ -239,7 +239,7 @@ async def test_concurrent_subagents_keep_original_attempts_with_their_own_execut
 
     models, _clients = _registry(monkeypatch, handler)
     group = RuntimeFeatures("application")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_subagents=("child",))
     group.agent("child", model="default", allow_tools=(), allow_subagents=())
     storage = RuntimeStorage.in_memory()

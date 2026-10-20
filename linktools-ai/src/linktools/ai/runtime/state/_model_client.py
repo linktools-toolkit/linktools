@@ -31,7 +31,7 @@ async def prepare_client_requests(
         return None
 
     async def prepare_body(raw: bytes | None) -> ModelClientBodyRef | None:
-        if raw is None:
+        if raw is None or runtime_domain is not RuntimeDomain.TRACE:
             return None
         codec, raw_digest, raw_size, encoded = encode_payload_bytes(raw)
         payload = (
@@ -48,6 +48,7 @@ async def prepare_client_requests(
         response = request.response
         result.append(ModelClientRequestRef(
             api=request.api,
+            record_http_bodies=request.record_http_bodies,
             body=await prepare_body(request.body),
             capture_error=request.capture_error,
             response=None if response is None else ModelClientResponseRef(
@@ -66,12 +67,13 @@ async def resolve_client_requests(
     requests: tuple[ModelClientRequestRef, ...] | None,
     runtime_domain: RuntimeDomain,
     history: TranscriptRepository | None = None,
+    *, include_bodies: bool = True,
 ) -> tuple[ModelClientRequest, ...] | None:
     if requests is None:
         return None
 
     async def read_body(body: ModelClientBodyRef | None) -> bytes | None:
-        if body is None:
+        if body is None or not include_bodies:
             return None
         if body.content.source_domain not in {None, runtime_domain}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -96,6 +98,7 @@ async def resolve_client_requests(
         response = request.response
         result.append(ModelClientRequest(
             api=request.api,
+            record_http_bodies=request.record_http_bodies,
             body=await read_body(request.body),
             capture_error=request.capture_error,
             response=None if response is None else ModelClientResponse(

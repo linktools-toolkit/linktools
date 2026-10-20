@@ -28,6 +28,10 @@ from ...storage import (
     TransientObjectStore,
     read_object,
 )
+from ._filesystem import FilesystemStateStorageGroup
+from ._memory import InMemoryStateStorageGroup
+from ._sql import SqlStateStorageGroup
+from ._store import StateStore
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
@@ -51,6 +55,7 @@ class _RuntimeObjectRouter:
         stores: Mapping[RuntimeDomain, ObjectStore],
         *,
         close_guard_stores: Sequence[ObjectStore],
+        archive_stores: Mapping[RuntimeDomain, ObjectStore] | None = None,
         cache: CacheBackend | None = None,
         domain_caches: Mapping[RuntimeDomain, CacheBackend | None] | None = None,
         cache_domains: Sequence[RuntimeDomain] = (),
@@ -58,6 +63,7 @@ class _RuntimeObjectRouter:
         tenant_id: str = "",
     ) -> None:
         self._stores = dict(stores)
+        self._archive_stores = dict(archive_stores or {})
         self._close_guard_stores = tuple(close_guard_stores)
         selected = dict(domain_caches or {})
         self._caches = {
@@ -72,7 +78,7 @@ class _RuntimeObjectRouter:
         self._cache_scope = (namespace, tenant_id)
         self._closing = False
         self._pending_reads: set[asyncio.Task[bytes]] = set()
-        self._inflight: dict[tuple[RuntimeDomain, ObjectRef], tuple[float, asyncio.Task[bytes]]] = {}
+        self._inflight: dict[tuple[RuntimeDomain, bool, ObjectRef], tuple[float, asyncio.Task[bytes]]] = {}
 
     async def read_object(self, domain: RuntimeDomain, reference: ObjectRef) -> bytes:
         """Read verified bytes with bounded source-membership staleness."""
@@ -87,16 +93,31 @@ class _RuntimeObjectRouter:
             return await task
         return await asyncio.shield(task)
 
+    async def read_archive_object(self, domain: RuntimeDomain, reference: ObjectRef) -> bytes:
+        """Read reserved archive keys using the same bounded source validation."""
+        if not reference.key.startswith("v1/archive/"):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._closing:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        store = self.archive_object_store(domain)
+        task = asyncio.create_task(self._read_accepted(domain, store, reference, archive=True))
+        self._pending_reads.add(task)
+        task.add_done_callback(self._read_finished)
+        if self._caches[domain] is None or domain not in self._cache_domains:
+            # Unshared reads retain request-owned cancellation and stream close.
+            return await task
+        return await asyncio.shield(task)
+
     async def _read_accepted(
-        self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef
+        self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef, *, archive: bool = False
     ) -> bytes:
         if self._caches[domain] is None or domain not in self._cache_domains:
             return await self._read_origin(store, reference)
-        identity = (domain, reference)
+        identity = (domain, archive, reference)
         flight = self._inflight.get(identity)
         if (flight is None or flight[1].done()
                 or monotonic() >= flight[0] + _OBJECT_MAX_AGE_SECONDS):
-            task = asyncio.create_task(self._read_cached(domain, store, reference))
+            task = asyncio.create_task(self._read_cached(domain, store, reference, archive=archive))
             self._inflight[identity] = (monotonic(), task)
             task.add_done_callback(
                 lambda finished: self._flight_finished(identity, finished)
@@ -108,9 +129,9 @@ class _RuntimeObjectRouter:
         return await asyncio.shield(task)
 
     async def _read_cached(
-        self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef
+        self, domain: RuntimeDomain, store: ObjectStore, reference: ObjectRef, *, archive: bool = False
     ) -> bytes:
-        key = self._cache_key(domain, reference)
+        key = self._cache_key(domain, reference, archive=archive)
 
         loaded = False
 
@@ -128,9 +149,10 @@ class _RuntimeObjectRouter:
         await self._hot[domain].invalidate(key)
         return await load()
 
-    def _cache_key(self, domain: RuntimeDomain, reference: ObjectRef) -> str:
+    def _cache_key(self, domain: RuntimeDomain, reference: ObjectRef, *, archive: bool = False) -> str:
         identity = (
             *self._cache_scope,
+            "archive" if archive else "domain",
             domain.value,
             reference.store_id,
             reference.key,
@@ -167,7 +189,7 @@ class _RuntimeObjectRouter:
             task.exception()
 
     def _flight_finished(
-        self, identity: tuple[RuntimeDomain, ObjectRef], task: asyncio.Task[bytes]
+        self, identity: tuple[RuntimeDomain, bool, ObjectRef], task: asyncio.Task[bytes]
     ) -> None:
         flight = self._inflight.get(identity)
         if flight is not None and flight[1] is task:
@@ -193,9 +215,15 @@ class _RuntimeObjectRouter:
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
 
+    def archive_object_store(self, domain: RuntimeDomain) -> ObjectStore:
+        try:
+            return self._archive_stores[domain]
+        except KeyError as error:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
+
     def local_paths(self) -> tuple[Path, ...]:
         paths: list[Path] = []
-        for store in self._stores.values():
+        for store in (*self._stores.values(), *self._archive_stores.values()):
             paths.extend(store.local_paths())
         return tuple(dict.fromkeys(paths))
 
@@ -249,7 +277,7 @@ class _RuntimeObjectRouter:
 def build_runtime_object_router(
     plan: RuntimeStoragePlan,
     external: ObjectStore | None,
-    stores: Mapping[RuntimeDomain, object],
+    stores: Mapping[RuntimeDomain, StateStore],
     contexts: Mapping[RuntimeDomain, SqlStorageContext],
     *,
     namespace: str = "",
@@ -292,8 +320,27 @@ def build_runtime_object_router(
             close_guard_stores.append(store)
         else:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    archive_values: dict[RuntimeDomain, ObjectStore] = {}
+    group_objects = {}
+    for domain, state_store in stores.items():
+        group = state_store.storage_group
+        if group not in group_objects:
+            if isinstance(group, InMemoryStateStorageGroup):
+                archive_store = group.archive_objects
+            elif external is not None and isinstance(group, (FilesystemStateStorageGroup, SqlStateStorageGroup)):
+                archive_store = external
+            elif isinstance(group, FilesystemStateStorageGroup):
+                archive_store = FilesystemObjectStore(group.transaction_root / ".state-archive-objects")
+            elif isinstance(group, SqlStateStorageGroup) and domain in contexts:
+                archive_store = SqlObjectStore.from_context(contexts[domain])
+            else:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            group_objects[group] = archive_store
+            close_guard_stores.append(archive_store)
+        archive_values[domain] = group_objects[group]
     return _RuntimeObjectRouter(
         values,
+        archive_stores=archive_values,
         close_guard_stores=close_guard_stores,
         domain_caches={domain: plan.route(domain).cache for domain in values},
         cache_domains=tuple(

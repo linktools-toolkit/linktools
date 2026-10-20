@@ -4,12 +4,13 @@
 
 import asyncio
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from time import time
 from typing import TYPE_CHECKING, TypeVar
+from uuid import uuid4
 
 from linktools.core import environ
 
@@ -21,11 +22,13 @@ from ...storage import (
     create_sql_storage_context,
 )
 from ._plan import RuntimeDomain
+from ._archive_read import ArchiveNodeRead, ArchiveNodeSlot
 from ._schema import build_runtime_sql_metadata
 from ._record_cache import StateRecordCache
 from ._store import (
     FactQuery,
     FactScanCursor,
+    GroupRecordReader,
     OperationQuery,
     OperationScanCursor,
     RecordQuery,
@@ -34,12 +37,15 @@ from ._store import (
     StateCallback,
     StateGroupCallback,
     StateStorageGroup,
+    StateStore,
     StateTransaction,
+    StateTransactionNestingError,
     StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
     active_state_group_transaction,
+    active_state_scope,
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
@@ -51,7 +57,7 @@ from ._store import (
 if TYPE_CHECKING:
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Result
-    from sqlalchemy.sql import Executable
+    from sqlalchemy.sql import Executable, Select
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 ValueT = TypeVar("ValueT")
@@ -60,18 +66,28 @@ _MAINTENANCE_PAGE_SIZE = 128
 _RECORD_DELETE_BATCH_SIZE = 256
 # Six CASE assignments plus key/CAS predicates stay below 999 SQLite binds.
 _RECORD_REPLACE_BATCH_SIZE = 64
+_GROUP_RECORD_BIND_BUDGET = 999
+_ARCHIVE_READ_BIND_BUDGET = 999
+# Fixed predicates and JSON-path bindings across all eight edge branches.
+_ARCHIVE_READ_FIXED_BINDS = 96
 
 
 class _SqlGroupTransaction:
     def __init__(
         self,
         group: "SqlStateStorageGroup",
-        transactions: Mapping["SqlStateStore", StateTransaction],
+        transactions: Mapping[StateStore, "_SqlTransaction"],
     ) -> None:
         self._group = group
         self._transactions = transactions
+        record_caches: dict[bytes, dict[bytes, StoredRecord | None]] = {}
+        for transaction in transactions.values():
+            # Aliases of a physical partition must observe each other's writes.
+            transaction._record_cache = record_caches.setdefault(
+                transaction._store_digest, transaction._record_cache,
+            )
 
-    def transaction(self, store: "SqlStateStore") -> StateTransaction:
+    def transaction(self, store: StateStore) -> "_SqlTransaction":
         if store.storage_group is not self._group:
             raise RuntimeError("store does not belong to this StateStorageGroup")
         try:
@@ -80,6 +96,82 @@ class _SqlGroupTransaction:
             raise RuntimeError(
                 "store was not enlisted in the StateStorageGroup transaction"
             ) from error
+
+    async def get_records(
+        self, requests: Mapping[StateStore, Sequence[bytes]],
+    ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]]:
+        active_state_group_transaction(self._group, tuple(requests), writable=False)
+        active = active_state_scope()
+        if active is None or active.record_reader is not self:
+            raise StateTransactionNestingError("group record reader is outside its transaction")
+        unique: dict[StateStore, tuple[bytes, ...]] = {}
+        transactions: dict[StateStore, _SqlTransaction] = {}
+        for store, keys in requests.items():
+            for key in keys:
+                _hex(key)
+            unique[store] = tuple(dict.fromkeys(keys))
+            transactions[store] = self.transaction(store)
+        missing = {
+            store: tuple(key for key in keys if key not in transactions[store]._record_cache)
+            for store, keys in unique.items()
+        }
+        for batch in self._record_read_batches(missing):
+            first = transactions[next(iter(batch))]
+            statement = self._record_read_statement(batch)
+            compiled = statement.compile(
+                dialect=first._context.engine.dialect,
+                compile_kwargs={"render_postcompile": True},
+            )
+            count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+            if count > _GROUP_RECORD_BIND_BUDGET:
+                raise ValueError("group record read exceeds the SQL parameter budget")
+            rows = (await first._execute(statement)).mappings().all()
+            records: dict[str, dict[bytes, StoredRecord]] = {}
+            for row in rows:
+                record = _record_from_row(row)
+                records.setdefault(row["store_digest"], {})[record.key_digest] = record
+            for store, keys in batch.items():
+                transaction = transactions[store]
+                found = records.get(transaction._store_hex, {})
+                transaction._record_cache.update((key, found.get(key)) for key in keys)
+        return {
+            store: {key: value for key in keys
+                    if (value := transactions[store]._record_cache[key]) is not None}
+            for store, keys in unique.items()
+        }
+
+    @classmethod
+    def _record_read_batches(
+        cls, requests: Mapping[StateStore, Sequence[bytes]],
+    ) -> Iterator[Mapping[StateStore, tuple[bytes, ...]]]:
+        batch: dict[StateStore, tuple[bytes, ...]] = {}
+        used = 0
+        for store, keys in requests.items():
+            offset = 0
+            while offset < len(keys):
+                if _GROUP_RECORD_BIND_BUDGET - used < 2:
+                    yield batch
+                    batch, used = {}, 0
+                count = min(len(keys) - offset, _GROUP_RECORD_BIND_BUDGET - used - 1)
+                batch[store] = tuple(keys[offset:offset + count])
+                offset += count
+                used += count + 1
+                if offset < len(keys):
+                    yield batch
+                    batch, used = {}, 0
+        if batch:
+            yield batch
+
+    def _record_read_statement(
+        self, requests: Mapping[StateStore, Sequence[bytes]],
+    ) -> "Select":
+        from sqlalchemy import and_, or_, select
+
+        table = self._group.metadata.tables["ai_state_records"]
+        return select(table).where(or_(*(and_(
+            table.c.store_digest == self.transaction(store)._store_hex,
+            table.c.key_digest.in_(tuple(_hex(key) for key in keys)),
+        ) for store, keys in requests.items())))
 
 
 class SqlStateStorageGroup:
@@ -103,6 +195,88 @@ class SqlStateStorageGroup:
         self._close_lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
+        self._members: dict[bytes, SqlStateStore] = {}
+        self._archive_member: SqlStateStore | None = None
+        self._owned_members: set[SqlStateStore] = set()
+
+    def add_member(self, store: "SqlStateStore") -> None:
+        self._members.setdefault(store.store_digest, store)
+
+    async def open_archive(
+        self, *, create: bool = False,
+    ) -> tuple[str, "SqlStateStore"] | None:
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("open_archive must run outside a state callback")
+        await self.initialize()
+        if create and self._read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
+        metadata_digest = hashlib.sha256(b"linktools-ai:state-group-metadata").digest()
+        metadata_store = await self._open_partition(metadata_digest)
+        key = hashlib.sha256(b"archive_scope_id").digest()
+        record = await metadata_store.read(lambda tx: tx.get_record(key))
+        archive_digest = hashlib.sha256(b"linktools-ai:state-group-archive").digest()
+        if record is None:
+            archive = await self._open_partition(archive_digest)
+            if await archive.read(lambda tx: tx.scan_records_page(after=None, limit=1)):
+                record = await metadata_store.read(lambda tx: tx.get_record(key))
+                if record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record is None and create:
+            async def initialize_scope(tx: StateTransaction) -> StoredRecord:
+                existing = await tx.get_record(key)
+                if existing is not None:
+                    return existing
+                value = StoredRecord(
+                    key_digest=key, scope_digest=None, parent_digest=None,
+                    kind="archive_scope", sort_key="archive_scope", state=None,
+                    storage_revision=0, lease_owner=None, lease_fence=0,
+                    lease_expires_at=None, data={"archive_scope_id": uuid4().hex},
+                )
+                await tx.insert_record(value)
+                return value
+            try:
+                record = await metadata_store.mutate(initialize_scope)
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                record = await metadata_store.read(lambda tx: tx.get_record(key))
+                if record is None:
+                    raise
+        if record is None:
+            return None
+        scope = record.data.get("archive_scope_id")
+        if not isinstance(scope, str) or len(scope) != 32 or any(c not in "0123456789abcdef" for c in scope):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        archive_digest = hashlib.sha256(b"linktools-ai:state-group-archive").digest()
+        self._archive_member = await self._open_partition(archive_digest)
+        return scope, self._archive_member
+
+    async def _open_partition(self, digest: bytes) -> "SqlStateStore":
+        store = self._members.get(digest)
+        if store is None or store._closed:
+            store = SqlStateStore(
+                self._context.engine, metadata=self._metadata,
+                context=self._context, group=self, store_digest=digest,
+                runtime_domain="group_internal",
+            )
+            self._members[digest] = store
+            self._owned_members.add(store)
+        await store.initialize()
+        return store
+
+    async def scan_stores(self) -> tuple["SqlStateStore", ...]:
+        from sqlalchemy import select, union
+
+        await self.initialize()
+        statements = [
+            select(self._metadata.tables[name].c.store_digest)
+            for name in ("ai_state_records", "ai_state_aliases", "ai_state_facts",
+                         "ai_state_sequences", "ai_state_operations")
+        ]
+        async with self._session() as session:
+            result = await self._context.run_statement(session.execute(union(*statements)))
+            digests = tuple(bytes.fromhex(value) for value in result.scalars())
+        return tuple([await self._open_partition(digest) for digest in digests])
 
     @property
     def context(self) -> SqlStorageContext:
@@ -131,6 +305,8 @@ class SqlStateStorageGroup:
                 return
             self._closed = True
             try:
+                for store in self._owned_members:
+                    await store.close()
                 if self._owns_context:
                     await self._context.close()
             except BaseException:
@@ -144,13 +320,22 @@ class SqlStateStorageGroup:
             (store,), lambda group: fn(group.transaction(store))
         )
 
+    async def get_records(
+        self, requests: Mapping[StateStore, Sequence[bytes]],
+    ) -> Mapping[StateStore, Mapping[bytes, StoredRecord]]:
+        """Read only within an existing group callback, without opening a scope."""
+        transaction = active_state_group_transaction(self, tuple(requests), writable=False)
+        if not isinstance(transaction, GroupRecordReader):
+            raise StateTransactionNestingError("no active group record reader")
+        return await transaction.get_records(requests)
+
     async def read_many(
         self,
         stores: Sequence["SqlStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
-        members = tuple(dict.fromkeys(stores))
-        if not members:
+        members = tuple(dict.fromkeys((*stores, *((self._archive_member,) if self._archive_member else ()))))
+        if not stores:
             raise ValueError("StateStorageGroup read requires a store")
         for store in members:
             self._ensure_member(store)
@@ -171,7 +356,8 @@ class SqlStateStorageGroup:
                     )
                     for store in members
                 }
-                token = bind_state_scope(self, transactions, writable=False)
+                group_transaction = _SqlGroupTransaction(self, transactions)
+                token = bind_state_scope(self, transactions, writable=False, record_reader=group_transaction)
                 try:
                     return await fn(active_state_group_transaction(self, members, writable=False))
                 finally:
@@ -184,8 +370,8 @@ class SqlStateStorageGroup:
     ) -> ValueT:
         if self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
-        members = tuple(dict.fromkeys(stores))
-        if not members:
+        members = tuple(dict.fromkeys((*stores, *((self._archive_member,) if self._archive_member else ()))))
+        if not stores:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
             self._ensure_member(store)
@@ -215,7 +401,7 @@ class SqlStateStorageGroup:
                 for store in members
             }
             group_transaction = _SqlGroupTransaction(self, transactions)
-            token = bind_state_scope(self, transactions)
+            token = bind_state_scope(self, transactions, record_reader=group_transaction)
             try:
                 result = await fn(group_transaction)
                 for transaction in transactions.values():
@@ -227,10 +413,11 @@ class SqlStateStorageGroup:
                                  and record is not None and record.kind in {"session", "execution"})
                     for store, transaction in transactions.items()
                 }
-                changed = {
-                    store for store, transaction in transactions.items()
+                changed_partitions = {
+                    transaction._store_digest for transaction in transactions.values()
                     if transaction._guarded_record_keys or transaction._deleted_records
                 }
+                changed = {store for store in members if store.store_digest in changed_partitions}
                 return result
             finally:
                 reset_state_transaction(token)
@@ -373,6 +560,7 @@ class SqlStateStore:
         self._closed = False
         self._initialized = False
         self._reads = StateRecordCache(self, cache, scope=f"sql:{self._store_digest.hex()}")
+        self._storage_group.add_member(self)
 
     @property
     def context(self) -> SqlStorageContext:
@@ -706,6 +894,113 @@ class _SqlTransaction:
             for key in unique_keys
             if (value := self._record_cache[key]) is not None
         }
+
+    async def read_archive_frontiers(
+        self, *, scope_digest: bytes, requests: Sequence[ArchiveNodeRead],
+        content_keys: Sequence[bytes] = (),
+    ) -> Mapping[bytes, StoredRecord] | None:
+        dialect = self._context.engine.dialect
+        if dialect.name not in {"sqlite", "mysql", "postgresql"}:
+            return None
+        scope_hex = _hex(scope_digest)
+        merged: dict[bytes, ArchiveNodeRead] = {}
+        for request in requests:
+            previous = merged.get(request.key_digest)
+            merged[request.key_digest] = request if previous is None else ArchiveNodeRead(
+                request.key_digest, request.metadata_slots | previous.metadata_slots,
+                request.content_slots | previous.content_slots,
+            )
+        direct = tuple(dict.fromkeys(content_keys))
+        for key in direct:
+            _hex(key)
+        result: dict[bytes, StoredRecord] = {}
+        for nodes, contents in self._archive_read_batches(tuple(merged.values()), direct):
+            statement = self._archive_read_statement(scope_hex, nodes, contents)
+            compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+            parameter_count = len(compiled.params) if compiled.positiontup is None else len(compiled.positiontup)
+            if parameter_count > _ARCHIVE_READ_BIND_BUDGET:
+                raise ValueError("archive read exceeds the SQL parameter budget")
+            rows = (await self._execute(statement)).mappings().all()
+            for row in rows:
+                # An absent optional edge contributes no record to the mapping.
+                if row["key_digest"] is None:
+                    continue
+                record = _record_from_row(row)
+                result[record.key_digest] = self._record_cache[record.key_digest] = record
+        return result
+
+    @classmethod
+    def _archive_read_batches(
+        cls, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
+    ) -> Iterator[tuple[tuple[ArchiveNodeRead, ...], tuple[bytes, ...]]]:
+        available = _ARCHIVE_READ_BIND_BUDGET - _ARCHIVE_READ_FIXED_BINDS
+        nodes: list[ArchiveNodeRead] = []
+        contents: list[bytes] = []
+        used = 0
+        for request in requests:
+            # Each enabled branch contains the input key once, regardless of depth.
+            cost = int(request.metadata_slots).bit_count() + int(request.content_slots).bit_count()
+            if cost > available:
+                raise ValueError("archive read parameter budget cannot fit one node")
+            if used + cost > available:
+                yield tuple(nodes), tuple(contents)
+                nodes, contents, used = [], [], 0
+            nodes.append(request)
+            used += cost
+        for key in content_keys:
+            if used + 1 > available:
+                yield tuple(nodes), tuple(contents)
+                nodes, contents, used = [], [], 0
+            contents.append(key)
+            used += 1
+        if nodes or contents:
+            yield tuple(nodes), tuple(contents)
+
+    def _archive_read_statement(
+        self, scope_hex: str, requests: Sequence[ArchiveNodeRead], content_keys: Sequence[bytes],
+    ) -> "Select":
+        from sqlalchemy import and_, literal, select, union
+
+        table = self._table("ai_state_records")
+        current = table.alias("archive_current")
+        current_scope = and_(current.c.store_digest == self._store_hex,
+                             current.c.scope_digest == scope_hex, current.c.kind == "archive_sequence")
+        branches = []
+        for slot, field in ((ArchiveNodeSlot.SELF, None), (ArchiveNodeSlot.LEFT, "left"),
+                            (ArchiveNodeSlot.RIGHT, "right"), (ArchiveNodeSlot.NEXT, "next")):
+            metadata_keys = tuple(_hex(item.key_digest) for item in requests if item.metadata_slots & slot)
+            body_keys = tuple(_hex(item.key_digest) for item in requests if item.content_slots & slot)
+            if not metadata_keys and not body_keys:
+                continue
+            identity = current.c.sort_key if field is None else current.c.payload_json[field].as_string()
+            if metadata_keys:
+                branches.append(select(literal("archive_sequence").label("kind"), identity.label("identity")).where(
+                    current_scope, current.c.key_digest.in_(metadata_keys),
+                ))
+            if not body_keys:
+                continue
+            node, joined = current, current
+            if field is not None:
+                node = table.alias("archive_" + field)
+                joined = current.outerjoin(node, and_(
+                    node.c.store_digest == self._store_hex, node.c.scope_digest == scope_hex,
+                    node.c.kind == "archive_sequence", node.c.sort_key == identity,
+                ))
+            branches.append(select(literal("archive_content").label("kind"),
+                                   node.c.payload_json["content"].as_string().label("identity"))
+                            .select_from(joined).where(current_scope, current.c.key_digest.in_(body_keys)))
+        if content_keys:
+            content = table.alias("archive_direct_content")
+            branches.append(select(content.c.kind.label("kind"), content.c.sort_key.label("identity")).where(
+                content.c.store_digest == self._store_hex, content.c.scope_digest == scope_hex,
+                content.c.kind == "archive_content", content.c.key_digest.in_(tuple(_hex(key) for key in content_keys)),
+            ))
+        keys = (branches[0] if len(branches) == 1 else union(*branches)).subquery("archive_record_keys")
+        # Keep the bounded identity set on the driving side of the row lookup.
+        return select(table).select_from(keys.outerjoin(table, and_(
+            table.c.store_digest == self._store_hex, table.c.scope_digest == scope_hex,
+            table.c.kind == keys.c.kind, table.c.sort_key == keys.c.identity,
+        )))
 
     async def insert_record(self, record: StoredRecord) -> None:
         await self.insert_records((record,))

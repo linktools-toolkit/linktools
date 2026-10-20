@@ -721,3 +721,37 @@ cross-owner immediate visibility or act as an authorization cache. Native SQL
 batching, transaction-local record reuse, CAS and atomic Runtime commands stay
 with the authoritative store. No execution control state is moved into this
 best-effort buffer merely because it shares a database.
+
+### Optional grouped record reads
+
+Custom state backends do not need to implement SQL query optimizations. The
+required `StateStorageGroup` and `StateGroupTransaction` contracts are unchanged.
+`GroupRecordReader`, exported by `linktools.ai.runtime.state`, is an optional
+operation on a supporting storage group and its active callback:
+
+```python
+async def get_records(
+    requests: Mapping[StateStore, Sequence[bytes]],
+) -> Mapping[StateStore, Mapping[bytes, StoredRecord]]:
+    ...
+```
+
+Keys belong to explicitly enlisted stores. Call the operation only inside that
+group's existing `read_many` or `mutate` callback, from the owning task. Calling
+it on the group does not open a new transaction. Unsupported backends keep the
+original repository read path; they are not required to emulate an extra
+prefetch. Empty per-store results mean observed absence, not unsupported access.
+
+The SQL implementation combines bounded key lookups across partitions and
+updates the existing transaction-local record cache, including missing keys.
+Subsequent inserts, replacements, guards and deletions update that same view.
+The operation neither caches across transactions nor replaces domain CAS,
+unique insertion, content integrity or publication checks. Large requests split
+at the backend's parameter budget; fewer SELECT statements are not a guarantee
+of one network round trip or a transaction-wide snapshot on READ COMMITTED.
+
+Archive preparation may reuse a completed metadata observation for its exact
+requested content keys. Existing object bytes are still verified outside the
+metadata callback, and publication checks source records again inside the owner
+mutation. This observation is separate from prepared writes and verified-body
+receipts and is discarded after consumption or preparation failure.

@@ -12,6 +12,7 @@ import httpx2
 import pytest
 from openai import DefaultAsyncHttpxClient
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     InstructionPart, ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextPart,
@@ -125,7 +126,7 @@ async def test_model_client_request_capture_matches_dispatch_and_retains_retries
     parameters = ModelRequestParameters(instruction_parts=[InstructionPart("instruction")])
     settings = {"extra_body": {"metadata": {"after_mapping": True}}}
     async with model:
-        with ModelClientRequestRecorder() as capture:
+        with ModelClientRequestRecorder(record_http_bodies=True) as capture:
             if streaming:
                 async with model.request_stream(messages, settings, parameters) as response:
                     async for _event in response:
@@ -158,15 +159,15 @@ async def test_model_client_request_capture_separates_nested_and_concurrent_task
     model, _clients = _model(monkeypatch, _response)
 
     async def child(label: str) -> ModelClientRequestRecorder:
-        with ModelClientRequestRecorder() as captured:
+        with ModelClientRequestRecorder(record_http_bodies=True) as captured:
             await asyncio.sleep(0)
             await _request(model, label)
         return captured
 
     async with model:
-        with ModelClientRequestRecorder() as outer:
+        with ModelClientRequestRecorder(record_http_bodies=True) as outer:
             await _request(model, "before")
-            with ModelClientRequestRecorder() as inner:
+            with ModelClientRequestRecorder(record_http_bodies=True) as inner:
                 await _request(model, "inner")
             children = await asyncio.gather(child("one"), child("two"))
             await asyncio.create_task(_request(model, "sdk-child-task"))
@@ -192,7 +193,7 @@ async def test_model_client_request_capture_does_not_collect_after_scope_exit(
         await _request(model, "late")
 
     async with model:
-        with ModelClientRequestRecorder() as capture:
+        with ModelClientRequestRecorder(record_http_bodies=True) as capture:
             task = asyncio.create_task(delayed())
         gate.set()
         await task
@@ -213,14 +214,14 @@ async def test_model_client_request_capture_keeps_provider_failure_and_cancelled
         raise AssertionError("cancelled dispatch must not complete")
 
     model, clients = _model(monkeypatch, handler)
-    cancelled = ModelClientRequestRecorder()
+    cancelled = ModelClientRequestRecorder(record_http_bodies=True)
 
     async def cancelled_request() -> None:
         with cancelled:
             await _request(model, "cancel")
 
     async with model:
-        with ModelClientRequestRecorder() as failed:
+        with ModelClientRequestRecorder(record_http_bodies=True) as failed:
             with pytest.raises(ModelHTTPError) as raised:
                 await _request(model, "failure")
         assert raised.value.status_code == 400
@@ -244,7 +245,7 @@ async def test_model_client_request_capture_reports_unavailable_body_without_con
         yield b"body"
 
     request = httpx2.Request("POST", "https://capture.invalid/chat/completions", content=content())
-    with ModelClientRequestRecorder() as capture:
+    with ModelClientRequestRecorder(record_http_bodies=True) as capture:
         await _openai._capture_chat_request(request)
     assert not consumed
     assert len(capture.requests) == 1
@@ -260,16 +261,16 @@ async def test_model_client_request_capture_client_lifecycle_follows_nested_agen
     agent = Agent(model)
     async with model:
         async with model:
-            with ModelClientRequestRecorder() as first:
+            with ModelClientRequestRecorder(record_http_bodies=True) as first:
                 await agent.run("one")
             assert len(clients) == 1 and not clients[0].is_closed
         assert not clients[0].is_closed
-        with ModelClientRequestRecorder() as second:
+        with ModelClientRequestRecorder(record_http_bodies=True) as second:
             await agent.run("two")
     assert len(first.requests) == len(second.requests) == 1
     assert len(clients) == 1 and clients[0].is_closed
     async with agent:
-        with ModelClientRequestRecorder() as reopened:
+        with ModelClientRequestRecorder(record_http_bodies=True) as reopened:
             await agent.run("three")
     assert len(reopened.requests) == 1
     assert len(clients) == 2 and all(client.is_closed for client in clients)
@@ -282,7 +283,7 @@ async def test_model_client_request_capture_preserves_final_body_overrides(
     model, _clients = _model(monkeypatch, _response)
     original = [{"role": "developer", "content": [{"type": "text", "text": "actual"}]}]
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             await model.request(
                 [ModelRequest(parts=[UserPromptPart("before-extra-body")])],
                 {"extra_body": {"messages": original}}, ModelRequestParameters(),
@@ -362,11 +363,11 @@ async def test_model_client_request_capture_runtime_closes_owned_client(
     registry, clients = _registry(monkeypatch, handler)
     storage = RuntimeStorage.in_memory()
     features = _agents()
-    features.capability(TraceCapability(), scope="runtime")
+    features.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     async with Runtime.open(
         "default", models=registry, storage=storage, features=features,
     ) as runtime:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             execution = await runtime.agents.get("default").start("hello")
             await asyncio.wait_for(dispatched.wait(), 5)
             if outcome == "cancel_cleanup":
@@ -494,11 +495,11 @@ async def test_model_client_request_capture_compaction_reuses_owned_client(
             ModelRequest(parts=[UserPromptPart(f"user {index} " + "x" * 240)]),
             ModelResponse(parts=[TextPart(f"answer {index} " + "y" * 240)]),
         ))
-    agent = Agent(model, capabilities=[CompactionCapability(
+    agent = Agent(model, capabilities=[TraceCapability(record_http_bodies=True).bind(AbstractCapability()), CompactionCapability(
         300, limits=PromptLimits(), journal=journal, observer=observer, request_recorder=record,
     )])
     async with model:
-        with ModelClientRequestRecorder() as recorder:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
             result = await agent.run("continue", message_history=history)
         assert result.output == "done"
         assert len(clients) == 1 and not clients[0].is_closed

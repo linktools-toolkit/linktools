@@ -7,7 +7,7 @@ from ._runtime_test_helpers import workspace_features
 
 from collections.abc import Mapping
 from pathlib import Path
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -37,7 +37,7 @@ class _NoToolsModels(_TaskTestModels):
 @pytest.mark.asyncio
 async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_path: Path) -> None:
     group = RuntimeFeatures("context")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", system_prompt="original-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
     group.agent("candidate", model="default", system_prompt="candidate-only behavior", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -106,7 +106,7 @@ async def test_captured_agent_task_and_graph_restore_context_after_restart(tmp_p
     from linktools.ai.task import TaskGraph, TaskNode
 
     group = RuntimeFeatures("context-graph")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     principal = Principal("owner", "default")
     async with Runtime.open("captured-graph-context", models=_NoToolsModels(), storage=RuntimeStorage.filesystem(tmp_path), features=group) as runtime:
@@ -182,7 +182,24 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         execution = await runtime.agents.get().start("question", input_context=baseline, principal=principal)
         assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await runtime._state.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
-        assert record.input_context.payload.kind == "object"
+        assert record.input_context.payload.kind == "inline"
+        manifest = record.input_context.payload.decode()
+        assert manifest["kind"] == "execution-context"
+        from linktools.ai.runtime._context_archive import ExecutionContextArchive
+        contents = await ExecutionContextArchive(
+            runtime._state.execution.executions.state_store,
+            runtime._state.archive_object_store(RuntimeDomain.EXECUTION),
+            namespace=runtime.namespace, tenant_id=principal.tenant_id,
+            object_reader=lambda reference: runtime._state.read_archive_object(
+                RuntimeDomain.EXECUTION, reference,
+            ),
+        )._open()
+        memory_contents = await contents.content_records(tuple(
+            reference["content_id"] for reference in manifest["memory"].values()
+        ))
+        assert len(memory_contents) == 2
+        assert all(content.payload.kind == "object" for content in memory_contents)
+        assert sum(content.raw_size for content in memory_contents) >= 80000
     archive = InMemoryObjectStore("context-snapshot")
     storage = RuntimeStorage.filesystem(source_root)
     storage = RuntimeState(storage)
@@ -208,7 +225,7 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
     from linktools.ai.task import TaskGraph, TaskNode, TaskStatus
 
     group = RuntimeFeatures("reproject-context")
-    group.capability(ConversationCapability(), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
 
     async def first_builder(context: AgentTaskInputContext) -> str:

@@ -33,18 +33,23 @@ async def test_conversation_preparation_reuses_new_run_metadata(
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements = []
+    select_stores: list[str] = []
 
     def capture(_connection, _cursor, statement, _parameters, _context, _many):
         statements.append(statement.split()[0].upper())
+        if statement.startswith("SELECT"):
+            select_stores.append(_parameters[0])
 
     try:
         if existing != "absent":
             await archive.materialize_checkpoint(run, _checkpoint(2))
             if existing == "head_without_run":
                 await archive.state_store.mutate(lambda tx: tx.delete_record(archive._agent_run_key("run")))
-        batches, counts = [], []
+        await archive.transcript_repository.content_archive(create=True)
+        batches, counts, domain_counts = [], [], []
         for composed in (False, True):
             statements.clear()
+            select_stores.clear()
             event.listen(engine, "before_cursor_execute", capture)
             try:
                 if composed:
@@ -57,8 +62,14 @@ async def test_conversation_preparation_reuses_new_run_metadata(
                 event.remove(engine, "before_cursor_execute", capture)
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
+            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
         assert batches[0] == batches[1]
-        assert counts[1] == counts[0] - (existing != "replay")
+        # New-run metadata and content existence share one group query. Replay
+        # still recaptures after source validation; range JOINs bound archive reads.
+        assert domain_counts == ([7, 7] if existing == "replay" else [2, 1])
+        assert counts == {
+            "absent": [3, 1], "replay": [9, 9], "head_without_run": [3, 1],
+        }[existing]
         assert active_state_scope() is None
     finally:
         await state.close()

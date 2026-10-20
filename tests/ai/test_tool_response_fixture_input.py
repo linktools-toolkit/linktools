@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.asset import AssetKey, AssetStore, AssetVersionRef, InMemoryAssetBackend
-from linktools.ai.capability import ConversationCapability, RuntimeFeatures, ToolResponseFixture, ToolResponsesCapability
+from linktools.ai.capability import ExecutionCapability, RuntimeFeatures, ToolResponseFixture, ToolResponsesCapability
 from linktools.ai.core import AuthorizationAction, ExecutionLineageKind, ExecutionStatus, Principal, ResourceRef, canonical_sha256, principal_identity_payload, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CaptureInputRequest, ExecutionRequest, Runtime, RuntimeStorage
@@ -104,7 +104,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     assets, first, second = await _fixtures()
     principal = service_principal("default", "fixture-owner")
     features = RuntimeFeatures("fixture-conversation")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
@@ -137,7 +137,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
     assert await assets.read_versions((first,))
 
     features = RuntimeFeatures("fixture-conversation")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(second, assets)), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("fixture-input", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
@@ -170,7 +170,7 @@ async def test_capture_retry_fork_and_child_keep_saved_fixture_after_default_cha
 async def test_fixture_session_rejection_leaves_no_admitted_turn(tmp_path: Path) -> None:
     assets, first, _second = await _fixtures()
     features = RuntimeFeatures("fixture-conversation")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(ToolResponsesCapability(ToolResponseFixture(first, assets)), scope="runtime")
     storage = RuntimeStorage.filesystem(tmp_path)
     async with Runtime.open("fixture-session", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:

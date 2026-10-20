@@ -58,7 +58,7 @@ async def test_provider_stream_failure_is_not_wrapper_cancellation(boundary: str
                 fail()
 
     group = RuntimeFeatures("provider-stream-failure")
-    group.capability(TraceCapability(), scope="runtime")
+    group.capability(TraceCapability(record_http_bodies=True), scope="runtime")
     group.agent("default", model="default", allow_tools=())
     async with Runtime.open(
         "provider-stream-failure", models=_Models(ExitModel(stream_function=stream)),
@@ -103,7 +103,7 @@ async def test_provider_observation_preserves_consumer_error_and_context_suppres
     async def prepare(messages, settings, parameters, streaming):
         return model.wrapped
 
-    recorder = ModelClientRequestRecorder()
+    recorder = ModelClientRequestRecorder(record_http_bodies=True)
     consumer_model = ConsumerModel(lambda messages, info: response)
     model = _PreparedRequestModel(
         recorder.wrap_model(consumer_model) if client_capture else consumer_model, prepare, provider_errors.append,

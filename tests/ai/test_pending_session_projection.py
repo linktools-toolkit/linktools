@@ -15,7 +15,6 @@ from pydantic_ai.messages import ModelResponse, TextPart
 from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
 from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest, ListSessionRequest
 from linktools.ai.runtime.state._store import active_state_scope, record_key_digest
@@ -43,9 +42,8 @@ async def _runtimes(tmp_path, *, cache, shared=True):
 
     def group():
         value = RuntimeFeatures("pending-session-display")
-        value.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+        value.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
         value.agent("default", model="default", allow_tools=())
-        value.capability(ConversationCapability(), scope="runtime")
         return value
 
     def block_next():

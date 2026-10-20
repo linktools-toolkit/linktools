@@ -11,7 +11,7 @@ import traceback
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.storage import StorageRoute
 from linktools.ai.runtime.service_api import CancelExecutionRequest
@@ -26,7 +26,7 @@ _NAMESPACE = "recovery-ownership"
 def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
     group = RuntimeFeatures(_NAMESPACE)
     if conversation:
-        group.capability(ConversationCapability(), scope="runtime")
+        group.capability(ExecutionCapability(retain_history=True), scope="runtime")
     group.capability(CheckpointCapability(), scope="runtime")
     group.capability(TraceCapability(), scope="runtime")
     group.agent("default", model="default", allow_tools=())

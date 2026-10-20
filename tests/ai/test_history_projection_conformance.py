@@ -841,8 +841,10 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
         )
         chunk = await repository.latest_chunk(owner_id)
         assert chunk is not None
-        raw = await repository.read_payload(chunk.content.payload)
-        assert chunk.codec == "raw"
+        contents = await repository.content_archive()
+        identity = (await contents.content_ids(chunk.content))[0]
+        content = (await contents.content_records((identity,)))[0]
+        raw = (await contents.read_contents((identity,), codec="model-message"))[0]
         compressed = raw if corruption == "unknown-codec" else zlib.compress(raw)
         if corruption == "zlib":
             compressed = b"not a zlib stream"
@@ -853,29 +855,31 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
         else:
             async def chunks() -> AsyncIterator[bytes]:
                 yield compressed
+            digest = hashlib.sha256(compressed).hexdigest()
             stat = await objects.put(
-                "transcript", chunks(), expected_digest=hashlib.sha256(compressed).hexdigest(),
+                contents._object_prefix + digest, chunks(), expected_digest=digest,
                 expected_size=len(compressed),
             )
             payload = StoredPayload.object(ObjectRef(objects.store_id, stat.key, stat.digest, stat.size))
         if corruption == "non-binary":
             payload = StoredPayload.inline_text("not binary")
         changed = replace(
-            chunk,
-            codec="unknown-compression" if corruption == "unknown-codec" else "zlib",
-            content=RuntimePayloadRef(payload, RuntimeDomain.TRACE),
-            raw_digest="0" * 64 if corruption == "raw-digest" else chunk.raw_digest,
-            raw_size=chunk.raw_size + 1 if corruption == "raw-size" else chunk.raw_size,
+            content,
+            compression="unknown-compression" if corruption == "unknown-codec" else "zlib",
+            payload=payload,
+            raw_digest="0" * 64 if corruption == "raw-digest" else content.raw_digest,
+            raw_size=content.raw_size + 1 if corruption == "raw-size" else content.raw_size,
         )
-        decode_stored_chunk = repository.decode_chunk
-        corrupt_data = encode_envelope({
-            "type": "transcript_chunk", "payload": _encode_persisted_domain(changed),
-        })
+        read_records = contents.store.read_records
+        content_key = contents._key("archive_content", identity)
 
-        def decode_chunk(fact: StoredFact) -> TranscriptChunk:
-            return decode_stored_chunk(replace(fact, data=corrupt_data))
+        async def corrupt_content(keys):
+            records = dict(await read_records(keys))
+            if content_key in records:
+                records[content_key] = replace(records[content_key], data=changed.to_json())
+            return records
 
-        monkeypatch.setattr(repository, "decode_chunk", decode_chunk)
+        monkeypatch.setattr(contents.store, "read_records", corrupt_content)
         history = RuntimeHistory(
             DefaultExecutionHistoryService(
                 state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state),

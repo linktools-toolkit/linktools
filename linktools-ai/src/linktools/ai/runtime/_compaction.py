@@ -18,6 +18,9 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
+    SystemPromptPart,
+    ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
@@ -31,15 +34,17 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
     estimate_context_tokens,
     estimate_token_count,
+    is_pinned,
 )
 
+from ._trace_capture import record_http_bodies_enabled
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest, ModelClientRequestRecorder
 from ..workspace import validate_workspace_path
 from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, await_request_handoff
-from ._message import binary_content_usage, project_transient_binary_content
+from ._message import SummaryPromptPart, binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
@@ -111,6 +116,98 @@ class _WorkspaceFileReadDeduplication(AbstractCapability[Any]):
         return _deduplicate_text_entries(messages, self._policies())
 
 
+def _dependency_safe_tail(messages: Sequence[ModelMessage], keep: int) -> int:
+    start = max(0, len(messages) - max(1, keep))
+    calls: dict[str, int] = {}
+    dependencies: list[int] = []
+    orphans: set[int] = set()
+    for index, message in enumerate(messages):
+        dependency = index
+        for part in message.parts:
+            if isinstance(part, ToolCallPart):
+                calls[part.tool_call_id] = index
+            elif isinstance(part, ToolReturnPart) or (
+                isinstance(part, RetryPromptPart) and part.tool_name is not None
+            ):
+                if part.tool_call_id not in calls:
+                    orphans.add(index)
+                else:
+                    dependency = min(dependency, calls[part.tool_call_id])
+        dependencies.append(dependency)
+    for index in range(len(messages) - 1, -1, -1):
+        if index < start:
+            break
+        start = min(start, dependencies[index])
+    if any(index >= start for index in orphans):
+        raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE,
+                      safe_details={"reason": "orphan_tool_context"})
+    return start
+
+
+class RuntimeSummarizingCompaction(SummarizingCompaction):
+    """Adapt public Harness compaction while preserving Runtime context identity."""
+
+    async def compact(
+        self, messages: list[ModelMessage], ctx: PydanticRunContext[Any],
+    ) -> list[ModelMessage]:
+        if len(messages) <= max(1, self.keep_messages):
+            return messages
+        start = _dependency_safe_tail(messages, self.keep_messages)
+        if start == 0:
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE,
+                          safe_details={"reason": "unsplittable_tool_context"})
+        # The public keep_messages parameter protects tool retries as well as returns.
+        adapter = replace(self, keep_messages=len(messages) - start,
+                          preserve_first_user_message=False)
+        result = await SummarizingCompaction.compact(adapter, messages, ctx)
+        if result == messages:
+            return messages
+        original = {id(part) for message in messages for part in message.parts}
+        created = [
+            part for message in result for part in message.parts
+            if isinstance(part, SystemPromptPart) and id(part) not in original
+        ]
+        tail = len(messages)
+        result_tail = len(result)
+        while tail and result_tail and messages[tail - 1] is result[result_tail - 1]:
+            tail -= 1
+            result_tail -= 1
+        if (
+            len(created) != 1 or tail > start
+            or any(isinstance(part, SummaryPromptPart)
+                   for message in result for part in message.parts)
+        ):
+            raise AIError(ErrorCode.CONTEXT_PAYLOAD_TOO_LARGE,
+                          safe_details={"reason": "unsupported_compaction_projection"})
+        summary = created[0]
+        identified: list[ModelMessage] = [
+            replace(message, parts=[
+                SummaryPromptPart(part.content, timestamp=part.timestamp, dynamic_ref=part.dynamic_ref)
+                if part is summary else part for part in message.parts
+            ]) if isinstance(message, ModelRequest) and any(
+                part is summary for part in message.parts
+            ) else message
+            for message in result
+        ]
+        # Preserve user occurrences, not the first mixed request or a set of part IDs.
+        first = next((
+            (index, message) for index, message in enumerate(messages)
+            if isinstance(message, ModelRequest)
+            and any(isinstance(part, UserPromptPart) and not is_pinned(part)
+                    for part in message.parts)
+        ), None)
+        if first is not None and first[0] < tail:
+            request = first[1]
+            parts = [part for part in request.parts
+                     if isinstance(part, UserPromptPart) and not is_pinned(part)]
+            summary_index = next(
+                index for index, message in enumerate(identified)
+                if any(isinstance(part, SummaryPromptPart) for part in message.parts)
+            )
+            identified.insert(summary_index + 1, replace(request, parts=parts))
+        return identified
+
+
 class _ObservedCompactionModel(WrapperModel):
     """Observe one Harness summary request without changing model semantics."""
 
@@ -141,7 +238,9 @@ class _ObservedCompactionModel(WrapperModel):
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         model_request_seq = fact.model_request_seq
-        with ModelClientRequestRecorder() as client_recorder:
+        with ModelClientRequestRecorder(
+            record_http_bodies=record_http_bodies_enabled(self._ctx.capabilities.values()),
+        ) as client_recorder:
             try:
                 await self._notify(
                     fact,
@@ -373,7 +472,7 @@ class CompactionCapability(AbstractCapability[None]):
                             if policy == _UNIFIED_READ_POLICY
                         ),
                     ),
-                    SummarizingCompaction(
+                    RuntimeSummarizingCompaction(
                         model=summary_model,
                         max_messages=1,
                         keep_messages=_SUMMARY_TAIL_MESSAGES,
@@ -599,6 +698,7 @@ def _text_read_key(value: object) -> str | None:
 
 
 __all__ = [
+    "RuntimeSummarizingCompaction",
     "CompactionCapability",
     "CompactionPolicy",
     "ExternalModelRequestObserver",

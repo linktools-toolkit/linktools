@@ -15,7 +15,7 @@ pytest.importorskip("uvicorn")
 from linktools.ai.errors import ErrorDiagnostics
 from linktools.ai.observe import Metrics
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.capability import CheckpointCapability, ConversationCapability, TraceCapability
+from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.web import create_app
 from ._runtime_test_helpers import RuntimeUsageModels, _persistence_capabilities
@@ -98,7 +98,7 @@ async def test_local_boundary_blocks_cross_site_fetches_and_unmarked_mutations()
 async def test_session_execution_history_trace_result_and_metrics_use_runtime() -> None:
     metrics = Metrics.in_memory()
     features = RuntimeFeatures("web-test")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     features.capability(TraceCapability(), scope="runtime")
     async with Runtime.open(
         "web-test", metrics=metrics, models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(),
@@ -185,7 +185,7 @@ async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-busy")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("web-busy", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
@@ -238,7 +238,7 @@ async def test_independent_clients_serialize_session_admission_and_cancel_exact_
 
     monkeypatch.setattr(helpers, "_runtime_usage_model", model)
     features = RuntimeFeatures("web-clients")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("web-clients", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         app = create_app(runtime=runtime)
         async with client(app) as first, client(app) as second:
@@ -317,7 +317,7 @@ async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_s
 async def test_read_only_history_requires_no_model_and_never_opens_runtime(tmp_path: Path) -> None:
     storage = RuntimeStorage.from_root(tmp_path)
     features = RuntimeFeatures("web-history")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("default", models=RuntimeUsageModels(), storage=storage, features=features) as runtime:
         execution = await runtime.agents.get().start("saved", session_id="session")
         await execution.wait()
@@ -607,7 +607,7 @@ def test_web_cli_rejects_invalid_input_types(tmp_path: Path) -> None:
 async def test_opaque_session_ids_round_trip_through_query_identity() -> None:
     identity = "../team/conversation?notes#你好"
     features = RuntimeFeatures("opaque-web")
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("opaque-web", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory(), features=features) as runtime:
         async with client(create_app(runtime=runtime)) as http:
             created = await http.post("/api/sessions", json={"session_id": identity, "request_id": "create-opaque", "title": "Opaque session"}, headers=_HEADERS)

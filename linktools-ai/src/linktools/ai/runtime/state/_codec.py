@@ -3,6 +3,7 @@
 """Canonical versioned codecs for Runtime persistence values."""
 
 from ...storage import StorageRetentionMode
+from ._archive import ArchiveRoot, ArchiveSlice
 
 import base64
 import binascii
@@ -169,8 +170,7 @@ from ._contracts import (
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     InlineContextBlock,
-    LoadedContextMessage,
-    LoadedModelContext,
+    ArchivedContextBlock,
     MemoryRecord,
     ModelClientBodyRef,
     ModelClientRequestRef,
@@ -337,11 +337,12 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("stored_payload", StoredPayload),
     ("history_quality", HistoryQuality),
     ("inline_context_block", InlineContextBlock),
-    ("loaded_context_message", LoadedContextMessage),
-    ("loaded_model_context", LoadedModelContext),
+    ("archived_context_block", ArchivedContextBlock),
     ("runtime_payload_ref", RuntimePayloadRef),
     ("stored_user_input", StoredUserInput),
     ("task_binding_contract", TaskBindingContract),
+    ("archive_root", ArchiveRoot),
+    ("archive_slice", ArchiveSlice),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),

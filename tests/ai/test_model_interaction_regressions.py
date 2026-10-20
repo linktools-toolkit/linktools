@@ -221,6 +221,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
             lambda digest: payloads[digest],
             local_message_base=4,
             local_message_count=1,
+            local_messages=(source,),
         )
 
         assert len(prepared) == 1

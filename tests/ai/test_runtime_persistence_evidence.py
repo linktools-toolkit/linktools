@@ -23,7 +23,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime.state._codec import (
@@ -299,7 +299,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     features = _agent_group()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     try:
         async with Runtime.open(
             "default",
@@ -355,7 +355,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     )
 
     features = _agent_group()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     try:
         async with Runtime.open(
             "default",

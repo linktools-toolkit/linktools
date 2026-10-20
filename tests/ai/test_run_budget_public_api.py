@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, Principal, RunBudget, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, TraceCapability
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -26,7 +26,7 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
     capabilities = _capabilities()
     capabilities.capability(TraceCapability(), scope="runtime")
     features = capabilities
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("budget-lineage", models=RuntimeUsageModels(),
                             storage=RuntimeStorage.in_memory(), features=features) as runtime:
         agent = runtime.agents.get()
@@ -61,7 +61,7 @@ async def test_execution_retries_and_default_forks_share_scope_but_explicit_fork
 @pytest.mark.asyncio
 async def test_session_new_turns_have_independent_budgets() -> None:
     features = _capabilities()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("budget-session", models=RuntimeUsageModels(),
                             storage=RuntimeStorage.in_memory(), features=features) as runtime:
         session = runtime.agents.get().session("conversation")
@@ -188,7 +188,7 @@ async def test_budget_scope_survives_restart_and_missing_inherited_scope_fails_c
     from linktools.ai.runtime.state._store import RecordQuery, StateTransaction
 
     features = _capabilities()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("budget-reopen", models=RuntimeUsageModels(),
                             storage=RuntimeStorage.filesystem(tmp_path), features=features) as runtime:
         root = await runtime.agents.get().start("first", budget=RunBudget(model_requests=2))

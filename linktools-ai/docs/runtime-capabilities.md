@@ -35,7 +35,7 @@ pass through these hooks.
 ## Capability and service ownership
 
 All public capability declarations are imported from `linktools.ai.capability`,
-including `ExecutionCapability`, `SessionCapability`, `ConversationCapability`,
+including `ExecutionCapability`, `SessionCapability`,
 `CheckpointCapability`, and `TraceCapability`.
 `linktools.ai.runtime` owns Runtime entry points and services; it does not provide duplicate capability exports.
 
@@ -55,8 +55,8 @@ Session identity and combined execution-history queries remain owned by
 
 ## Optional execution persistence
 
-Conversation, interrupted-execution recovery and detailed trace are separate,
-explicit Runtime-scoped capabilities. Passing durable storage alone does not
+Retained execution history, interrupted-execution recovery and detailed trace
+are separate, explicit Runtime-scoped options. Passing durable storage alone does not
 enable them. Automatic metrics use the independent `Runtime.open(metrics=...)`
 resource described below. Supply one `RuntimeFeatures` declaration or
 its `RuntimeFeaturesCapture` through `features`; complete registrations
@@ -64,11 +64,11 @@ before capture or opening the Runtime.
 
 ```python
 from linktools.ai.capability import RuntimeFeatures
-from linktools.ai.capability import ConversationCapability, CheckpointCapability, TraceCapability
+from linktools.ai.capability import ExecutionCapability, CheckpointCapability, TraceCapability
 
 chat = RuntimeFeatures("chat")
 chat.agent("default", model="default")
-chat.capability(ConversationCapability())
+chat.capability(ExecutionCapability(retain_history=True))
 # Runtime.open(..., features=chat) retains model context and supports execution forks.
 
 persistent_work = RuntimeFeatures("persistent-work")
@@ -78,7 +78,7 @@ persistent_work.capability(TraceCapability())
 # Runtime.open(..., features=persistent_work) supports recovery and audit.
 ```
 
-`ConversationCapability()` retains committed model context for future turns and
+`ExecutionCapability(retain_history=True)` retains committed model context for future turns and
 execution forks. Session creation, listing, resume, metadata, and display history
 are enabled by the default `SessionCapability`, independently of Conversation.
 Register `SessionCapability(enabled=False)` at Runtime scope to disable Session
@@ -86,7 +86,7 @@ operations explicitly; no manual enable registration is needed by default. Resum
 requires available committed context: an unretained completed turn makes Session
 history unavailable, and later resume or Session fork fails with
 `SESSION_HISTORY_UNAVAILABLE` rather than silently losing context. Enabling
-Conversation later cannot reconstruct that missing history. Execution forks
+History retention enabled later cannot reconstruct that missing history. Execution forks
 require an admitted conversation guarantee; checkpoint or trace data alone does
 not grant it.
 `CheckpointCapability()` retains before-request and after-node recovery context.
@@ -121,13 +121,19 @@ does not close the shared dataset, engine or cache. `metrics=None` disables
 automatic recording. Read-only history and snapshots never activate recording.
 Metrics retain their own batching; a conversation turn does not force a metrics flush.
 
+`TraceCapability()` retains structured execution evidence and model-request
+metadata without original HTTP bodies. Opt into
+`TraceCapability(record_http_bodies=True)` for transport diagnostics; original
+request/response bodies can repeat whole prompts and contain sensitive content.
+Checkpoint recovery keeps its structured context independently of this option.
+
 ### Module storage and cache configuration
 
 `StorageRoute` and `StorageRetentionMode` are imported from `linktools.ai.storage`.
 A route bundles its backend with an optional borrowed hot-read cache, for example
 `StorageRoute.sqlite("state.db", cache=cache)`. Cache identity is not part of
 persistence identity. Session and Conversation use the root `RuntimeStorage`
-resource; `ConversationCapability()` only selects context retention. Set
+resource; `ExecutionCapability(retain_history=True)` only selects context retention. Set
 `RuntimeStoragePlan(conversation=route, ...)` to customize that domain.
 For plan-based construction, caches live on the routes rather than a second
 `RuntimeStorage` cache argument. Convenience factories such as
@@ -146,8 +152,10 @@ remain borrowed resources.
 
 The workspace ACP convenience entry point accepts the same execution declaration:
 `ACPApplication.for_workspace(workspace, models=models, storage=storage,
-execution=ExecutionCapability(coordination=cache))`. Its workspace and conversation
-capabilities remain built in. A cache attached only to storage does not enable
+execution=ExecutionCapability(retain_history=True, coordination=cache))`. Without
+an explicit execution declaration, ACP defaults to retaining history. An explicit
+declaration controls retention as well as commit and coordination; workspace
+capability remains built in. A cache attached only to storage does not enable
 turn or stream coordination.
 
 `ExecutionCapability(coordination=cache)` explicitly supplies shared turn
@@ -190,7 +198,7 @@ Drain active work and upgrade all Runtime readers and writers sharing a namespac
 before admitting executions with the new defaults. Superseded pre-release record
 shapes and mixed-version operation are not supported.
 
-Without conversation, checkpoint or trace capabilities, ordinary execution keeps authorization, idempotency,
+Without retained history, checkpoints or trace, ordinary execution keeps authorization, idempotency,
 producer ownership, cancellation, terminal results and durable tool-effect
 records. Model and tool progress still streams. Local history is available while
 its existing staging owner is retained, and is unavailable after release or in
@@ -272,15 +280,14 @@ routes are rejected during initialization. No distributed transaction is implied
 
 ```python
 from linktools.ai.capability import (
-    ConversationCapability, ExecutionCapability, RuntimeFeatures, TraceCapability,
+    ExecutionCapability, RuntimeFeatures, TraceCapability,
 )
 from linktools.ai.core import CommitPolicy
 from linktools.ai.runtime import RuntimeStorage
 
 features = RuntimeFeatures("traced-chat")
 features.agent("default", model="default")
-features.capability(ConversationCapability())
-features.capability(ExecutionCapability(commit=CommitPolicy.terminal()), scope="runtime")
+features.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal()))
 features.capability(TraceCapability(commit=CommitPolicy.terminal()))
 storage = RuntimeStorage.sqlite("chat.db")
 # Pass storage and features to Runtime.open with your model configuration.
@@ -324,8 +331,8 @@ storage, and a lost lease never permits two canonical terminal results.
 - Runtime policies are current host configuration, outside durable Agent binding
   identity. Reopening uses the newly supplied host policies while restoring
   historical Agent behavior. Put model-visible, versioned behavior in Agent scope.
-- For the per-run Conversation, Checkpoint and Trace features, use capability
-  types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
+- For per-run history retention, Checkpoint and Trace, use `ExecutionCapability`,
+  `CheckpointCapability` and `TraceCapability` types in native `requires`, `wraps` and `wrapped_by` ordering declarations.
   References to an original instance do not survive per-run copies, as described
   by the native SDK ordering contract.
 - Native hook ordering, `for_agent` and `for_run` remain in effect. Instances are

@@ -201,6 +201,15 @@ async def materialize_runtime_storage(
         for store in (*stores.values(), *capability_stores.values()):
             await store.initialize()
 
+        if not read_only:
+            archive_groups = dict.fromkeys(
+                stores[domain].storage_group
+                for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION,
+                               RuntimeDomain.TRACE, RuntimeDomain.CHECKPOINT)
+            )
+            for group in archive_groups:
+                await group.open_archive(create=True)
+
         execution_store = stores[RuntimeDomain.EXECUTION]
         recovery_store = stores[RuntimeDomain.RECOVERY]
         if execution_store.storage_group is not recovery_store.storage_group:

@@ -79,6 +79,19 @@ class ConversationPersistence:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
 
+    async def committed_conversation_message_count(
+        self, *, history_id: str | None, agent_run_id: str, tenant_id: str,
+    ) -> int:
+        archive = self.archive
+        if isinstance(archive, StateStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await archive.committed_session_message_count(history_id,
+                agent_run_id=agent_run_id, tenant_id=tenant_id)
+        if isinstance(archive, InMemoryStepArchive):
+            return await archive.transcript_message_count(agent_run_id)
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
     async def conversation_message_count(
         self,
         *,

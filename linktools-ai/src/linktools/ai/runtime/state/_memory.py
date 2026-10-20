@@ -12,6 +12,7 @@ from linktools.core import environ
 
 from ...storage import CacheBackend
 from ...errors import AIError, ErrorCode
+from ...storage import InMemoryObjectStore
 from ._memory_transaction import _MemoryTransaction, _validate_transaction_integrity
 from ._record_cache import StateRecordCache
 from ._store import (
@@ -19,10 +20,12 @@ from ._store import (
     StateGroupCallback,
     StateStorageGroup,
     StateTransaction,
+    StateTransactionNestingError,
     StoredFact,
     StoredOperation,
     StoredRecord,
     active_state_group_transaction,
+    active_state_scope,
     active_state_transaction,
     bind_state_scope,
     reset_state_transaction,
@@ -58,6 +61,58 @@ class InMemoryStateStorageGroup:
     def __init__(self, *, read_only: bool = False) -> None:
         self._lock = asyncio.Lock()
         self._read_only = read_only
+        self._members: list[InMemoryStateStore] = []
+        self._archive: tuple[str, InMemoryStateStore] | None = None
+        self._archive_objects = InMemoryObjectStore()
+        self._closing = False
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+
+    @property
+    def archive_objects(self) -> InMemoryObjectStore:
+        return self._archive_objects
+
+    async def open_archive(
+        self, *, create: bool = False,
+    ) -> tuple[str, "InMemoryStateStore"] | None:
+        if self._closing:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("open_archive must run outside a state callback")
+        if create and self._read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
+        if self._archive is None and create:
+            store = InMemoryStateStore(self)
+            await store.initialize()
+            self._archive = (uuid4().hex, store)
+        return self._archive
+
+    async def scan_stores(self) -> tuple["InMemoryStateStore", ...]:
+        if self._closing:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        return tuple(self._members)
+
+    async def close(self) -> None:
+        """Drain accepted callbacks and close only the group-owned archive handle."""
+        if active_state_scope() is not None:
+            raise StateTransactionNestingError("close must run outside a state callback")
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = asyncio.create_task(self._close_owned(), name="memory-state-group-close")
+        await asyncio.shield(self._close_task)
+
+    async def _close_owned(self) -> None:
+        async with self._lock:
+            self._closed = True
+        if self._archive is not None:
+            await self._archive[1].close()
+
+
+    def add_member(self, store: "InMemoryStateStore") -> None:
+        if self._closing:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if store not in self._members:
+            self._members.append(store)
 
     async def read(
         self,
@@ -73,8 +128,8 @@ class InMemoryStateStorageGroup:
         stores: Sequence["InMemoryStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
-        members = tuple(dict.fromkeys(stores))
-        if not members:
+        members = tuple(dict.fromkeys((*stores, *((self._archive[1],) if self._archive else ()))))
+        if not stores:
             raise ValueError("StateStorageGroup read requires a store")
         for store in members:
             self._ensure_member(store)
@@ -100,8 +155,8 @@ class InMemoryStateStorageGroup:
     ) -> ValueT:
         if self._read_only:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
-        members = tuple(dict.fromkeys(stores))
-        if not members:
+        members = tuple(dict.fromkeys((*stores, *((self._archive[1],) if self._archive else ()))))
+        if not stores:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
             self._ensure_member(store)
@@ -148,6 +203,8 @@ class InMemoryStateStorageGroup:
         )
 
     def _ensure_member(self, store: "InMemoryStateStore") -> None:
+        if self._closed or (self._closing and active_state_transaction(store) is None):
+            raise AIError(ErrorCode.STORAGE_CLOSED)
         if store.storage_group is not self:
             raise RuntimeError("store does not belong to this StateStorageGroup")
         store._ensure_ready()
@@ -168,6 +225,7 @@ class InMemoryStateStore:
         self._initialized = False
         self._reads = StateRecordCache(self, cache, scope=f"memory:{uuid4().hex}")
         self._storage_group = group or InMemoryStateStorageGroup()
+        self._storage_group.add_member(self)
 
     @property
     def storage_group(self) -> StateStorageGroup:

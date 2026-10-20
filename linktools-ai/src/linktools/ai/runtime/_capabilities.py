@@ -18,7 +18,7 @@ from .persistence import CapabilityPersistence
 from ._agent_run_recorder import AgentRunRecorder
 from ._budget import RunBudgetContext
 from ._compaction import ExternalModelRequestRecorder, CompactionCapability, CompactionPolicy
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from ._harness import HarnessPlanStoreAdapter
 from ._harness_memory import build_harness_memory, select_harness_memory_tools
 from ._harness_planning import build_harness_planning
@@ -28,6 +28,7 @@ from ._plan import RuntimePlanStore
 from ._run_hooks import AgentRunCapture
 from ._conversation_service import ConversationService
 from ._persistence_services import CheckpointService, TraceService
+from ._persistence_configuration import execution_configuration
 from .state._step_contracts import AgentRunStore
 from .state._steps import RuntimeAgentRunStore
 
@@ -81,7 +82,7 @@ async def compose_platform_capabilities(
         execution_id=execution_id,
         agent_run_id=agent_run_id,
     )
-    guarantees = (True, True, True)
+    guarantees = (execution_configuration(runtime_capabilities).retain_history, True, True)
     if isinstance(run_store, RuntimeAgentRunStore):
         guarantees = run_store.execution_persistence(agent_run_id)
     async def require_active_producer() -> None:
@@ -128,7 +129,10 @@ async def compose_platform_capabilities(
             if not isinstance(bound, AbstractCapability):
                 raise TypeError("bind_persistence must preserve the SDK capability type")
             return bound
-        for enabled, feature, service in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability), (ConversationService, CheckpointService, TraceService)):
+        if isinstance(capability, ExecutionCapability):
+            bound_types.add(ExecutionCapability)
+            return capability.bind(ConversationService(persistence), retain_history=guarantees[0])
+        for enabled, feature, service in zip(guarantees[1:], (CheckpointCapability, TraceCapability), (CheckpointService, TraceService)):
             if isinstance(capability, feature):
                 if not enabled:
                     return None
@@ -147,7 +151,11 @@ async def compose_platform_capabilities(
         bound = template.visit_and_replace(bind)
         if bound is not None:
             capabilities.append(bound)
-    for enabled, feature, service in zip(guarantees, (ConversationCapability, CheckpointCapability, TraceCapability), (ConversationService, CheckpointService, TraceService)):
+    if ExecutionCapability not in bound_types:
+        capabilities.append(ExecutionCapability().bind(
+            ConversationService(persistence), retain_history=guarantees[0],
+        ))
+    for enabled, feature, service in zip(guarantees[1:], (CheckpointCapability, TraceCapability), (CheckpointService, TraceService)):
         if enabled and feature not in bound_types:
             capabilities.append(feature().bind(service(persistence)))
     selected_memory = select_harness_memory_tools(tool_policy)

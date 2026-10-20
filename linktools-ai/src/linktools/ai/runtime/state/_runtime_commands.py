@@ -28,6 +28,7 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
+from ._archive import ContentArchive, PreparedArchive
 from ._contracts import (
     deferred_resource_id,
     AgentAttemptClaim,
@@ -71,7 +72,7 @@ from ._durability import (
 from ._execution_commands import _execution_history_seal
 from ._execution_repositories import ExecutionRepositoryImpl
 from ._model_interaction_store import ModelInteractionStateStepArchive
-from ._conversation_repositories import SessionRepositoryImpl
+from ._conversation_repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from ._recovery_repositories import (
     RecoveryCheckpointRepositoryImpl,
     tool_admission_matches as _tool_admission_matches,
@@ -88,7 +89,7 @@ from ._step_archive import (
     StateStepArchive,
 )
 from ._repository_common import operation_identity_matches, validate_recovery_operation
-from ._store import StateGroupTransaction, StateStore, StateTransaction
+from ._store import GroupRecordReader, StateGroupTransaction, StateStore, StateTransaction
 
 _logger = environ.get_logger("ai.runtime.state.commands")
 
@@ -106,6 +107,15 @@ def _same_execution_except_hold_metadata(
             dependency_hold_ids=expected.dependency_hold_ids,
         ) == expected
     )
+
+
+def _copy_archive_union(values: Sequence[PreparedArchive]) -> PreparedArchive:
+    """Combine values without consuming a caller's preparation receipts."""
+    unique = {id(value): value for value in values}
+    return PreparedArchive.combine(tuple(
+        PreparedArchive(owner=value.owner, records=dict(value.records), nodes=dict(value.nodes))
+        for value in unique.values()
+    ))
 
 
 def _timeline_turn_message_range(
@@ -1109,14 +1119,16 @@ class RuntimeStateCommands:
         return await self._commit_agent_attempt_checkpoint(claim, recovery_operation=recovery_operation)
 
     async def commit_prepared_agent_attempt_checkpoint(
-        self, claim: AgentAttemptClaim, input_context: RuntimePayloadRef,
+        self, claim: AgentAttemptClaim, input_context: RuntimePayloadRef, *,
+        context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-        return await self._commit_agent_attempt_checkpoint(claim, prepared_input_context=input_context)
+        return await self._commit_agent_attempt_checkpoint(claim, prepared_input_context=input_context, context_write=context_write)
 
     async def _commit_agent_attempt_checkpoint(
         self, claim: AgentAttemptClaim, *,
         recovery_operation: OperationLedgerInput | None = None,
         prepared_input_context: RuntimePayloadRef | None = None,
+        context_write: tuple[ContentArchive, PreparedArchive] | None = None,
         producer_claim_id: str | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
         """Atomically publish the execution sequence and active recovery run."""
@@ -1192,6 +1204,9 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if current_recovery.state is not RecoveryCheckpointState.ADMITTED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if context_write is not None:
+                content_archive, archive_records = context_write
+                await content_archive.store.mutate(lambda tx: content_archive.publish(tx, archive_records))
             if prepared_input_context is not None:
                 if type(self._execution) is not ExecutionRepositoryImpl:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1883,6 +1898,7 @@ class RuntimeStateCommands:
         self, reservation: ExecutionStartReservation, *,
         expected_session: SessionRecord | None, captured_input_context: RuntimePayloadRef | None,
         producer_claim_id: str | None = None,
+        context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
         """Confirm durable producer ownership before a local turn performs effects."""
         self._require_recovery()
@@ -1956,6 +1972,7 @@ class RuntimeStateCommands:
                     AgentAttemptClaim(initial.execution_id, started.revision, 0, 0,
                                       RecoveryCheckpointState.ADMITTED),
                     prepared_input_context=captured_input_context, producer_claim_id=producer_claim_id,
+                    context_write=context_write,
                 )
             confirmed_head = await self._execution.get_history_head(
                 initial.execution_id, tenant_id=self._tenant_id,
@@ -2025,6 +2042,7 @@ class RuntimeStateCommands:
         recovery_agent_run_checkpoint: AgentRunCheckpoint | None = None,
         audit_events: Sequence[ExecutionEventAppend] = (),
         capability_run_id: str | None = None,
+        context_write: tuple[ContentArchive, PreparedArchive] | None = None,
     ) -> ExecutionTerminalCommitResult:
         """Materialize one effect-free local turn at its final atomic boundary."""
         audit_events = tuple(audit_events)
@@ -2148,7 +2166,30 @@ class RuntimeStateCommands:
         if capability_prefix is not None:
             stores = tuple(_dedupe_stores((*stores, *capability_prefix.stores)))
 
+        fresh_record_keys: dict[StateStore, tuple[bytes, ...]] = {}
+        if (isinstance(stores[0].storage_group, GroupRecordReader)
+                and expected_session is not None and prepared is not None and archive is not None
+                and conversation_agent_run is not None
+                and isinstance(self._conversation_history, ConversationHistoryRepositoryImpl)):
+            entries = [
+                (repository.state_store, repository.pending_turn_record_keys(reservation)),
+                (self._conversation.state_store, (self._conversation.session_record_key(expected_session.session_id),
+                 self._conversation_history.history_record_key(expected_session.history_id))),
+                (self._recovery.state_store, (self._recovery.checkpoint_record_key(execution.execution_id),)),
+                *(await archive.checkpoint_publication_record_keys(conversation_agent_run, prepared[0])).items(),
+            ]
+            if all(store.storage_group is stores[0].storage_group for store, _keys in entries):
+                for store, keys in entries:
+                    fresh_record_keys[store] = tuple(dict.fromkeys((*fresh_record_keys.get(store, ()), *keys)))
+                stores = tuple(_dedupe_stores((*stores, *fresh_record_keys)))
+
         async def mutate(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+            if context_write is not None:
+                content_archive, archive_records = context_write
+                await content_archive.store.mutate(lambda tx: content_archive.publish(tx, archive_records))
+            if fresh_record_keys and isinstance(group, GroupRecordReader):
+                # Mutable owners still use their CAS; immutable records still compare complete bytes.
+                await group.get_records(fresh_record_keys)
             execution_transaction = group.transaction(repository.state_store)
             winner = await self._read_pending_turn_in_group(group, reservation, expected_session)
             if winner is not None:
@@ -2295,6 +2336,47 @@ class RuntimeStateCommands:
             if background_tasks is None
             else background_tasks
         )
+        stores = [self._execution.state_store]
+        if session_id is not None:
+            self._require_conversation()
+            stores.append(self._conversation.state_store)
+        if recovery_checkpoint is not None:
+            self._require_recovery()
+            stores.append(self._recovery.state_store)
+        if execution_run is not None:
+            if self._execution_run_store is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.extend(self._execution_run_store.transaction_stores)
+        if conversation_agent_run is not None or conversation_checkpoint is not None:
+            if self._conversation_run_store is None or conversation_agent_run is None or conversation_checkpoint is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.extend(self._conversation_run_store.transaction_stores)
+        if recovery_run is not None or recovery_agent_run_checkpoint is not None:
+            if self._recovery_run_store is None or recovery_run is None or recovery_agent_run_checkpoint is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores.extend(self._recovery_run_store.transaction_stores)
+        terminal_archives = tuple(
+            archive for archive, participates in (
+                (self._execution_run_store, execution_run is not None and bool(execution_projections or execution_checkpoints)),
+                (self._conversation_run_store, conversation_agent_run is not None),
+                (self._recovery_run_store, recovery_run is not None),
+            ) if participates and archive is not None
+        )
+        shared_archive = None
+        if _same_group(stores) and terminal_archives:
+            roots = tuple([
+                (await archive.transcript_repository.content_archive(create=True)).empty_root()
+                for archive in terminal_archives
+            ])
+            same_content_scope = all(root == roots[0] for root in roots)
+            shared_archive = _copy_archive_union(tuple(
+                archive for projection in execution_projections
+                for archive in (
+                    projection.archive,
+                    *(checkpoint.archive for checkpoint in projection.checkpoints),
+                    *((projection.observation.archive,) if projection.observation is not None else ()),
+                )
+            )) if same_content_scope else None
         prepared_conversation = ()
         if (
             self._conversation_run_store is not None
@@ -2305,6 +2387,7 @@ class RuntimeStateCommands:
                 await self._conversation_run_store.prepare_conversation_checkpoint(
                     conversation_agent_run,
                     conversation_checkpoint,
+                    archive=shared_archive,
                 )
             )
         timeline_range: tuple[int, int] | None = conversation_message_range
@@ -2344,6 +2427,7 @@ class RuntimeStateCommands:
             recovery_agent_run_checkpoint, prepared_recovery = await self._recovery_run_store.prepare_run_checkpoint(
                 recovery_run,
                 recovery_agent_run_checkpoint,
+                archive=shared_archive,
             )
         prepared_execution: PreparedAgentRunCheckpointBatch | tuple[()] = ()
         if (
@@ -2355,6 +2439,7 @@ class RuntimeStateCommands:
             prepared_execution = await self._execution_run_store.prepare_checkpoints(
                 execution_run,
                 execution_checkpoints,
+                archive=shared_archive,
             )
         seal = _execution_history_seal(
             commit,
@@ -2368,26 +2453,35 @@ class RuntimeStateCommands:
                 else None
             ),
         ) if commit.execution.durable_trace else None
-        stores = [self._execution.state_store]
-        if session_id is not None:
-            self._require_conversation()
-            stores.append(self._conversation.state_store)
-        if recovery_checkpoint is not None:
-            self._require_recovery()
-            stores.append(self._recovery.state_store)
-        if execution_run is not None:
-            if self._execution_run_store is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.extend(self._execution_run_store.transaction_stores)
-        if conversation_agent_run is not None or conversation_checkpoint is not None:
-            if self._conversation_run_store is None or conversation_agent_run is None or conversation_checkpoint is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.extend(self._conversation_run_store.transaction_stores)
-        if recovery_run is not None or recovery_agent_run_checkpoint is not None:
-            if self._recovery_run_store is None or recovery_run is None or recovery_agent_run_checkpoint is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.extend(self._recovery_run_store.transaction_stores)
         if _same_group(stores):
+            terminal_projections = execution_projections
+            if shared_archive is not None:
+                shared_archive = _copy_archive_union((
+                    shared_archive,
+                    *(checkpoint.archive for batch in (
+                        prepared_conversation, prepared_recovery, prepared_execution,
+                    ) for checkpoint in batch),
+                ))
+                if prepared_conversation:
+                    prepared_conversation = replace(prepared_conversation, checkpoints=tuple(
+                        replace(checkpoint, archive=PreparedArchive()) for checkpoint in prepared_conversation
+                    ))
+                if prepared_recovery:
+                    prepared_recovery = replace(prepared_recovery, checkpoints=tuple(
+                        replace(checkpoint, archive=PreparedArchive()) for checkpoint in prepared_recovery
+                    ))
+                if prepared_execution:
+                    prepared_execution = replace(prepared_execution, checkpoints=tuple(
+                        replace(checkpoint, archive=PreparedArchive()) for checkpoint in prepared_execution
+                    ))
+                terminal_projections = tuple(replace(
+                    projection,
+                    archive=PreparedArchive(),
+                    checkpoints=tuple(replace(checkpoint, archive=PreparedArchive())
+                                      for checkpoint in projection.checkpoints),
+                    observation=(None if projection.observation is None else
+                                 replace(projection.observation, archive=PreparedArchive())),
+                ) for projection in execution_projections)
             prepared = (await self._capability_writes.prepare_terminal(
                 commit.execution.execution_id, capability_run_id, stores[0].storage_group,
             ) if self._capability_writes is not None else None)
@@ -2419,6 +2513,8 @@ class RuntimeStateCommands:
                             commit,
                             expected_execution=expected_execution,
                         )
+                    if shared_archive is not None:
+                        await terminal_archives[0].transcript_repository.publish_archive(shared_archive)
                     if session_id is not None:
                         conversation_transaction = group.transaction(self._conversation.state_store)
                         if conversation_agent_run is None or conversation_checkpoint is None:
@@ -2504,7 +2600,8 @@ class RuntimeStateCommands:
                             self._execution_run_store.state_store
                         )
                         if execution_projections:
-                            for projection in execution_projections:
+                            for projection in terminal_projections:
+                                await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
                                 await self._execution_run_store.sync_projection_in_transaction(
                                     execution_transaction_for_steps,
                                     projection.run,
@@ -2844,6 +2941,7 @@ class RuntimeStateCommands:
                 )
                 if execution_projections:
                     for projection in execution_projections:
+                        await self._execution_run_store.transcript_repository.publish_archive(projection.archive)
                         await self._execution_run_store.sync_projection_in_transaction(
                             execution_transaction_for_steps,
                             projection.run,
@@ -3216,6 +3314,7 @@ class RuntimeStateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def sync(transaction: StateTransaction) -> None:
+            await archive.transcript_repository.publish_archive(projection.archive)
             await archive.sync_projection_in_transaction(
                 transaction,
                 projection.run,

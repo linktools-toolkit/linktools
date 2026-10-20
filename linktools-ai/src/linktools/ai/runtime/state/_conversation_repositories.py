@@ -42,6 +42,9 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             domain=RuntimeDomain.CONVERSATION,
         )
 
+    def history_record_key(self, history_id: str) -> bytes:
+        return self._key("conversation_history", history_id)
+
     async def create(
         self, record: ConversationHistoryRecord
     ) -> ConversationHistoryRecord:
@@ -1458,6 +1461,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         if committed.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return committed
+
+    def session_record_key(self, session_id: str) -> bytes:
+        return self._key("session", session_id)
 
     async def commit_pending_turn_in_transaction(
         self, transaction: StateTransaction, *, expected: SessionRecord,

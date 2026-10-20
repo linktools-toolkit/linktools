@@ -4,7 +4,8 @@
 
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit, await_owned_task
 from ._capability_contracts import CapabilityPersistence, CapabilityWriter
-from ._store import (StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction,
+from ._archive_read import ArchiveNodeSlot, ArchiveNodeRead, ArchiveFrontierReader
+from ._store import (StateStore, StateTransaction, StateStorageGroup, StateGroupTransaction, GroupRecordReader,
                      StoredRecord, StoredFact, StoredOperation, RecordReplacement, RecordQuery)
 from ._object_cleanup import ObjectCleanupResult
 from ._plan import RuntimeDomain, RuntimeStoragePlan, runtime_domain_uses_object_store
@@ -33,7 +34,9 @@ __all__ = [
     "has_capability_partition_marker",
     "CommitObservation", "DurableCommitState", "run_durable_commit", "await_owned_task",
     "CapabilityPersistence", "CapabilityWriter",
+    "ArchiveNodeSlot", "ArchiveNodeRead", "ArchiveFrontierReader",
     "StateStore", "StateTransaction", "StateStorageGroup", "StateGroupTransaction",
+    "GroupRecordReader",
     "StoredRecord", "StoredFact", "StoredOperation", "RecordReplacement", "RecordQuery",
     "ConversationPersistence",
     "CheckpointPersistence",

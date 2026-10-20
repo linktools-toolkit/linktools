@@ -11,7 +11,7 @@ from linktools.ai.capability import ExecutionCapability, RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.execution import ExecutionCancelRequestCommit, ExecutionRecord
-from linktools.ai.capability import ConversationCapability, CheckpointCapability
+from linktools.ai.capability import CheckpointCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.storage import InMemoryCacheBackend
@@ -23,9 +23,8 @@ from ._runtime_test_helpers import _Models, _UsageFunctionModel
 
 def _group(terminal: bool = True, *, coordination=None):
     group = RuntimeFeatures('shared-pending')
-    group.capability(ExecutionCapability(commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(), coordination=coordination), scope='runtime')
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal() if terminal else CommitPolicy.sync(), coordination=coordination), scope='runtime')
     group.agent('default', model='default', allow_tools=())
-    group.capability(ConversationCapability(), scope='runtime')
     if not terminal:
         # Checkpoint guarantees force source admission even with shared cache.
         group.capability(CheckpointCapability(), scope='runtime')
@@ -207,10 +206,9 @@ async def test_lost_pending_lease_never_executes_effect(tmp_path: Path) -> None:
         await finish.wait()
         return ModelResponse(parts=[ToolCallPart('effect', {}, tool_call_id='call')])
     group = RuntimeFeatures('lost-pending')
-    group.capability(ExecutionCapability(commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
+    group.capability(ExecutionCapability(retain_history=True, commit=CommitPolicy.terminal(), coordination=cache), scope="runtime")
     group.tool(effect, effect_policy='replay_safe')
     group.agent('default', model='default', allow_tools=('effect',))
-    group.capability(ConversationCapability(), scope='runtime')
     storage = RuntimeStorage.sqlite(tmp_path / 'state.db', cache=cache)
     opened = Runtime.open('lost-pending', storage=storage, models=_Models(_UsageFunctionModel(model)), features=group)
     runtime = await opened.__aenter__()

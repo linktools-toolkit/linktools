@@ -16,7 +16,7 @@ from linktools.ai.runtime.state._model_interaction_store import ModelInteraction
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._store import active_state_scope
 
-from .test_checkpoint_metadata_snapshot_io import _checkpoint
+from .test_checkpoint_metadata_snapshot_io import _assert_prepared_values_equal, _checkpoint
 from .test_incremental_projection_boundaries import _storage
 
 pytestmark = pytest.mark.asyncio
@@ -32,9 +32,12 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
     run = AgentRunRecord("run")
     engine = archive.state_store.storage_group.context.engine.sync_engine
     statements = []
+    select_stores: list[str] = []
 
     def capture(_connection, _cursor, statement, _parameters, _context, _many):
         statements.append(statement.split()[0].upper())
+        if statement.startswith("SELECT"):
+            select_stores.append(_parameters[0])
 
     try:
         if existing == "empty":
@@ -43,9 +46,12 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
             await archive.materialize_checkpoint(run, _checkpoint(1))
             if existing == "head_without_run":
                 await archive.state_store.mutate(lambda tx: tx.delete_record(archive._agent_run_key("run")))
-        batches, counts = [], []
+        # Both alternatives start with the shared content scope already resolved.
+        await archive.transcript_repository.content_archive(create=True)
+        batches, counts, domain_counts = [], [], []
         for composed in (False, True):
             statements.clear()
+            select_stores.clear()
             event.listen(engine, "before_cursor_execute", capture)
             try:
                 if composed:
@@ -58,8 +64,15 @@ async def test_run_preparation_reduces_empty_prefix_reads_without_changing_value
                 event.remove(engine, "before_cursor_execute", capture)
             assert not set(statements) & {"INSERT", "UPDATE", "DELETE"}
             counts.append(statements.count("SELECT"))
-        assert batches[0] == batches[1]
-        assert counts[1] == counts[0] - (existing != "prefix")
+            domain_counts.append(select_stores.count(archive.state_store.store_digest.hex()))
+        await _assert_prepared_values_equal(archive, batches[0], batches[1])
+        # Empty prefixes reuse one metadata capture. Prefix validation performs
+        # source reads, so both paths must recapture metadata after body I/O.
+        assert domain_counts == ([3, 3] if existing == "prefix" else [2, 1])
+        assert counts == {
+            "absent": [3, 2], "empty": [3, 2], "prefix": [7, 7],
+            "head_without_run": [4, 3],
+        }[existing]
         expected_start = 1 if existing in {"prefix", "head_without_run"} else 0
         assert batches[1].checkpoints[0].chunks[0].first_message_index == expected_start
         assert active_state_scope() is None
@@ -111,7 +124,7 @@ async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled
     await state.initialize(namespace="run-preparation", tenant_id="tenant")
     archive = state.run_store.read_store(RuntimeDomain.CHECKPOINT)
     run = AgentRunRecord("run")
-    prepare = archive.transcript_repository.prepare_projection
+    prepare = archive.transcript_repository.prepare_model_projection
     entered = False
 
     async def prepare_with_fault(*args, **kwargs):
@@ -128,7 +141,7 @@ async def test_run_preparation_body_io_keeps_fresh_commit_and_releases_cancelled
 
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(archive.transcript_repository, "prepare_projection", prepare_with_fault)
+            patch.setattr(archive.transcript_repository, "prepare_model_projection", prepare_with_fault)
             if fault == "append":
                 prepared, = (await archive.prepare_run_checkpoint(run, _checkpoint(2)))[1].checkpoints
             else:

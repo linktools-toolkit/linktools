@@ -13,7 +13,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from linktools.ai.capability import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus, JsonValue, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ConversationCapability
+from linktools.ai.capability import ExecutionCapability
 from linktools.ai.runtime import AgentTaskInput, CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import TaskGraph, TaskNode
@@ -360,7 +360,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
     producer = Task("capture.greeting", produce, effect_policy="none")
     features = _agents()
     if session_id is not None:
-        features.capability(ConversationCapability(), scope="runtime")
+        features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("capture-ready", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get(), build_input=project)
         engine = runtime.tasks.bind(producer, task)
@@ -520,7 +520,7 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
     principal = service_principal("default", "owner")
     storage = RuntimeStorage.filesystem(tmp_path)
     features = _agents()
-    features.capability(ConversationCapability(), scope="runtime")
+    features.capability(ExecutionCapability(retain_history=True), scope="runtime")
     async with Runtime.open("capture-lineage", models=models, storage=storage, features=features) as runtime:
         task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
         source = await runtime.tasks.bind(task).start(TaskGraph("source", (

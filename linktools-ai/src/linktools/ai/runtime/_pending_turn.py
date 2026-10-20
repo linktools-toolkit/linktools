@@ -12,6 +12,7 @@ from ..core import ExecutionStatus, IdempotencyStatus, SessionStatus
 from ..errors import AIError, ErrorCode
 from ..storage import TurnCoordination
 from ._pending_coordination import _PendingTurnCoordination
+from .state._archive import ArchiveRoot
 from .state._contracts import (
     ExecutionRecord,
     ExecutionStartReservation,
@@ -36,6 +37,8 @@ class _PendingExecutionTurn:
     uncertain: bool = False
     reconcile: Callable[[], Awaitable[None]] | None = None
     promotion_claim_id: str | None = None
+    history_root: ArchiveRoot | None = None
+    history_digest: str | None = None
     coordination: TurnCoordination | None = None
     boundary: asyncio.Lock = field(default_factory=asyncio.Lock)
 

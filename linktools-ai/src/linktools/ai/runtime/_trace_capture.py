@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
+from ..capability import TraceCapability
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
 from ..model import ModelClientRequest
@@ -22,6 +24,20 @@ from ._model_interaction import (
     build_inline_context_projection, model_identity, request_envelope,
 )
 from ._run_context import RunContextProjection
+
+
+def record_http_bodies_enabled(capabilities: Iterable[AbstractCapability[object]]) -> bool:
+    """Read the active run's Trace policy through public native capability trees."""
+    for capability in capabilities:
+        if isinstance(capability, WrapperCapability):
+            if record_http_bodies_enabled((capability.wrapped,)):
+                return True
+        elif isinstance(capability, CombinedCapability):
+            if record_http_bodies_enabled(capability.capabilities):
+                return True
+        elif isinstance(capability, TraceCapability) and capability.record_http_bodies:
+            return True
+    return False
 
 
 class TraceStagingPort(Protocol):
@@ -248,4 +264,4 @@ def _usage_metrics(value: object | None) -> UsageMetrics | None:
     )
 
 
-__all__ = ["ModelInteractionCapture", "TraceStagingPort"]
+__all__ = ["ModelInteractionCapture", "TraceStagingPort", "record_http_bodies_enabled"]
