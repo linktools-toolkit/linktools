@@ -379,14 +379,16 @@ def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path
 
 def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(tmp_path: Path) -> None:
     from concurrent.futures import ThreadPoolExecutor
+    import multiprocessing
     from ._runtime_process_test_helpers import _RuntimeProcess
 
     owner = _RuntimeProcess(tmp_path / "race.db", phase="finalizing")
     successors = []
+    barrier = multiprocessing.get_context("spawn").Barrier(2)
     try:
         for _ in range(2):
             successors.append(_RuntimeProcess(tmp_path / "race.db", phase="finalizing",
-                execution_id=owner.initial["execution_id"], auto_recover=False))
+                execution_id=owner.initial["execution_id"], auto_recover=False, recovery_barrier=barrier))
         owner.process.kill()
         owner.process.join(10)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -403,3 +405,27 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(tmp_
         owner.close()
         for successor in successors:
             successor.close()
+
+
+def test_recovery_receipt_waits_for_committed_result_publication(tmp_path: Path) -> None:
+    from ._runtime_process_test_helpers import _RuntimeProcess
+
+    owner = _RuntimeProcess(tmp_path / "publication.db", phase="finalizing")
+    successor = _RuntimeProcess(tmp_path / "publication.db", phase="finalizing",
+        execution_id=owner.initial["execution_id"], auto_recover=False)
+    try:
+        owner.process.kill()
+        owner.process.join(10)
+        interrupted = successor.request("recover_before_publication")
+        assert interrupted["status"] == "SUCCEEDED"
+        assert interrupted["handoff_phase"] == "prepared"
+        result = successor.request("recover_keyed")
+        assert result["status"] == "SUCCEEDED"
+        assert result["handoff_phase"] == "completed"
+        assert result["active_execution_id"] is None
+        assert result["model_calls"] == 0
+        assert successor.request("history")["answers"] == ["owner answer"]
+        successor.close(check=True)
+    finally:
+        owner.close()
+        successor.close()

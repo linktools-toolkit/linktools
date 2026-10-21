@@ -11,7 +11,7 @@ import traceback
 
 from pydantic_ai.models.function import FunctionModel
 
-from linktools.ai.errors import AIError
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
@@ -48,7 +48,7 @@ def _storage(database: Path, phase: str) -> RuntimeStorage:
 
 def _runtime_process(
     connection: Connection, database: str, mode: str, phase: str,
-    execution_id: str | None, auto_recover: bool,
+    execution_id: str | None, auto_recover: bool, recovery_barrier,
 ) -> None:
     async def run() -> None:
         nonlocal execution_id
@@ -84,12 +84,29 @@ def _runtime_process(
                 execution = await runtime._state.execution.executions.get(execution_id, tenant_id=tenant)
                 head = await runtime._state.execution.executions.get_history_head(execution_id, tenant_id=tenant)
                 assert execution is not None and head is not None
+                checkpoint = await runtime._state.recovery.checkpoints.get(execution_id, tenant_id=tenant)
+                session = await runtime._state.conversation.sessions.get("session", tenant_id=tenant)
                 return {
+                    "handoff_phase": None if checkpoint is None else checkpoint.handoff_phase.value,
+                    "active_execution_id": None if session is None else session.active_execution_id,
                     "execution_id": execution_id, "status": execution.status.value,
                     "revision": execution.revision, "generation": head.producer_generation,
                     "claim_id": head.producer_claim_id, "model_calls": calls,
                 }
 
+            if recovery_barrier is not None:
+                backend = runtime._execution_service.runtime_backend()
+                original_reconcile = backend._reconcile_handoff
+                rendezvous = True
+
+                async def synchronized_reconcile(checkpoint):
+                    nonlocal rendezvous
+                    if rendezvous:
+                        rendezvous = False
+                        await asyncio.to_thread(recovery_barrier.wait, 15)
+                    return await original_reconcile(checkpoint)
+
+                backend._reconcile_handoff = synchronized_reconcile
             if execution_id is None:
                 backend = runtime._execution_service.runtime_backend()
                 if phase == "admitted":
@@ -179,6 +196,23 @@ def _runtime_process(
                         "local_producer": backend._live_broker.is_local_producer(execution_id),
                         "worker_failure": None if failure is None else failure.code.value,
                     })
+                elif command == "recover_before_publication":
+                    backend = runtime._execution_service.runtime_backend()
+                    original_validate = backend._validate_committed_handoff
+
+                    async def unavailable(checkpoint):
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+                    backend._validate_committed_handoff = unavailable
+                    try:
+                        await runtime.executions.recover(execution_id,
+                            principal=runtime.default_principal, idempotency_key="owner-handoff")
+                    except AIError as error:
+                        connection.send({**await snapshot(), "error_code": error.code.value})
+                    else:
+                        raise AssertionError("unfinished publication must not be acknowledged")
+                    finally:
+                        backend._validate_committed_handoff = original_validate
                 elif command == "try_recover_keyed":
                     try:
                         await runtime.executions.recover(execution_id,
@@ -275,13 +309,13 @@ def _runtime_process(
 class _RuntimeProcess:
     def __init__(
         self, database: Path, *, mode: str = "session", phase: str = "active",
-        execution_id: str | None = None, auto_recover: bool = True,
+        execution_id: str | None = None, auto_recover: bool = True, recovery_barrier=None,
     ) -> None:
         context = multiprocessing.get_context("spawn")
         self.connection, child = context.Pipe()
         self.process = context.Process(
             target=_runtime_process,
-            args=(child, str(database), mode, phase, execution_id, auto_recover),
+            args=(child, str(database), mode, phase, execution_id, auto_recover, recovery_barrier),
         )
         self.process.start()
         child.close()

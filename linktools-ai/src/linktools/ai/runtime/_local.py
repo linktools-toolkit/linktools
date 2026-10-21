@@ -2380,6 +2380,14 @@ class LocalExecutionBackend:
             and execution.status is not outcome.terminal_status
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if checkpoint.handoff_phase is RecoveryHandoffPhase.COMPLETED:
+            await self._validate_committed_handoff(checkpoint)
+            if execution.session_id is not None and execution.conversation:
+                result = await self._execution.executions.get_result(
+                    execution.execution_id, tenant_id=self._tenant_id,
+                )
+                await self._runtime_commands.verify_conversation_turn(execution, result)
+            return execution
         if checkpoint.handoff_phase is RecoveryHandoffPhase.PREPARED:
             if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
                 if execution.conversation and execution.session_id is not None and handoff.conversation is None:
@@ -4859,6 +4867,24 @@ class LocalExecutionBackend:
             ):
                 raise
 
+    async def _finish_terminal_recovery(
+        self, current: ExecutionRecord, receipt: OperationLedgerRecord,
+    ) -> ExecutionRecord:
+        checkpoint = await self.load_recovery_checkpoint(
+            current.execution_id, tenant_id=self._tenant_id,
+        )
+        if checkpoint is not None and checkpoint.terminal_handoff is not None:
+            # A committed execution does not prove the prepared publication finished.
+            current = await self._reconcile_handoff(checkpoint)
+        if current.status is ExecutionStatus.FAILED:
+            code = current.error_code or ErrorCode.INTERNAL_ERROR.value
+            await self._settle_recovery(receipt, OperationStatus.FAILED, error_code=code)
+            raise AIError(ErrorCode(code))
+        await self._settle_recovery(receipt,
+            OperationStatus.CANCELLED if current.status is ExecutionStatus.CANCELLED
+            else OperationStatus.SUCCEEDED)
+        return current
+
     async def _recover_keyed_execution(
         self, execution_id: str, expected_revision: int, operation: OperationLedgerInput,
     ) -> ExecutionRecord:
@@ -4870,15 +4896,8 @@ class LocalExecutionBackend:
                         ExecutionStatus.FINALIZING, ExecutionStatus.SUCCEEDED,
                         ExecutionStatus.CANCELLED, ExecutionStatus.FAILED,
                     }):
-                if current.status is ExecutionStatus.FAILED:
-                    code = current.error_code or ErrorCode.INTERNAL_ERROR.value
-                    await self._settle_recovery(receipt, OperationStatus.FAILED, error_code=code)
-                    raise AIError(ErrorCode(code))
                 if current.status is not ExecutionStatus.FINALIZING:
-                    await self._settle_recovery(receipt,
-                        OperationStatus.CANCELLED if current.status is ExecutionStatus.CANCELLED
-                        else OperationStatus.SUCCEEDED)
-                    return current
+                    return await self._finish_terminal_recovery(current, receipt)
                 expected_revision = current.revision
             else:
                 return await self._replay_recovery(receipt)
@@ -4894,6 +4913,14 @@ class LocalExecutionBackend:
             )
         except AIError as error:
             receipt = await self._recovery_receipt(operation)
+            if (receipt is not None and receipt.status is OperationStatus.RUNNING
+                    and receipt.result_ref is None):
+                current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
+                if current is not None and current.status in {
+                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                }:
+                    return await self._finish_terminal_recovery(current, receipt)
+                raise
             if receipt is not None and (
                 receipt.result_ref != operation.result_ref
                 or receipt.status is not OperationStatus.RUNNING
