@@ -3,9 +3,12 @@
 """Graceful shutdown preserves checkpointed conversation execution identity."""
 
 import asyncio
+import getpass
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.core import ExecutionStatus
@@ -16,19 +19,53 @@ from ._runtime_test_helpers import _Models
 from .test_terminal_commit_shared_runtime import _group
 
 
+@pytest_asyncio.fixture(params=("sqlite", "filesystem", "postgresql", "mysql"))
+async def handoff_storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Callable[[], RuntimeStorage]]:
+    backend = request.param
+    if backend in {"sqlite", "filesystem"}:
+        yield (lambda: RuntimeStorage.sqlite(tmp_path / "runtime.db")) if backend == "sqlite" else (
+            lambda: RuntimeStorage.filesystem(tmp_path / "runtime"))
+        return
+    from sqlalchemy.engine import URL
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from linktools.ai.migrate import provision_database
+    from ._metrics_server_test_helpers import _server_database
+
+    server = request.getfixturevalue(f"_{backend}_server")
+    with _server_database(server) as (_, command):
+        if backend == "postgresql":
+            url = URL.create("postgresql+asyncpg", username=getpass.getuser(), database=command[-1],
+                query={"host": command[command.index("-h") + 1]})
+        else:
+            socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
+            url = URL.create("mysql+asyncmy", username="root", database=command[-1],
+                query={"unix_socket": socket, "charset": "utf8mb4"})
+        engines = []
+
+        def storage() -> RuntimeStorage:
+            engine = create_async_engine(url, isolation_level="READ COMMITTED")
+            engines.append(engine)
+            return RuntimeStorage.sql(engine)
+
+        provisioner = create_async_engine(url)
+        try:
+            await provision_database(provisioner)
+            yield storage
+        finally:
+            for engine in engines:
+                await engine.dispose()
+            await provisioner.dispose()
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["sqlite", "filesystem"])
-async def test_handoff_recovers_same_execution_and_next_session_turn(tmp_path: Path, backend: str) -> None:
+async def test_handoff_recovers_same_execution_and_next_session_turn(handoff_storage) -> None:
+    storage = handoff_storage
     entered = asyncio.Event()
 
     async def blocked(messages, info):
         entered.set()
         await asyncio.Event().wait()
         yield "unreachable"
-
-    def storage():
-        return (RuntimeStorage.sqlite(tmp_path / "runtime.db") if backend == "sqlite"
-                else RuntimeStorage.filesystem(tmp_path / "runtime"))
 
     async with Runtime.open("shutdown-handoff", storage=storage(),
                             models=_Models(FunctionModel(stream_function=blocked)),
@@ -91,7 +128,7 @@ async def test_handoff_requires_checkpoint_capability_without_closing_runtime(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown", [False, True])
-async def test_handoff_settles_tool_effect_once_before_recovery(tmp_path: Path, unknown: bool) -> None:
+async def test_handoff_settles_tool_effect_once_before_recovery(handoff_storage, unknown: bool) -> None:
     from linktools.ai.capability import AgentContext, CheckpointCapability, ExecutionCapability
     from linktools.ai.core import CommitPolicy
     from linktools.ai.runtime import RuntimeFeatures
@@ -116,8 +153,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(tmp_path: Path, 
         group.agent("default", allow_tools=("write",))
         return group
 
-    database = tmp_path / "tools.db"
-    async with Runtime.open("handoff-tool", storage=RuntimeStorage.sqlite(database),
+    async with Runtime.open("handoff-tool", storage=handoff_storage(),
                             models=_TaskTestModels(), features=features()) as owner:
         execution = await owner.agents.get().start("Write once", idempotency_key="write")
         await asyncio.wait_for(entered.wait(), 10)
@@ -128,7 +164,7 @@ async def test_handoff_settles_tool_effect_once_before_recovery(tmp_path: Path, 
         release.set()
         await asyncio.wait_for(handoff, 10)
         assert effects == ["written"]
-    async with Runtime.open("handoff-tool", storage=RuntimeStorage.sqlite(database),
+    async with Runtime.open("handoff-tool", storage=handoff_storage(),
                             models=_TaskTestModels(), features=features(), auto_recover=False) as successor:
         if unknown:
             view = await successor.executions.inspect(execution.execution_id,
@@ -212,17 +248,27 @@ async def test_handoff_waiter_cancellation_keeps_owned_cleanup(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
-async def test_handoff_does_not_claim_success_after_default_close(tmp_path: Path) -> None:
-    async def answer(messages, info):
-        yield "answer"
+async def test_handoff_does_not_claim_success_after_default_close(handoff_storage) -> None:
+    entered = asyncio.Event()
 
-    async with Runtime.open("handoff-close", storage=RuntimeStorage.sqlite(tmp_path / "close.db"),
-                            models=_Models(FunctionModel(stream_function=answer)),
+    async def blocked(messages, info):
+        entered.set()
+        await asyncio.Event().wait()
+        yield "unreachable"
+
+    models = _Models(FunctionModel(stream_function=blocked))
+    async with Runtime.open("handoff-close", storage=handoff_storage(), models=models,
                             features=_group(False)) as runtime:
+        execution = await runtime.agents.get().start("Cancel normally", idempotency_key="close")
+        await asyncio.wait_for(entered.wait(), 10)
         await runtime.close()
         with pytest.raises(AIError) as error:
             await runtime.handoff()
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    async with Runtime.open("handoff-close", storage=handoff_storage(), models=models,
+                            features=_group(False), auto_recover=False) as reader:
+        view = await reader.executions.inspect(execution.execution_id, principal=reader.default_principal)
+        assert view.status is ExecutionStatus.CANCELLED
 
 
 @pytest.mark.asyncio
