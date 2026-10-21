@@ -913,6 +913,54 @@ async with Runtime.open(
     ...
 ```
 
+`await runtime.close()` retains its default cancellation semantics. For a planned
+worker restart, use `await runtime.handoff()` before releasing the application's
+owner lease. This is a terminal lifecycle operation, not a pause of the same
+Runtime. It stops admission, joins admitted starts, drains in-flight tool
+settlement, and stops local producers without turning infrastructure shutdown
+into user cancellation. Successful handoff closes owned resources; a later
+`close()` or context-manager exit does not cancel the preserved executions.
+Cancellation of the handoff caller does not abandon its owned cleanup task.
+Retry `handoff()` or `close()` to join that same cleanup after a failure.
+
+Handoff requires `CheckpointCapability`, synchronous execution admission, and
+durable execution, recovery and checkpoint storage. Unsupported composition
+raises `CAPABILITY_REQUIRED_MISSING` before closing the Runtime. Active evaluation
+trial coordination is not supported by this lifecycle operation and is rejected
+before shutdown; finish or explicitly close those trials first. A handoff cannot
+replace an already-started default close and reports an error instead of claiming
+that cancelled executions were preserved.
+
+A fresh Runtime using the same namespace, tenant, stored objects and compatible
+captured definitions resumes through the existing public control operation:
+
+```python
+handle = await replacement.executions.recover(
+    execution_id,
+    principal=authorized_actor,
+    idempotency_key="known-owner-handoff",
+)
+```
+
+An already-open replacement can also call `executions.recover()` for a
+`FINALIZING` execution with a persisted terminal handoff. Recovery finishes that
+prepared result publication without launching a new model/tool producer or
+changing its generation. Repeated keyed recovery converges on the same result. An unprepared
+`PENDING_START` without a durable checkpoint reports `EXECUTION_NOT_READY`;
+recovery does not fabricate its missing input or an execution checkpoint.
+
+The execution ID, admitted principal and session binding remain unchanged.
+Completed tool results retain their operation-ledger identity; unknown external
+effects remain `RECOVERY_REQUIRED` and must not be blindly replayed. Pending user
+cancellation retains precedence. New control requests on the closing Runtime
+are rejected; another Runtime can use the existing durable cancellation APIs.
+Applications still own liveness/lease policy before takeover. Handoff does not
+provide a network discovery service, shared filesystem, or replicated Workspace.
+Filesystem and local SQLite storage require access to their original data;
+cross-node recovery requires shared durable SQL and object storage. A tool that
+cannot settle can keep handoff pending: a successful return never means that a
+still-running local side effect has been abandoned.
+
 Execution metadata is available through the authorized public query surface:
 
 ```python

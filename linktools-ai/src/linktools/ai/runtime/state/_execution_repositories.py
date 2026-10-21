@@ -404,6 +404,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 ExecutionStatus.STARTED,
                 ExecutionStatus.RECOVERY_REQUIRED,
                 ExecutionStatus.CANCELLING,
+                ExecutionStatus.FINALIZING,
             }
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)

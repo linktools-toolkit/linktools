@@ -302,6 +302,7 @@ class Runtime(Generic[AppT]):
         namespace: str,
         context: RuntimeContext[AppT],
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
+        handoff_callback: "Callable[[], Awaitable[None]] | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         task_admissions: "TaskAdmissionRepository | None" = None,
         budgets: "BudgetRepository | None" = None,
@@ -354,6 +355,8 @@ class Runtime(Generic[AppT]):
             kind=PrincipalKind.LOCAL_TRUSTED.value,
         )
         self._close_callback = close_callback
+        self._handoff_callback = handoff_callback
+        self._handoff_requested = False
         self._task_node_runtime = task_node_runtime
         self._task_admissions = task_admissions
         self._budgets = budgets
@@ -1347,11 +1350,33 @@ class Runtime(Generic[AppT]):
             )
         return Page(tuple(recovered), page.next_cursor)
 
+    async def handoff(self) -> None:
+        """Close this Runtime without cancelling its checkpointed executions.
+
+        A fresh Runtime must explicitly recover the original execution IDs.
+        Requires durable synchronous admission and CheckpointCapability.
+        Unknown external effects still require explicit recovery resolution.
+        """
+        await self._close(handoff=True)
+
     async def close(self) -> None:
+        """Close owned resources, cancelling unfinished work by default."""
+        await self._close(handoff=False)
+
+    async def _close(self, *, handoff: bool) -> None:
         async with self._close_lock:
+            if handoff and self._closing and not self._handoff_requested:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                    safe_details={"phase": "runtime_handoff", "reason": "close_already_started"})
             if self._closed:
                 return
             if not self._closing:
+                if handoff:
+                    if self._handoff_callback is None:
+                        raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                            safe_details={"capability": "durable_runtime_handoff"})
+                    self.evaluations.require_handoff_supported()
+                    self._handoff_requested = True
                 self._closing = True
                 for session in tuple(self._observation_sessions):
                     session.stop()
@@ -1417,8 +1442,9 @@ class Runtime(Generic[AppT]):
             await session.close(deadline=deadline)
         for settlement in tuple(self._cancel_settlements):
             await settlement.close()
-        if self._close_callback is not None:
-            await self._close_callback()
+        callback = self._handoff_callback if self._handoff_requested else self._close_callback
+        if callback is not None:
+            await callback()
         async with self._close_lock:
             self._closed = True
             _logger.info("runtime close completed: tenant=%s", self.tenant_id)
@@ -1496,6 +1522,7 @@ async def _open_runtime(
             namespace=namespace,
             context=context,
             close_callback=components.close_callback,
+            handoff_callback=components.handoff_callback,
             task_node_runtime=components.task_node_runtime,
             task_admissions=components.task_admissions,
             budgets=components.budgets,

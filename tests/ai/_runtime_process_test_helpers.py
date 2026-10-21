@@ -4,12 +4,14 @@
 
 import asyncio
 import multiprocessing
+import signal
 from multiprocessing.connection import Connection
 from pathlib import Path
 import traceback
 
 from pydantic_ai.models.function import FunctionModel
 
+from linktools.ai.errors import AIError
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
 from linktools.ai.runtime import Runtime, RuntimeStorage, RuntimeStoragePlan
@@ -34,7 +36,7 @@ def _capabilities(*, conversation: bool = False) -> RuntimeFeatures:
 
 
 def _storage(database: Path, phase: str) -> RuntimeStorage:
-    if phase in {"pending", "handoff"}:
+    if phase in {"pending", "handoff", "finalizing"}:
         return _split_sqlite_storage(database)
     if phase == "filesystem":
         return RuntimeStorage(RuntimeStoragePlan(
@@ -46,17 +48,20 @@ def _storage(database: Path, phase: str) -> RuntimeStorage:
 
 def _runtime_process(
     connection: Connection, database: str, mode: str, phase: str,
-    execution_id: str | None,
+    execution_id: str | None, auto_recover: bool,
 ) -> None:
     async def run() -> None:
         nonlocal execution_id
+        stopping = asyncio.Event()
+        if phase == "graceful":
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stopping.set)
         entered = asyncio.Event()
         release_model = asyncio.Event()
         admitted = asyncio.Event()
         release_admission = asyncio.Event()
         calls = 0
         start_task = None
-        if phase == "handoff":
+        if phase in {"handoff", "finalizing"}:
             release_model.set()
 
         async def model(messages, info):
@@ -71,6 +76,7 @@ def _runtime_process(
         async with Runtime.open(
             _NAMESPACE, models=_Models(FunctionModel(stream_function=model)),
             storage=state, features=_capabilities(conversation=mode == "session"),
+            auto_recover=auto_recover,
         ) as runtime:
             async def snapshot() -> dict[str, object]:
                 assert execution_id is not None
@@ -108,6 +114,18 @@ def _runtime_process(
                         return await original_claim(claim)
 
                     runtime._state.execution.executions.claim_start = pause_claim
+                elif phase == "finalizing":
+                    original_finalizing = backend._claim_session_or_recovery_finalizing
+
+                    async def pause_finalizing(execution):
+                        nonlocal execution_id
+                        current = await original_finalizing(execution)
+                        execution_id = current.execution_id
+                        admitted.set()
+                        await release_admission.wait()
+                        return current
+
+                    backend._claim_session_or_recovery_finalizing = pause_finalizing
                 elif phase == "handoff":
                     original_handoff = backend._reconcile_handoff
 
@@ -128,13 +146,17 @@ def _runtime_process(
                     return await agent.start("Wait", idempotency_key="start")
 
                 start_task = asyncio.create_task(start())
-                if phase in {"active", "filesystem"}:
+                if phase in {"active", "filesystem", "graceful"}:
                     execution = await start_task
                     execution_id = execution.execution_id
                     await asyncio.wait_for(entered.wait(), 10)
                 else:
                     await asyncio.wait_for(admitted.wait(), 10)
             connection.send(await snapshot())
+            if phase == "graceful":
+                await stopping.wait()
+                await runtime.handoff()
+                return
             while True:
                 command = await asyncio.to_thread(connection.recv)
                 if command == "snapshot":
@@ -157,9 +179,23 @@ def _runtime_process(
                         "local_producer": backend._live_broker.is_local_producer(execution_id),
                         "worker_failure": None if failure is None else failure.code.value,
                     })
-                elif command == "recover":
+                elif command == "try_recover_keyed":
+                    try:
+                        await runtime.executions.recover(execution_id,
+                            principal=runtime.default_principal, idempotency_key="owner-handoff")
+                    except AIError as error:
+                        connection.send({"error_code": error.code.value})
+                    else:
+                        connection.send(await snapshot())
+                elif command == "history":
+                    from pydantic_ai.messages import TextPart
+                    page = await runtime.history.messages("session", principal=runtime.default_principal)
+                    connection.send({"answers": [part.content for message in page.items
+                        for part in message.parts if isinstance(part, TextPart)]})
+                elif command in {"recover", "recover_keyed"}:
                     await runtime.executions.recover(
                         execution_id, principal=runtime.default_principal,
+                        idempotency_key="owner-handoff" if command == "recover_keyed" else None,
                     )
                     connection.send(await snapshot())
                 elif command == "await_model":
@@ -239,13 +275,13 @@ def _runtime_process(
 class _RuntimeProcess:
     def __init__(
         self, database: Path, *, mode: str = "session", phase: str = "active",
-        execution_id: str | None = None,
+        execution_id: str | None = None, auto_recover: bool = True,
     ) -> None:
         context = multiprocessing.get_context("spawn")
         self.connection, child = context.Pipe()
         self.process = context.Process(
             target=_runtime_process,
-            args=(child, str(database), mode, phase, execution_id),
+            args=(child, str(database), mode, phase, execution_id, auto_recover),
         )
         self.process.start()
         child.close()

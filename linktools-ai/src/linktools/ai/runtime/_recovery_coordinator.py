@@ -988,8 +988,20 @@ class _RecoveryCoordinator:
             ExecutionStatus.PENDING_START,
             ExecutionStatus.STARTED,
             ExecutionStatus.CANCELLING,
+            ExecutionStatus.FINALIZING,
         }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if current.status is ExecutionStatus.FINALIZING:
+            checkpoint = await self._port.load_recovery_checkpoint(
+                execution_id, tenant_id=tenant_id,
+            )
+            if (checkpoint is None or checkpoint.terminal_handoff is None
+                    or checkpoint.handoff_phase is RecoveryHandoffPhase.NONE):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._port.validate_binding(current)
+            if recovery_operation is not None:
+                await self._port._admit_recovery_without_producer(current, recovery_operation)
+            return await self._port._reconcile_handoff(checkpoint), False
         unresolved, active_claims = await self._port._reconcile_tool_effects(
             execution_id,
             tenant_id=tenant_id,

@@ -529,6 +529,7 @@ class DefaultExecutionService:
         self._handoff = HandoffGate[tuple[str, str], bool]()
         self._accepting = True
         self._admission_tasks: set[asyncio.Task[ExecutionHandle]] = set()
+        self._cancel_tasks: set[asyncio.Task[CancelExecutionResult]] = set()
         self._detached_cancel_finalizers: set[asyncio.Task[CancelExecutionResult]] = (
             set()
         )
@@ -2524,7 +2525,6 @@ class DefaultExecutionService:
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
-            capture_metric=capture_metric,
         )
 
     async def _admit_execution_start(
@@ -2539,7 +2539,6 @@ class DefaultExecutionService:
         dependency_hold_id: str | None,
         requires_task_invocation_capture: bool,
         budget_scope_id: str | None,
-        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
     ) -> ExecutionHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2547,6 +2546,12 @@ class DefaultExecutionService:
         coordinator = self._runtime_bridge.pending_turns.coordination
         execution = proposed_reservation.execution
         identity = proposed_reservation.idempotency
+
+        metric_delivery: _TerminalMetricDelivery | None = None
+
+        def capture_owned_metric(delivery: _TerminalMetricDelivery) -> None:
+            nonlocal metric_delivery
+            metric_delivery = delivery
 
         async def admit() -> ExecutionHandle:
             if not self._accepting:
@@ -2590,7 +2595,7 @@ class DefaultExecutionService:
                     dependency_hold_id=dependency_hold_id,
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
-                    capture_metric=capture_metric,
+                    capture_metric=capture_owned_metric,
                 )
             finally:
                 if (coordinator is not None and coordination is not None
@@ -2606,9 +2611,9 @@ class DefaultExecutionService:
                             execution.execution_id,
                             exc_info=environ.debug,
                         )
+                if metric_delivery is not None:
+                    await metric_delivery()
 
-        if coordinator is None:
-            return await admit()
         task = asyncio.create_task(admit(), name=f"execution-admission-{execution.execution_id}")
         self._admission_tasks.add(task)
         task.add_done_callback(self._admission_tasks.discard)
@@ -3484,24 +3489,27 @@ class DefaultExecutionService:
             nonlocal metric_delivery
             metric_delivery = delivery
 
-        async with self._execution_consumer(execution_id, request.principal.tenant_id):
-            finalizer = asyncio.create_task(
-                self._cancel_finalizer_with_handoff(
-                    execution_id, request, capture_metric=capture_metric,
-                ),
-                name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
+        async def settle() -> CancelExecutionResult:
+            result = await self._cancel_finalizer_with_handoff(
+                execution_id, request, capture_metric=capture_metric,
             )
-            try:
-                result = await asyncio.shield(finalizer)
-            except asyncio.CancelledError:
-                if finalizer.done():
-                    result = finalizer.result()
-                else:
-                    self._detach_cancel_finalizer(finalizer, execution_id)
-                    raise
-        if metric_delivery is not None:
-            await metric_delivery()
-        return result
+            if metric_delivery is not None:
+                await metric_delivery()
+            return result
+
+        finalizer = asyncio.create_task(
+            settle(),
+            name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
+        )
+        self._cancel_tasks.add(finalizer)
+        finalizer.add_done_callback(self._cancel_tasks.discard)
+        try:
+            return await asyncio.shield(finalizer)
+        except asyncio.CancelledError:
+            if finalizer.done():
+                return finalizer.result()
+            self._detach_cancel_finalizer(finalizer, execution_id)
+            raise
 
     async def _cancel_finalizer_with_handoff(
         self,
@@ -3579,7 +3587,7 @@ class DefaultExecutionService:
             )
         while True:
             pending = tuple(
-                task for task in self._detached_cancel_finalizers if not task.done()
+                task for task in self._cancel_tasks | self._detached_cancel_finalizers if not task.done()
             )
             if not pending:
                 break
@@ -3661,6 +3669,7 @@ class DefaultExecutionService:
                 ExecutionStatus.PENDING_START,
                 ExecutionStatus.STARTED,
                 ExecutionStatus.CANCELLING,
+                ExecutionStatus.FINALIZING,
             }:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self.runtime_backend().recover_execution(
