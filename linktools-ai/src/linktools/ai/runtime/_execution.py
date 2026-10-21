@@ -528,7 +528,8 @@ class DefaultExecutionService:
         self._session_locks_guard = asyncio.Lock()
         self._handoff = HandoffGate[tuple[str, str], bool]()
         self._accepting = True
-        self._admission_tasks: set[asyncio.Task[ExecutionHandle]] = set()
+        self._admission_tasks: set[asyncio.Task[ExecutionHandle] | asyncio.Future[None]] = set()
+        self._cancel_tasks: set[asyncio.Task[CancelExecutionResult]] = set()
         self._detached_cancel_finalizers: set[asyncio.Task[CancelExecutionResult]] = (
             set()
         )
@@ -2077,6 +2078,9 @@ class DefaultExecutionService:
             nonlocal metric_delivery
             metric_delivery = delivery
 
+        # Track the caller-owned admission, without shielding its cancellation.
+        admission_done = asyncio.get_running_loop().create_future()
+        self._admission_tasks.add(admission_done)
         try:
             if session_id is None:
                 return await self._start_unlocked(
@@ -2121,6 +2125,8 @@ class DefaultExecutionService:
                     capture_metric=capture_metric,
                 )
         finally:
+            admission_done.set_result(None)
+            self._admission_tasks.discard(admission_done)
             if metric_delivery is not None:
                 await metric_delivery()
 
@@ -3484,21 +3490,23 @@ class DefaultExecutionService:
             nonlocal metric_delivery
             metric_delivery = delivery
 
-        async with self._execution_consumer(execution_id, request.principal.tenant_id):
-            finalizer = asyncio.create_task(
-                self._cancel_finalizer_with_handoff(
-                    execution_id, request, capture_metric=capture_metric,
-                ),
-                name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
-            )
-            try:
-                result = await asyncio.shield(finalizer)
-            except asyncio.CancelledError:
-                if finalizer.done():
-                    result = finalizer.result()
-                else:
-                    self._detach_cancel_finalizer(finalizer, execution_id)
-                    raise
+        finalizer = asyncio.create_task(
+            self._cancel_finalizer_with_handoff(
+                execution_id, request, capture_metric=capture_metric,
+            ),
+            name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
+        )
+        self._cancel_tasks.add(finalizer)
+        finalizer.add_done_callback(self._cancel_tasks.discard)
+        try:
+            result = await asyncio.shield(finalizer)
+        except asyncio.CancelledError:
+            if finalizer.done():
+                result = finalizer.result()
+            else:
+                self._detach_cancel_finalizer(finalizer, execution_id)
+                raise
+        # Only durable settlement is runtime-owned; telemetry remains caller-owned.
         if metric_delivery is not None:
             await metric_delivery()
         return result
@@ -3579,7 +3587,7 @@ class DefaultExecutionService:
             )
         while True:
             pending = tuple(
-                task for task in self._detached_cancel_finalizers if not task.done()
+                task for task in self._cancel_tasks | self._detached_cancel_finalizers if not task.done()
             )
             if not pending:
                 break
@@ -3661,6 +3669,7 @@ class DefaultExecutionService:
                 ExecutionStatus.PENDING_START,
                 ExecutionStatus.STARTED,
                 ExecutionStatus.CANCELLING,
+                ExecutionStatus.FINALIZING,
             }:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await self.runtime_backend().recover_execution(

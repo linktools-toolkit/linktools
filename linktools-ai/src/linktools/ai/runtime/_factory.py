@@ -119,6 +119,7 @@ class _RuntimeComponents:
     artifact: DefaultArtifactService
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
+    handoff_callback: Callable[[], Awaitable[None]] | None
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: MetricsService | None
@@ -454,6 +455,7 @@ def _runtime_close_actions(
     metric_buffer: MetricsService | None,
     state: RuntimeState,
     session: RuntimeSessionService | None = None,
+    handoff: bool = False,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if session is not None:
@@ -473,7 +475,7 @@ def _runtime_close_actions(
         )
     actions.append(("runtime.execution.preflight", execution.preflight_close))
     if backend is not None:
-        actions.append(("runtime.backend", backend.close))
+        actions.append(("runtime.backend", backend.handoff if handoff else backend.close))
     actions.append(("runtime.input", input_materializer.close))
     if metric_buffer is not None:
         actions.append(("runtime.metrics", metric_buffer.close))
@@ -1015,8 +1017,14 @@ async def _build_local_components(
             session=session,
         )
         close_actions = (("runtime.evaluation", evaluation.close), *close_actions)
+        handoff_actions = _runtime_close_actions(
+            graph_service=graph_service, task_launcher=task_launcher,
+            execution=execution, backend=backend, input_materializer=input_materializer,
+            metric_buffer=metric_buffer, state=state, session=session, handoff=True,
+        )
         coordinator = _RuntimeCloseCoordinator(
-            tuple(action for _, action in close_actions)
+            tuple(action for _, action in close_actions),
+            (evaluation.close, *(action for _, action in handoff_actions)),
         )
         await state.run_store.prepare_archives()
         if auto_recover and RuntimeDomain.RECOVERY in state.plan.durable_domains:
@@ -1054,6 +1062,10 @@ async def _build_local_components(
         artifact=artifact,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
+        handoff_callback=(coordinator.handoff if restart_checkpoints and commit.mode == "sync"
+            and all(state.plan.route(domain).retention is StorageRetentionMode.DURABLE
+                    for domain in (RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY,
+                                   RuntimeDomain.CHECKPOINT)) else None),
         task_node_runtime=task_runner,
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
@@ -1104,11 +1116,20 @@ def _borrowed_runtime_history(
 
 
 class _RuntimeCloseCoordinator:
-    def __init__(self, actions: tuple[Callable[[], Awaitable[None]], ...]) -> None:
+    def __init__(
+        self, actions: tuple[Callable[[], Awaitable[None]], ...],
+        handoff_actions: tuple[Callable[[], Awaitable[None]], ...] = (),
+    ) -> None:
         self._actions = actions
+        self._handoff_actions = handoff_actions
         self._cursor = 0
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+
+    async def handoff(self) -> None:
+        if self._task is None and self._cursor == 0:
+            self._actions = self._handoff_actions
+        await self.close()
 
     async def close(self) -> None:
         async with self._lock:

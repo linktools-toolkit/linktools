@@ -3,6 +3,8 @@
 """Local ExecutionBackend backed by AgentExecutor and durable persistence."""
 
 import asyncio
+
+from ._handoff import ExecutionHandoffScope, execution_handoff_scope
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -347,6 +349,8 @@ class LocalExecutionBackend:
         self._worker_shutdown_requests: set[str] = set()
         self._recovery_reconcile_tasks: dict[str, asyncio.Task[None]] = {}
         self._accepting = True
+        self._handoff_requested = False
+        self._handoff_scopes: dict[str, ExecutionHandoffScope] = {}
         execution_run_store = self._run_stores[RuntimeDomain.TRACE]
         conversation_run_store = self._run_stores[RuntimeDomain.CONVERSATION]
         execution_repository: ExecutionRepository = self._execution.executions
@@ -1421,6 +1425,11 @@ class LocalExecutionBackend:
             # Cold recovery and deferred resumption reconstruct the launch request.
             usage = await self._execution.budgets.read(current.budget_scope_id)
             request = replace(request, budget=usage.limits)
+        if not self._accepting:
+            if recovery_operation is not None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                    safe_details={"phase": "recovery_launch_rejected"})
+            return
         if not self._live_broker.is_local_producer(current.execution_id):
             self._live_broker.register_local_producer(
                 current.execution_id,
@@ -1686,6 +1695,9 @@ class LocalExecutionBackend:
         task = self._tasks.get(execution.execution_id)
         if task is None:
             return await self._confirm_cancel_effects(current, force=force)
+        scope = self._handoff_scopes.get(execution.execution_id)
+        if scope is not None:
+            scope.cancel_tools()
         self._request_worker_cancel(execution.execution_id, task)
         await self._drain_worker_task(execution.execution_id, task)
         current = await self.load_execution(
@@ -2368,6 +2380,14 @@ class LocalExecutionBackend:
             and execution.status is not outcome.terminal_status
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if checkpoint.handoff_phase is RecoveryHandoffPhase.COMPLETED:
+            await self._validate_committed_handoff(checkpoint)
+            if execution.session_id is not None and execution.conversation:
+                result = await self._execution.executions.get_result(
+                    execution.execution_id, tenant_id=self._tenant_id,
+                )
+                await self._runtime_commands.verify_conversation_turn(execution, result)
+            return execution
         if checkpoint.handoff_phase is RecoveryHandoffPhase.PREPARED:
             if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
                 if execution.conversation and execution.session_id is not None and handoff.conversation is None:
@@ -3039,6 +3059,13 @@ class LocalExecutionBackend:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    async def handoff(self) -> None:
+        self._accepting = False
+        self._handoff_requested = True
+        for scope in self._handoff_scopes.values():
+            scope.stopping = True
+        await self.close()
+
     async def close(self) -> None:
         self._accepting = False
         await self._pending_turns.settle_all()
@@ -3337,6 +3364,10 @@ class LocalExecutionBackend:
         initial_attempt: _InitialAttemptCapture | None = None,
     ) -> None:
         execution_id = original.execution_id
+        handoff_scope = ExecutionHandoffScope()
+        handoff_scope.stopping = self._handoff_requested
+        self._handoff_scopes[execution_id] = handoff_scope
+        execution_handoff_scope.set(handoff_scope)
         execution_tasks = self._execution_task_set(execution_id)
         checkpoint: RecoveryCheckpoint | None = None
         agent_run_id: str | None = None
@@ -4075,6 +4106,25 @@ class LocalExecutionBackend:
             if current is not None and current.status is ExecutionStatus.FINALIZING:
                 metric_status = "CANCELLED"
                 raise
+            if (handoff_scope.stopping and not cleanup_details
+                    and current is not None and current.restart_checkpoints
+                    and current.status is ExecutionStatus.STARTED):
+                effects, active_claims = await self._reconcile_tool_effects(
+                    execution_id, tenant_id=self._tenant_id,
+                )
+                if active_claims:
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={"phase": "runtime_handoff", "active_tool_claims": active_claims})
+                if effects:
+                    current = await self._commit_recovery_required(
+                        current, AIError(ErrorCode.TOOL_EFFECT_UNKNOWN), effects,
+                        producer_generation=producer_generation,
+                    )
+                self._agent_run_only_worker_exits.add(execution_id)
+                self._live_broker.handoff(execution_id)
+                metric_status = current.status.value
+                metric_error_code = current.error_code
+                return
             if current is not None and current.status is ExecutionStatus.CANCELLING:
                 self._worker_shutdown_requests.discard(execution_id)
                 current = await self._commit_terminal(
@@ -4143,6 +4193,7 @@ class LocalExecutionBackend:
             )
             raise
         finally:
+            self._handoff_scopes.pop(execution_id, None)
             await _record_storage_operation(
                 metric_recorder,
                 observation_id=metric_id,
@@ -4816,12 +4867,40 @@ class LocalExecutionBackend:
             ):
                 raise
 
+    async def _finish_terminal_recovery(
+        self, current: ExecutionRecord, receipt: OperationLedgerRecord,
+    ) -> ExecutionRecord:
+        checkpoint = await self.load_recovery_checkpoint(
+            current.execution_id, tenant_id=self._tenant_id,
+        )
+        if checkpoint is not None and checkpoint.terminal_handoff is not None:
+            # A committed execution does not prove the prepared publication finished.
+            current = await self._reconcile_handoff(checkpoint)
+        if current.status is ExecutionStatus.FAILED:
+            code = current.error_code or ErrorCode.INTERNAL_ERROR.value
+            await self._settle_recovery(receipt, OperationStatus.FAILED, error_code=code)
+            raise AIError(ErrorCode(code))
+        await self._settle_recovery(receipt,
+            OperationStatus.CANCELLED if current.status is ExecutionStatus.CANCELLED
+            else OperationStatus.SUCCEEDED)
+        return current
+
     async def _recover_keyed_execution(
         self, execution_id: str, expected_revision: int, operation: OperationLedgerInput,
     ) -> ExecutionRecord:
         receipt = await self._recovery_receipt(operation)
         if receipt is not None:
-            return await self._replay_recovery(receipt)
+            current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
+            if (receipt.status is OperationStatus.RUNNING and receipt.result_ref is None
+                    and current is not None and current.status in {
+                        ExecutionStatus.FINALIZING, ExecutionStatus.SUCCEEDED,
+                        ExecutionStatus.CANCELLED, ExecutionStatus.FAILED,
+                    }):
+                if current.status is not ExecutionStatus.FINALIZING:
+                    return await self._finish_terminal_recovery(current, receipt)
+                expected_revision = current.revision
+            else:
+                return await self._replay_recovery(receipt)
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         worker = self._tasks.get(execution_id)
@@ -4834,6 +4913,14 @@ class LocalExecutionBackend:
             )
         except AIError as error:
             receipt = await self._recovery_receipt(operation)
+            if (receipt is not None and receipt.status is OperationStatus.RUNNING
+                    and receipt.result_ref is None):
+                current = await self.load_execution(execution_id, tenant_id=self._tenant_id)
+                if current is not None and current.status in {
+                    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+                }:
+                    return await self._finish_terminal_recovery(current, receipt)
+                raise
             if receipt is not None and (
                 receipt.result_ref != operation.result_ref
                 or receipt.status is not OperationStatus.RUNNING
@@ -4845,7 +4932,7 @@ class LocalExecutionBackend:
         receipt = await self._recovery_receipt(operation)
         if receipt is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if launched:
+        if launched or result.status is ExecutionStatus.SUCCEEDED:
             status = OperationStatus.SUCCEEDED
         elif result.status is ExecutionStatus.FAILED:
             code = result.error_code or ErrorCode.INTERNAL_ERROR.value

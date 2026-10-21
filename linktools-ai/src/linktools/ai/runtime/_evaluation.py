@@ -166,6 +166,13 @@ class RuntimeEvaluations:
         return await self._retention.purge_expired(
             principal=principal, now=now, exclusive=exclusive, limit=limit)
 
+    def require_handoff_supported(self) -> None:
+        """Reject shutdown handoff while evaluation owns independent trial scopes."""
+        if self._trial_scopes or any(not task.done() for task in self._watchers.values()):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                safe_details={"phase": "evaluation_handoff", "reason": "active_evaluation"})
+        self._closed = True
+
     async def close(self) -> None:
         """Stop coordination and reject new execution and control requests."""
         self._closed = True

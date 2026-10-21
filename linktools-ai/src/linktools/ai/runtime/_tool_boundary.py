@@ -35,6 +35,7 @@ from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..observe import Observation
 from ..workspace import SandboxSession, ToolPermissionPolicy
+from ._handoff import ToolEntryStopped, execution_handoff_scope
 from ._budget import RunBudgetContext
 from ._attachment import bind_tool_return_attachments
 from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
@@ -203,6 +204,18 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         return result
 
     async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: PydanticRunContext[AgentContext[object]],
+        tool: ToolsetTool[AgentContext[object]],
+    ) -> Any:
+        scope = execution_handoff_scope.get()
+        if scope is None:
+            return await self._call_tool(name, tool_args, ctx, tool)
+        return await scope.call_tool(lambda: self._call_tool(name, tool_args, ctx, tool))
+
+    async def _call_tool(
         self,
         name: str,
         tool_args: dict[str, Any],
@@ -386,7 +399,10 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
                     raise asyncio.CancelledError
                 raise
             except asyncio.CancelledError as error:
-                await bridge.unknown(decision, error)
+                if isinstance(error, ToolEntryStopped):
+                    await bridge.defer(decision)
+                else:
+                    await bridge.unknown(decision, error)
                 raise
             except BaseException as error:
                 await unknown_after_leaf(error)
@@ -457,13 +473,21 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         *,
         capture: Callable[[Observation], None] | None = None,
     ) -> Any:
+        scope = execution_handoff_scope.get()
+        if scope is not None:
+            scope.require_accepting()
+        async def enter_leaf(arguments: dict[str, Any]) -> Any:
+            if scope is not None:
+                scope.require_accepting()
+            return await handler(arguments)
+
         if self._tool_metrics is None:
-            return await handler(args)
+            return await enter_leaf(args)
         return await self._tool_metrics.execute(
             call=call,
             tool_def=tool_def,
             args=args,
-            handler=handler,
+            handler=enter_leaf,
             suppress_cancel=lambda: False,
             capture=capture,
         )

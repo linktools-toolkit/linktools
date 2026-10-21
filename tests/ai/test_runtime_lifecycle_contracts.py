@@ -31,6 +31,7 @@ def state_owners(monkeypatch: pytest.MonkeyPatch) -> list[RuntimeState]:
 
 
 class _Components:
+    handoff_callback = None
     state = None
     metric_control = None
     catalog = object()

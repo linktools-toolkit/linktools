@@ -173,6 +173,7 @@ def _backend() -> LocalExecutionBackend:
     backend._captured_usage = {}
     backend._worker_failures = {}
     backend._worker_cancel_requests = set()
+    backend._handoff_scopes = {}
     backend._worker_shutdown_requests = set()
     backend._recovery_reconcile_tasks = {}
     backend._terminal_events = {}
