@@ -528,7 +528,7 @@ class DefaultExecutionService:
         self._session_locks_guard = asyncio.Lock()
         self._handoff = HandoffGate[tuple[str, str], bool]()
         self._accepting = True
-        self._admission_tasks: set[asyncio.Task[ExecutionHandle]] = set()
+        self._admission_tasks: set[asyncio.Task[ExecutionHandle] | asyncio.Future[None]] = set()
         self._cancel_tasks: set[asyncio.Task[CancelExecutionResult]] = set()
         self._detached_cancel_finalizers: set[asyncio.Task[CancelExecutionResult]] = (
             set()
@@ -2078,6 +2078,9 @@ class DefaultExecutionService:
             nonlocal metric_delivery
             metric_delivery = delivery
 
+        # Track the caller-owned admission, without shielding its cancellation.
+        admission_done = asyncio.get_running_loop().create_future()
+        self._admission_tasks.add(admission_done)
         try:
             if session_id is None:
                 return await self._start_unlocked(
@@ -2122,6 +2125,8 @@ class DefaultExecutionService:
                     capture_metric=capture_metric,
                 )
         finally:
+            admission_done.set_result(None)
+            self._admission_tasks.discard(admission_done)
             if metric_delivery is not None:
                 await metric_delivery()
 
@@ -2525,6 +2530,7 @@ class DefaultExecutionService:
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
             budget_scope_id=budget_scope_id,
+            capture_metric=capture_metric,
         )
 
     async def _admit_execution_start(
@@ -2539,6 +2545,7 @@ class DefaultExecutionService:
         dependency_hold_id: str | None,
         requires_task_invocation_capture: bool,
         budget_scope_id: str | None,
+        capture_metric: Callable[[_TerminalMetricDelivery], None] | None,
     ) -> ExecutionHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -2546,12 +2553,6 @@ class DefaultExecutionService:
         coordinator = self._runtime_bridge.pending_turns.coordination
         execution = proposed_reservation.execution
         identity = proposed_reservation.idempotency
-
-        metric_delivery: _TerminalMetricDelivery | None = None
-
-        def capture_owned_metric(delivery: _TerminalMetricDelivery) -> None:
-            nonlocal metric_delivery
-            metric_delivery = delivery
 
         async def admit() -> ExecutionHandle:
             if not self._accepting:
@@ -2595,7 +2596,7 @@ class DefaultExecutionService:
                     dependency_hold_id=dependency_hold_id,
                     requires_task_invocation_capture=requires_task_invocation_capture,
                     budget_scope_id=budget_scope_id,
-                    capture_metric=capture_owned_metric,
+                    capture_metric=capture_metric,
                 )
             finally:
                 if (coordinator is not None and coordination is not None
@@ -2611,9 +2612,9 @@ class DefaultExecutionService:
                             execution.execution_id,
                             exc_info=environ.debug,
                         )
-                if metric_delivery is not None:
-                    await metric_delivery()
 
+        if coordinator is None:
+            return await admit()
         task = asyncio.create_task(admit(), name=f"execution-admission-{execution.execution_id}")
         self._admission_tasks.add(task)
         task.add_done_callback(self._admission_tasks.discard)

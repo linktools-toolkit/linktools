@@ -377,14 +377,17 @@ def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path
             successor.close()
 
 
-def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("synchronized", (False, True))
+def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
+    tmp_path: Path, synchronized: bool,
+) -> None:
     from concurrent.futures import ThreadPoolExecutor
     import multiprocessing
     from ._runtime_process_test_helpers import _RuntimeProcess
 
     owner = _RuntimeProcess(tmp_path / "race.db", phase="finalizing")
     successors = []
-    barrier = multiprocessing.get_context("spawn").Barrier(2)
+    barrier = multiprocessing.get_context("spawn").Barrier(2) if synchronized else None
     try:
         for _ in range(2):
             successors.append(_RuntimeProcess(tmp_path / "race.db", phase="finalizing",

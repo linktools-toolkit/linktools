@@ -1681,9 +1681,6 @@ class LocalExecutionBackend:
         return self._live_broker
 
     async def cancel(self, execution: ExecutionRecord, *, force: bool = False) -> CancelEffectOutcome:
-        scope = self._handoff_scopes.get(execution.execution_id)
-        if scope is not None:
-            scope.cancel_tools()
         self._worker_shutdown_requests.discard(execution.execution_id)
         current = await self.load_execution(
             execution.execution_id,
@@ -1698,6 +1695,9 @@ class LocalExecutionBackend:
         task = self._tasks.get(execution.execution_id)
         if task is None:
             return await self._confirm_cancel_effects(current, force=force)
+        scope = self._handoff_scopes.get(execution.execution_id)
+        if scope is not None:
+            scope.cancel_tools()
         self._request_worker_cancel(execution.execution_id, task)
         await self._drain_worker_task(execution.execution_id, task)
         current = await self.load_execution(
