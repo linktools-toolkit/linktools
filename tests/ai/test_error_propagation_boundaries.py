@@ -152,6 +152,7 @@ async def test_execution_cancel_finalizer_preserves_classified_ai_error() -> Non
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("execution finalizer"))
     service = object.__new__(DefaultExecutionService)
     service._admission_tasks = set()
+    service._cancel_tasks = set()
     service._detached_cancel_finalizers = set()
     service._detached_cancel_failure = None
 

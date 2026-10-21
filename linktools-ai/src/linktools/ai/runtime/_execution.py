@@ -3489,27 +3489,26 @@ class DefaultExecutionService:
             nonlocal metric_delivery
             metric_delivery = delivery
 
-        async def settle() -> CancelExecutionResult:
-            result = await self._cancel_finalizer_with_handoff(
-                execution_id, request, capture_metric=capture_metric,
-            )
-            if metric_delivery is not None:
-                await metric_delivery()
-            return result
-
         finalizer = asyncio.create_task(
-            settle(),
+            self._cancel_finalizer_with_handoff(
+                execution_id, request, capture_metric=capture_metric,
+            ),
             name=f"execution-cancel-finalizer-{request.principal.tenant_id}-{execution_id}",
         )
         self._cancel_tasks.add(finalizer)
         finalizer.add_done_callback(self._cancel_tasks.discard)
         try:
-            return await asyncio.shield(finalizer)
+            result = await asyncio.shield(finalizer)
         except asyncio.CancelledError:
             if finalizer.done():
-                return finalizer.result()
-            self._detach_cancel_finalizer(finalizer, execution_id)
-            raise
+                result = finalizer.result()
+            else:
+                self._detach_cancel_finalizer(finalizer, execution_id)
+                raise
+        # Only durable settlement is runtime-owned; telemetry remains caller-owned.
+        if metric_delivery is not None:
+            await metric_delivery()
+        return result
 
     async def _cancel_finalizer_with_handoff(
         self,

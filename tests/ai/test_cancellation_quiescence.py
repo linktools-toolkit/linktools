@@ -66,6 +66,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._repository_instruction_provenance = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
+    backend._handoff_scopes = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
     backend._recovery_reconcile_tasks = {}
@@ -82,6 +83,7 @@ def _execution_service() -> DefaultExecutionService:
     service = object.__new__(DefaultExecutionService)
     service._handoff = HandoffGate()
     service._admission_tasks = set()
+    service._cancel_tasks = set()
     service._detached_cancel_finalizers = set()
     service._detached_cancel_failure = None
     return service

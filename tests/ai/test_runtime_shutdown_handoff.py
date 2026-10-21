@@ -391,7 +391,7 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(tmp_
         owner.process.join(10)
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda runtime: runtime.request("try_recover_keyed"), successors))
-        assert any(result.get("status") == "SUCCEEDED" for result in results)
+        assert any(result.get("status") == "SUCCEEDED" for result in results), results
         for result in results:
             assert result.get("error_code") in {None, "STORAGE_CONFLICT", "STORAGE_RECOVERY_REQUIRED"}
         for successor in successors:

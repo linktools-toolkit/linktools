@@ -184,7 +184,7 @@ def _runtime_process(
                         await runtime.executions.recover(execution_id,
                             principal=runtime.default_principal, idempotency_key="owner-handoff")
                     except AIError as error:
-                        connection.send({"error_code": error.code.value})
+                        connection.send({"error_code": error.code.value, "details": dict(error.safe_details)})
                     else:
                         connection.send(await snapshot())
                 elif command == "history":
