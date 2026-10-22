@@ -5,7 +5,12 @@
 from collections.abc import Mapping
 from types import TracebackType
 
-from anthropic import DefaultAsyncHttpxClient
+try:
+    from anthropic import DefaultAsyncHttpxClient
+except ModuleNotFoundError as error:
+    if error.name != "anthropic":
+        raise
+    raise ImportError('Anthropic model adapters require pip install "linktools-ai[anthropic]"') from error
 from httpx2 import AsyncClient, Limits
 from pydantic_ai.models import Model, ModelSettings
 from pydantic_ai.profiles.anthropic import AnthropicModelProfile

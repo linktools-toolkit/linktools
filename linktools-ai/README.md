@@ -230,6 +230,10 @@ models.register_alias("default", "production")
 
 ### Protocols and thinking profiles
 
+Install `linktools-ai[openai]` for Chat Completions and Responses, or
+`linktools-ai[anthropic]` for Messages; combine extras when using both.
+The base package does not install either provider SDK.
+
 `ModelRegistry.openai` / `register_openai` retain Chat Completions behavior.
 Use `openai_responses` / `register_openai_responses` for Responses, or
 `anthropic` / `register_anthropic` for Messages. They accept the same connection,

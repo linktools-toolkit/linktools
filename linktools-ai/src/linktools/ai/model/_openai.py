@@ -6,7 +6,12 @@ from collections.abc import Mapping
 from types import TracebackType
 
 from httpx2 import AsyncClient, Limits
-from openai import DefaultAsyncHttpxClient
+try:
+    from openai import DefaultAsyncHttpxClient
+except ModuleNotFoundError as error:
+    if error.name != "openai":
+        raise
+    raise ImportError('OpenAI model adapters require pip install "linktools-ai[openai]"') from error
 from pydantic_ai.models import Model, ModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel

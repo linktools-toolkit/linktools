@@ -1,5 +1,18 @@
 # Model protocols and readable traces
 
+Install only the provider adapters you use:
+
+```shell
+pip install "linktools-ai[openai]"       # Chat Completions and Responses
+pip install "linktools-ai[anthropic]"    # Anthropic Messages
+pip install "linktools-ai[openai,anthropic,web]"  # both adapters and Web console
+```
+
+The base package does not require either provider SDK. Core ModelBinding, Runtime
+and Web modules remain importable without them (serving Web additionally needs the
+`web` extra). Calling a provider factory/register without its extra fails immediately
+with the matching install hint, before connection settings or credentials are resolved.
+
 Choose the actual API, not a vendor-looking model name:
 
 ```python
