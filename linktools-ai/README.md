@@ -158,7 +158,13 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 
 Useful options:
 
-- `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
+- `--model-api` selects `openai-chat` (default), `openai-responses`, or `anthropic-messages`. This is the wire protocol, not a vendor/model-name guess. The same option works for `ai-run`, `ai-acp`, and `ai-web`.
+- Persist the selection in `.linktools/config.yaml` as `model_api: anthropic-messages`, alongside `model: your-model`. `AI_MODEL_API` / the existing `LINKTOOLS_AI_MODEL_API` configuration can also select the protocol; an explicit CLI option wins.
+- `--base-url`, `--api-key`, and `--model` are one-shot overrides. With Anthropic Messages, the corresponding configuration/environment fields are `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`; both OpenAI protocols use the existing `OPENAI_*` fields. The selected protocol's existing LinkTools config resolver still supports `LINKTOOLS_`-prefixed configuration and its non-secret cache. Anthropic never falls back to OpenAI credentials or endpoints.
+- Model selection order is explicit nonempty CLI value, selected-protocol LinkTools configuration, workspace `model`, then the unprefixed selected-protocol environment variable. Connection settings use explicit CLI value, selected-protocol LinkTools configuration, then selected-protocol environment. Empty connection values retain the native SDK fallback to the selected protocol's environment; they do not disable environment credentials. Credentials are secret fields and are not persisted by configuration resolution.
+- Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
+- Endpoint paths retain native SDK semantics: OpenAI normally uses a base ending in `/v1`; Anthropic normally uses the server root and appends `/v1/messages` itself. Configure a gateway according to its supported API, not by copying an OpenAI endpoint.
+- Custom headers and arbitrary SDK profile overrides are not CLI configuration options. Thinking control remains governed by the effective native SDK model profile, independently of whether the response contains thinking parts; selecting Anthropic does not declare arbitrary models thinking-capable.
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.

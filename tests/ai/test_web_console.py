@@ -504,7 +504,7 @@ def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     monkeypatch.setattr(Runtime, "open", tracked_open)
-    monkeypatch.setattr(web_command, "_local_runtime_models", lambda *_: RuntimeUsageModels())
+    monkeypatch.setattr(web_command, "_local_models", lambda *_, **__: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, "Server", Server)
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path), "--model", "fake"])
     with pytest.raises(CommandError):
@@ -533,7 +533,7 @@ def test_web_cli_requires_a_model_before_opening_runtime(monkeypatch: pytest.Mon
 
 @pytest.mark.parametrize(
     ("argument", "environment", "configured"),
-    [(None, "", False), (None, " \t", True), (None, "value", True), ("", "value", True), (" \t", "", True)],
+    [(None, "", False), (None, " \t", True), (None, "value", True), ("", "value", True), (" \t", "", False)],
 )
 def test_web_settings_show_runtime_mime_types_and_connection_flags(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argument: str | None, environment: str, configured: bool,

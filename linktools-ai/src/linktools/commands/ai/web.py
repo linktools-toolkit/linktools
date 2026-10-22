@@ -3,7 +3,6 @@
 """`lt ai web`: serve a local Runtime console."""
 
 import asyncio
-import os
 from argparse import Namespace
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
@@ -12,7 +11,7 @@ from linktools.cli import BaseCommand, CommandError
 from linktools.core import environ
 from ._common import (
     _add_local_runtime_arguments, _load_workspace, _local_metrics,
-    _local_runtime_assets, _local_runtime_models,
+    _local_runtime_assets, _local_models, _local_model_options,
     _local_runtime_storage, _run_async,
 )
 
@@ -39,7 +38,6 @@ class Command(BaseCommand):
         if not 1 <= args.port <= 65535:
             raise CommandError("port must be between 1 and 65535")
         workspace = _load_workspace(args.project)
-        model = args.model or workspace.config.get("model") or os.getenv("OPENAI_MODEL", "").strip()
 
         async def serve() -> int:
             from linktools.ai.capability import AssetCapability, WorkspaceCapability
@@ -47,10 +45,10 @@ class Command(BaseCommand):
             from linktools.ai.capability import CheckpointCapability, ExecutionCapability, TraceCapability
             from linktools.ai.runtime import Runtime
 
-            models = _local_runtime_models(workspace, args)
-            model_contract = models.capture().resolve("default").contract
-            base_url = args.base_url or os.getenv("OPENAI_BASE_URL", "").strip()
-            api_key = args.api_key or os.getenv("OPENAI_API_KEY", "").strip()
+            model_options = _local_model_options(workspace, args)
+            models = _local_models(workspace, **model_options)
+            model_binding = models.capture().resolve("default")
+            model_contract = model_binding.contract
             async with AsyncExitStack() as stack:
                 assets = _local_runtime_assets(workspace)
                 await assets.initialize()
@@ -73,10 +71,11 @@ class Command(BaseCommand):
                 status = {
                     "workspace": str(workspace.root),
                     "asset_root": str(workspace.storage_root),
-                    "model": model or None,
+                    "model": model_binding.model_identity.removeprefix(model_binding.provider + ":"),
+                    "model_api": model_options["api"],
                     "input_mime_types": model_contract.get("input_mime_types"),
-                    "base_url_configured": bool(base_url),
-                    "api_key_configured": bool(api_key),
+                    "base_url_configured": bool(model_options["base_url"]),
+                    "api_key_configured": bool(model_options["api_key"]),
                 }
                 app = create_app(
                     runtime=runtime,
