@@ -423,9 +423,10 @@ def test_resident_runtime_finishes_prepared_result_without_model_replay(tmp_path
             successor.close()
 
 
+@pytest.mark.parametrize("ordered_publication", (False, True))
 @pytest.mark.parametrize("synchronized", (False, True))
 def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
-    tmp_path: Path, synchronized: bool,
+    tmp_path: Path, synchronized: bool, ordered_publication: bool,
 ) -> None:
     from concurrent.futures import ThreadPoolExecutor
     import multiprocessing
@@ -433,11 +434,14 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
 
     owner = _RuntimeProcess(tmp_path / "race.db", phase="finalizing")
     successors = []
-    barrier = multiprocessing.get_context("spawn").Barrier(2) if synchronized else None
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2) if synchronized else None
+    publication_events = tuple(context.Event() for _ in range(3)) if ordered_publication else ()
     try:
-        for _ in range(2):
+        for role in ("delayed", "first"):
             successors.append(_RuntimeProcess(tmp_path / "race.db", phase="finalizing",
-                execution_id=owner.initial["execution_id"], auto_recover=False, recovery_barrier=barrier))
+                execution_id=owner.initial["execution_id"], auto_recover=False, recovery_barrier=barrier,
+                publication_order=(role, *publication_events) if ordered_publication else None))
         owner.process.kill()
         owner.process.join(10)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -448,6 +452,8 @@ def test_concurrent_finalizing_takeover_keeps_one_result_and_replay_receipt(
         for successor in successors:
             result = successor.request("recover_keyed")
             assert result["status"] == "SUCCEEDED" and result["model_calls"] == 0
+            assert result["handoff_phase"] == "completed"
+            assert result["active_execution_id"] is None
             assert successor.request("history")["answers"] == ["owner answer"]
             successor.close(check=True)
     finally:

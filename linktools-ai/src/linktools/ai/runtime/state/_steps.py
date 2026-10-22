@@ -939,7 +939,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
                 if isinstance(destination, StateStepArchive):
                     if target is RuntimeDomain.CONVERSATION:
-                        target_checkpoint = await destination.relocate_conversation_checkpoint(
+                        target_checkpoint, prepared_projection = await destination.prepare_conversation_checkpoint(
                             run, checkpoint
                         )
                     else:
@@ -1041,7 +1041,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                 async def publish() -> None:
                     if prepared_projection is not None and isinstance(destination, StateStepArchive):
                         await destination.sync_prepared_projection(
-                            run, events=(), checkpoints=prepared_projection.checkpoints,
+                            run, events=(), checkpoints=(
+                                () if target is RuntimeDomain.CONVERSATION and checkpoint_published
+                                else prepared_projection.checkpoints
+                            ),
                             interactions=relocated, observation=restored_observation, execution_id=execution_id,
                             archive=interaction_archive,
                         )
