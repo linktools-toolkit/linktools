@@ -64,7 +64,7 @@ def test_web_command_preserves_terminal_history_after_handoff_and_reopen(
                     assert response.json()['output'] == {'text': 'done'}
 
     monkeypatch.setattr(Runtime, 'open', tracked_open)
-    monkeypatch.setattr(web_command, '_local_runtime_models', lambda *_: RuntimeUsageModels())
+    monkeypatch.setattr(web_command, '_local_models', lambda *_, **__: RuntimeUsageModels())
     monkeypatch.setattr(uvicorn, 'Server', Server)
     for _ in range(2):
         args = web_command.command.create_parser().parse_args([

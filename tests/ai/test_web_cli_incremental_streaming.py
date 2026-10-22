@@ -91,7 +91,7 @@ def test_web_command_delivers_text_before_model_completion(monkeypatch: pytest.M
                     await asyncio.gather(observing, return_exceptions=True)
 
     if provider == 'function':
-        monkeypatch.setattr(web_command, '_local_runtime_models', lambda *_: _Models(FunctionModel(stream_function=model)))
+        monkeypatch.setattr(web_command, '_local_models', lambda *_, **__: _Models(FunctionModel(stream_function=model)))
     else:
         import httpx2
         from openai import DefaultAsyncHttpxClient
