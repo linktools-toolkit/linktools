@@ -158,8 +158,8 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 
 Useful options:
 
-- `--model-api` selects `openai-chat` (default), `openai-responses`, or `anthropic-messages`. This is the wire protocol, not a vendor/model-name guess. The same option works for `ai-run`, `ai-acp`, and `ai-web`.
-- Persist the selection in `.linktools/config.yaml` as `model_api: anthropic-messages`, alongside `model: your-model`. `AI_MODEL_API` / the existing `LINKTOOLS_AI_MODEL_API` configuration can also select the protocol; an explicit CLI option wins.
+- `--model-api` selects `openai` (default), `openai-responses`, or `anthropic`. This is the wire protocol, not a vendor/model-name guess. The same option works for `ai-run`, `ai-acp`, and `ai-web`.
+- Persist the selection in `.linktools/config.yaml` as `model_api: anthropic`, alongside `model: your-model`. `AI_MODEL_API` / the existing `LINKTOOLS_AI_MODEL_API` configuration can also select the protocol; an explicit CLI option wins.
 - `--base-url`, `--api-key`, and `--model` are one-shot overrides. With Anthropic Messages, the corresponding configuration/environment fields are `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`; both OpenAI protocols use the existing `OPENAI_*` fields. The selected protocol's existing LinkTools config resolver still supports `LINKTOOLS_`-prefixed configuration and its non-secret cache. Anthropic never falls back to OpenAI credentials or endpoints.
 - Model selection order is explicit nonempty CLI value, selected-protocol LinkTools configuration, workspace `model`, then the selected-protocol native fallback. Standard LinkTools configuration itself reads both native and `LINKTOOLS_`-prefixed environment variables. Connection settings use explicit CLI value, selected-protocol LinkTools configuration, then the native fallback. Empty connection values retain the native SDK fallback to the selected protocol's environment; they do not disable environment credentials. Credentials are secret fields and are not persisted by configuration resolution.
 - Install `linktools-ai[anthropic]` for Anthropic Messages, or `linktools-ai[openai]` for either OpenAI API; add `web` for `ai-web`, for example `linktools-ai[anthropic,web]`. Missing provider extras produce an installation hint before a Runtime is opened.
@@ -176,7 +176,7 @@ are selected after resolving the API, so configuring Anthropic does not require
 passing connection options on every invocation:
 
 ```bash
-export LINKTOOLS_AI_MODEL_API=anthropic-messages
+export LINKTOOLS_AI_MODEL_API=anthropic
 export LINKTOOLS_ANTHROPIC_MODEL=claude-sonnet-4-5
 export LINKTOOLS_ANTHROPIC_BASE_URL=https://api.anthropic.com
 # Supply LINKTOOLS_ANTHROPIC_API_KEY through your environment/secret manager.
@@ -184,7 +184,7 @@ ai-run "review this change"
 ```
 
 For either OpenAI API, use `OPENAI_MODEL`, `OPENAI_BASE_URL`, and `OPENAI_API_KEY`
-with the same `LINKTOOLS_` prefix, and select `openai-chat` or `openai-responses`.
+with the same `LINKTOOLS_` prefix, and select `openai` or `openai-responses`.
 Unprefixed native variables are also accepted by the standard config resolver. API selection is a
 protocol choice, not a provider-name or model-name guess.
 
@@ -194,7 +194,7 @@ the user profile is `~/.linktools/linktools.json`. For example:
 ```json
 {
   "config": {
-    "AI_MODEL_API": "anthropic-messages",
+    "AI_MODEL_API": "anthropic",
     "ANTHROPIC_MODEL": "claude-sonnet-4-5",
     "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
   }

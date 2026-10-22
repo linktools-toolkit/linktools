@@ -50,7 +50,7 @@ class _AnthropicModelBinding(_ProviderModelBinding):
     __slots__ = ()
     _provider_type = AnthropicProvider
     _profile_type = AnthropicModelProfile
-    api = "anthropic-messages"
+    api = "anthropic"
     _provider = "anthropic"
 
     def _build_model(self, connection: Mapping[str, object], settings: ModelSettings) -> Model:

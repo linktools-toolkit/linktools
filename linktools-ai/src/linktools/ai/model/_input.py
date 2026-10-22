@@ -114,8 +114,8 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
 
 def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str | None:
     contract = binding.contract
-    api = contract.get("api", "openai-chat" if binding.provider == "openai" else None)
-    if api == "openai-chat":
+    api = contract.get("api", "openai" if binding.provider == "openai" else None)
+    if api == "openai":
         return openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"),
                                       contract.get("profile"))
     if api == "openai-responses":
@@ -131,7 +131,7 @@ def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str 
                 return None
             return "file-block"
         return None
-    if api == "anthropic-messages":
+    if api == "anthropic":
         if kind == "uploaded":
             return "file-block" if mime_type.startswith(("image/", "text/", "application/")) else None
         if kind in {"binary", "image-url"} and mime_type in {"image/jpeg", "image/png", "image/gif", "image/webp"}:

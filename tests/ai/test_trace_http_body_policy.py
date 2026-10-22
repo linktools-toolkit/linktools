@@ -54,7 +54,7 @@ async def test_disabled_capture_does_not_read_request_body() -> None:
     request = httpx2.Request('POST', 'https://capture.invalid/chat/completions', content=iter([b'body']))
     with ModelClientRequestRecorder() as capture:
         await _http.capture_request(request)
-    assert capture.requests == (ModelClientRequest('openai-chat', None, record_http_bodies=False),)
+    assert capture.requests == (ModelClientRequest('openai', None, record_http_bodies=False),)
     with pytest.raises(httpx2.RequestNotRead):
         _ = request.content
 
@@ -66,7 +66,7 @@ async def test_attempt_policy_and_metadata_roundtrip_without_copying_bodies_to_c
     enabled: bool, domain: RuntimeDomain,
 ) -> None:
     source = ModelClientRequest(
-        'openai-chat', b'request' if enabled else None, record_http_bodies=enabled,
+        'openai', b'request' if enabled else None, record_http_bodies=enabled,
         response=ModelClientResponse(b'response' if enabled else None, 200, 'json', None, enabled),
     )
     refs = await prepare_client_requests((source,), domain)

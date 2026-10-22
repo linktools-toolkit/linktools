@@ -181,7 +181,7 @@ if(process.argv[3]==='protocols') {
   const path='/api/executions/a-run/models';
   const bodies=[
     ['openai-responses',{model:'sample',instructions:'response instructions',previous_response_id:'resp-previous',input:[{role:'user',content:[{type:'input_text',text:'native input'}]},{type:'function_call',call_id:'call-r',name:'lookup',arguments:'{"key":1}'},{type:'function_call_output',call_id:'call-r',output:'tool output'},{type:'reasoning',summary:[{type:'summary_text',text:'brief summary'}],encrypted_content:'opaque-reasoning'},{type:'unknown_input',custom:{keep:true}}]}],
-    ['anthropic-messages',{model:'sample',system:[{type:'text',text:'anthropic system'}],messages:[{role:'assistant',content:[{type:'thinking',thinking:'public thought',signature:'signature-1'},{type:'redacted_thinking',data:'opaque-block'},{type:'tool_use',id:'call-a',name:'lookup',input:{key:2}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'call-a',content:'tool answer'}]}]}],
+    ['anthropic',{model:'sample',system:[{type:'text',text:'anthropic system'}],messages:[{role:'assistant',content:[{type:'thinking',thinking:'public thought',signature:'signature-1'},{type:'redacted_thinking',data:'opaque-block'},{type:'tool_use',id:'call-a',name:'lookup',input:{key:2}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'call-a',content:'tool answer'}]}]}],
   ];
   const item={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},client_requests_included:true,client_requests:bodies.map(([api,body])=>({api,body:Buffer.from(JSON.stringify(body)).toString('base64'),body_encoding:'base64',response:null}))};
   detailResponses.set(path,{items:[item],next_cursor:null});

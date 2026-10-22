@@ -26,9 +26,28 @@ models.register_openai("compatible", model="gateway-model", profile={
 })
 ```
 
+The public model types and Python entry points are:
+
+| Type | Default-route factory | Route registration |
+| --- | --- | --- |
+| `openai` | `ModelRegistry.openai(...)` | `models.register_openai(route_id, ...)` |
+| `openai-responses` | `ModelRegistry.openai_responses(...)` | `models.register_openai_responses(route_id, ...)` |
+| `anthropic` | `ModelRegistry.anthropic(...)` | `models.register_anthropic(route_id, ...)` |
+
+CLI `--model-api`, `AI_MODEL_API`, workspace `model_api`, HTTP trace API labels,
+and protocol dispatch use these same type values. Python methods use underscores
+where a type contains a hyphen. Native HTTP endpoint paths are unchanged.
+The earlier pre-release `openai-chat` / `anthropic-messages` type spellings are not
+aliases; update configuration to the current spellings. A captured pre-release
+Anthropic contract with the previous discriminator is not a valid restore target
+for the current binding; do not edit stored snapshots to bypass contract checks.
+Existing Python registration names do not change. Chat's binding contract continues to omit the API field, preserving
+its existing contract/digest; readers interpret that established omission as
+`openai`, while Responses and Anthropic carry an explicit API discriminator.
+
 The three factory/register pairs have symmetric connection and input-type options.
 OpenAI Chat is unchanged; new binding contracts distinguish `openai-responses`
-and `anthropic-messages`. Provider/model identity remains separate from the API.
+and `anthropic`. Provider/model identity remains separate from the API.
 An API switch, profile change, or different captured binding is not an interchangeable
 restore target, even if the displayed model name matches.
 

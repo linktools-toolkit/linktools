@@ -33,14 +33,14 @@ if TYPE_CHECKING:
     from linktools.ai.model import ModelRegistry
     from linktools.ai.runtime import Runtime, RuntimeStorage
 
-MODEL_APIS = ("openai-chat", "openai-responses", "anthropic-messages")
+MODEL_APIS = ("openai", "openai-responses", "anthropic")
 MODEL_API = ConfigField(name="AI_MODEL_API", cast=str, default=None)
 
 
 def _add_local_runtime_arguments(parser: "CommandParser") -> None:
     parser.add_argument("--project", type=Path, default=None, help="working directory")
     parser.add_argument("--model-api", action=ConfigAction, config=MODEL_API, choices=MODEL_APIS,
-                        help="model API protocol (default: openai-chat)")
+                        help="model API protocol (default: openai)")
     parser.add_argument("--base-url", default=None, help="selected protocol endpoint")
     parser.add_argument("--model", default=None, help="selected protocol model name")
     parser.add_argument("--api-key", default=None, help="one-shot selected protocol credential")
@@ -116,10 +116,10 @@ def _local_input_config(
 
 
 def _local_model_options(workspace: Workspace, args: Namespace) -> dict[str, str | None]:
-    api = args.model_api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai-chat"
+    api = args.model_api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai"
     if api not in MODEL_APIS:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "model_api must be one of: " + ", ".join(MODEL_APIS))
-    prefix = "ANTHROPIC" if api == "anthropic-messages" else "OPENAI"
+    prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
     options = {"api": api}
     for name, explicit in (("model", args.model), ("base_url", args.base_url), ("api_key", args.api_key)):
         field = ConfigField(name=f"{prefix}_{name.upper()}", cast=str, default=None, secret=name == "api_key")
@@ -144,12 +144,12 @@ def _local_models(
 ) -> "ModelRegistry":
     from linktools.ai.model import ModelRegistry
 
-    api = api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai-chat"
-    factories = {"openai-chat": ModelRegistry.openai, "openai-responses": ModelRegistry.openai_responses,
-                 "anthropic-messages": ModelRegistry.anthropic}
+    api = api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai"
+    factories = {"openai": ModelRegistry.openai, "openai-responses": ModelRegistry.openai_responses,
+                 "anthropic": ModelRegistry.anthropic}
     if not isinstance(api, str) or api not in factories:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "unsupported model_api")
-    prefix = "ANTHROPIC" if api == "anthropic-messages" else "OPENAI"
+    prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
     input_types = _local_input_config(workspace)
     configured = workspace.config.get("model")
     selected_model = (

@@ -15,13 +15,13 @@ from .test_model_client_response_capture import _Stream
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path,api,terminal", [
-    ("chat/completions", "openai-chat", "[DONE]"),
+    ("chat/completions", "openai", "[DONE]"),
     ("responses", "openai-responses", '{"type":"response.completed"}'),
     ("responses", "openai-responses", '{"type":"response.failed"}'),
     ("responses", "openai-responses", '{"type":"response.incomplete"}'),
     ("responses", "openai-responses", '{"type":"error","message":"failed"}'),
-    ("messages", "anthropic-messages", '{"type":"message_stop"}'),
-    ("messages", "anthropic-messages", '{"type":"error","error":{"type":"overloaded_error"}}'),
+    ("messages", "anthropic", '{"type":"message_stop"}'),
+    ("messages", "anthropic", '{"type":"error","error":{"type":"overloaded_error"}}'),
 ])
 async def test_protocol_terminal_observation_keeps_original_bytes(
     path: str, api: str, terminal: str,

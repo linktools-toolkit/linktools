@@ -17,9 +17,9 @@ from linktools.ai.model import _anthropic, _openai
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 
 
-PROTOCOLS = [('openai', 'openai-chat', 'gpt-4o'),
+PROTOCOLS = [('openai', 'openai', 'gpt-4o'),
              ('openai_responses', 'openai-responses', 'gpt-5'),
-             ('anthropic', 'anthropic-messages', 'claude-sonnet-4-5')]
+             ('anthropic', 'anthropic', 'claude-sonnet-4-5')]
 
 
 def registry(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handler: Callable,
@@ -39,7 +39,7 @@ def registry(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handler: Ca
 
 
 def response(api: str, *, tool: bool = False) -> dict:
-    if api == 'openai-chat':
+    if api == 'openai':
         message = {'role': 'assistant', 'content': None if tool else 'answer'}
         if tool:
             message.update(reasoning_content='returned thinking', tool_calls=[{
@@ -105,6 +105,23 @@ async def test_native_tool_turn_survives_durable_restore_and_client_reentry(monk
         assert 'returned thinking' in outgoing
 
 
+@pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)
+def test_public_registration_matches_model_type_and_restores(kind, api, model_name):
+    factory = getattr(ModelRegistry, kind)(model=model_name)
+    registered = ModelRegistry()
+    getattr(registered, 'register_' + kind)('selected', model=model_name)
+    expected = factory.capture().resolve('default').contract
+    actual = registered.capture().resolve('selected').contract
+    assert actual == expected
+    assert actual.get('api', 'openai') == api
+    assert registered.capture().restore(actual, route_id='selected').contract == actual
+    if api == 'openai':
+        assert 'api' not in actual
+    elif api == 'anthropic':
+        with pytest.raises(AIError):
+            registered.capture().restore(dict(actual, api='anthropic-messages'), route_id='selected')
+
+
 def test_profile_overrides_are_explicit_frozen_and_contract_owned():
     expected = {'provider': 'openai', 'model_identity': 'openai:same', 'settings': {}, 'input_mime_types': []}
     assert ModelRegistry.openai(model='same').capture().resolve('default').contract == expected
@@ -142,7 +159,7 @@ def test_native_protocol_input_encoding_is_distinct(kind, accepted, rejected):
 
 
 def stream_events(api: str) -> list[bytes]:
-    if api == 'openai-chat':
+    if api == 'openai':
         from .test_model_client_response_capture import _EVENT, _DONE
         return [_EVENT, _DONE]
     if api == 'openai-responses':
@@ -243,7 +260,7 @@ async def test_native_structured_output_uses_sdk_adapter(monkeypatch, factory, a
         value: int
     def handler(request):
         body = response(api, tool=False)
-        if api == "openai-chat": body["choices"][0]["message"]["content"] = '{"value":7}'
+        if api == "openai": body["choices"][0]["message"]["content"] = '{"value":7}'
         elif api == "openai-responses": body["output"][0]["content"][0]["text"] = '{"value":7}'
         else: body["content"][0]["text"] = '{"value":7}'
         return httpx2.Response(200, json=body)

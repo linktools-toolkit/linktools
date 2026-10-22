@@ -15,9 +15,9 @@ _CLIENT_REQUEST_ENTRY = "linktools.model.client_request_entry"
 
 async def capture_request(request: Request) -> None:
     api = next((api for suffix, api in (
-        ("/chat/completions", "openai-chat"),
+        ("/chat/completions", "openai"),
         ("/responses", "openai-responses"),
-        ("/messages", "anthropic-messages"),
+        ("/messages", "anthropic"),
     ) if request.url.path.endswith(suffix)), None)
     if request.method != "POST" or api is None:
         return
@@ -36,7 +36,7 @@ async def capture_request(request: Request) -> None:
 
 def response_snapshot(
     response: Response, body: bytes | None, *, content_encoding: str | None, eof: bool,
-    record_http_bodies: bool = True, api: str = "openai-chat",
+    record_http_bodies: bool = True, api: str = "openai",
 ) -> ModelClientResponse:
     content_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
     format = "sse" if content_type == "text/event-stream" else (
@@ -146,7 +146,7 @@ async def capture_response(response: Response) -> None:
 
 
 def _terminal_event(api: str, data: str, event: str | None) -> bool:
-    if api == "openai-chat":
+    if api == "openai":
         return data == "[DONE]"
     try:
         payload = json.loads(data)
@@ -159,7 +159,7 @@ def _terminal_event(api: str, data: str, event: str | None) -> bool:
         return False
     if api == "openai-responses":
         return kind in {"response.completed", "response.failed", "response.incomplete", "error"}
-    if api == "anthropic-messages":
+    if api == "anthropic":
         return kind in {"message_stop", "error"}
     return False
 

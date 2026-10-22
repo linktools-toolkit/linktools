@@ -27,7 +27,7 @@ _logger = environ.get_logger("ai.model.binding")
 
 @dataclass(frozen=True, slots=True)
 class _ProviderModelBinding:
-    api: ClassVar[str] = "openai-chat"
+    api: ClassVar[str] = "openai"
     _provider: ClassVar[str] = "openai"
     _profile_type: ClassVar[type]
     _provider_type: ClassVar[type]
@@ -92,7 +92,7 @@ class _ProviderModelBinding:
             "settings": settings,
         }
         result["input_mime_types"] = list(self._input_mime_types)
-        if self.api != "openai-chat":
+        if self.api != "openai":
             result["api"] = self.api
         if self._profile_overrides:
             result["profile"] = dict(self._profile_overrides)

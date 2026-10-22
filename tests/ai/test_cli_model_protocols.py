@@ -21,8 +21,8 @@ from tests.ai.test_model_protocols import response
 
 
 @pytest.mark.parametrize("command,arguments", [(run_command, ["hello"]), (acp_command, []), (web_command, [])])
-@pytest.mark.parametrize("api,prefix", [("openai-chat", "OPENAI"), ("openai-responses", "OPENAI"),
-                                       ("anthropic-messages", "ANTHROPIC")])
+@pytest.mark.parametrize("api,prefix", [("openai", "OPENAI"), ("openai-responses", "OPENAI"),
+                                       ("anthropic", "ANTHROPIC")])
 def test_cli_protocol_configuration_round_trip(monkeypatch, tmp_path, command, arguments, api, prefix):
     config = command.environ.build_config("cli-protocol", "LINKTOOLS_")
     monkeypatch.setattr(command.environ, "config", config)
@@ -39,11 +39,11 @@ def test_cli_protocol_configuration_round_trip(monkeypatch, tmp_path, command, a
     assert options == {"api": api, "model": f"{prefix.lower()}-model",
                        "api_key": f"{prefix.lower()}-fixture-key", "base_url": f"https://{prefix.lower()}.invalid/v1"}
     binding = _local_runtime_models(workspace, args).capture().resolve("default")
-    assert binding.contract.get("api", "openai-chat") == api
+    assert binding.contract.get("api", "openai") == api
     assert "fixture-key" not in json.dumps(binding.contract)
-    explicit = command.create_parser().parse_args(arguments + ["--model-api", "anthropic-messages",
+    explicit = command.create_parser().parse_args(arguments + ["--model-api", "anthropic",
         "--model", "explicit-model", "--base-url", "https://explicit.invalid", "--api-key", "explicit-fixture"])
-    assert _local_model_options(workspace, explicit) == {"api": "anthropic-messages", "model": "explicit-model",
+    assert _local_model_options(workspace, explicit) == {"api": "anthropic", "model": "explicit-model",
         "base_url": "https://explicit.invalid", "api_key": "explicit-fixture"}
     assert _local_model_options(workspace, args) == options
     assert "fixture-key" not in (root / "config.yaml").read_text()
@@ -51,11 +51,11 @@ def test_cli_protocol_configuration_round_trip(monkeypatch, tmp_path, command, a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("empty_override", [False, True])
-@pytest.mark.parametrize("api,model_name", [("openai-chat", "gpt-4o"), ("openai-responses", "gpt-5"),
-                                            ("anthropic-messages", "claude-sonnet-4-5")])
+@pytest.mark.parametrize("api,model_name", [("openai", "gpt-4o"), ("openai-responses", "gpt-5"),
+                                            ("anthropic", "claude-sonnet-4-5")])
 async def test_cli_configuration_invokes_native_protocol_offline(monkeypatch, tmp_path, api, model_name, empty_override):
     from linktools.ai.model import _anthropic, _openai
-    module = _anthropic if api == "anthropic-messages" else _openai
+    module = _anthropic if api == "anthropic" else _openai
     requests = []
 
     def handle(request):
@@ -64,8 +64,8 @@ async def test_cli_configuration_invokes_native_protocol_offline(monkeypatch, tm
 
     monkeypatch.setattr(module, "DefaultAsyncHttpxClient", lambda **kwargs: httpx2.AsyncClient(
         transport=httpx2.MockTransport(handle), trust_env=False, **kwargs))
-    prefix = "ANTHROPIC" if api == "anthropic-messages" else "OPENAI"
-    base_url = "https://fixture.invalid" if api == "anthropic-messages" else "https://fixture.invalid/v1"
+    prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
+    base_url = "https://fixture.invalid" if api == "anthropic" else "https://fixture.invalid/v1"
     monkeypatch.setenv(f"{prefix}_BASE_URL", base_url)
     monkeypatch.setenv(f"{prefix}_API_KEY", "fixture-key")
     args = run_command.create_parser().parse_args(["hello", "--model-api", api, "--model", model_name,
@@ -79,17 +79,17 @@ async def test_cli_configuration_invokes_native_protocol_offline(monkeypatch, tm
         result = await model.request([ModelRequest(parts=[UserPromptPart("hello")])], {"max_tokens": 128}, ModelRequestParameters())
     assert result.parts[0].content == "answer"
     request = requests[0]
-    assert request.url.path == {"openai-chat": "/v1/chat/completions", "openai-responses": "/v1/responses",
-                                "anthropic-messages": "/v1/messages"}[api]
-    if api == "anthropic-messages":
+    assert request.url.path == {"openai": "/v1/chat/completions", "openai-responses": "/v1/responses",
+                                "anthropic": "/v1/messages"}[api]
+    if api == "anthropic":
         assert request.headers["x-api-key"] == "fixture-key"
         assert "authorization" not in request.headers
     else:
         assert request.headers["authorization"] == "Bearer fixture-key"
 
 
-@pytest.mark.parametrize("provider,api", [("openai", "openai-chat"), ("openai", "openai-responses"),
-                                         ("anthropic", "anthropic-messages")])
+@pytest.mark.parametrize("provider,api", [("openai", "openai"), ("openai", "openai-responses"),
+                                         ("anthropic", "anthropic")])
 def test_cli_missing_provider_extra_has_install_hint(tmp_path, provider, api):
     script = """
 import sys
@@ -113,7 +113,7 @@ else:
 def test_protocol_cache_selection_does_not_reuse_openai_connection(monkeypatch, tmp_path):
     config = run_command.environ.build_config("cli-protocol-cache", "LINKTOOLS_")
     monkeypatch.setattr(run_command.environ, "config", config)
-    config.set("AI_MODEL_API", "anthropic-messages")
+    config.set("AI_MODEL_API", "anthropic")
     config.set("OPENAI_MODEL", "wrong-model")
     config.set("OPENAI_BASE_URL", "https://wrong.invalid/v1")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -121,11 +121,11 @@ def test_protocol_cache_selection_does_not_reuse_openai_connection(monkeypatch, 
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     workspace = Workspace(tmp_path, {"model": " workspace-model "})
     args = run_command.create_parser().parse_args(["hello"])
-    assert _local_model_options(workspace, args) == {"api": "anthropic-messages", "model": "workspace-model",
+    assert _local_model_options(workspace, args) == {"api": "anthropic", "model": "workspace-model",
                                                  "base_url": None, "api_key": None}
 
 
-@pytest.mark.parametrize("api", ["anthropic", "invalid", ["anthropic-messages"]])
+@pytest.mark.parametrize("api", ["anthropic-messages", "openai-chat", "invalid", ["anthropic"]])
 def test_invalid_workspace_protocol_fails_before_model_assembly(tmp_path, api):
     from linktools.ai.errors import AIError, ErrorCode
     from argparse import Namespace
@@ -135,8 +135,8 @@ def test_invalid_workspace_protocol_fails_before_model_assembly(tmp_path, api):
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
 
 
-@pytest.mark.parametrize("api,prefix", [("openai-chat", "OPENAI"), ("openai-responses", "OPENAI"),
-                                       ("anthropic-messages", "ANTHROPIC")])
+@pytest.mark.parametrize("api,prefix", [("openai", "OPENAI"), ("openai-responses", "OPENAI"),
+                                       ("anthropic", "ANTHROPIC")])
 @pytest.mark.parametrize("source", ["profile", "environment", "native-environment", "cache"])
 def test_cli_standard_config_sources_preserve_protocol_fields(tmp_path, api, prefix, source):
     home = tmp_path / "home"
@@ -151,7 +151,7 @@ def test_cli_standard_config_sources_preserve_protocol_fields(tmp_path, api, pre
     if source == "profile":
         (home / ".linktools").mkdir()
         (home / ".linktools" / "linktools.json").write_text(json.dumps({"config": {
-            "AI_MODEL_API": "openai-chat", f"{prefix}_MODEL": "global-model"}}))
+            "AI_MODEL_API": "openai", f"{prefix}_MODEL": "global-model"}}))
         (project / ".linktools.json").write_text(json.dumps({"config": values}))
         # The existing profile source precedes prefixed process environment.
         environment[f"LINKTOOLS_{prefix}_MODEL"] = "environment-model"
@@ -172,7 +172,7 @@ from linktools.commands.ai.run import command as run
 from linktools.commands.ai.acp import command as acp
 from linktools.commands.ai.web import command as web
 api, prefix, source = sys.argv[1:]
-environ.config.persist_many({"AI_MODEL_API": api if source == "cache" else "openai-chat",
+environ.config.persist_many({"AI_MODEL_API": api if source == "cache" else "openai",
     prefix + "_MODEL": "source-model" if source == "cache" else "cached-model",
     prefix + "_BASE_URL": "https://source.invalid" if source == "cache" else "https://cached.invalid"})
 before = set(environ.config.persisted_keys())
@@ -180,7 +180,7 @@ workspace = Workspace(Path.cwd(), {"model": "workspace-model"})
 for command, arguments in ((run, ["hello"]), (acp, []), (web, [])):
     args = command.create_parser().parse_args(arguments)
     binding = _local_runtime_models(workspace, args).capture().resolve("default")
-    assert binding.contract.get("api", "openai-chat") == api
+    assert binding.contract.get("api", "openai") == api
     assert binding.model_identity == binding.provider + ":source-model"
     assert binding.base_url == "https://source.invalid"
     assert binding.api_key == "source-fixture-key"

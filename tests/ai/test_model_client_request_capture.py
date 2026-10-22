@@ -137,7 +137,7 @@ async def test_model_client_request_capture_matches_dispatch_and_retains_retries
     assert len(clients) == 1 and clients[0].is_closed
     assert tuple(item.body for item in capture.requests) == tuple(dispatched)
     assert len(capture.requests) == 2
-    assert all(item.api == "openai-chat" and item.capture_error is None for item in capture.requests)
+    assert all(item.api == "openai" and item.capture_error is None for item in capture.requests)
     body = json.loads(capture.requests[0].body)
     assert body["metadata"] == {"after_mapping": True}
     # Raw capture must match dispatch above; SDK JSON whitespace is not semantic.
