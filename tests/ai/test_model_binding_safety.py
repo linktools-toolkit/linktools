@@ -15,7 +15,8 @@ from pydantic_ai.tools import RunContext
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry, model_binding_error
-from linktools.ai.model._openai import _OpenAIModelBinding, _RetryingModel, _resolved_connection
+from linktools.ai.model._openai import _OpenAIModelBinding
+from linktools.ai.model._binding import _RetryingModel, _resolved_connection
 
 
 def test_model_binding_contract_excludes_secret_material() -> None:

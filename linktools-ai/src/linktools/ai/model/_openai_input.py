@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 """Encoding constraints of the OpenAI Chat adapter, independent of model support."""
 
+from collections.abc import Mapping
+
 from pydantic_ai.messages import BinaryContent, DocumentUrl
 
 
-def openai_input_transport(mime_type: str, input_kind: str, model: str) -> str | None:
+def openai_input_transport(mime_type: str, input_kind: str, model: str, profile: Mapping[str, object] | None = None) -> str | None:
     """Return the actual SDK wire transport, or None when it cannot encode it."""
     if input_kind == "uploaded":
         return None if mime_type.startswith("image/") else "file-block"
@@ -26,7 +28,7 @@ def openai_input_transport(mime_type: str, input_kind: str, model: str) -> str |
         return "audio" if _audio_supported(probe) else None
     from pydantic_ai.providers.openai import OpenAIProvider
 
-    profile = OpenAIProvider.model_profile(model)
+    profile = {**(OpenAIProvider.model_profile(model) or {}), **(profile or {})}
     if profile is not None and not profile.get("openai_chat_supports_document_input", True):
         return None
     if input_kind == "document-url":

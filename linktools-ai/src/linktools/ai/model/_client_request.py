@@ -25,7 +25,7 @@ class ModelClientResponse:
     ``content_encoding`` describes the stored bytes. Streaming transports retain
     their encoded bytes; already-buffered HTTP client responses provide decoded
     bytes. ``format`` is only a Content-Type hint, not validation of the body.
-    ``complete`` means an observed Chat SSE terminator or a non-SSE transport EOF,
+    ``complete`` means an observed protocol terminal SSE event or a non-SSE transport EOF,
     not SDK success. Bytes after a terminator in the same received chunk may be
     present even though the SDK did not process them. No response headers other
     than the format/encoding hints are retained.
@@ -162,7 +162,7 @@ class _ClientRecordingModel(WrapperModel):
         run_context: RunContext[Any] | None = None,
     ) -> AsyncIterator[StreamedResponse]:
         async with AsyncExitStack() as stack:
-            # Chat dispatch happens while opening the stream. Keep token reset
+            # Client dispatch happens while opening the stream. Keep token reset
             # in this task; the SDK may close the stream from another task.
             with self._recorder._bind():
                 response = await stack.enter_async_context(self.wrapped.request_stream(
@@ -175,6 +175,10 @@ class _ClientRecordingModel(WrapperModel):
 class _ClientRequestEntry:
     recorder: ModelClientRequestRecorder
     index: int
+
+    @property
+    def api(self) -> str:
+        return self.recorder._requests[self.index].api
 
     @property
     def record_http_bodies(self) -> bool:

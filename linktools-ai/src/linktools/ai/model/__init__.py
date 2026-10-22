@@ -4,7 +4,7 @@
 
 from pydantic_ai.messages import AudioMediaType, DocumentMediaType, ImageMediaType, VideoMediaType
 
-from ._contract import ModelBinding, ModelResolver
+from ._contract import ModelBinding, ModelResolver, model_thinking_control
 from ._client_request import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
 from ._errors import model_binding_error
 from ._registry import ModelRegistry
@@ -23,6 +23,7 @@ __all__ = [
     "normalize_input_files",
 
     "AudioMediaType", "DocumentMediaType", "ImageMediaType", "VideoMediaType",
+    "model_thinking_control",
     "ModelBinding", "ModelRegistry", "ModelResolver", "model_binding_error",
     "ModelClientRequest", "ModelClientRequestRecorder", "ModelClientResponse",
     "validate_model_input", "validate_model_inputs",

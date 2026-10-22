@@ -19,7 +19,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestParameters
 
 from linktools.ai.model import ModelClientRequestRecorder
-from linktools.ai.model import _client_request, _openai
+from linktools.ai.model import _client_request, _http, _openai
 from .test_model_client_request_capture import _model, _request
 
 
@@ -400,15 +400,15 @@ async def test_model_client_response_capture_failures_preserve_sdk_outcome(
         class FailedParts(list):
             append = fail
 
-        initialize = _openai._CapturedChatResponseStream.__init__
+        initialize = _http.CapturedResponseStream.__init__
 
         def initialize_failed_parts(self, response, entry):
             initialize(self, response, entry)
             self._parts = FailedParts()
 
-        monkeypatch.setattr(_openai._CapturedChatResponseStream, "__init__", initialize_failed_parts)
+        monkeypatch.setattr(_http.CapturedResponseStream, "__init__", initialize_failed_parts)
     elif failure_at == "snapshot":
-        monkeypatch.setattr(_openai, "_chat_response_snapshot", fail)
+        monkeypatch.setattr(_http, "response_snapshot", fail)
     else:
         # The fallback encounters the same unavailable recorder.
         monkeypatch.setattr(_client_request._ClientRequestEntry, "record_response", fail)

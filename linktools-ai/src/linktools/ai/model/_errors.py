@@ -10,13 +10,6 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics
 
 def model_binding_error(error: Exception) -> "AIError | None":
     """Project provider failures; leave execution and output failures to callers."""
-    from openai import (
-        APIConnectionError as OpenAIAPIConnectionError,
-        APIError as OpenAIAPIError,
-        APIStatusError as OpenAIAPIStatusError,
-        APITimeoutError as OpenAIAPITimeoutError,
-    )
-
     details: dict[str, JsonValue] = {}
     if isinstance(error, ModelHTTPError):
         code = _http_error_code(error.status_code)
@@ -32,17 +25,35 @@ def model_binding_error(error: Exception) -> "AIError | None":
     elif isinstance(error, ModelAPIError):
         code = ErrorCode.MODEL_API_ERROR
         details = {"model_name": error.model_name}
-    elif isinstance(error, OpenAIAPITimeoutError):
-        code = ErrorCode.MODEL_TIMEOUT
-    elif isinstance(error, OpenAIAPIConnectionError):
-        code = ErrorCode.MODEL_UNAVAILABLE
-    elif isinstance(error, OpenAIAPIStatusError):
-        code = _http_error_code(error.status_code)
-        details = {"status_code": error.status_code}
-    elif isinstance(error, OpenAIAPIError):
-        code = ErrorCode.MODEL_API_ERROR
     else:
-        return None
+        provider_errors = []
+        try:
+            from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
+            provider_errors.append((APITimeoutError, APIConnectionError, APIStatusError, APIError))
+        except ModuleNotFoundError as missing:
+            if missing.name != "openai":
+                raise
+        try:
+            from anthropic import APIConnectionError, APIError, APIStatusError, APITimeoutError
+            provider_errors.append((APITimeoutError, APIConnectionError, APIStatusError, APIError))
+        except ModuleNotFoundError as missing:
+            if missing.name != "anthropic":
+                raise
+        for timeout, connection, status, api in provider_errors:
+            if isinstance(error, timeout):
+                code = ErrorCode.MODEL_TIMEOUT
+            elif isinstance(error, connection):
+                code = ErrorCode.MODEL_UNAVAILABLE
+            elif isinstance(error, status):
+                code = _http_error_code(error.status_code)
+                details = {"status_code": error.status_code}
+            elif isinstance(error, api):
+                code = ErrorCode.MODEL_API_ERROR
+            else:
+                continue
+            break
+        else:
+            return None
     return AIError(
         code,
         safe_details=details,

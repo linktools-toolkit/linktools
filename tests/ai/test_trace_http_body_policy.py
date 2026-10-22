@@ -12,7 +12,7 @@ from linktools.ai.capability import CheckpointCapability, TraceCapability
 from linktools.ai.runtime import RuntimeFeatures
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.model import ModelClientRequest, ModelClientRequestRecorder, ModelClientResponse
-from linktools.ai.model import _openai
+from linktools.ai.model import _http, _openai
 from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.runtime._trace_capture import record_http_bodies_enabled
 from linktools.ai.runtime.state import RuntimeDomain
@@ -33,7 +33,7 @@ async def test_http_policy_gates_body_observation_before_stream_capture(
     if not enabled:
         def forbidden_buffer(*args: object, **kwargs: object) -> object:
             pytest.fail('disabled policy must not construct a response-body capture buffer')
-        monkeypatch.setattr(_openai, '_CapturedChatResponseStream', forbidden_buffer)
+        monkeypatch.setattr(_http, 'CapturedResponseStream', forbidden_buffer)
     model, _clients = _model(monkeypatch, _response)
     async with model:
         with ModelClientRequestRecorder(record_http_bodies=enabled) as capture:
@@ -53,7 +53,7 @@ async def test_http_policy_gates_body_observation_before_stream_capture(
 async def test_disabled_capture_does_not_read_request_body() -> None:
     request = httpx2.Request('POST', 'https://capture.invalid/chat/completions', content=iter([b'body']))
     with ModelClientRequestRecorder() as capture:
-        await _openai._capture_chat_request(request)
+        await _http.capture_request(request)
     assert capture.requests == (ModelClientRequest('openai-chat', None, record_http_bodies=False),)
     with pytest.raises(httpx2.RequestNotRead):
         _ = request.content

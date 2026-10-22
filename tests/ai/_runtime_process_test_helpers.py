@@ -48,7 +48,7 @@ def _storage(database: Path, phase: str) -> RuntimeStorage:
 
 def _runtime_process(
     connection: Connection, database: str, mode: str, phase: str,
-    execution_id: str | None, auto_recover: bool, recovery_barrier,
+    execution_id: str | None, auto_recover: bool, recovery_barrier, publication_order=None,
 ) -> None:
     async def run() -> None:
         nonlocal execution_id
@@ -107,6 +107,44 @@ def _runtime_process(
                     return await original_reconcile(checkpoint)
 
                 backend._reconcile_handoff = synchronized_reconcile
+            if publication_order is not None:
+                from linktools.ai.runtime.state import RuntimeDomain
+                from linktools.ai.runtime.state._step_archive import StateStepArchive
+
+                role, prepared, cursor_committed, publication_finished = publication_order
+                backend = runtime._execution_service.runtime_backend()
+                original_terminal = backend._commit_reconciled_terminal
+                waiting = True
+
+                def ordered_publication(original):
+                    async def publish(store, run, **kwargs):
+                        nonlocal waiting
+                        if store._runtime_domain is not RuntimeDomain.CONVERSATION or not waiting:
+                            return await original(store, run, **kwargs)
+                        waiting = False
+                        if role == "delayed":
+                            prepared.set()
+                            assert await asyncio.to_thread(cursor_committed.wait, 15)
+                        else:
+                            assert await asyncio.to_thread(prepared.wait, 15)
+                        try:
+                            return await original(store, run, **kwargs)
+                        finally:
+                            if role == "delayed":
+                                publication_finished.set()
+                    return publish
+
+                async def ordered_terminal(*args, **kwargs):
+                    if role == "first":
+                        cursor_committed.set()
+                        assert await asyncio.to_thread(publication_finished.wait, 15)
+                    return await original_terminal(*args, **kwargs)
+
+                # Pause after preparation, allowing the other process to publish
+                # and advance the session cursor before this writer commits.
+                StateStepArchive.sync_projection = ordered_publication(StateStepArchive.sync_projection)
+                StateStepArchive.sync_prepared_projection = ordered_publication(StateStepArchive.sync_prepared_projection)
+                backend._commit_reconciled_terminal = ordered_terminal
             if execution_id is None:
                 backend = runtime._execution_service.runtime_backend()
                 if phase == "admitted":
@@ -310,12 +348,13 @@ class _RuntimeProcess:
     def __init__(
         self, database: Path, *, mode: str = "session", phase: str = "active",
         execution_id: str | None = None, auto_recover: bool = True, recovery_barrier=None,
+        publication_order=None,
     ) -> None:
         context = multiprocessing.get_context("spawn")
         self.connection, child = context.Pipe()
         self.process = context.Process(
             target=_runtime_process,
-            args=(child, str(database), mode, phase, execution_id, auto_recover, recovery_barrier),
+            args=(child, str(database), mode, phase, execution_id, auto_recover, recovery_barrier, publication_order),
         )
         self.process.start()
         child.close()

@@ -20,7 +20,7 @@ from linktools.ai.model import (
     validate_model_input, validate_model_inputs,
 )
 from linktools.ai.model import _openai
-from linktools.ai.model._openai import _RetryingModel
+from linktools.ai.model._binding import _RetryingModel
 
 
 def _binding(*mime_types: str, **kwargs: object) -> ModelBinding:

@@ -35,7 +35,7 @@ def test_development_install_selects_declared_optional_extras() -> None:
     modules = get_modules()
     development = dict(_install_requirements(Namespace(module=["linktools-ai"], editable=True), modules))
     ordinary = dict(_install_requirements(Namespace(module=["linktools-ai"], editable=False), modules))
-    assert development["linktools-ai"] == modules["linktools-ai"]["path"] + "[magic,web]"
+    assert development["linktools-ai"] == modules["linktools-ai"]["path"] + "[anthropic,magic,openai,web]"
     assert ordinary["linktools-ai"] == modules["linktools-ai"]["path"]
 
 

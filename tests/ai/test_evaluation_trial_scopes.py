@@ -363,8 +363,9 @@ async def test_child_agent_reads_captured_input_with_its_own_model_and_runtime_b
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hold_change", (None, "acquire", "release"))
 async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hold_change: str | None,
 ) -> None:
     model_entered, stop_owner = asyncio.Event(), asyncio.Event()
     completed_outputs: list[str] = []
@@ -443,6 +444,25 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
                             )
 
                         fault.setattr(backend, "_commit_failure", commit_stopped_owner)
+                    elif hold_change is not None:
+                        backend = child._execution_service.runtime_backend()
+                        original_resume = backend._commit_recovery_resume
+                        repository = child._state.execution.executions
+
+                        async def resume_with_hold_change(execution, **kwargs):
+                            resumed, checkpoint = await original_resume(execution, **kwargs)
+                            if hold_change == "release":
+                                await repository.acquire_dependency_hold(
+                                    execution.execution_id, tenant_id=child.default_principal.tenant_id,
+                                    hold_id="concurrent-reader",
+                                )
+                            change = (repository.acquire_dependency_hold if hold_change == "acquire"
+                                      else repository.release_dependency_hold)
+                            await change(execution.execution_id, tenant_id=child.default_principal.tenant_id,
+                                         hold_id="concurrent-reader")
+                            return resumed, checkpoint
+
+                        fault.setattr(backend, "_commit_recovery_resume", resume_with_hold_change)
                     yield child.tasks.bind(target, scorer)
         finally:
             closed.append(descriptor)

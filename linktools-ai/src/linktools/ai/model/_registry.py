@@ -11,7 +11,7 @@ from pydantic_ai.models import Model
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ._contract import ModelBinding, ModelResolver
+from ._contract import ModelBinding, ModelResolver, model_thinking_control
 
 _logger = environ.get_logger("ai.model.registry")
 
@@ -27,6 +27,7 @@ class ModelRegistry:
         *,
         model: str,
         input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -46,6 +47,7 @@ class ModelRegistry:
             "default",
             model=model,
             input_types=input_types,
+            profile=profile,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
@@ -69,6 +71,7 @@ class ModelRegistry:
         *,
         model: str,
         input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -84,6 +87,147 @@ class ModelRegistry:
                 route_id=route_id,
                 model=model,
                 input_types=input_types,
+                profile=profile,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                max_tokens=max_tokens,
+                connection_resolver=connection_resolver,
+            )
+        )
+
+    @classmethod
+    def openai_responses(
+        cls,
+        *,
+        model: str,
+        input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
+        base_url: "str | None" = None,
+        api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
+        max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
+    ) -> "ModelRegistry":
+        """Create the default openai_responses route.
+
+        input_types accepts image/audio/document/video SDK categories and
+        mime:<MIME type> patterns. Only their expanded MIME types are allowed;
+        provider encoding checks and resource budgets still apply.
+        """
+        registry = cls()
+        registry.register_openai_responses(
+            "default",
+            model=model,
+            input_types=input_types,
+            profile=profile,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            max_tokens=max_tokens,
+            connection_resolver=connection_resolver,
+        )
+        return registry
+
+    def register_openai_responses(
+        self,
+        route_id: str,
+        *,
+        model: str,
+        input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
+        base_url: "str | None" = None,
+        api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
+        max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
+    ) -> None:
+        from ._openai import _OpenAIResponsesModelBinding
+
+        self.register(
+            _OpenAIResponsesModelBinding(
+                route_id=route_id,
+                model=model,
+                input_types=input_types,
+                profile=profile,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                max_tokens=max_tokens,
+                connection_resolver=connection_resolver,
+            )
+        )
+
+    @classmethod
+    def anthropic(
+        cls,
+        *,
+        model: str,
+        input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
+        base_url: "str | None" = None,
+        api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
+        max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
+    ) -> "ModelRegistry":
+        """Create the default anthropic route.
+
+        input_types accepts image/audio/document/video SDK categories and
+        mime:<MIME type> patterns. Only their expanded MIME types are allowed;
+        provider encoding checks and resource budgets still apply.
+        """
+        registry = cls()
+        registry.register_anthropic(
+            "default",
+            model=model,
+            input_types=input_types,
+            profile=profile,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            max_tokens=max_tokens,
+            connection_resolver=connection_resolver,
+        )
+        return registry
+
+    def register_anthropic(
+        self,
+        route_id: str,
+        *,
+        model: str,
+        input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
+        base_url: "str | None" = None,
+        api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
+        max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
+    ) -> None:
+        from ._anthropic import _AnthropicModelBinding
+
+        self.register(
+            _AnthropicModelBinding(
+                route_id=route_id,
+                model=model,
+                input_types=input_types,
+                profile=profile,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
@@ -180,6 +324,9 @@ class _ModelAliasBinding:
     @property
     def contract(self) -> Mapping[str, JsonValue]:
         return self._target.contract
+
+    def thinking_control(self) -> Mapping[str, JsonValue]:
+        return model_thinking_control(self._target)
 
     def materialize(self) -> Model:
         return self._target.materialize()

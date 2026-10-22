@@ -160,6 +160,14 @@ class _RecoveryCoordinatorPort(Protocol):
         tenant_id: str,
     ) -> ExecutionRecord | None: ...
 
+    async def _load_admitted_recovery_execution(
+        self,
+        admitted: ExecutionRecord,
+        *,
+        producer_generation: int,
+        recovery_operation: OperationLedgerInput | None,
+    ) -> ExecutionRecord: ...
+
     async def load_recovery_checkpoint(
         self,
         execution_id: str,
@@ -735,11 +743,23 @@ class _RecoveryCoordinator:
         allow_active_recovery: bool = True,
         expected_revision: int | None = None,
         recovery_operation: OperationLedgerInput | None = None,
+        admitted_execution: ExecutionRecord | None = None,
     ) -> bool:
-        execution = await self._port.load_execution(
-            checkpoint.execution_id,
-            tenant_id=self._port.tenant_id,
-        )
+        if admitted_execution is not None:
+            if (producer_generation is None
+                    or expected_revision != admitted_execution.revision
+                    or checkpoint.execution_id != admitted_execution.execution_id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution = await self._port._load_admitted_recovery_execution(
+                admitted_execution, producer_generation=producer_generation,
+                recovery_operation=recovery_operation,
+            )
+            expected_revision = execution.revision
+        else:
+            execution = await self._port.load_execution(
+                checkpoint.execution_id,
+                tenant_id=self._port.tenant_id,
+            )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if expected_revision is not None and execution.revision != expected_revision:
@@ -1095,6 +1115,7 @@ class _RecoveryCoordinator:
             checkpoint, producer_generation=current.revision + 1,
             expected_revision=resumed.revision,
             recovery_operation=recovery_operation,
+            admitted_execution=resumed,
         )
         latest = await self._port.load_execution(
             execution_id,

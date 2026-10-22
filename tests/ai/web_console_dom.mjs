@@ -81,7 +81,7 @@ globalThis.fetch=async(path,options={})=>{
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
   if(detailResponses.has(key)){const value=detailResponses.get(key),result=typeof value==='function'?value(url):value;return result instanceof Response?result:response(result);}
   if(key==='/api/metrics')return response({items:[]});
-  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id)});}
+  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null,thinking_control:sessions.get(id)?.thinking_control});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id),thinking_control:sessions.get(id)?.thinking_control});}
   const execution=key.match(/^\/api\/executions\/([^/]+)$/);
   if(execution)return response(executions.get(execution[1]) || info(execution[1],null));
   if(key.endsWith('/events') && streamBlocks.has(key.split('/')[3]))return new Response(new ReadableStream({start(controller){streamBlocks.get(key.split('/')[3]).controller=controller;},cancel(){}}));
@@ -137,8 +137,10 @@ async function until(description,ready){
   }
 }
 const node=id=>nodes.get(id),tab=name=>({async click(){if(node('inspector').hidden){const opening=node('inspector-toggle').click();if(node('detail-view').value===name)return opening;}node('detail-view').value=name;return node('detail-view').onchange();}}),view=name=>all.find(element=>element.dataset.view===name);
-async function openOriginal(){
+const descendants=node=>[node,...node.children.flatMap(descendants)];
+async function openOriginal(diagnostic=true){
   const draft=node('prompt').value;await node('native-mode').click();assert.equal(node('composer').hidden,true);assert.equal(node('cancel').parentElement,node('reader-actions'));assert.equal(node('prompt').value,draft);assert.equal(node('inspector').hidden,true);assert.equal(node('run-actions').open,false);assert.ok(node('native-mode').className.includes('active'));
+  const diagnostics=descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Original HTTP diagnostics');if(diagnostic && diagnostics)await diagnostics.click();
 }
 async function refresh(){
   const previous=node('list').children;node('refresh').click();
@@ -157,6 +159,79 @@ assert.match(node('conversation').textContent,/a answer/);
 assert.doesNotMatch(node('conversation').textContent,/Original request timeline/);
 assert.equal(node('request-context')?.hidden ?? true,true);
 assert.equal(node('native-mode').className.includes('active'),false);
+if(process.argv[3]==='thinking') {
+  for(const [mode,checked,disabled] of [['always_on',true,true],['controllable',true,false],['undeclared',false,true],['unknown',false,false]]) {
+    sessions.get('a').thinking_control={mode,enabled_by_default:true};await refresh();
+    assert.equal(node('thinking').checked,checked);assert.equal(node('thinking').disabled,disabled);
+    assert.match(node('thinking-hint').textContent,mode==='always_on'?/always on/:mode==='controllable'?/checkbox selects the next request/:/Returned reasoning remains visible/);
+  }
+  sessions.get('a').thinking_control={mode:'controllable',enabled_by_default:true};await refresh();
+  assert.equal(node('thinking').checked,false,'model default must not overwrite the current request selection');
+  sessions.get('a').thinking_control={mode:'unknown'};node('thinking').checked=true;await refresh();
+  assert.equal(node('thinking').checked,true);assert.equal(node('thinking').disabled,false);
+  sessions.get('a').status='CLOSED';await refresh();assert.equal(node('thinking').disabled,true);
+  sessions.get('a').status='OPEN';await refresh();assert.equal(node('thinking').disabled,false);
+  node('prompt').value='Hello';await node('composer').requestSubmit();
+  const submitted=calls.findLast(call=>call.method==='POST' && call.key==='/api/sessions/a/messages');
+  assert.equal(submitted.body.thinking,true);
+  console.log('THINKING_REQUEST='+JSON.stringify(submitted.body));
+  console.log('Thinking controls follow the declared profile without hiding returned content');process.exit(0);
+}
+if(process.argv[3]==='protocols') {
+  const path='/api/executions/a-run/models';
+  const bodies=[
+    ['openai-responses',{model:'sample',instructions:'response instructions',previous_response_id:'resp-previous',input:[{role:'user',content:[{type:'input_text',text:'native input'}]},{type:'function_call',call_id:'call-r',name:'lookup',arguments:'{"key":1}'},{type:'function_call_output',call_id:'call-r',output:'tool output'},{type:'reasoning',summary:[{type:'summary_text',text:'brief summary'}],encrypted_content:'opaque-reasoning'},{type:'unknown_input',custom:{keep:true}}]}],
+    ['anthropic-messages',{model:'sample',system:[{type:'text',text:'anthropic system'}],messages:[{role:'assistant',content:[{type:'thinking',thinking:'public thought',signature:'signature-1'},{type:'redacted_thinking',data:'opaque-block'},{type:'tool_use',id:'call-a',name:'lookup',input:{key:2}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'call-a',content:'tool answer'}]}]}],
+  ];
+  const item={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},client_requests_included:true,client_requests:bodies.map(([api,body])=>({api,body:Buffer.from(JSON.stringify(body)).toString('base64'),body_encoding:'base64',response:null}))};
+  detailResponses.set(path,{items:[item],next_cursor:null});
+  await node('native-mode').click();
+  await descendants(node('conversation')).find(value=>value.tagName==='BUTTON' && value.textContent==='Original HTTP diagnostics').click();
+  let content=node('conversation').textContent;
+  for(const value of ['response instructions','native input','call-r','tool output','brief summary','opaque-reasoning','unknown_input','resp-previous'])assert.ok(content.includes(value),value);
+  assert.match(content,/Provider-returned reasoning summary/);assert.match(content,/not readable reasoning/);assert.doesNotMatch(content,/no messages field/);
+  const picker=descendants(node('conversation')).find(value=>value.tagName==='SELECT' && value.className==='native-request');picker.value='a-run:1:1:1';picker.onchange();
+  content=node('conversation').textContent;
+  for(const value of ['anthropic system','public thought','signature-1','opaque-block','call-a','tool answer'])assert.ok(content.includes(value),value);
+  assert.match(content,/Opaque provider thinking data/);
+  console.log('Native Responses and Anthropic content preserve protocol blocks, references and opaque reasoning fields');process.exit(0);
+}
+if(process.argv[3]==='sdk') {
+  const path='/api/executions/a-run/models';
+  const sdk={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},content_included:true,request:{messages:[
+    {kind:'request',instructions:'dynamic instruction',parts:[{part_kind:'system-prompt',content:'system first'},{part_kind:'user-prompt',content:'<script>user second</script>'}]},
+    {kind:'response',parts:[{part_kind:'tool-call',tool_name:'lookup',tool_call_id:'call-1',args:{id:1}}]},
+    {kind:'request',parts:[{part_kind:'tool-return',tool_name:'lookup',tool_call_id:'call-1',content:'result third'},{part_kind:'user-prompt',content:[{kind:'binary',media_type:'image/png',size:24,digest:'metadata-only'}]}]},
+  ],parameters:{instruction_parts:[{content:'effective instruction'}],function_tools:[{name:'lookup',parameters_json_schema:{type:'object'}}]}},response:{kind:'response',parts:[{part_kind:'text',content:'answer'}]},client_requests_included:false};
+  detailResponses.set(path,url=>{assert.equal(url.searchParams.get('include_content'),'true');assert.equal(url.searchParams.has('include_client_requests'),false);return {items:[sdk],next_cursor:null};});
+  await node('native-mode').click();
+  const content=node('conversation').textContent;
+  assert.match(content,/reconstructed from retained context/);assert.doesNotMatch(content,/Readable view unavailable/);
+  const parts=descendants(node('conversation')).filter(item=>item.className==='sdk-part');
+  assert.deepEqual(parts.map(item=>item.children[0].textContent),['system-prompt','user-prompt','tool-call','tool-return','user-prompt']);
+  for(const value of ['dynamic instruction','effective instruction','call-1','metadata-only','function_tools'])assert.ok(content.includes(value));
+  assert.ok(parts[1].textContent.includes('<script>user second</script>'));assert.equal(parts[1].children[1].tagName,'PRE');
+  assert.equal(descendants(node('conversation')).some(item=>item.tagName==='IMG'),false);
+  // Switching sources starts a separate paged read, without passing the SDK cursor.
+  detailResponses.set(path,url=>{assert.equal(url.searchParams.get('include_client_requests'),'true');assert.equal(url.searchParams.has('include_content'),false);assert.equal(url.searchParams.has('cursor'),false);return {items:[{...sdk,request:{},content_included:false,client_requests_included:true,client_requests:null}],next_cursor:null};});
+  await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Original HTTP diagnostics').click();
+  assert.match(node('conversation').textContent,/Original client messages were not recorded/);assert.doesNotMatch(node('conversation').textContent,/dynamic instruction/);
+  detailResponses.set(path,{items:[sdk],next_cursor:null});
+  await descendants(node('conversation')).find(item=>item.tagName==='BUTTON' && item.textContent==='Read model input').click();
+  assert.match(node('conversation').textContent,/dynamic instruction/);
+  await tab('sdkmodels').click();assert.match(node('inspector-content').textContent,/effective instruction/);
+  // A terminal metadata event must fetch SDK content even without client captures.
+  await select('#session=b');
+  executions.set('a-run',{...info('a-run'),status:'RUNNING'});streamBlocks.set('a-run',{});
+  detailResponses.set(path,url=>({items:[url.searchParams.has('model_request_seq')?{...sdk,model_request_seq:2,purpose:'compaction'}:{...sdk,status:'RUNNING',content_included:false,request:{}}],next_cursor:null}));
+  await select('#session=a');await node('native-mode').click();
+  assert.match(node('conversation').textContent,/not committed yet/);
+  streamBlocks.get('a-run').controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'model',item:{item:{...sdk,model_request_seq:2,purpose:'compaction',request:{},content_included:false},visibility:'durable_history'}})+'\n\n'));
+  await until('SDK terminal exact refresh',()=>descendants(node('conversation')).some(item=>item.tagName==='OPTION' && item.value==='a-run:1:2'));
+  const picker=descendants(node('conversation')).find(item=>item.tagName==='SELECT' && item.className==='native-request');picker.value='a-run:1:2';picker.onchange();
+  assert.match(node('conversation').textContent,/dynamic instruction/);assert.ok(calls.some(call=>call.key===path && call.query.model_request_seq==='2' && call.query.include_content==='true' && !call.query.include_client_requests));
+  console.log('SDK messages stay readable without HTTP capture, preserving ordered parts and separate instruction/tool metadata');process.exit(0);
+}
 if(process.argv[3]==='streaming') {
   const frames=new Map();let frameId=0,copied;
   globalThis.requestAnimationFrame=callback=>{const id=++frameId;frames.set(id,callback);return id;};
@@ -284,7 +359,7 @@ if(process.argv[3]==='minimal') {
   await descendants(rows()[0]).find(item=>item.tagName==='BUTTON' && item.textContent==='Open subagent').click();
   assert.match(node('execution-meta').textContent,/child-run/);assert.equal(node('detail-turn').value,'child-run');assert.match(node('detail-turn').children.at(-1).textContent,/Execution child-run/);
   await descendants(node('execution-meta')).find(item=>item.tagName==='BUTTON' && item.textContent==='↑ Parent execution').click();assert.equal(node('detail-turn').value,'a-run');
-  node('run-actions').open=true;await node('activity-mode').click();assert.equal(node('run-actions').open,false);assert.equal(node('conversation-column').hidden,true);assert.ok(node('inspector').className.includes('execution-page'));assert.equal(node('detail-view').value,'trace');assert.equal(rows().length,2);node('inspector-close').click();assert.equal(node('conversation-column').hidden,false);assert.equal(document.activeElement,node('activity-mode'));await openOriginal();assert.equal(node('request-turn').value,'a-run');assert.equal(document.activeElement,node('native-mode'));node('chat-mode').click();assert.equal(document.activeElement,node('prompt'));
+  node('run-actions').open=true;await node('activity-mode').click();assert.equal(node('run-actions').open,false);assert.equal(node('conversation-column').hidden,true);assert.ok(node('inspector').className.includes('execution-page'));assert.equal(node('detail-view').value,'trace');assert.equal(rows().length,2);node('inspector-close').click();assert.equal(node('conversation-column').hidden,false);assert.equal(document.activeElement,node('activity-mode'));await openOriginal(false);assert.equal(node('request-turn').value,'a-run');assert.equal(document.activeElement,node('native-mode'));node('chat-mode').click();assert.equal(document.activeElement,node('prompt'));
   console.log('Minimal navigation contracts passed: one entry, explicit turn identity, original Trace order, single selected event, paging/focus, real child/parent and full-width return');process.exit(0);
 }
 if(process.argv[3]==='details') {
@@ -339,6 +414,7 @@ if(process.argv[3]==='guided') {
   assert.doesNotMatch(node('inspector-content').textContent,/Message 1/);
   for(const value of ['SDK instructions field first in projection','SDK system part follows field metadata'])assert.ok(descendants(node('inspector-content')).some(item=>item.tagName==='PRE' && item.textContent===value),'SDK field and part content remain unchanged');
   await descendants(node('inspector-content')).find(item=>item.tagName==='BUTTON' && item.textContent==='View model messages').click();
+  await descendants(node('inspector-content')).find(item=>item.tagName==='BUTTON' && item.textContent==='Original HTTP diagnostics').click();
   assert.deepEqual(descendants(node('inspector-content')).filter(item=>item.className==='native-text').map(item=>item.textContent),['actual system first','actual instructions second'],'Readable rows follow captured array order, never SDK projection order');
   await descendants(node('inspector-content')).find(item=>item.tagName==='BUTTON' && item.textContent==='View raw').click();
   assert.ok(descendants(node('inspector-content')).some(item=>item.tagName==='PRE' && item.textContent===source),'Raw remains exact after readable projection');
@@ -438,7 +514,7 @@ if(process.argv[3]==='native') {
   await select('#session=b');
   stale({items:[item],next_cursor:null});await staleRefresh;assert.equal(node('composer').hidden,true,'Switching conversations in reader mode keeps the composer hidden');assert.equal(node('cancel').parentElement,node('reader-actions'));
   assert.doesNotMatch(node('conversation').textContent,/native only/);
-  assert.ok(calls.filter(call=>call.key.endsWith('/models')).every(call=>call.query.include_client_requests==='true' && !call.query.include_content));
+  assert.ok(calls.filter(call=>call.key.endsWith('/models')).every(call=>call.query.include_client_requests==='true' && !call.query.include_content || call.query.include_content==='true' && !call.query.include_client_requests));
   const id='native-live',path=`/api/executions/${id}/models`;
   sessions.get('a').active_execution_id=id;executions.set(id,{...info(id,'a'),status:'STARTED'});streamBlocks.set(id,{});
   const completed=seq=>({...item,execution_id:id,model_request_seq:seq,purpose:seq===22?'compaction':'agent',status:'SUCCEEDED'});
@@ -518,8 +594,8 @@ assert.equal(node('inspector-toggle').getAttribute('aria-expanded'),'false');
 const beforeDetails=calls.length;node('inspector-toggle').click();
 assert.equal(node('inspector').hidden,false);assert.equal(document.activeElement,node('inspector-close'));
 assert.equal(node('inspector-toggle').getAttribute('aria-expanded'),'true');
-assert.equal(node('detail-view').value,'models','Details opens directly to original model requests');
-assert.ok(calls.slice(beforeDetails).some(call=>call.key.endsWith('/models') && call.query.include_client_requests==='true'));
+assert.equal(node('detail-view').value,'models','Details opens directly to model input messages');
+assert.ok(calls.slice(beforeDetails).some(call=>call.key.endsWith('/models') && call.query.include_content==='true'));
 const afterDetails=calls.length;node('inspector-close').click();assert.equal(document.activeElement,node('actions-toggle'));
 assert.equal(node('inspector').hidden,true);assert.equal(calls.length,afterDetails,'Closing Details does not fetch another view');
 node('action-menu').open=true;node('action-menu').onkeydown({key:'Escape'});
@@ -545,7 +621,7 @@ if(process.argv[3]==='navigation'){
   await detail('models',/No records/);node('inspector-close').click();const hiddenReads=calls.length;
   await select('#session=b');assert.equal(node('inspector').hidden,true);
   assert.ok(!calls.slice(hiddenReads).some(item=>item.key.endsWith('/models')),'A hidden inspector cannot request another execution body');
-  node('inspector-toggle').click();await until('reopened original request inspector',()=>node('inspector-content').textContent.includes('No records'));assert.ok(calls.slice(hiddenReads).some(item=>item.key==='/api/executions/b-run/models' && item.query.include_client_requests==='true'));
+  node('inspector-toggle').click();await until('reopened original request inspector',()=>node('inspector-content').textContent.includes('No records'));assert.ok(calls.slice(hiddenReads).some(item=>item.key==='/api/executions/b-run/models' && item.query.include_content==='true'));
   node('inspector-close').click();const hiddenRefresh=calls.length;await refresh();
   assert.ok(!calls.slice(hiddenRefresh).some(item=>item.key.endsWith('/models')),'Refreshing a conversation does not refresh hidden detail bodies');
   const closedDetail=deferred('GET /api/executions/b-run/models');node('inspector-toggle').click();await closedDetail.requested;node('inspector-close').click();
@@ -1229,8 +1305,8 @@ assert.equal(new URLSearchParams(location.hash.slice(1)).get('execution'),'b-run
 
 // A committed RUNNING identity can have an intentionally empty prompt envelope.
 detailResponses.set('/api/executions/b-run/models',{items:[{execution_id:'b-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'RUNNING',model:{},request:{},response:null,content_included:true}],next_cursor:null});
-await detail('sdkmodels',/Prompt content is not available yet/);
-assert.match(node('inspector-content').textContent,/Prompt content is not available yet/);
+await detail('sdkmodels',/Model input is not committed yet/);
+assert.match(node('inspector-content').textContent,/Model input is not committed yet/);
 assert.doesNotMatch(node('inspector-content').textContent,/SDK prompt architecture/);
 
 // Former history/trace summaries remain human-readable without an eager trace fetch.
