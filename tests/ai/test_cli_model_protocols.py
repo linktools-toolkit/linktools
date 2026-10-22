@@ -133,3 +133,74 @@ def test_invalid_workspace_protocol_fails_before_model_assembly(tmp_path, api):
         _local_runtime_models(Workspace(tmp_path, {"model_api": api}),
                               Namespace(model_api=None, model="fixture", base_url=None, api_key=None))
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
+
+
+@pytest.mark.parametrize("api,prefix", [("openai-chat", "OPENAI"), ("openai-responses", "OPENAI"),
+                                       ("anthropic-messages", "ANTHROPIC")])
+@pytest.mark.parametrize("source", ["profile", "environment", "native-environment", "cache"])
+def test_cli_standard_config_sources_preserve_protocol_fields(tmp_path, api, prefix, source):
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    values = {"AI_MODEL_API": api, f"{prefix}_MODEL": "source-model",
+              f"{prefix}_BASE_URL": "https://source.invalid", f"{prefix}_API_KEY": "source-fixture-key"}
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("OPENAI_", "ANTHROPIC_", "LINKTOOLS_")) and key != "AI_MODEL_API"}
+    environment["HOME"] = str(home)
+    if source == "profile":
+        (home / ".linktools").mkdir()
+        (home / ".linktools" / "linktools.json").write_text(json.dumps({"config": {
+            "AI_MODEL_API": "openai-chat", f"{prefix}_MODEL": "global-model"}}))
+        (project / ".linktools.json").write_text(json.dumps({"config": values}))
+        # The existing profile source precedes prefixed process environment.
+        environment[f"LINKTOOLS_{prefix}_MODEL"] = "environment-model"
+    elif source in ("environment", "native-environment"):
+        if source == "native-environment":
+            environment[f"LINKTOOLS_{prefix}_MODEL"] = "prefixed-model"
+        environment.update({("LINKTOOLS_" if source == "environment" else "") + key: value
+                            for key, value in values.items()})
+    else:
+        environment[f"LINKTOOLS_{prefix}_API_KEY"] = values[f"{prefix}_API_KEY"]
+    script = '''
+import json, sys
+from pathlib import Path
+from linktools.core import environ
+from linktools.ai.workspace import Workspace
+from linktools.commands.ai._common import _local_runtime_models
+from linktools.commands.ai.run import command as run
+from linktools.commands.ai.acp import command as acp
+from linktools.commands.ai.web import command as web
+api, prefix, source = sys.argv[1:]
+environ.config.persist_many({"AI_MODEL_API": api if source == "cache" else "openai-chat",
+    prefix + "_MODEL": "source-model" if source == "cache" else "cached-model",
+    prefix + "_BASE_URL": "https://source.invalid" if source == "cache" else "https://cached.invalid"})
+before = set(environ.config.persisted_keys())
+workspace = Workspace(Path.cwd(), {"model": "workspace-model"})
+for command, arguments in ((run, ["hello"]), (acp, []), (web, [])):
+    args = command.create_parser().parse_args(arguments)
+    binding = _local_runtime_models(workspace, args).capture().resolve("default")
+    assert binding.contract.get("api", "openai-chat") == api
+    assert binding.model_identity == binding.provider + ":source-model"
+    assert binding.base_url == "https://source.invalid"
+    assert binding.api_key == "source-fixture-key"
+    assert "source-fixture-key" not in json.dumps(binding.contract)
+    explicit = command.create_parser().parse_args(arguments + ["--model-api", api, "--model", "cli-model",
+        "--base-url", "https://cli.invalid", "--api-key", "cli-fixture-key"])
+    overridden = _local_runtime_models(workspace, explicit).capture().resolve("default")
+    assert overridden.model_identity == overridden.provider + ":cli-model"
+    assert overridden.base_url == "https://cli.invalid"
+    assert overridden.api_key == "cli-fixture-key"
+    assert set(environ.config.persisted_keys()) == before
+    again = _local_runtime_models(workspace, args).capture().resolve("default")
+    assert again.api_key == "source-fixture-key"
+    assert again.model_identity == binding.model_identity
+assert not any("API_KEY" in key for key in environ.config.persisted_keys())
+print("configuration sources verified")
+'''
+    result = subprocess.run([sys.executable, "-c", script, api, prefix, source],
+                            cwd=project, env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "fixture-key" not in result.stdout + result.stderr
+    if source == "profile":
+        assert json.loads((project / ".linktools.json").read_text()) == {"config": values}
