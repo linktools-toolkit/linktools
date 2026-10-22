@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
-from httpx2 import AsyncClient, AsyncByteStream, ByteStream, DecodingError, EventSource, Request, RequestNotRead, Response, SSEError
+from httpx2 import AsyncClient, AsyncByteStream, ByteStream, EventSource, Request, RequestNotRead, Response
 
 from ._client_request import ModelClientResponse, _ClientRequestEntry, _record_client_request, _record_http_bodies
 
@@ -50,13 +50,14 @@ def response_snapshot(
     complete = eof and body is not None
     capture_error = "response_capture_failed" if body is None else None
     if format == "sse" and body is not None:
-        replica = Response(
-            200, headers={"content-type": "text/event-stream", "content-encoding": content_encoding or ""},
-            stream=ByteStream(body), request=Request("GET", "https://model-response.invalid"),
-        )
         try:
+            replica = Response(
+                200, headers={"content-type": "text/event-stream", "content-encoding": content_encoding or ""},
+                stream=ByteStream(body), request=Request("GET", "https://model-response.invalid"),
+            )
             complete = any(_terminal_event(api, event.data, event.event) for event in EventSource(replica))
-        except (DecodingError, SSEError, ImportError):
+        except Exception:
+            # Derived metadata must not discard bytes already observed from the SDK stream.
             complete = False
             capture_error = "response_decode_failed"
     return ModelClientResponse(

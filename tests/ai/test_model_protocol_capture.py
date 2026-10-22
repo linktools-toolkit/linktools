@@ -93,3 +93,66 @@ async def test_malformed_event_type_preserves_observed_bytes(path: str, terminal
     assert observed.capture_error is None
     assert source.received == ([malformed, ending] if finished else [malformed])
     assert source.closes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,terminal", [("responses", "response.completed"), ("messages", "message_stop")])
+@pytest.mark.parametrize("ending", ["eof", "terminal", "read_error", "close_error"])
+async def test_deep_sse_json_retains_bytes_without_changing_transport_outcome(path: str, terminal: str, ending: str) -> None:
+    # CPython JSON decoder limits can exceed the Python recursion limit.
+    depth = 10000
+    body = b'data: {"type":"error","details":' + b'[' * depth + b'0' + b']' * depth + b'}\n\n'
+    with pytest.raises(RecursionError):
+        json.loads(body.removeprefix(b"data: "))
+    if ending == "terminal":
+        body += b'data: ' + json.dumps({"type": terminal}).encode() + b'\n\n'
+    failure = httpx2.ReadError("read failed") if ending == "read_error" else RuntimeError("close failed")
+    source = _Stream([body, failure] if ending == "read_error" else [body],
+                     close_error=failure if ending == "close_error" else None)
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda request: httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=source,
+        )),
+        event_hooks={"request": [capture_request], "response": [capture_response]},
+    ) as client:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
+            if ending in {"read_error", "close_error"}:
+                with pytest.raises(type(failure)) as caught:
+                    await client.post(f"https://model.invalid/v1/{path}", json={"input": "hello"})
+                assert caught.value is failure
+            else:
+                response = await client.post(f"https://model.invalid/v1/{path}", json={"input": "hello"})
+                assert response.content == body
+    observed = recorder.requests[0].response
+    assert observed.body == body and observed.format == "sse" and observed.status_code == 200
+    assert observed.content_encoding is None
+    assert not observed.complete and observed.capture_error == "response_decode_failed"
+    assert source.received == [body] and source.closes == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_at", ["Response", "EventSource"])
+async def test_diagnostic_replica_failure_retains_known_response_metadata(monkeypatch: pytest.MonkeyPatch, failure_at: str) -> None:
+    from linktools.ai.model import _http
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("private decoder details")
+
+    monkeypatch.setattr(_http, failure_at, fail)
+    body = b'data: [DONE]\n\n'
+    source = _Stream([body])
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda request: httpx2.Response(
+            201, headers={"content-type": "text/event-stream", "content-encoding": "identity"}, stream=source,
+        )),
+        event_hooks={"request": [capture_request], "response": [capture_response]},
+    ) as client:
+        with ModelClientRequestRecorder(record_http_bodies=True) as recorder:
+            response = await client.post("https://model.invalid/v1/chat/completions", json={"input": "hello"})
+            assert response.content == body
+    observed = recorder.requests[0].response
+    assert observed.body == body and observed.format == "sse" and observed.status_code == 201
+    assert observed.content_encoding == "identity"
+    assert not observed.complete and observed.capture_error == "response_decode_failed"
+    assert "private decoder details" not in repr(observed)
+    assert source.closes == 1
