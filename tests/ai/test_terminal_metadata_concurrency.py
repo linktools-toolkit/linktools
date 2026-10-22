@@ -300,7 +300,8 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     else replace(
                         value.execution,
                         binding=replace(
-                            value.execution.binding, model_contract={"model": "changed"}
+                            value.execution.binding,
+                            agent_spec=replace(value.execution.binding.agent_spec, model="other-route")
                         ),
                     )
                     if post_commit_change == "binding"
@@ -440,7 +441,9 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         changed = (
             replace(
                 current,
-                binding=replace(current.binding, model_contract={"model": "changed"}),
+                binding=replace(
+                    current.binding, agent_spec=replace(current.binding.agent_spec, model="other-route")
+                ),
             )
             if drift == "binding"
             else replace(current, event_seq=current.event_seq + 1)
