@@ -34,6 +34,21 @@ The public model types and Python entry points are:
 | `openai-responses` | `ModelRegistry.openai_responses(...)` | `models.register_openai_responses(route_id, ...)` |
 | `anthropic` | `ModelRegistry.anthropic(...)` | `models.register_anthropic(route_id, ...)` |
 
+For a protocol selected at runtime, use the shared constructor instead of
+maintaining a factory dispatch in each consumer:
+
+```python
+models = ModelRegistry.create(protocol="anthropic", model="claude-sonnet-4-5")
+```
+
+`create` returns a new registry with the `default` route. It accepts the same
+explicit options as the three dedicated factories, including input types, profile,
+connection resolver, credentials, timeouts and retry/token limits. It delegates to
+the selected factory, preserving missing-extra installation hints. It does not
+register a route into an existing registry; use the dedicated `register_*` methods
+or `register(binding)` for that. Unknown protocol strings fail with
+`MODEL_CONFIG_INVALID` without echoing connection values.
+
 CLI `--model-api`, `AI_MODEL_API`, workspace `model_api`, HTTP trace API labels,
 and protocol dispatch use these same type values. Python methods use underscores
 where a type contains a hyphen. Native HTTP endpoint paths are unchanged.

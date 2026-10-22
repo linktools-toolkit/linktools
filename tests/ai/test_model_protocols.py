@@ -33,7 +33,7 @@ def registry(monkeypatch: pytest.MonkeyPatch, kind: str, model: str, handler: Ca
         return result
 
     monkeypatch.setattr(module, 'DefaultAsyncHttpxClient', client)
-    return getattr(ModelRegistry, kind)(model=model, api_key='fixture-secret',
+    return ModelRegistry.create(protocol=kind.replace('_', '-'), model=model, api_key='fixture-secret',
         base_url='https://model.invalid/v1', max_retries=options.pop('max_retries', 0),
         retry_delay=0, max_tokens=128, **options), clients
 
@@ -354,3 +354,31 @@ async def test_runtime_web_profile_and_durable_model_content(monkeypatch, tmp_pa
             meta = await http.get("/api/session", params={"session_id":"session","include_timeline":"false"})
             assert meta.status_code == 200, meta.text
             assert meta.json()["thinking_control"]["mode"] == "unknown"
+
+
+@pytest.mark.parametrize('kind,api,model_name', PROTOCOLS)
+def test_generic_factory_forwards_all_options(monkeypatch, kind, api, model_name):
+    sentinel = ModelRegistry()
+    received = {}
+    def factory(cls, **kwargs):
+        assert cls is ModelRegistry
+        received.update(kwargs)
+        return sentinel
+    monkeypatch.setattr(ModelRegistry, kind, classmethod(factory))
+    resolver = lambda: {"api_key": "fixture-secret"}
+    options = dict(model=model_name, input_types=("image",), profile={"supports_thinking": True},
+                   base_url="https://model.invalid/v1", api_key="fixture-secret", timeout=9,
+                   max_retries=3, retry_delay=0.2, max_tokens=99, connection_resolver=resolver)
+    assert ModelRegistry.create(protocol=api, **options) is sentinel
+    assert received == options
+
+
+@pytest.mark.parametrize('protocol', ['', 'openai-chat', 'anthropic-messages', 'unknown-secret', None, {}])
+def test_generic_factory_rejects_invalid_protocol_without_echoing_values(protocol):
+    from linktools.ai.errors import ErrorCode
+    with pytest.raises(AIError) as caught:
+        ModelRegistry.create(protocol=protocol, model='fixture-model', api_key='fixture-secret')
+    assert caught.value.code == ErrorCode.MODEL_CONFIG_INVALID
+    assert caught.value.safe_details == {"reason": "unsupported_model_protocol"}
+    assert 'fixture-secret' not in str(caught.value)
+    assert 'unknown-secret' not in str(caught.value)

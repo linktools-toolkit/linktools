@@ -290,6 +290,12 @@ Install `linktools-ai[openai]` for Chat Completions and Responses, or
 `linktools-ai[anthropic]` for Messages; combine extras when using both.
 The base package does not install either provider SDK.
 
+`ModelRegistry.create(protocol="anthropic", model="claude-sonnet-4-5")` constructs
+one default-route registry from a protocol string (`openai`, `openai-responses`,
+or `anthropic`). It delegates to the corresponding dedicated factory with the
+same explicit options; the CLI uses this shared constructor as well. It is not
+an in-place route-registration operation.
+
 `ModelRegistry.openai` / `register_openai` retain Chat Completions behavior.
 Use `openai_responses` / `register_openai_responses` for Responses, or
 `anthropic` / `register_anthropic` for Messages. They accept the same connection,

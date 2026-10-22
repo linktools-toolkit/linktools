@@ -145,9 +145,7 @@ def _local_models(
     from linktools.ai.model import ModelRegistry
 
     api = api or workspace.config.get("model_api") or os.getenv("AI_MODEL_API") or "openai"
-    factories = {"openai": ModelRegistry.openai, "openai-responses": ModelRegistry.openai_responses,
-                 "anthropic": ModelRegistry.anthropic}
-    if not isinstance(api, str) or api not in factories:
+    if not isinstance(api, str) or api not in MODEL_APIS:
         raise AIError(ErrorCode.MODEL_CONFIG_INVALID, "unsupported model_api")
     prefix = "ANTHROPIC" if api == "anthropic" else "OPENAI"
     input_types = _local_input_config(workspace)
@@ -163,7 +161,8 @@ def _local_models(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
 
     try:
-        return factories[api](
+        return ModelRegistry.create(
+            protocol=api,
             model=selected_model,
             input_types=input_types,
             base_url=(

@@ -22,6 +22,52 @@ class ModelRegistry:
         self._lock = RLock()
 
     @classmethod
+    def create(
+        cls,
+        *,
+        protocol: str,
+        model: str,
+        input_types: Sequence[str] = (),
+        profile: Mapping[str, JsonValue] | None = None,
+        base_url: "str | None" = None,
+        api_key: "str | None" = None,
+        timeout: "int | float | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
+        max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
+    ) -> "ModelRegistry":
+        """Create a default route using a supported protocol's dedicated factory.
+
+        This constructs a new registry; register(binding) adds a binding to an
+        existing registry. Protocol names are exact, not provider/model names.
+        """
+        factories = {
+            "openai": cls.openai,
+            "openai-responses": cls.openai_responses,
+            "anthropic": cls.anthropic,
+        }
+        if not isinstance(protocol, str) or protocol not in factories:
+            raise AIError(
+                ErrorCode.MODEL_CONFIG_INVALID,
+                "Unsupported model protocol; expected openai, openai-responses or anthropic",
+                retryable=False,
+                safe_details={"reason": "unsupported_model_protocol"},
+            )
+        return factories[protocol](
+            model=model,
+            input_types=input_types,
+            profile=profile,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            max_tokens=max_tokens,
+            connection_resolver=connection_resolver,
+        )
+
+    @classmethod
     def openai(
         cls,
         *,
