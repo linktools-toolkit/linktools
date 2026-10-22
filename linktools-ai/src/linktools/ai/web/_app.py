@@ -19,6 +19,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route
 
 from linktools.core import environ
+from ..model import model_thinking_control
 from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..model import ModelClientRequest, ModelClientResponse
@@ -240,7 +241,14 @@ class _Console:
             if environ.debug:
                 request.state.phase = "session.timeline"
             timeline = await history.session_timeline(identity, principal=self.principal, **_paging(request))
-        return _json({"session": session, "timeline": timeline})
+        control = {"mode": "unknown", "enabled_by_default": None}
+        if self.runtime is not None:
+            try:
+                control = model_thinking_control(self.runtime.agents.get(session.agent_id).model)
+            except AIError as error:
+                if error.code != ErrorCode.AGENT_BINDING_UNAVAILABLE:
+                    raise
+        return _json({"session": session, "timeline": timeline, "thinking_control": control})
 
     async def session_action(self, request: Request) -> Response:
         if environ.debug:

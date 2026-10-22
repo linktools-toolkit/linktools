@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelBinding, ModelRegistry
-from linktools.ai.model._openai import _RetryingModel
+from linktools.ai.model._binding import _RetryingModel
 from pydantic_ai.messages import (
     BinaryContent,
     ImageUrl,

@@ -81,7 +81,7 @@ globalThis.fetch=async(path,options={})=>{
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
   if(detailResponses.has(key)){const value=detailResponses.get(key),result=typeof value==='function'?value(url):value;return result instanceof Response?result:response(result);}
   if(key==='/api/metrics')return response({items:[]});
-  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id)});}
+  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null,thinking_control:sessions.get(id)?.thinking_control});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id),thinking_control:sessions.get(id)?.thinking_control});}
   const execution=key.match(/^\/api\/executions\/([^/]+)$/);
   if(execution)return response(executions.get(execution[1]) || info(execution[1],null));
   if(key.endsWith('/events') && streamBlocks.has(key.split('/')[3]))return new Response(new ReadableStream({start(controller){streamBlocks.get(key.split('/')[3]).controller=controller;},cancel(){}}));
@@ -159,6 +159,35 @@ assert.match(node('conversation').textContent,/a answer/);
 assert.doesNotMatch(node('conversation').textContent,/Original request timeline/);
 assert.equal(node('request-context')?.hidden ?? true,true);
 assert.equal(node('native-mode').className.includes('active'),false);
+if(process.argv[3]==='thinking') {
+  for(const [mode,checked,disabled] of [['always_on',true,true],['controllable',true,false],['undeclared',false,true],['unknown',false,true]]) {
+    sessions.get('a').thinking_control={mode,enabled_by_default:true};await refresh();
+    assert.equal(node('thinking').checked,checked);assert.equal(node('thinking').disabled,disabled);
+    assert.match(node('thinking-hint').textContent,mode==='always_on'?/always on/:mode==='controllable'?/checkbox selects the next request/:/Returned reasoning remains visible/);
+  }
+  sessions.get('a').thinking_control={mode:'controllable',enabled_by_default:true};await refresh();
+  assert.equal(node('thinking').checked,false,'model default must not overwrite the current request selection');
+  console.log('Thinking controls follow the declared profile without hiding returned content');process.exit(0);
+}
+if(process.argv[3]==='protocols') {
+  const path='/api/executions/a-run/models';
+  const bodies=[
+    ['openai-responses',{model:'sample',instructions:'response instructions',previous_response_id:'resp-previous',input:[{role:'user',content:[{type:'input_text',text:'native input'}]},{type:'function_call',call_id:'call-r',name:'lookup',arguments:'{"key":1}'},{type:'function_call_output',call_id:'call-r',output:'tool output'},{type:'reasoning',summary:[{type:'summary_text',text:'brief summary'}],encrypted_content:'opaque-reasoning'},{type:'unknown_input',custom:{keep:true}}]}],
+    ['anthropic-messages',{model:'sample',system:[{type:'text',text:'anthropic system'}],messages:[{role:'assistant',content:[{type:'thinking',thinking:'public thought',signature:'signature-1'},{type:'redacted_thinking',data:'opaque-block'},{type:'tool_use',id:'call-a',name:'lookup',input:{key:2}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'call-a',content:'tool answer'}]}]}],
+  ];
+  const item={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},client_requests_included:true,client_requests:bodies.map(([api,body])=>({api,body:Buffer.from(JSON.stringify(body)).toString('base64'),body_encoding:'base64',response:null}))};
+  detailResponses.set(path,{items:[item],next_cursor:null});
+  await node('native-mode').click();
+  await descendants(node('conversation')).find(value=>value.tagName==='BUTTON' && value.textContent==='Original HTTP diagnostics').click();
+  let content=node('conversation').textContent;
+  for(const value of ['response instructions','native input','call-r','tool output','brief summary','opaque-reasoning','unknown_input','resp-previous'])assert.ok(content.includes(value),value);
+  assert.match(content,/Provider-returned reasoning summary/);assert.match(content,/not readable reasoning/);assert.doesNotMatch(content,/no messages field/);
+  const picker=descendants(node('conversation')).find(value=>value.tagName==='SELECT' && value.className==='native-request');picker.value='a-run:1:1:1';picker.onchange();
+  content=node('conversation').textContent;
+  for(const value of ['anthropic system','public thought','signature-1','opaque-block','call-a','tool answer'])assert.ok(content.includes(value),value);
+  assert.match(content,/Opaque provider thinking data/);
+  console.log('Native Responses and Anthropic content preserve protocol blocks, references and opaque reasoning fields');process.exit(0);
+}
 if(process.argv[3]==='sdk') {
   const path='/api/executions/a-run/models';
   const sdk={execution_id:'a-run',agent_run_seq:1,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{},content_included:true,request:{messages:[

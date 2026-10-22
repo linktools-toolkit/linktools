@@ -14,6 +14,9 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
+    ThinkingPart,
+    ToolCallPart,
+    ToolReturnPart,
     UploadedFile,
     UserPromptPart,
 )
@@ -204,3 +207,17 @@ def test_model_message_version_requires_supported_integer(
     with pytest.raises(AIError) as raised:
         decode_model_messages(canonical_json_bytes(value))
     assert raised.value.code is error_code
+
+
+@pytest.mark.parametrize("thinking", [
+    ThinkingPart("brief summary", id="rs-1", signature="encrypted", provider_name="openai",
+                 provider_details={"raw_content": [{"type": "reasoning_text", "text": "returned text"}]}),
+    ThinkingPart("returned thinking", signature="signed", provider_name="anthropic"),
+    ThinkingPart("", id="redacted_thinking", signature="opaque", provider_name="anthropic"),
+])
+def test_thinking_round_trip_preserves_signed_and_opaque_tool_context(thinking: ThinkingPart) -> None:
+    messages = (
+        ModelResponse(parts=[thinking, ToolCallPart("lookup", {"key": 1}, tool_call_id="call-1")]),
+        ModelRequest(parts=[ToolReturnPart("lookup", "result", tool_call_id="call-1")]),
+    )
+    assert decode_model_messages(encode_model_messages(messages)) == messages

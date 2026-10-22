@@ -65,9 +65,7 @@ def validate_model_input(
                       safe_details={"reason": "model_input_contract_invalid"}) from error
     if mime_type not in rules and mime_type.split("/", 1)[0] + "/*" not in rules:
         _input_error(mime_type, input_kind, "model_input_not_supported")
-    if binding.provider == "openai" and openai_input_transport(
-        mime_type, input_kind, binding.model_identity.removeprefix("openai:")
-    ) is None:
+    if _input_transport(binding, mime_type, input_kind) is None:
         _input_error(mime_type, input_kind, "input_encoding_not_supported")
 
 
@@ -92,10 +90,10 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False,
                           safe_details={"reason": "model_input_mime_type_unknown"}) from error
         validate_model_input(binding, mime_type, input_kind=kind, size=size)
-        if binding.provider == "openai":
-            if isinstance(item, UploadedFile) and item.provider_name != "openai":
+        if binding.provider in {"openai", "anthropic"}:
+            if isinstance(item, UploadedFile) and item.provider_name != binding.provider:
                 _input_error(mime_type, kind, "uploaded_file_provider_mismatch")
-            transport = openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"))
+            transport = _input_transport(binding, mime_type, kind)
             if isinstance(item, (BinaryContent, AudioUrl, DocumentUrl)) and transport is None:
                 _input_error(mime_type, kind, "input_encoding_not_supported")
             if isinstance(item, BinaryContent) and transport == "text-inline":
@@ -112,6 +110,37 @@ def validate_model_inputs(binding: "ModelBinding", value: object) -> None:
                 except (KeyError, ValueError):
                     _input_error(mime_type, kind, "input_encoding_not_supported")
 
+
+
+def _input_transport(binding: "ModelBinding", mime_type: str, kind: str) -> str | None:
+    contract = binding.contract
+    api = contract.get("api", "openai-chat" if binding.provider == "openai" else None)
+    if api == "openai-chat":
+        return openai_input_transport(mime_type, kind, binding.model_identity.removeprefix("openai:"),
+                                      contract.get("profile"))
+    if api == "openai-responses":
+        if kind in {"uploaded", "image-url"}:
+            return "file-block"
+        if kind in {"audio-url", "document-url"}:
+            return "file-block"
+        probe = BinaryContent(b"", media_type=mime_type)
+        if kind == "binary" and (probe.is_image or probe.is_document):
+            try:
+                probe.format
+            except (KeyError, ValueError):
+                return None
+            return "file-block"
+        return None
+    if api == "anthropic-messages":
+        if kind == "uploaded":
+            return "file-block" if mime_type.startswith(("image/", "text/", "application/")) else None
+        if kind in {"binary", "image-url"} and mime_type in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+            return "image"
+        if kind in {"binary", "document-url"} and mime_type in {"application/pdf", "text/plain"}:
+            return "text-inline" if mime_type == "text/plain" else "file-block"
+        return None
+    # Custom bindings own their SDK encoding constraints.
+    return "custom"
 
 def _input_error(mime_type: str, input_kind: str, reason: str) -> None:
     raise AIError(ErrorCode.REQUEST_FIELD_INVALID, retryable=False,

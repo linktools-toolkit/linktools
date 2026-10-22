@@ -6,7 +6,9 @@ dependencies:
   - filelock>=3.4.0
   - jsonschema>=4.23.0,<5.0.0
   - httpx2>=2.12
-  - pydantic-ai-slim[mcp,openai]>=2.53.0,<3.0.0
+  - pydantic-ai-slim[mcp,openai,anthropic]>=2.53.0,<3.0.0
+  # PydanticAI currently constructs BetaMessageParam, changed to a union in Anthropic 2.x.
+  - anthropic>=1.12.1,<2.0.0
   - pydantic-ai-harness>=0.29.0
 
 dev-dependencies:

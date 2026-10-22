@@ -29,7 +29,7 @@ from linktools.ai.core import ExecutionStatus, JsonValue, PromptLimits, agent_ru
 from linktools.ai.errors import AIError, ErrorCode
 
 from linktools.ai.model import ModelClientRequestRecorder, ModelRegistry
-from linktools.ai.model import _openai
+from linktools.ai.model import _http, _openai
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._compaction import CompactionCapability
 from linktools.ai.runtime._journal import ModelRequestJournal
@@ -250,7 +250,7 @@ async def test_model_client_request_capture_reports_unavailable_body_without_con
 
     request = httpx2.Request("POST", "https://capture.invalid/chat/completions", content=content())
     with ModelClientRequestRecorder(record_http_bodies=True) as capture:
-        await _openai._capture_chat_request(request)
+        await _http.capture_request(request)
     assert not consumed
     assert len(capture.requests) == 1
     assert capture.requests[0].body is None

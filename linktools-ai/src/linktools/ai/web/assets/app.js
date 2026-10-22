@@ -63,6 +63,8 @@ function showError(error) {
   if(error.name==='AbortError')return;
   notice(error.message || String(error));
   if(error.context)$('notice').append(element('div','',error.context));
+  if(error.details?.safe_details?.field==='thinking' && error.details.safe_details.reason==='model_always_enabled')$('notice').append(element('p','','This model declares thinking always enabled; disabling it is not supported.'));
+  if(error.details?.safe_details?.field==='thinking' && error.details.safe_details.reason==='model_not_supported')$('notice').append(element('p','','The active model profile does not declare thinking support. This does not establish that the provider lacks it; compatible gateways may need an explicit SDK model profile and request mapping.'));
   if(error.details?.operation_id || Object.keys(error.details?.safe_details || {}).length) {
     $('notice').append(rawDetail({operation_id:error.details.operation_id,safe_details:error.details.safe_details},'Error details'));
   }
@@ -128,6 +130,10 @@ function setDisabled() {
   $('open-recovery').disabled=readonly || !state.selectedExecution;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
+  const control=state.session?.thinking_control, mode=control?.mode;
+  if(mode==='always_on'){$('thinking').checked=true;$('thinking').disabled=true;}
+  else if(mode==='undeclared' || mode==='unknown'){$('thinking').checked=false;$('thinking').disabled=true;}
+  if($('thinking-hint'))$('thinking-hint').textContent=mode==='always_on'?'Thinking is always on for this model.':mode==='controllable'?`Thinking control is available. Model default: ${control.enabled_by_default?'on':'off'}; this checkbox selects the next request.`:'Thinking control is not declared. Returned reasoning remains visible; compatible models may require a profile override.';
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
   const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
@@ -307,7 +313,7 @@ async function readSession(id, metadataOnly=false) {
 }
 function acceptSession(payload) {
   if(payload.session.session_id!==state.selectedSession || payload.readGeneration<state.sessionAppliedGeneration)return false;
-  state.session=payload.session;state.sessionAppliedGeneration=payload.readGeneration;return true;
+  state.session={...payload.session,thinking_control:payload.thinking_control};state.sessionAppliedGeneration=payload.readGeneration;return true;
 }
 function renderSessionHeader() {
   if(!state.session)return;
@@ -541,7 +547,7 @@ function nativeBody(value,name,{request=false}={}) {
   try {source=clientBodyText(value);}
   catch(error){container.append(element('p','muted',`Text display unavailable · ${error.message}. Original bytes remain downloadable.`));return container;}
   const full=element('details');full.open=true;
-  const summary=element('summary','',request?'Original outbound request body · native messages array and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text');summary.dataset.requestFocus=name+':body';
+  const summary=element('summary','',request?'Original outbound request body · native input and envelope':value.content_encoding?'HTTP-decoded response display':'Original response text');summary.dataset.requestFocus=name+':body';
   full.append(summary,element('pre','json',source));
   container.append(full);return container;
 }
@@ -559,14 +565,14 @@ function nativeContent(container,node) {
     const row=element('div','native-block'),types=block.fields().filter(field=>field.name==='type');
     const type=types.length===1 && types[0].value.kind==='string'?types[0].value.text:null;
     row.append(element('span','native-field-label',`content[${index}]${type?' · '+type:''}`));
-    if(type==='text'){
+    if(['text','input_text','output_text','summary_text','thinking'].includes(type)){
       const counts=fieldCounts(block);
       for(const field of block.fields()){
         if(field.name==='type')continue;
-        if(field.name==='text' && counts.get('text')===1 && field.value.kind==='string')row.append(element('pre','native-text',field.value.text));
+        if(['text','thinking'].includes(field.name) && counts.get(field.name)===1 && field.value.kind==='string')row.append(element('pre','native-text',field.value.text));
         else row.append(literalSource(field.raw));
       }
-    } else row.append(element('pre','native-literal',block.raw));
+    } else {if(type==='redacted_thinking')row.append(element('p','muted','Opaque provider thinking data, not readable reasoning.'));row.append(element('pre','native-literal',block.raw));}
     container.append(row);
   });
 }
@@ -598,7 +604,31 @@ function nativeToolCalls(container,node,key) {
   });
 }
 
-function nativeMessages(container,projection,key) {
+function nativeMessages(container,projection,key,api) {
+  if(api==='openai-responses'){
+    const inputs=projection.fields.filter(field=>['instructions','input'].includes(field.name));
+    if(!inputs.length)container.append(element('p','muted','No instructions or input items were captured. Provider-side references may supply additional context; retained SDK history does not reconstruct it.'));
+    for(const field of inputs){
+      container.append(element('h3','',field.name));
+      if(field.value.kind!=='array'){nativeContent(container,field.value);continue;}
+      field.value.items().forEach((item,index)=>{
+        const row=element('article','native-message'),fields=item.fields(),counts=fieldCounts(item);
+        const kind=fields.find(value=>value.name==='type' && counts.get('type')===1)?.value;
+        row.append(element('strong','',`input[${index}]${kind?.kind==='string'?' · '+kind.text:''}`));
+        if(item.kind!=='object')row.append(literalSource(item.raw));
+        else for(const value of fields){
+          if(value.name==='content' && counts.get('content')===1)nativeContent(row,value.value);
+          else if(value.name==='summary' && counts.get('summary')===1){row.append(element('p','muted','Provider-returned reasoning summary'));nativeContent(row,value.value);}
+          else {if(value.name==='encrypted_content')row.append(element('p','muted','Opaque provider reasoning data, not readable reasoning.'));row.append(literalSource(value.raw));}
+        }
+        container.append(row);
+      });
+    }
+    return;
+  }
+  if(api==='anthropic-messages')for(const field of projection.fields.filter(field=>field.name==='system')){
+    container.append(element('h3','','System content'));nativeContent(container,field.value);
+  }
   if(projection.root.kind!=='object' || !projection.messages.length){container.append(element('p','muted','This captured body has no messages field. Its original source is shown without inventing messages.'),element('pre','native-literal',projection.source));return;}
   if(projection.messages.length>1)container.append(element('p','source-warning','Multiple messages fields were captured. Each field is shown separately in source order; no effective field is guessed.'));
   projection.messages.forEach((field,group)=>{
@@ -696,7 +726,7 @@ function renderNativeTimeline(container,{conversation=false}={}) {
   if(!selected)container.append(element('p','empty',view.loading?'Loading model records…':'No records for this selection.'));
   else {
     const {item,attempt}=selected;
-    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Only OpenAI Chat is captured; SDK history never fills missing captures.':'SDK preparation evidence, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
+    const metadata=readerDetail(modelKey(item)+':metadata','Request details','native-envelope native-info');metadata.hidden=!metadata.open;metadata.append(element('p','native-identity',`${modelLabel(item.model)} · ${item.purpose}`),element('p','source-note',state.readerHttp?'SDK-client input, in original array order. View raw and Download bytes retain the source; readable strings are decoded. Provider-server receipt is not observable here. Supported Chat, Responses and Anthropic dispatches are captured; SDK history never fills missing captures.':'SDK preparation evidence, not provider wire bytes.'),element('pre','json',json({execution_id:item.execution_id,agent_run_seq:item.agent_run_seq,model_request_seq:item.model_request_seq,purpose:item.purpose,step_index:item.step_index,output_retry_index:item.output_retry_index,started_at:item.started_at,finished_at:item.finished_at,duration_ns:item.duration_ns,status:item.status,error_code:item.error_code,usage:item.usage,api:attempt?.api})));if(item.usage)metadata.append(element('p','muted',usageLabel(item.usage)));container.append(metadata);
     const toggleInfo=metadata.ontoggle;metadata.ontoggle=()=>{toggleInfo();if(!metadata.isConnected)return;metadata.hidden=!metadata.open;if(!metadata.open && metadata.contains(document.activeElement))tools.children[0].focus({preventScroll:true});};
     if(!state.readerHttp)sdkMessages(container,item,selected.key);
     else if(!attempt)container.append(element('p','muted',!item.client_requests_included?'Original client content was not requested.':item.status==='RUNNING'?'Request running; capture is saved on completion.':item.client_requests===null?'Original client messages were not recorded.':'No supported client dispatch was observed.'));
@@ -707,8 +737,9 @@ function renderNativeTimeline(container,{conversation=false}={}) {
         if(state.readerRaw)container.append(element('pre','native-literal native-raw',source));
         else {
           if(state.readerCache?.source!==source){state.readerCache={source,projection:capturedRequest(source)};}
-          nativeMessages(container,state.readerCache.projection,selected.key);
-          const envelope=state.readerCache.projection.fields.filter(field=>field.name!=='messages');
+          nativeMessages(container,state.readerCache.projection,selected.key,attempt.api);
+          const rendered=attempt.api==='openai-responses'?['input','instructions']:attempt.api==='anthropic-messages'?['messages','system']:['messages'];
+          const envelope=state.readerCache.projection.fields.filter(field=>!rendered.includes(field.name));
           if(envelope.length){const detail=readerDetail(selected.key+':envelope','Request envelope fields','native-envelope');envelope.forEach(field=>detail.append(literalSource(field.raw)));container.append(detail);}
         }
       } catch(error){container.append(element('p','source-warning',`Readable view unavailable: ${error.message}. The original request remains authoritative.`));try {const source=clientBodyText(attempt);if(source!==null)container.append(element('pre','native-literal',source));}catch{}}

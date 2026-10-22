@@ -228,6 +228,14 @@ models.register_openai(
 models.register_alias("default", "production")
 ```
 
+### Protocols and thinking profiles
+
+`ModelRegistry.openai` / `register_openai` retain Chat Completions behavior.
+Use `openai_responses` / `register_openai_responses` for Responses, or
+`anthropic` / `register_anthropic` for Messages. They accept the same connection,
+retry, input-type and optional `profile` arguments. See [model protocols](docs/model-protocols.md)
+for explicit compatible-model profiles, restore boundaries and trace semantics.
+
 ## 2. Define application capabilities and Agents
 
 Use `RuntimeFeatures` for direct application registrations:
