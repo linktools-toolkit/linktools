@@ -533,3 +533,58 @@ async def test_confirmed_launch_receipt_is_independent_of_fast_business_terminal
         assert await _receipt(state, "recovery") == receipt
         assert await _head(state, execution_id) == head
         assert calls == previous_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ("generation", "claim", "closed", "status", "event", "input"))
+async def test_admitted_recovery_rejects_changed_owner_or_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    from linktools.ai.runtime.state._contracts import ExecutionHistoryState
+    from linktools.ai.storage import StoredPayload
+
+    async with _recoverable(tmp_path) as (runtime, other, state, execution_id, calls, release):
+        backend = runtime._execution_service.runtime_backend()
+        repository = state.execution.executions
+        original_resume = backend._commit_recovery_resume
+        observe = repository.observe_execution_control
+        effects = 0
+        original_effects = backend._reconcile_tool_effects
+
+        async def count_effects(*args, **kwargs):
+            nonlocal effects
+            effects += 1
+            return await original_effects(*args, **kwargs)
+
+        async def resume_then_change(execution, **kwargs):
+            result = await original_resume(execution, **kwargs)
+
+            async def changed_control(*args, **kwargs):
+                current, head = await observe(*args, **kwargs)
+                if change == "generation":
+                    head = replace(head, producer_generation=head.producer_generation + 1)
+                elif change == "claim":
+                    head = replace(head, producer_claim_id="different-owner")
+                elif change == "closed":
+                    head = replace(head, state=ExecutionHistoryState.CLOSED)
+                elif change == "status":
+                    current = replace(current, status=ExecutionStatus.CANCELLING)
+                elif change == "event":
+                    current = replace(current, event_seq=current.event_seq + 1)
+                else:
+                    current = replace(current, stored_user_input=replace(
+                        current.stored_user_input, payload=StoredPayload.inline_text("different input"),
+                    ))
+                return current, head
+
+            monkeypatch.setattr(repository, "observe_execution_control", changed_control)
+            monkeypatch.setattr(backend, "_reconcile_tool_effects", count_effects)
+            return result
+
+        monkeypatch.setattr(backend, "_commit_recovery_resume", resume_then_change)
+        with pytest.raises(AIError) as raised:
+            await _recover(runtime, execution_id, "changed-admission")
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        assert raised.value.safe_details["phase"] == "recovery_admission_changed"
+        assert effects == 0 and calls == []
+        assert (await _receipt(state, "changed-admission")).status is not OperationStatus.SUCCEEDED

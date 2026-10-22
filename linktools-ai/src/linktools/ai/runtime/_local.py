@@ -544,6 +544,40 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         return result
 
+    async def _load_admitted_recovery_execution(
+        self,
+        admitted: ExecutionRecord,
+        *,
+        producer_generation: int,
+        recovery_operation: OperationLedgerInput | None,
+    ) -> ExecutionRecord:
+        repository = self._execution.executions
+        current, head = await repository.state_store.read(
+            lambda transaction: repository.observe_execution_control(
+                admitted.execution_id, tenant_id=self._tenant_id,
+            )
+        )
+        if current is None or head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            head.state is not ExecutionHistoryState.OPEN
+            or head.producer_generation != producer_generation
+            or (recovery_operation is not None and head.producer_claim_id != recovery_operation.result_ref)
+            or current.revision < admitted.revision
+            or replace(
+                current, revision=admitted.revision, updated_at=admitted.updated_at,
+                dependency_hold_ids=admitted.dependency_hold_ids,
+            ) != admitted
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={
+                "phase": "recovery_admission_changed",
+                "expected_revision": admitted.revision,
+                "actual_revision": current.revision,
+                "expected_status": admitted.status.value,
+                "actual_status": current.status.value,
+            })
+        return current
+
     async def _admit_recovery_without_producer(
         self, execution: ExecutionRecord, operation: OperationLedgerInput,
     ) -> None:
