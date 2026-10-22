@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import inspect
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal, TaskStatus, UsageMetrics
+from linktools.ai.core import _signed_cursor
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.evaluation import DatasetRef, EvaluationProgress, EvaluationView
 from linktools.ai.runtime import Agent, Execution, Runtime, RuntimeContext, Session, TaskGraphRun, WaitResult
@@ -20,6 +22,7 @@ from linktools.ai.runtime._evaluation import EvaluationRun
 from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from linktools.ai.runtime._watch_cursor import (
     decode_execution_watch_cursor,
+    decode_graph_watch_cursor,
     encode_evaluation_watch_cursor,
     encode_execution_watch_cursor,
     encode_graph_watch_cursor,
@@ -245,7 +248,9 @@ async def test_each_owner_returns_wait_result_independent_of_callback(owner, obs
         )
         assert type(outcome) is WaitResult
         if owner == "graph" and observe:
-            assert outcome.cursor == bundle.cursor(owner, include_content=include_content)
+            assert decode_graph_watch_cursor(
+                _NAMESPACE, "tenant", "graph", outcome.cursor, include_content=include_content,
+            ) == (1, {})
         else:
             assert outcome.cursor is None
         assert outcome.observation_error is None
@@ -265,6 +270,37 @@ async def test_each_owner_returns_wait_result_independent_of_callback(owner, obs
         else:
             assert outcome.result is bundle.evaluations.result
             assert bool(bundle.evaluations.record_calls) is observe
+    finally:
+        await bundle.runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_content", [False, True])
+async def test_graph_wait_ack_survives_cursor_issuance_crossing_a_second(monkeypatch, include_content) -> None:
+    bundle = _Bundle()
+    delivered = []
+    issued_at = int(time.time())
+    monkeypatch.setattr(_signed_cursor, "time", SimpleNamespace(time=lambda: issued_at))
+
+    async def acknowledge(event) -> None:
+        nonlocal issued_at
+        delivered.append(event.cursor)
+        issued_at += 2
+
+    try:
+        outcome = await bundle.wait(
+            "graph", on_event=acknowledge, include_event_content=include_content,
+            include_content=include_content,
+        )
+        assert delivered
+        assert outcome.cursor == delivered[-1]
+        issued_at += 2
+        later = bundle.cursor("graph", include_content=include_content)
+        assert later != outcome.cursor
+        for cursor in (outcome.cursor, later):
+            assert decode_graph_watch_cursor(
+                _NAMESPACE, "tenant", "graph", cursor, include_content=include_content,
+            ) == (1, {})
     finally:
         await bundle.runtime.close()
 
